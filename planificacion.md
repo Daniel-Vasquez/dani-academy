@@ -3064,12 +3064,18 @@ y dentro del `<article>`, al final: `<StudyTracker sectionId={section.data.secti
 
 En `src/pages/cursos/[course]/index.astro`, sustituye `const readIds: string[] = [];` por la misma llamada a `getCourseReadIds`.
 
+### Notas de implementación (Tanda 4 ya ejecutada)
+
+- `COURSE_ID_REGEX` y `SECTION_ID_REGEX` ya existían en `constants.ts` desde la Tanda 1; solo se añadió `IDLE_AFTER_MINUTES`.
+- **Criterio del 404 corregido:** `B9.1` no tiene un formato válido (los cursos van de B1 a B8), así que la API responde `400`, que es lo correcto. Para el `404` se usa un identificador con formato válido de una sección que no existe, como `B2.1`.
+- Verificado con dos usuarios reales contra Atlas (18 comprobaciones de API): idempotencia y fecha original, 8 `PUT` simultáneos → un documento, aislamiento entre usuarios y la regla de los 30 minutos de las sesiones (simulada moviendo `lastSeenAt`). En Chrome (13 comprobaciones), con reloj y temporizadores simulados: un solo intervalo tras navegar con View Transitions, sin latidos con la pestaña oculta o tras 5 min de inactividad, persistencia al recargar y *rollback* sin red.
+
 ### Criterios de aceptación — Tanda 4
 
 - [ ] Marcar una sección crea **un** documento en `section_progress`; pulsar varias veces o en dos pestañas no crea duplicados.
 - [ ] Desmarcar lo elimina. Al recargar, el estado del botón, del índice y del contador coincide con Mongo.
 - [ ] Con la red desactivada (DevTools → *Offline*), el botón vuelve a su estado anterior y muestra el error.
-- [ ] `PUT /api/progress/Z9.9` → `400`; `PUT /api/progress/B9.1` → `404`; sin sesión → `401`.
+- [ ] `PUT /api/progress/Z9.9` → `400`; `PUT /api/progress/B2.1` (formato válido, no existe) → `404`; sin sesión → `401`.
 - [ ] Con dos usuarios distintos, cada uno ve solo su progreso.
 - [ ] Al leer una sección durante 3 minutos se crea **una** sesión en `study_sessions` con `lastSeenAt` actualizado; tras 30 min sin latidos, el siguiente crea una sesión nueva.
 - [ ] Con la pestaña oculta o sin interacción durante más de 5 min no se envían latidos (compruébalo en *Network*).

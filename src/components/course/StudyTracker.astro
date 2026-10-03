@@ -1,0 +1,54 @@
+---
+interface Props {
+  sectionId: string;
+}
+const { sectionId } = Astro.props;
+---
+
+<!--
+  Registra el tiempo de estudio: un latido al abrir la sección y cada minuto mientras la pestaña
+  esté visible y haya habido interacción en los últimos 5 minutos.
+-->
+<div data-study-tracker data-section-id={sectionId} hidden></div>
+
+<script>
+  import { HEARTBEAT_INTERVAL_SECONDS, IDLE_AFTER_MINUTES } from "@/lib/constants";
+
+  let timer: number | undefined;
+  let lastActivity = Date.now();
+
+  const markActive = () => (lastActivity = Date.now());
+  ["scroll", "keydown", "pointerdown", "pointermove"].forEach((evt) =>
+    window.addEventListener(evt, markActive, { passive: true }),
+  );
+
+  const beat = (sectionId: string) => {
+    const idle = Date.now() - lastActivity > IDLE_AFTER_MINUTES * 60_000;
+    if (document.visibilityState !== "visible" || idle) return;
+    fetch("/api/study-sessions/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sectionId }),
+      keepalive: true,
+    }).catch(() => {});
+  };
+
+  const stop = () => {
+    if (timer) window.clearInterval(timer);
+    timer = undefined;
+  };
+
+  const start = () => {
+    stop();
+    const sectionId =
+      document.querySelector<HTMLElement>("[data-study-tracker]")?.dataset.sectionId;
+    if (!sectionId) return;
+    markActive();
+    beat(sectionId);
+    timer = window.setInterval(() => beat(sectionId), HEARTBEAT_INTERVAL_SECONDS * 1000);
+  };
+
+  // El script se ejecuta una vez; estos eventos lo reactivan en cada navegación con View Transitions
+  document.addEventListener("astro:page-load", start);
+  document.addEventListener("astro:before-swap", stop);
+</script>

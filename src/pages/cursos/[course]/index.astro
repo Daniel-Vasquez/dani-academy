@@ -10,16 +10,18 @@ import {
   getCourses,
   sectionUrl,
 } from "@/lib/content";
+import { getCourseReadIds } from "@/server/services/progress.service";
 
 const { course: courseSlug = "" } = Astro.params;
 const course = await getCourseBySlug(courseSlug);
 if (!course?.data.published) return Astro.rewrite("/404");
 
-const sections = await getCourseSections(course.id);
-const allCourses = await getCourses();
-
-// Tanda 4: secciones leídas desde MongoDB
-const readIds: string[] = [];
+const user = Astro.locals.user!; // el middleware garantiza la sesión
+const [sections, allCourses, readIds] = await Promise.all([
+  getCourseSections(course.id),
+  getCourses(),
+  getCourseReadIds(user.id, course.id),
+]);
 const read = new Set(readIds);
 const readCount = sections.filter((s) => read.has(s.data.sectionId)).length;
 const firstUnread = sections.find((s) => !read.has(s.data.sectionId)) ?? sections[0];

@@ -1,10 +1,10 @@
 import { db } from "@/lib/mongo";
+import { createProgressRepo } from "./progress.repo";
+import { createStudySessionsRepo } from "./study-sessions.repo";
 
 /** Punto único donde se conectan los repositorios con la base de datos real. */
 export const repos = {
-  // progress: createProgressRepo(db),            ← Tanda 4
-  // studySessions: createStudySessionsRepo(db),  ← Tanda 4
+  progress: createProgressRepo(db),
+  studySessions: createStudySessionsRepo(db),
   // quizAttempts: createQuizAttemptsRepo(db),    ← Tanda 5
 };
-
-export { db };
