@@ -3100,7 +3100,7 @@ En `src/pages/cursos/[course]/index.astro`, sustituye `const readIds: string[] =
 
 ```js
 // astro.config.mjs → env.schema
-APP_TIMEZONE: envField.string({ context: "server", access: "public", default: "UTC" }),
+APP_TIMEZONE: envField.string({ context: "server", access: "public", default: "America/Mexico_City" }),
 ```
 
 ### 5.1 Reglas de la evaluación
@@ -4982,7 +4982,7 @@ env:
   MONGODB_URI: mongodb://localhost:27017/?directConnection=true
   MONGODB_DB: dani_academy_ci
   BETTER_AUTH_URL: http://localhost:4321
-  APP_TIMEZONE: UTC
+  APP_TIMEZONE: America/Mexico_City
 
 jobs:
   verify:
@@ -5127,7 +5127,7 @@ Plantilla completa en `.env.example`.
 | `MONGODB_DB` | servidor, secreta | No (`dani_academy`) | 2 | Nombre de la base de datos |
 | `BETTER_AUTH_SECRET` | servidor, secreta | Sí (≥ 32 caracteres) | 3 | Firma de cookies y tokens de sesión |
 | `BETTER_AUTH_URL` | servidor, secreta | Sí | 3 | URL base de la app |
-| `APP_TIMEZONE` | servidor, pública | No (`UTC`) | 5 | Zona IANA para fechas y días de estudio |
+| `APP_TIMEZONE` | servidor, pública | No (`America/Mexico_City`) | 5 | Zona IANA para fechas y días de estudio |
 | `MONGODB_URI_TEST` | solo tests | No | 9 | Instancia alternativa para E2E |
 | `LOG_LEVEL` | servidor | No | Futuro (A6) | Nivel de logs estructurados |
 | `SENTRY_DSN` / `PUBLIC_SENTRY_DSN` / `SENTRY_AUTH_TOKEN` | servidor / cliente / build | No | Futuro (A6) | Captura de errores con Sentry |
@@ -5141,7 +5141,7 @@ env: {
     MONGODB_DB: envField.string({ context: "server", access: "secret", default: "dani_academy" }),
     BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
     BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
-    APP_TIMEZONE: envField.string({ context: "server", access: "public", default: "UTC" }),
+    APP_TIMEZONE: envField.string({ context: "server", access: "public", default: "America/Mexico_City" }),
     LOG_LEVEL: envField.enum({ context: "server", access: "public", values: ["debug", "info", "warn", "error"], default: "info" }),
   },
 },

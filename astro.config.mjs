@@ -31,7 +31,11 @@ export default defineConfig({
       MONGODB_DB: envField.string({ context: "server", access: "secret", default: "dani_academy" }),
       BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
       BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
-      APP_TIMEZONE: envField.string({ context: "server", access: "public", default: "UTC" }),
+      APP_TIMEZONE: envField.string({
+        context: "server",
+        access: "public",
+        default: "America/Mexico_City",
+      }),
     },
   },
 });
