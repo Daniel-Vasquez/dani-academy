@@ -2166,6 +2166,14 @@ export const GET: APIRoute = async () => {
 };
 ```
 
+### Notas de implementación (Tanda 2 ya ejecutada)
+
+- Versiones instaladas: driver `mongodb` 7.7, `tsx` 4.23. Las APIs del plan no cambian.
+- **`db:setup` usa ya la forma final** (`node --env-file-if-exists=.env --import tsx scripts/db-setup.ts`), que el plan reservaba para la Tanda 9: no falla si no existe `.env` (CI) y no depende de opciones de `tsx`.
+- **`collMod` requiere el rol `dbAdmin`.** Con un usuario solo `readWrite`, el script crea colecciones e índices pero no puede actualizar el validador de una colección existente: ahora avisa en lugar de fallar.
+- `MONGODB_URI` se valida con `startsWith: "mongodb"` en `astro:env`, para detectar al instante una URI mal pegada.
+- Verificado: dos ejecuciones de `db:setup` sin errores; Atlas rechaza documentos inválidos (código 121) y duplicados (11000); `/api/health` → 200 con Atlas, 503 con una URI inaccesible (la app sigue sirviendo páginas) y error `EnvInvalidVariables` con una URI mal formada.
+
 ### Criterios de aceptación — Tanda 2
 
 - [ ] `npm run db:setup` termina con "Listo." y en Atlas/Compass existen `section_progress`, `quiz_attempts` y `study_sessions` con su validador y sus índices.
