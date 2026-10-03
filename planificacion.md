@@ -500,14 +500,15 @@ export default defineConfig({
   "include": [".astro/types.d.ts", "**/*"],
   "exclude": ["dist", "node_modules"],
   "compilerOptions": {
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] },
+    "paths": { "@/*": ["./src/*"] },
     "jsx": "react-jsx",
     "jsxImportSource": "react",
     "noUncheckedIndexedAccess": true
   }
 }
 ```
+
+> TypeScript 6 marca `baseUrl` como obsoleto: `paths` se resuelve relativo al `tsconfig.json`, por eso las rutas empiezan por `./`.
 
 ### 0.5 `src/styles/global.css` (*tokens* y estilos base)
 
