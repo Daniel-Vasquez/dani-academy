@@ -1,0 +1,54 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import SiteHeader from "@/components/layout/SiteHeader.astro";
+import ContinueBanner from "@/components/syllabus/ContinueBanner.astro";
+import LevelSection from "@/components/syllabus/LevelSection.astro";
+import { LEVELS, type Level } from "@/lib/constants";
+import { repos } from "@/server/repositories";
+import { getContinueTarget, getSyllabusOverview } from "@/server/services/overview.service";
+
+const user = Astro.locals.user!;
+const [overview, lastRead] = await Promise.all([
+  getSyllabusOverview(user.id),
+  repos.progress.lastRead(user.id),
+]);
+const target = getContinueTarget(overview, lastRead?.courseId);
+
+const DESCRIPTIONS: Record<Level, string> = {
+  basic: "Entender las piezas que ya usas en lugar de copiarlas.",
+  intermediate: "Pasar de usar a diseñar: backend, datos, auth, servidores y tests.",
+  advanced: "Operar tus propios sistemas: tipos expresivos, SQL, VPS, seguridad y CI/CD.",
+  final: "Construir una aplicación completa aplicando todo lo aprendido.",
+};
+
+const groups = (Object.keys(LEVELS) as Level[])
+  .sort((a, b) => LEVELS[a].order - LEVELS[b].order)
+  .map((level) => ({ level, items: overview.filter((o) => o.course.data.level === level) }))
+  .filter((g) => g.items.length > 0);
+
+const firstName = user.name.trim().split(/\s+/)[0] ?? user.name;
+---
+
+<BaseLayout title="Temario">
+  <SiteHeader />
+  <main id="contenido" class="mx-auto max-w-6xl px-4 py-12 lg:px-6">
+    <header class="max-w-[68ch]">
+      <h1 class="font-serif text-4xl font-semibold tracking-tight">Hola, {firstName}</h1>
+      <p class="mt-3 font-serif text-lg text-muted">
+        Tu temario: {overview.length} cursos en tres niveles y un proyecto final. Cada sección es
+        una sesión de unos 60 minutos.
+      </p>
+    </header>
+
+    {target && <ContinueBanner target={target} />}
+
+    {groups.map((g) => (
+      <LevelSection
+        id={`nivel-${g.level}`}
+        title={LEVELS[g.level].label}
+        description={DESCRIPTIONS[g.level]}
+        items={g.items}
+      />
+    ))}
+  </main>
+</BaseLayout>

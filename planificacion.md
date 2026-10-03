@@ -4065,6 +4065,13 @@ const groups = (Object.keys(LEVELS) as Level[])
 </BaseLayout>
 ```
 
+### Notas de implementación (Tanda 6 ya ejecutada)
+
+- **`src/lib/status.ts` se crea ya en esta Tanda** (el plan lo dejaba para la 7): `CourseCard` usa el mapa `COURSE_STATUS` y la página de progreso lo reutilizará.
+- **Banner "Continuar" sin `opacity-80`:** el texto blanco al 80 % sobre `--accent-strong` quedaba en 4,13:1 (no llega a AA). Ahora usa el color completo (5,47:1) y el título y el detalle pasan a otra línea en lugar de cortarse con `truncate` (en móvil se perdía "Sección N de 8").
+- El saludo usa solo el primer nombre (`Hola, Dani`).
+- Verificado: 23 comprobaciones en Chrome con un usuario nuevo que recorre los cuatro estados de B1 (incluido un intento suspendido que muestra "Mejor nota 1/5" sin completar el curso), el banner con lecturas fuera de orden, la miga "Temario" y la rejilla 1/2/3 columnas. Lighthouse con sesión: rendimiento 99 y accesibilidad 100 en claro y en oscuro.
+
 ### Criterios de aceptación — Tanda 6
 
 - [ ] Tras iniciar sesión, `/` lleva a `/temario`.
