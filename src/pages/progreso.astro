@@ -1,0 +1,80 @@
+---
+import BaseLayout from "@/layouts/BaseLayout.astro";
+import SiteHeader from "@/components/layout/SiteHeader.astro";
+import StatCard from "@/components/progress/StatCard.astro";
+import ActivityHeatmap from "@/components/progress/ActivityHeatmap.astro";
+import CourseProgressList from "@/components/progress/CourseProgressList.astro";
+import QuizHistoryTable from "@/components/progress/QuizHistoryTable.astro";
+import SessionsList from "@/components/progress/SessionsList.astro";
+import { formatMinutes } from "@/lib/format";
+import { getProgressDashboard } from "@/server/services/stats.service";
+
+const user = Astro.locals.user!;
+const { summary, byLevel, quizHistory, sessions, heatmap } = await getProgressDashboard(user.id);
+const avg =
+  summary.averageScore === null
+    ? "—"
+    : `${summary.averageScore.toLocaleString("es", { maximumFractionDigits: 1 })}/5`;
+const days = (n: number) => `${n} ${n === 1 ? "día" : "días"}`;
+---
+
+<BaseLayout title="Progreso" description="Tu avance, tus evaluaciones y tus sesiones de estudio.">
+  <SiteHeader />
+  <main id="contenido" class="mx-auto max-w-5xl px-4 py-12 lg:px-6">
+    <h1 class="font-serif text-4xl font-semibold tracking-tight">Tu progreso</h1>
+
+    <dl class="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <StatCard
+        label="Avance"
+        value={`${summary.percent} %`}
+        hint={`${summary.sectionsRead}/${summary.sectionsTotal} secciones`}
+      />
+      <StatCard
+        label="Cursos"
+        value={`${summary.coursesCompleted}/${summary.coursesPublished}`}
+        hint="completados"
+      />
+      <StatCard label="Exámenes" value={avg} hint="media de mejores notas" />
+      <StatCard
+        label="Estudio"
+        value={formatMinutes(summary.studyMinutes)}
+        hint={`${summary.sessions} ${summary.sessions === 1 ? "sesión" : "sesiones"}`}
+      />
+    </dl>
+    <p class="mt-4 text-sm text-muted">
+      Racha actual: <strong class="text-fg">{days(summary.streak.current)}</strong>
+      <span aria-hidden="true"> · </span>Récord: {days(summary.streak.longest)}
+    </p>
+
+    <section aria-labelledby="actividad" class="mt-14">
+      <h2 id="actividad" class="font-serif text-2xl font-semibold">
+        Actividad
+      </h2>
+      <p class="mt-1 text-sm text-muted">Minutos de estudio por día en las últimas 12 semanas.</p>
+      <div class="mt-4">
+        <ActivityHeatmap columns={heatmap} />
+      </div>
+    </section>
+
+    <section aria-labelledby="avance" class="mt-14">
+      <h2 id="avance" class="font-serif text-2xl font-semibold">
+        Avance por curso
+      </h2>
+      <CourseProgressList byLevel={byLevel} />
+    </section>
+
+    <section aria-labelledby="examenes" class="mt-14">
+      <h2 id="examenes" class="font-serif text-2xl font-semibold">
+        Resultados de exámenes
+      </h2>
+      <QuizHistoryTable quizHistory={quizHistory} />
+    </section>
+
+    <section aria-labelledby="sesiones" class="mt-14">
+      <h2 id="sesiones" class="font-serif text-2xl font-semibold">
+        Sesiones recientes
+      </h2>
+      <SessionsList sessions={sessions} />
+    </section>
+  </main>
+</BaseLayout>

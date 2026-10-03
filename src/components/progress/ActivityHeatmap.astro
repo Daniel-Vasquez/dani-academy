@@ -1,0 +1,60 @@
+---
+import type { HeatCell } from "@/lib/domain/heatmap";
+import { formatMinutes } from "@/lib/format";
+
+interface Props {
+  columns: HeatCell[][];
+}
+const { columns } = Astro.props;
+const cells = columns.flat().filter((c) => !c.future);
+const activeDays = cells.filter((c) => c.minutes > 0).length;
+const totalMinutes = cells.reduce((a, c) => a + c.minutes, 0);
+
+const LEVEL_CLASS = ["bg-surface-2", "bg-accent/25", "bg-accent/50", "bg-accent/75", "bg-accent"];
+// Las claves de día ya están en la zona de la app: se formatean "tal cual" (UTC no desplaza el día)
+const dayLabel = new Intl.DateTimeFormat("es", {
+  weekday: "short",
+  day: "numeric",
+  month: "short",
+  timeZone: "UTC",
+});
+const WEEKDAYS = ["L", "", "X", "", "V", "", "D"];
+---
+
+<figure>
+  <div class="flex gap-2">
+    <div class="grid grid-rows-7 gap-1 text-[0.625rem] leading-none text-muted" aria-hidden="true">
+      {WEEKDAYS.map((d) => (
+        <span class="flex h-3.5 items-center sm:h-4">{d}</span>
+      ))}
+    </div>
+    <div
+      role="img"
+      aria-label={`Actividad de las últimas ${columns.length} semanas: ${activeDays} ${activeDays === 1 ? "día" : "días"} con estudio, ${formatMinutes(totalMinutes)} en total.`}
+      class="grid grid-flow-col grid-rows-7 gap-1 overflow-x-auto"
+    >
+      {columns.flat().map((cell) => (
+        <span
+          title={
+            cell.future
+              ? ""
+              : `${dayLabel.format(new Date(`${cell.day}T00:00:00Z`))}: ${cell.minutes} min`
+          }
+          data-day={cell.day}
+          data-level={cell.level}
+          class:list={[
+            "size-3.5 rounded-sm sm:size-4",
+            cell.future ? "bg-transparent" : LEVEL_CLASS[cell.level],
+          ]}
+        />
+      ))}
+    </div>
+  </div>
+  <figcaption class="mt-3 flex items-center gap-1.5 text-xs text-muted">
+    Menos
+    {LEVEL_CLASS.map((c) => (
+      <span class:list={["size-3 rounded-sm", c]} aria-hidden="true" />
+    ))}
+    Más
+  </figcaption>
+</figure>

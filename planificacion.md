@@ -4438,6 +4438,14 @@ const avg = summary.averageScore === null ? "—" : `${summary.averageScore.toLo
 </BaseLayout>
 ```
 
+### Notas de implementación (Tanda 7 ya ejecutada)
+
+- **Zona horaria por defecto:** `APP_TIMEZONE` usa `America/Mexico_City` como valor por defecto (`astro.config.mjs`, `.env.example` y CI). Las fechas se siguen **guardando** en UTC; la aritmética UTC de `streak.ts`, `heatmap.ts` y del formateo de las celdas del *heatmap* trabaja sobre claves de día ya convertidas a la zona de la app, así que no desplaza los días.
+- **Heatmap:** etiquetas de los días de la semana (L, X, V, D), atributos `data-day`/`data-level` en cada celda (útiles para tests) y un resumen accesible (`role="img"` con días con estudio y minutos totales).
+- **`quizHistory` solo expone los campos necesarios** (sin `answers` ni `results`).
+- **Cabecera en móvil:** con los enlaces Temario y Progreso no cabía en pantallas estrechas (el botón de tema quedaba cortado y la página se ensanchaba). Ahora los enlaces usan menos relleno por debajo de `sm`, y por debajo de 380 px la marca se abrevia a "DA" (el enlace conserva `aria-label="Dani Academy, inicio"`). Verificado sin recortes a 320, 360, 390, 768 y 1280 px.
+- Verificado: racha y *heatmap* con casos límite (hueco de un día, cambio de mes y año, lunes como inicio de semana, días futuros); agrupación por días contra Atlas (una sesión a las 23:30 de Ciudad de México cuenta ese día, no el siguiente como en UTC); 17 comprobaciones en Chrome con estados vacíos y con datos sembrados; Lighthouse con sesión en `/progreso`, `/temario` y una sección: rendimiento 99–100 y accesibilidad 100 en claro y en oscuro.
+
 ### Criterios de aceptación — Tanda 7
 
 - [ ] El enlace "Progreso" de la cabecera lleva a `/progreso` y se marca como actual.
