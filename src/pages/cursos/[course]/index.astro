@@ -10,18 +10,36 @@ import {
   getCourses,
   sectionUrl,
 } from "@/lib/content";
+import { repos } from "@/server/repositories";
 import { getCourseReadIds } from "@/server/services/progress.service";
+import { getQuizAccess, getQuizByCourseId } from "@/server/services/quiz.service";
 
 const { course: courseSlug = "" } = Astro.params;
 const course = await getCourseBySlug(courseSlug);
 if (!course?.data.published) return Astro.rewrite("/404");
 
 const user = Astro.locals.user!; // el middleware garantiza la sesión
-const [sections, allCourses, readIds] = await Promise.all([
+const [sections, allCourses, readIds, quiz, quizAccess, attempts] = await Promise.all([
   getCourseSections(course.id),
   getCourses(),
   getCourseReadIds(user.id, course.id),
+  getQuizByCourseId(course.id),
+  getQuizAccess(user.id, course.id),
+  repos.quizAttempts.listByCourse(user.id, course.id, 50),
 ]);
+
+// Estado de la evaluación: sin evaluación / bloqueada / disponible / aprobada
+const quizHref = `${courseUrl(course)}/evaluacion`;
+const passingScore = quiz?.data.passingScore ?? DEFAULT_PASSING_SCORE;
+const bestScore = attempts.length ? Math.max(...attempts.map((a) => a.score)) : null;
+const quizPassed = attempts.some((a) => a.passed);
+const quizState = !quiz
+  ? "none"
+  : quizPassed
+    ? "passed"
+    : quizAccess.unlocked
+      ? "available"
+      : "locked";
 const read = new Set(readIds);
 const readCount = sections.filter((s) => read.has(s.data.sectionId)).length;
 const firstUnread = sections.find((s) => !read.has(s.data.sectionId)) ?? sections[0];
@@ -48,6 +66,7 @@ const prerequisites = course.data.prerequisites.map((p) => {
   sections={sections}
   readIds={readIds}
   current="overview"
+  quizAvailable={Boolean(quiz)}
 >
   <div class="mx-auto max-w-[68ch]">
     <header>
@@ -140,13 +159,43 @@ const prerequisites = course.data.prerequisites.map((p) => {
         <h2 id="evaluacion" class="font-serif text-xl font-semibold">
           Evaluación final
         </h2>
-        <Badge tone="warning">Próximamente</Badge>
+        {quizState === "none" && <Badge>Próximamente</Badge>}
+        {quizState === "locked" && <Badge>Bloqueada</Badge>}
+        {quizState === "available" && <Badge tone="info">Disponible</Badge>}
+        {quizState === "passed" && (
+          <Badge tone="accent">
+            Aprobada · {bestScore}/{QUIZ_QUESTIONS}
+          </Badge>
+        )}
       </div>
       <p class="mt-3 text-sm leading-relaxed text-muted">
         {QUIZ_QUESTIONS} preguntas sobre los conceptos clave del curso. Se aprueba con{" "}
-        {DEFAULT_PASSING_SCORE}/{QUIZ_QUESTIONS} y se desbloquea al marcar todas las secciones como
-        leídas.
+        {passingScore}/{QUIZ_QUESTIONS} y se desbloquea al marcar todas las secciones como leídas.
       </p>
+      {quizState === "locked" && (
+        <p class="mt-2 text-sm text-fg">
+          Te{" "}
+          {quizAccess.remaining === 1
+            ? "falta 1 sección"
+            : `faltan ${quizAccess.remaining} secciones`}{" "}
+          por leer.
+        </p>
+      )}
+      {quizState === "available" && (
+        <div class="mt-4 flex flex-wrap items-center gap-4">
+          <ButtonLink href={quizHref}>Hacer la evaluación →</ButtonLink>
+          {bestScore !== null && (
+            <span class="text-sm text-muted">
+              Mejor nota hasta ahora: {bestScore}/{QUIZ_QUESTIONS}
+            </span>
+          )}
+        </div>
+      )}
+      {quizState === "passed" && (
+        <ButtonLink href={quizHref} variant="secondary" class="mt-4">
+          Repetir la evaluación
+        </ButtonLink>
+      )}
     </section>
   </div>
 </CourseLayout>

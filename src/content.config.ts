@@ -1,7 +1,12 @@
 import { defineCollection, reference } from "astro:content";
 import { file, glob } from "astro/loaders";
 import { z } from "astro/zod";
-import { COURSE_ID_REGEX, SECTION_ID_REGEX } from "@/lib/constants";
+import {
+  COURSE_ID_REGEX,
+  DEFAULT_PASSING_SCORE,
+  QUIZ_QUESTIONS,
+  SECTION_ID_REGEX,
+} from "@/lib/constants";
 
 const courses = defineCollection({
   loader: file("src/content/courses.json"),
@@ -31,4 +36,24 @@ const sections = defineCollection({
   }),
 });
 
-export const collections = { courses, sections };
+const quizzes = defineCollection({
+  // Un archivo por curso: b1.yaml, b2.yaml…
+  loader: glob({ pattern: "*.yaml", base: "./src/content/quizzes" }),
+  schema: z.object({
+    course: reference("courses"),
+    passingScore: z.number().int().min(1).max(QUIZ_QUESTIONS).default(DEFAULT_PASSING_SCORE),
+    questions: z
+      .array(
+        z.object({
+          prompt: z.string(),
+          code: z.string().optional(),
+          options: z.array(z.string()).length(4),
+          answer: z.number().int().min(0).max(3),
+          explanation: z.string(),
+        }),
+      )
+      .length(QUIZ_QUESTIONS),
+  }),
+});
+
+export const collections = { courses, sections, quizzes };

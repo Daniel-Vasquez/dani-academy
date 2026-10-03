@@ -6,6 +6,7 @@ import SectionNav from "@/components/course/SectionNav.astro";
 import MarkAsReadButton from "@/components/course/MarkAsReadButton";
 import StudyTracker from "@/components/course/StudyTracker.astro";
 import { getCourseReadIds } from "@/server/services/progress.service";
+import { getQuizByCourseId } from "@/server/services/quiz.service";
 import {
   courseUrl,
   getCourseBySlug,
@@ -27,7 +28,10 @@ if (!section) return Astro.rewrite("/404");
 const { Content } = await render(section);
 
 const user = Astro.locals.user!; // el middleware garantiza la sesión
-const readIds = await getCourseReadIds(user.id, course.id);
+const [readIds, quiz] = await Promise.all([
+  getCourseReadIds(user.id, course.id),
+  getQuizByCourseId(course.id),
+]);
 const isRead = readIds.includes(section.data.sectionId);
 
 const prevSection = sections[index - 1];
@@ -38,10 +42,16 @@ const prev = prevSection && {
   title: prevSection.data.title,
   label: "Anterior",
 };
-// Tanda 5: la última sección enlaza a la evaluación
+// Al final del curso: la evaluación si existe; si no, la portada
 const next = nextSection
   ? { href: sectionUrl(course, nextSection), title: nextSection.data.title, label: "Siguiente" }
-  : { href: courseUrl(course), title: "Volver a la portada del curso", label: "Fin del curso" };
+  : quiz
+    ? {
+        href: `${courseUrl(course)}/evaluacion`,
+        title: "Evaluación final · 5 preguntas",
+        label: "Siguiente",
+      }
+    : { href: courseUrl(course), title: "Volver a la portada del curso", label: "Fin del curso" };
 ---
 
 <CourseLayout
@@ -51,6 +61,7 @@ const next = nextSection
   sections={sections}
   readIds={readIds}
   currentSectionId={section.data.sectionId}
+  quizAvailable={Boolean(quiz)}
 >
   <article class="mx-auto max-w-[68ch]">
     <header class="mb-10">

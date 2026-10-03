@@ -3741,6 +3741,14 @@ const { passingScore, questions } = quiz.data;
   - **Aprobada** → `Badge tone="accent"` "Aprobada · mejor nota X/5" + botón secundario "Repetir".
 - Pasa `quizAvailable` también a `CourseLayout` en la portada.
 
+### Notas de implementación (Tanda 5 ya ejecutada)
+
+- **Accesibilidad del cuestionario:** el enunciado es un `<h2>` (con `tabIndex={-1}`) en lugar de un `<legend>`, y al cambiar de pregunta o mostrar el resultado el foco pasa a ese título. Así el lector de pantalla anuncia cada pregunta nueva y el teclado no se queda en un botón que desaparece. El `fieldset` conserva un `<legend>` oculto ("Pregunta N"). Las opciones muestran el foco del teclado con `has-[:focus-visible]`.
+- **Portada:** el bloque de evaluación tiene cuatro estados (sin evaluación, bloqueada, disponible —con la mejor nota si ya hubo intentos— y aprobada) y lee hasta 50 intentos para calcular la mejor nota.
+- **Mapa de errores de la Action:** `STATUS_TO_CODE` (objeto) en lugar de la expresión del plan; mismo comportamiento.
+- Verificado: el HTML, las *props* de la isla y el JavaScript del cliente no contienen `answer` ni el texto de las explicaciones (las *props* solo llevan `prompt`, `code` y `options`). 26 comprobaciones en Chrome (bloqueo y desbloqueo, navegación, corrección 3/5 y 5/5, revisión, reintento, historial, estados de la portada y errores 400/401/403/404 de la Action). Lighthouse con sesión iniciada y compresión brotli: rendimiento 100 y accesibilidad 100 en la evaluación, en claro y en oscuro.
+- **Medir rendimiento siempre con compresión** (Vercel usa brotli): sin ella, la evaluación baja a ~81 por los ~300 KB de JavaScript sin comprimir (React se carga desde el inicio porque el cuestionario es `client:load`).
+
 ### Criterios de aceptación — Tanda 5
 
 - [ ] Con secciones sin leer, `/cursos/typescript-desde-cero/evaluacion` muestra "Evaluación bloqueada" con el número correcto y un enlace a la primera pendiente.
