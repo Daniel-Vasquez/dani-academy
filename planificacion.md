@@ -2597,6 +2597,15 @@ const user = Astro.locals.user;
 
 En `SiteHeader.astro`, dentro de `<div class="ml-auto …">`, añade `<UserMenu />` antes de `<ThemeToggle />`.
 
+### Notas de implementación (Tanda 3 ya ejecutada)
+
+- Versiones: `better-auth` y `@better-auth/mongo-adapter` 1.7.7, `zod` 4.6, `react-hook-form` 7.89.
+- **Sin `@hookform/resolvers`:** una dependencia opcional suya pide Zod 3 y npm no resuelve el conflicto con el Zod 4 de Astro 7. Se sustituye por `src/lib/zod-resolver.ts` (15 líneas). Los esquemas usan la API de Zod 4: `z.string().trim().toLowerCase().pipe(z.email(…))`.
+- **`trustedOrigins` es una función:** en producción solo confía en `BETTER_AUTH_URL`; en desarrollo también en el origen real de la petición si es `localhost` (Astro cambia de puerto si el 4321 está ocupado).
+- **Componentes extra:** `FormAlert.tsx` (error general del formulario y clase del botón, compartidos por login y registro). El login muestra un mensaje propio si Better Auth responde `429`.
+- **CSRF de Astro:** `security.checkOrigin` (activo por defecto) rechaza con `403` las peticiones `PUT/POST/DELETE` sin `Origin` del propio sitio, antes del *middleware*. Un `curl` sin cabecera `Origin` recibe ese `403`; con `-H "Origin: <tu URL>"` recibe el `401` JSON del *middleware*. Los navegadores siempre envían `Origin`.
+- Verificado (build de producción y `astro dev` en otro puerto): 16 comprobaciones de flujo en Chrome; en Atlas, contraseña hasheada (scrypt, `sal:hash`) y 0 sesiones tras cerrar sesión; Lighthouse en `/login` y `/registro` con accesibilidad 100 en ambos temas.
+
 ### Criterios de aceptación — Tanda 3
 
 - [ ] Sin sesión, `/cursos/typescript-desde-cero` redirige a `/login?redirect=%2Fcursos%2Ftypescript-desde-cero`.
