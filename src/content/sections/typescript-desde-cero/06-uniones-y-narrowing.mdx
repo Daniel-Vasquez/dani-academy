@@ -1,0 +1,211 @@
+---
+sectionId: "B1.6"
+course: "B1"
+title: "Uniones y narrowing"
+order: 6
+minutes: 60
+summary: "Uniones, type guards y uniones discriminadas: la herramienta más útil del curso."
+---
+
+Si de este curso te quedas con una sola idea, que sea esta. Las **uniones** y el **_narrowing_** (estrechamiento) te permiten modelar datos que pueden tener varias formas, y que el compilador te obligue a manejar cada una. Es la diferencia entre "creo que he cubierto todos los casos" y "sé que los he cubierto".
+
+## Uniones
+
+Una unión (`A | B`) es un valor que puede ser de **uno u otro** tipo:
+
+```ts
+function formatearId(id: string | number): string {
+  return String(id);
+}
+
+formatearId("u-1"); // ✅
+formatearId(42); // ✅
+formatearId(true); // ❌ Argument of type 'boolean' is not assignable to parameter of type 'string | number'.
+```
+
+El problema llega cuando quieres usar algo que solo tiene uno de los tipos:
+
+```ts
+function mayusculas(valor: string | number) {
+  return valor.toUpperCase();
+  // ❌ Property 'toUpperCase' does not exist on type 'string | number'.
+  //    Property 'toUpperCase' does not exist on type 'number'.
+}
+```
+
+TypeScript tiene razón: si `valor` es un número, eso falla. Necesitas comprobar qué es.
+
+## _Narrowing_: estrechar el tipo
+
+Cuando haces una comprobación, TypeScript **estrecha** el tipo dentro de cada rama. A las comprobaciones que lo provocan se les llama _type guards_.
+
+### `typeof`
+
+Para primitivos:
+
+```ts
+function mayusculas(valor: string | number) {
+  if (typeof valor === "string") {
+    return valor.toUpperCase(); // aquí: string
+  }
+  return valor.toFixed(0); // aquí: number (solo queda esa opción)
+}
+```
+
+### `instanceof`
+
+Para clases como `Date` o `Error`:
+
+```ts
+function formatear(fecha: Date | string) {
+  if (fecha instanceof Date) return fecha.toISOString(); // Date
+  return fecha; // string
+}
+```
+
+### `in`
+
+Para comprobar si un objeto tiene una propiedad:
+
+```ts
+type Fuerza = { series: number; reps: number };
+type Running = { km: number };
+
+function resumen(a: Fuerza | Running) {
+  if ("km" in a) return `${a.km} km`; // Running
+  return `${a.series}×${a.reps}`; // Fuerza
+}
+```
+
+### Igualdad y valores "vacíos"
+
+Comparar con `null`, `undefined` o un literal también estrecha:
+
+```ts
+function saludar(nombre: string | null) {
+  if (nombre === null) return "Hola, desconocido";
+  return `Hola, ${nombre}`; // string
+}
+```
+
+## Uniones discriminadas
+
+Aquí está la herramienta estrella. Una **unión discriminada** es una unión de objetos que comparten una propiedad literal (el **discriminante**) que indica de qué variante se trata:
+
+```ts
+type Resultado = { ok: true; datos: string[] } | { ok: false; error: string };
+
+function mostrar(r: Resultado) {
+  if (r.ok) {
+    console.log(r.datos.length); // TypeScript sabe que existe `datos`
+  } else {
+    console.error(r.error); // y aquí, que existe `error`
+  }
+}
+```
+
+Compáralo con la alternativa habitual en JavaScript:
+
+```ts
+type ResultadoMalo = { ok: boolean; datos?: string[]; error?: string };
+```
+
+Con este tipo, nada impide un objeto con `ok: true` y sin `datos`, o con `datos` y `error` a la vez. La unión discriminada hace **imposibles los estados imposibles**.
+
+### Estados de una petición
+
+El ejemplo más útil en tus proyectos: el estado de una carga de datos.
+
+```ts
+type Estado<T> =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "success"; data: T }
+  | { status: "error"; message: string };
+
+function render(estado: Estado<string[]>): string {
+  switch (estado.status) {
+    case "idle":
+      return "Pulsa para cargar";
+    case "loading":
+      return "Cargando…";
+    case "success":
+      return `${estado.data.length} elementos`;
+    case "error":
+      return `Error: ${estado.message}`;
+  }
+}
+```
+
+No puedes leer `data` mientras estás en `loading`, ni olvidar el mensaje de error. Lo reutilizarás tal cual en React (curso B6).
+
+## Comprobación exhaustiva con `never`
+
+¿Y si mañana añades una variante? Puedes hacer que el compilador te avise de cada `switch` que no la maneja:
+
+```ts
+type Actividad = { tipo: "fuerza"; series: number } | { tipo: "running"; km: number };
+
+function resumen(a: Actividad): string {
+  switch (a.tipo) {
+    case "fuerza":
+      return `${a.series} series`;
+    case "running":
+      return `${a.km} km`;
+    default: {
+      const exhaustivo: never = a; // si llegamos aquí con algo, es un error
+      return exhaustivo;
+    }
+  }
+}
+```
+
+Si añades `{ tipo: "nutricion"; kcal: number }` a `Actividad` y no actualizas el `switch`:
+
+```text
+Type '{ tipo: "nutricion"; kcal: number; }' is not assignable to type 'never'.
+```
+
+El compilador te lleva de la mano a cada sitio que debes actualizar.
+
+## _Type guards_ propios
+
+Cuando la comprobación es compleja, puedes encapsularla en una función que "enseña" a TypeScript a estrechar. Su retorno usa la sintaxis `valor is Tipo`:
+
+```ts
+function esRunning(a: Actividad): a is Extract<Actividad, { tipo: "running" }> {
+  return a.tipo === "running";
+}
+
+const actividades: Actividad[] = [];
+const carreras = actividades.filter(esRunning); // solo las de running, bien tipadas
+```
+
+No abuses de ellos: si la función miente (devuelve `true` cuando no debe), el compilador la creerá.
+
+## Errores comunes
+
+- **Usar objetos con muchos opcionales** en lugar de una unión discriminada. Es la fuente de bugs más habitual.
+- **Discriminantes que no son literales.** `tipo: string` no permite estrechar; tiene que ser `tipo: "fuerza"`.
+- **Olvidar el `default` con `never`.** Sin él, una variante nueva pasa desapercibida.
+- **Comprobar con `typeof` un objeto concreto.** `typeof` solo distingue primitivos, `"object"` y `"function"`; para objetos usa un discriminante, `in` o `instanceof`.
+
+<Callout type="exercise">
+  1. Copia el tipo `Actividad` y la función `resumen` con el `default` exhaustivo.
+  2. Añade la variante `{ tipo: "nutricion"; kcal: number }` y observa cómo el compilador te obliga a manejarla.
+  3. Modela el estado de una petición (`idle`, `loading`, `success` y `error`) con una unión discriminada y escribe una función que devuelva el texto a mostrar en cada caso.
+  4. Busca en uno de tus proyectos un objeto con varias propiedades opcionales que en realidad represente estados distintos y reescríbelo como unión discriminada.
+</Callout>
+
+<Callout type="mastery">
+  Usas uniones discriminadas en lugar de objetos con muchos campos opcionales, y el compilador te
+  avisa cuando olvidas un caso.
+</Callout>
+
+## Resumen
+
+- Una unión (`A | B`) admite cualquiera de sus tipos.
+- El _narrowing_ estrecha el tipo tras una comprobación: `typeof`, `instanceof`, `in` o igualdad.
+- Las uniones discriminadas usan una propiedad literal común para distinguir variantes.
+- `never` en el `default` convierte un caso olvidado en un error de compilación.
+- Los _type guards_ propios (`valor is Tipo`) encapsulan comprobaciones complejas.

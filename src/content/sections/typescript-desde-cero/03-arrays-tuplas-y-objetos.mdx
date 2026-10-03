@@ -1,0 +1,187 @@
+---
+sectionId: "B1.3"
+course: "B1"
+title: "Arrays, tuplas y objetos"
+order: 3
+minutes: 60
+summary: "Tipar colecciones y objetos, propiedades opcionales, readonly y encadenamiento opcional."
+---
+
+Casi todos los datos de tus aplicaciones son listas y objetos: los entrenos de una semana, los días del Planificador, la respuesta de una API. En esta sección vas a aprender a describir su forma con precisión, que es exactamente lo que más errores evita en el día a día.
+
+## Arrays
+
+Hay dos formas equivalentes de escribir un array:
+
+```ts
+const pesos: number[] = [80.5, 79.8, 79.2];
+const nombres: Array<string> = ["Dani", "Ana"];
+```
+
+`number[]` es la forma más habitual; `Array<number>` es la misma idea escrita como genérico (lo verás a fondo en el curso I1). Elige una y sé consistente.
+
+Como siempre, la inferencia funciona: `const pesos = [80.5, 79.8]` ya es `number[]`. Si mezclas tipos, TypeScript infiere una unión:
+
+```ts
+const mezcla = [1, "dos", 3]; // (string | number)[]
+```
+
+### Arrays de solo lectura
+
+Si una lista no debe modificarse, márcala como `readonly`:
+
+```ts
+const dias: readonly string[] = ["lunes", "martes", "miércoles"];
+dias.push("jueves"); // ❌ Property 'push' does not exist on type 'readonly string[]'.
+```
+
+Muy útil para constantes y para parámetros de funciones que no deberían mutar lo que reciben.
+
+### Acceder por índice: `noUncheckedIndexedAccess`
+
+En este proyecto, el `tsconfig.json` tiene activada `noUncheckedIndexedAccess`. Eso hace que acceder por índice devuelva un posible `undefined`, porque el índice podría no existir:
+
+```ts
+const pesos = [80.5, 79.8];
+const primero = pesos[0]; // number | undefined
+primero.toFixed(1); // ❌ 'primero' is possibly 'undefined'.
+
+if (primero !== undefined) {
+  primero.toFixed(1); // ✅
+}
+```
+
+Puede parecer pesado, pero refleja la realidad: `pesos[10]` devuelve `undefined` en JavaScript, y TypeScript te obliga a tenerlo en cuenta.
+
+## Tuplas
+
+Una tupla es un array de **longitud fija** en el que cada posición tiene su propio tipo:
+
+```ts
+const punto: [number, number] = [10, 20];
+const registro: [string, number] = ["2026-10-02", 5.2]; // [fecha, km]
+
+const [fecha, km] = registro; // fecha: string, km: number
+```
+
+Las verás en hooks de React: `useState` devuelve una tupla `[valor, setValor]`. Puedes dar nombre a cada posición para documentarla:
+
+```ts
+type Coordenada = [lat: number, lng: number];
+```
+
+## Objetos
+
+El tipo de un objeto describe sus propiedades y el tipo de cada una:
+
+```ts
+const entreno: { tipo: string; minutos: number } = {
+  tipo: "running",
+  minutos: 30,
+};
+```
+
+Escribirlo en línea sirve para casos puntuales; en la sección B1.4 aprenderás a darle nombre para reutilizarlo.
+
+### Propiedades opcionales y de solo lectura
+
+```ts
+const entreno: {
+  readonly id: string;
+  tipo: string;
+  minutos: number;
+  notas?: string; // puede no existir
+} = {
+  id: "e1",
+  tipo: "fuerza",
+  minutos: 45,
+};
+
+entreno.minutos = 50; // ✅
+entreno.id = "e2"; // ❌ Cannot assign to 'id' because it is a read-only property.
+```
+
+Una propiedad opcional (`notas?`) tiene en realidad el tipo `string | undefined`. Antes de usarla, tendrás que comprobar que existe.
+
+### Comprobación de propiedades de más
+
+Cuando escribes un objeto literal directamente donde se espera un tipo, TypeScript avisa si añades propiedades que no existen. Es su forma de detectar erratas:
+
+```ts
+const entreno: { tipo: string; minutos: number } = {
+  tipo: "running",
+  minutos: 30,
+  kms: 5, // ❌ Object literal may only specify known properties, and 'kms' does not exist in type '{ tipo: string; minutos: number; }'.
+};
+```
+
+¿Querías escribir `km`? ¿O es que el tipo debería tenerla? En ambos casos, el compilador acaba de ahorrarte un bug silencioso.
+
+## Encadenamiento opcional y valores por defecto
+
+Dos operadores de JavaScript moderno encajan perfectamente con los tipos opcionales:
+
+- `?.` (_optional chaining_): accede a una propiedad solo si lo anterior no es `null` ni `undefined`.
+- `??` (_nullish coalescing_): da un valor por defecto si lo anterior es `null` o `undefined`.
+
+```ts
+const largoNotas = entreno.notas?.length ?? 0; // number
+```
+
+TypeScript entiende ambos operadores y ajusta el tipo: `entreno.notas?.length` es `number | undefined`, y con `?? 0` pasa a ser `number`.
+
+<Callout type="warning">
+  `??` no es lo mismo que `||`. Con `||`, un `0` o un texto vacío también se sustituyen por el valor
+  por defecto. Si `minutos` puede ser `0`, usa `??`.
+</Callout>
+
+## Juntándolo todo
+
+Un día de tu app de entrenamiento, tipado de principio a fin:
+
+```ts
+const dia: {
+  fecha: string;
+  ejercicios: { nombre: string; series: number; reps: number; peso: number }[];
+  aguaMl?: number;
+} = {
+  fecha: "2026-10-02",
+  ejercicios: [
+    { nombre: "Sentadilla", series: 4, reps: 8, peso: 70 },
+    { nombre: "Press banca", series: 3, reps: 10, peso: 50 },
+  ],
+};
+
+const volumen = dia.ejercicios.reduce((acc, e) => acc + e.series * e.reps * e.peso, 0);
+```
+
+Dentro del `reduce`, el editor sabe que `e` tiene `series`, `reps` y `peso`, y te los autocompleta. Si mañana renombras `peso` a `kg`, el compilador te señalará cada línea que debes cambiar.
+
+## Errores comunes
+
+- **Olvidar que una propiedad opcional puede ser `undefined`:** `'entreno.notas' is possibly 'undefined'.` Usa `?.`, `??` o una comprobación.
+- **Mutar un `readonly`.** Si necesitas cambiarlo, crea una copia: `[...dias, "jueves"]`.
+- **Usar tuplas para datos complejos.** `[string, number, boolean, string]` es ilegible; para más de dos o tres valores, usa un objeto con nombres.
+- **Asumir que `lista[0]` siempre existe.** Con `noUncheckedIndexedAccess`, compruébalo.
+
+<Callout type="exercise">
+  1. Modela con tipos en línea un día de tu app de entrenamiento: fecha, lista de ejercicios
+  (nombre, series, repeticiones y peso) y agua consumida (opcional). 2. Escribe una función que
+  reciba ese día y devuelva el volumen total (series × repeticiones × peso). 3. Añade una propiedad
+  `notas` opcional y escribe una función que devuelva su longitud o `0` usando `?.` y `??`. 4.
+  Intenta añadir una propiedad mal escrita al objeto literal y lee el error completo.
+</Callout>
+
+<Callout type="mastery">
+  Puedes tipar cualquier objeto JSON que ya uses en tus proyectos (por ejemplo, un día del
+  Planificador) sin consultar la documentación.
+</Callout>
+
+## Resumen
+
+- Arrays: `number[]` o `Array<number>`; `readonly` impide modificarlos.
+- Con `noUncheckedIndexedAccess`, el acceso por índice puede ser `undefined`.
+- Tuplas: arrays de longitud fija con un tipo por posición.
+- Objetos: propiedades opcionales (`?`) y de solo lectura (`readonly`).
+- TypeScript detecta propiedades de más en objetos literales.
+- `?.` y `??` trabajan junto a los tipos opcionales.

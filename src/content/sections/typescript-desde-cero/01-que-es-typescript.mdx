@@ -1,0 +1,148 @@
+---
+sectionId: "B1.1"
+course: "B1"
+title: "Qué es TypeScript y por qué existe"
+order: 1
+minutes: 60
+summary: "Qué añade TypeScript a JavaScript, cómo se compila y cómo lo usa tu editor para ayudarte."
+---
+
+Llevas un año escribiendo JavaScript y TypeScript ya aparece en tus proyectos: el `tsconfig.json` de Astro, los archivos `.ts`, los errores en rojo de VS Code. Hasta ahora ha sido una caja negra. En esta sección vas a entender qué es, qué problema resuelve y, sobre todo, qué **no** hace.
+
+## JavaScript con un sistema de tipos
+
+TypeScript es JavaScript con una capa extra: un **sistema de tipos** que se comprueba **antes** de ejecutar el código. Todo JavaScript válido es TypeScript válido; TypeScript solo añade anotaciones y un compilador que las revisa.
+
+```ts
+function sumar(a: number, b: number): number {
+  return a + b;
+}
+
+sumar(2, 3); // ✅ 5
+sumar("2", 3); // ❌ Argument of type 'string' is not assignable to parameter of type 'number'.
+```
+
+En JavaScript, `sumar("2", 3)` devolvería `"23"` sin quejarse, y el error aparecería mucho después, quizá en producción. TypeScript lo detecta mientras escribes.
+
+Un **tipo** es simplemente una descripción de qué valores puede contener algo y qué puedes hacer con ellos: "esto es un número", "esto es una lista de entrenos", "esto es un usuario con nombre y correo". El compilador usa esas descripciones para comprobar que cada pieza encaja con las demás.
+
+## Estático vs dinámico
+
+- **Tipado dinámico** (JavaScript): los tipos se descubren al ejecutar. Los errores aparecen en _runtime_.
+- **Tipado estático** (TypeScript): los tipos se comprueban al compilar. Los errores aparecen en el editor.
+
+La idea clave: TypeScript desplaza una familia entera de errores **del momento en que el usuario usa la app al momento en que tú escribes el código**.
+
+Piensa en un bug típico de tu app de entrenamiento:
+
+```js
+// JavaScript
+const entreno = { tipo: "running", km: 5 };
+console.log(entreno.kms.toFixed(1)); // TypeError: Cannot read properties of undefined
+```
+
+Una errata (`kms` en lugar de `km`) que solo descubres cuando alguien abre esa pantalla. En TypeScript, el mismo código no compila:
+
+```ts
+const entreno = { tipo: "running", km: 5 };
+entreno.kms.toFixed(1); // ❌ Property 'kms' does not exist on type '{ tipo: string; km: number; }'.
+```
+
+## Qué ganas en el día a día
+
+Detectar errores es solo una parte. En la práctica, notarás tres cosas:
+
+1. **Autocompletado de verdad.** Al escribir `entreno.`, el editor te propone exactamente `tipo` y `km`. Con librerías grandes como MongoDB o Better Auth, esto es como tener la documentación dentro del editor.
+2. **Cambios sin miedo.** Si renombras una propiedad o cambias lo que devuelve una función, el compilador te señala **cada línea** afectada. Sin tipos, tendrías que buscar a mano y cruzar los dedos.
+3. **Documentación que no se queda vieja.** La firma `obtenerEntrenos(userId: string): Promise<Entreno[]>` te dice qué necesita la función y qué devuelve, y no puede quedar desactualizada porque el compilador la comprueba.
+
+## Los tipos desaparecen al compilar
+
+El navegador y Node no entienden TypeScript. Antes de ejecutarse, el código se **compila** (o simplemente se le quitan los tipos) y queda JavaScript normal:
+
+```ts
+// suma.ts
+function sumar(a: number, b: number): number {
+  return a + b;
+}
+```
+
+```js
+// suma.js (resultado)
+function sumar(a, b) {
+  return a + b;
+}
+```
+
+Por eso TypeScript **no hace tu código más lento** en producción: lo que se ejecuta es el mismo JavaScript que habrías escrito a mano.
+
+<Callout type="note">
+  Como los tipos desaparecen, TypeScript **no valida datos en ejecución**. Si una API devuelve algo
+  inesperado, el compilador no lo sabrá. Eso lo resolveremos con Zod en el curso I1.
+</Callout>
+
+## Por qué ya está en tus proyectos
+
+Cuando creas un proyecto con `npm create astro`, TypeScript viene incluido aunque escribas JavaScript:
+
+- El `tsconfig.json` hereda de `astro/tsconfigs/strict` (lo abrirás línea a línea en la sección B1.7).
+- Astro genera tipos automáticamente en la carpeta `.astro/`, por ejemplo para tus colecciones de contenido.
+- Los archivos `.astro` tienen un _frontmatter_ que es TypeScript.
+- Las librerías que usas (Astro, React, MongoDB, Better Auth) publican sus tipos, y por eso el editor te ayuda incluso en archivos `.js`.
+
+Es decir: llevas un año beneficiándote de TypeScript sin escribirlo. Este curso te enseña a sacarle partido de forma consciente.
+
+## Tus herramientas: `tsc`, `tsx` y el editor
+
+```bash
+npm init -y
+npm i -D typescript tsx
+npx tsc --init      # crea un tsconfig.json
+npx tsx suma.ts     # ejecuta un .ts directamente (quita los tipos al vuelo)
+npx tsc             # compila y comprueba tipos de todo el proyecto
+```
+
+- `tsc` es el compilador oficial: **comprueba** tipos y genera `.js`.
+- `tsx` ejecuta `.ts` sin generar archivos: rápido para practicar, pero **no comprueba** tipos.
+- VS Code usa el mismo motor de TypeScript para el _hover_, el autocompletado y _Go to Definition_ (`F12`). Úsalo constantemente.
+
+<Callout type="tip">
+  Pasa el ratón por encima de cualquier variable o función en VS Code: el recuadro que aparece te
+  muestra su tipo. Es la forma más rápida de entender código ajeno, incluido el de tus propios
+  proyectos de hace meses.
+</Callout>
+
+## Lo que TypeScript no es
+
+Para terminar, despejemos tres malentendidos frecuentes:
+
+- **No es otro lenguaje.** Es JavaScript con anotaciones. Todo lo que sabes de JavaScript sigue valiendo.
+- **No es una garantía absoluta.** Puedes engañar al compilador (con `any` o con `as`, que verás más adelante), y los datos externos pueden no coincidir con tus tipos.
+- **No es todo o nada.** Puedes adoptarlo poco a poco: un archivo `.ts` convive perfectamente con archivos `.js`.
+
+## Errores comunes
+
+- **Creer que `tsx` comprueba tipos.** Solo los quita. Para comprobar, ejecuta `npx tsc --noEmit`.
+- **Ignorar los subrayados rojos** "porque funciona". Si el compilador se queja, es que en algún caso no funciona.
+- **Anotar todo.** Muchas veces TypeScript ya sabe el tipo; lo veremos en la siguiente sección.
+
+<Callout type="exercise">
+  1. Crea una carpeta `ts-playground` e instala `typescript` y `tsx`. 2. Copia una función de
+  JavaScript de tu Planificador o de tu app de entrenamiento a un archivo `.ts`. 3. Corrige todos
+  los errores que marque el editor y ejecuta `npx tsc --noEmit` hasta que no quede ninguno. 4.
+  Compila con `npx tsc` y abre el `.js` generado: comprueba que los tipos han desaparecido.
+</Callout>
+
+<Callout type="mastery">
+  Puedes explicar con tus palabras por qué TypeScript no hace tu código más lento en producción y
+  por qué, aun así, no protege contra datos inesperados en *runtime*.
+</Callout>
+
+## Resumen
+
+- TypeScript = JavaScript + tipos comprobados antes de ejecutar.
+- Ganas detección temprana de errores, autocompletado y cambios seguros.
+- Los tipos se eliminan al compilar: el resultado es JavaScript normal.
+- Ya está en tus proyectos de Astro, aunque no lo escribieras.
+- `tsc` comprueba tipos; `tsx` solo ejecuta.
+- No valida datos externos en ejecución (eso llega con Zod).

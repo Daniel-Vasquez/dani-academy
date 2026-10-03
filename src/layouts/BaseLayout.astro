@@ -1,0 +1,60 @@
+---
+import "@fontsource-variable/inter";
+import "@fontsource-variable/source-serif-4";
+import "@fontsource-variable/jetbrains-mono";
+import "@/styles/global.css";
+import { ClientRouter } from "astro:transitions";
+import { THEME_STORAGE_KEY } from "@/lib/constants";
+// Mismos archivos que usan los @font-face de Fontsource (subconjunto latin): se precargan
+// para que el texto no cambie de fuente después del primer pintado (CLS)
+import serifFont from "@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2?url";
+import sansFont from "@fontsource-variable/inter/files/inter-latin-wght-normal.woff2?url";
+
+const preloadFonts = [serifFont, sansFont];
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = "Plataforma personal de aprendizaje full-stack." } = Astro.props;
+const fullTitle = title === "Dani Academy" ? title : `${title} · Dani Academy`;
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    {preloadFonts.map((href) => (
+      <link rel="preload" href={href} as="font" type="font/woff2" crossorigin />
+    ))}
+    <title>{fullTitle}</title>
+
+    <!-- Aplica el tema antes del primer pintado (sin parpadeo) y tras cada navegación -->
+    <script is:inline define:vars={{ storageKey: THEME_STORAGE_KEY }}>
+      const applyTheme = () => {
+        let stored = null;
+        try {
+          stored = localStorage.getItem(storageKey);
+        } catch {}
+        const dark = stored
+          ? stored === "dark"
+          : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      };
+      applyTheme();
+      if (!window.__daThemeListener) {
+        window.__daThemeListener = true;
+        document.addEventListener("astro:after-swap", applyTheme);
+      }
+    </script>
+    <ClientRouter />
+  </head>
+  <body class="min-h-dvh bg-bg font-sans text-fg">
+    <slot />
+  </body>
+</html>

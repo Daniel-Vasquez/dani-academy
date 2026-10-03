@@ -1,0 +1,175 @@
+---
+sectionId: "B1.7"
+course: "B1"
+title: "Módulos, tipos de librerías y tsconfig.json"
+order: 7
+minutes: 60
+summary: "De dónde salen los tipos de las librerías y qué hace cada opción de tsconfig.json."
+---
+
+Hasta ahora has escrito tipos en tus propios archivos. Pero tus proyectos usan Astro, React, MongoDB y Better Auth: ¿de dónde saca el editor sus tipos? ¿Y qué hace ese `tsconfig.json` que nunca te has atrevido a tocar? En esta sección vas a abrir esas dos cajas negras.
+
+## Importar y exportar tipos
+
+Los tipos se exportan e importan como cualquier otra cosa:
+
+```ts
+// src/types/usuario.ts
+export interface Usuario {
+  id: string;
+  nombre: string;
+}
+
+export type Rol = "user" | "admin";
+```
+
+```ts
+// otro archivo
+import type { Usuario, Rol } from "@/types/usuario";
+```
+
+`import type` indica que **solo** importas tipos. Como los tipos desaparecen al compilar, esa línea se elimina por completo del JavaScript final. En los proyectos de Astro es obligatorio usarlo para importar tipos, porque su configuración activa `verbatimModuleSyntax` (lo verás más abajo). Si lo olvidas:
+
+```text
+'Usuario' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
+```
+
+También puedes mezclar valores y tipos en el mismo `import`:
+
+```ts
+import { getCollection, type CollectionEntry } from "astro:content";
+```
+
+## ¿De dónde salen los tipos de las librerías?
+
+Hay dos casos:
+
+1. **La librería trae sus propios tipos.** Es lo habitual hoy: `astro`, `mongodb`, `better-auth` o `zod` incluyen archivos `.d.ts` en su paquete.
+2. **Los tipos están en un paquete aparte** de la comunidad, bajo el nombre `@types/…`. Por ejemplo, React publica sus tipos en `@types/react` y Node en `@types/node`.
+
+```bash
+npm i -D @types/node   # tipos de las APIs de Node (process, fs, path…)
+```
+
+Si importas una librería sin tipos, verás algo como:
+
+```text
+Could not find a declaration file for module 'libreria-antigua'.
+```
+
+La solución suele ser instalar su `@types/…`, si existe.
+
+## Archivos `.d.ts`: leer los tipos ajenos
+
+Un `.d.ts` contiene **solo declaraciones de tipos**, sin código. Es la documentación más fiable de una librería, porque es exactamente lo que el compilador usa.
+
+Prueba esto en VS Code: escribe `fetch` en un archivo `.ts`, haz `Cmd` + clic sobre él (o pulsa `F12`). Saltarás a `lib.dom.d.ts`, donde verás algo así:
+
+```ts
+declare function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+```
+
+Ahora sabes, sin buscar en internet, qué acepta `fetch` y qué devuelve. Acostúmbrate a hacer esto con cada librería que uses: es una habilidad que te hará mucho más independiente.
+
+## `tsconfig.json` línea por línea
+
+`tsconfig.json` le dice al compilador **qué archivos** revisar y **con qué reglas**. Este es el de Dani Academy:
+
+```json
+{
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "**/*"],
+  "exclude": ["dist", "node_modules"],
+  "compilerOptions": {
+    "paths": { "@/*": ["./src/*"] },
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "noUncheckedIndexedAccess": true
+  }
+}
+```
+
+- **`extends`**: hereda otra configuración. Astro publica tres: `base`, `strict` y `strictest`.
+- **`include` / `exclude`**: qué archivos entran. `.astro/types.d.ts` contiene los tipos que Astro genera (colecciones de contenido, variables de entorno…).
+- **`paths`**: alias de importación. `@/lib/cn` equivale a `./src/lib/cn`.
+- **`jsx` / `jsxImportSource`**: cómo se interpreta el JSX de los componentes React.
+- **`noUncheckedIndexedAccess`**: `lista[0]` es `T | undefined` (lo viste en la sección B1.3).
+
+### Lo que hereda de `astro/tsconfigs/strict`
+
+Si sigues el `extends` hasta `node_modules/astro/tsconfigs/`, encontrarás estas opciones clave:
+
+| Opción                        | Qué hace                                                                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------ |
+| `strict: true`                | Activa un conjunto de comprobaciones estrictas, entre ellas `strictNullChecks` y `noImplicitAny` |
+| `target: "ESNext"`            | Permite la sintaxis moderna de JavaScript sin transformarla                                      |
+| `module: "ESNext"`            | Usa módulos ES (`import`/`export`)                                                               |
+| `moduleResolution: "Bundler"` | Resuelve los imports como lo hace Vite (sin extensiones obligatorias)                            |
+| `verbatimModuleSyntax: true`  | Obliga a usar `import type` para los tipos                                                       |
+| `noEmit: true`                | `tsc` solo comprueba; no genera archivos (Astro y Vite se encargan de compilar)                  |
+| `skipLibCheck: true`          | No revisa los `.d.ts` de las librerías (más rápido)                                              |
+
+### `strict`, la opción más importante
+
+`strict` no es una opción, sino un interruptor que activa varias. Las dos que más notarás:
+
+- **`strictNullChecks`**: `null` y `undefined` no se cuelan en cualquier tipo. Sin ella, `let n: string = null` sería válido.
+- **`noImplicitAny`**: un parámetro sin tipo es un error, en lugar de convertirse en `any` en silencio.
+
+```ts
+function saludar(nombre) {
+  // ❌ Parameter 'nombre' implicitly has an 'any' type.
+}
+```
+
+Desactivar `strict` hace desaparecer muchos errores, pero no los bugs que esos errores señalan.
+
+<Callout type="note">
+  TypeScript 6 marca `baseUrl` como obsoleto. Muchos tutoriales todavía lo usan junto a `paths`; hoy
+  basta con `paths` y rutas relativas al `tsconfig.json` (`./src/*`). Lo comprobamos al configurar
+  este mismo proyecto.
+</Callout>
+
+## Alias de rutas
+
+Sin alias, los imports profundos se vuelven frágiles:
+
+```ts
+import { cn } from "../../../lib/cn"; // ¿cuántos ../ eran?
+```
+
+Con `paths`:
+
+```ts
+import { cn } from "@/lib/cn"; // igual desde cualquier archivo
+```
+
+Astro lee los `paths` del `tsconfig.json` y configura Vite por ti, así que el alias funciona tanto en el editor como al compilar.
+
+## Errores comunes
+
+- **Importar un tipo sin `type`** con `verbatimModuleSyntax` activo.
+- **Instalar `@types/x` de una librería que ya trae tipos.** Puede provocar conflictos; revisa primero si el paquete incluye sus `.d.ts`.
+- **Desactivar `strict` para "arreglar" errores.** Arregla el código, no la configuración.
+- **Usar alias sin declararlos en `paths`:** `Cannot find module '@/lib/cn' or its corresponding type declarations.`
+
+<Callout type="exercise">
+  1. Abre el `tsconfig.json` de tu app de entrenamiento y escribe al lado de cada opción, en un
+  comentario, lo que hace. 2. Sigue el `extends` hasta el archivo real dentro de
+  `node_modules/astro/tsconfigs/` y lista qué opciones activa. 3. Añade el alias `@/*` (sin
+  `baseUrl`) y migra tres imports relativos con `../../`. 4. Haz `Cmd` + clic sobre una función de
+  MongoDB o de Better Auth y anota su firma: parámetros y retorno.
+</Callout>
+
+<Callout type="mastery">
+  Puedes crear un `tsconfig.json` para un proyecto Astro desde cero y explicar cada línea, y lees el
+  `.d.ts` de una librería para saber cómo usarla.
+</Callout>
+
+## Resumen
+
+- `import type` importa solo tipos y desaparece al compilar; Astro lo exige con `verbatimModuleSyntax`.
+- Las librerías traen sus tipos (`.d.ts`) o los publican en `@types/…`.
+- `Cmd` + clic (o `F12`) te lleva a la definición: la mejor documentación.
+- `tsconfig.json` define qué archivos se revisan y con qué reglas; `strict` es la más importante.
+- `paths` crea alias como `@/`; en TypeScript 6 ya no hace falta `baseUrl`.

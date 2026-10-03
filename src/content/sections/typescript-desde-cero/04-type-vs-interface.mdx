@@ -1,0 +1,193 @@
+---
+sectionId: "B1.4"
+course: "B1"
+title: "type vs interface"
+order: 4
+minutes: 60
+summary: "Las dos formas de nombrar tipos, sus diferencias reales y una convención para elegir."
+---
+
+En la sección anterior escribiste tipos de objetos en línea. Funciona, pero en cuanto el mismo tipo aparece en dos sitios lo estás duplicando. TypeScript ofrece dos formas de darle **nombre** a un tipo: `type` e `interface`. Internet está lleno de debates sobre cuál es mejor; aquí vas a ver las diferencias que de verdad importan y una convención sencilla para no tener que pensarlo cada vez.
+
+## Alias de tipo: `type`
+
+`type` le pone un nombre a **cualquier** tipo:
+
+```ts
+type Usuario = {
+  id: string;
+  nombre: string;
+  email: string;
+};
+
+type Tema = "light" | "dark"; // unión de literales
+type Coordenada = [number, number]; // tupla
+type Id = string; // alias de un primitivo
+```
+
+## Interfaces: `interface`
+
+`interface` describe solo **formas de objeto**:
+
+```ts
+interface Usuario {
+  id: string;
+  nombre: string;
+  email: string;
+}
+```
+
+Para un objeto como este, `type` e `interface` son prácticamente intercambiables: se usan igual y el editor los muestra igual.
+
+```ts
+function saludar(u: Usuario) {
+  return `Hola, ${u.nombre}`;
+}
+```
+
+## Extender tipos
+
+Las interfaces se extienden con `extends`:
+
+```ts
+interface Usuario {
+  id: string;
+  nombre: string;
+}
+
+interface Admin extends Usuario {
+  permisos: string[];
+}
+
+const admin: Admin = { id: "1", nombre: "Dani", permisos: ["editar"] };
+```
+
+Con `type`, el equivalente es la **intersección** (`&`): un valor que cumple los dos tipos a la vez.
+
+```ts
+type Usuario = { id: string; nombre: string };
+type Admin = Usuario & { permisos: string[] };
+```
+
+Una diferencia sutil: si `extends` produce un conflicto, la interfaz da un error claro en la declaración, mientras que una intersección conflictiva puede producir un tipo imposible (`never`) sin avisar hasta que lo usas.
+
+```ts
+interface Base {
+  id: string;
+}
+interface Malo extends Base {
+  id: number;
+}
+// ❌ Interface 'Malo' incorrectly extends interface 'Base'.
+//    Types of property 'id' are incompatible.
+```
+
+## Lo que solo puede hacer `type`
+
+`type` puede nombrar cosas que no son formas de objeto:
+
+```ts
+type Nivel = "basico" | "intermedio" | "avanzado"; // uniones
+type Par = [string, number]; // tuplas
+type Handler = (evento: string) => void; // tipos de función
+type Resultado = { ok: true; datos: string[] } | { ok: false; error: string }; // uniones de objetos
+```
+
+Las uniones, sobre todo, son imprescindibles: las usarás constantemente desde la sección B1.6.
+
+## Lo que solo puede hacer `interface`
+
+Una interfaz declarada dos veces se **fusiona** (_declaration merging_):
+
+```ts
+interface Config {
+  tema: string;
+}
+interface Config {
+  idioma: string;
+}
+
+const c: Config = { tema: "dark", idioma: "es" }; // tiene las dos propiedades
+```
+
+Con `type`, declarar dos veces el mismo nombre es un error: `Duplicate identifier 'Config'.`
+
+La fusión parece rara, pero tiene un uso real: **ampliar tipos de librerías**. Es como Astro te deja añadir tus propios datos a `Astro.locals` (lo harás en la Tanda de autenticación):
+
+```ts
+declare namespace App {
+  interface Locals {
+    user: { id: string; name: string } | null;
+  }
+}
+```
+
+## Una convención para elegir
+
+No hay una respuesta única, pero sí una convención clara y muy extendida:
+
+- **`interface`** para formas de objeto que representan entidades: `Usuario`, `Entreno`, `Props` de componentes.
+- **`type`** para todo lo demás: uniones, tuplas, funciones y tipos calculados.
+
+Lo importante no es la regla elegida, sino **aplicarla siempre igual** en el proyecto. Si un día dudas, usa `type`: puede hacer casi todo.
+
+<Callout type="tip">
+  En los componentes de Astro verás siempre `interface Props { … }`. Es la convención de la documentación oficial y la que sigue este proyecto.
+</Callout>
+
+## Organizar los tipos
+
+Cuando un tipo se usa en varios archivos, expórtalo desde un sitio común:
+
+```ts
+// src/types/entreno.ts
+export interface Ejercicio {
+  nombre: string;
+  series: number;
+  reps: number;
+  peso: number;
+}
+
+export interface DiaEntreno {
+  fecha: string;
+  ejercicios: Ejercicio[];
+  aguaMl?: number;
+}
+
+export type TipoActividad = "fuerza" | "running" | "movilidad";
+```
+
+```ts
+// en cualquier otro archivo
+import type { DiaEntreno } from "@/types/entreno";
+```
+
+`import type` deja claro que solo importas tipos (no código que se ejecute). Lo verás en detalle en la sección B1.7.
+
+## Errores comunes
+
+- **Mezclar `type` e `interface` sin criterio** en el mismo proyecto. Elige la convención y síguela.
+- **Intentar hacer una unión con `interface`.** No se puede: `interface Tema = "light" | "dark"` es un error de sintaxis.
+- **Redeclarar un `type`:** `Duplicate identifier`. Si necesitas ampliar, usa `&` o una interfaz.
+- **Duplicar tipos casi iguales** en varios archivos. Si dos tipos comparten la mitad de las propiedades, extiende uno del otro.
+
+<Callout type="exercise">
+  1. Convierte los tipos en línea que escribiste en la sección B1.3 en interfaces reutilizables:
+  `Ejercicio` y `DiaEntreno`. 2. Muévelos a un archivo `src/types/entreno.ts` y úsalos desde otro
+  archivo con `import type`. 3. Crea un `type Categoria` con las categorías de color de tu
+  Planificador 2026. 4. Crea una interfaz `DiaPlanificador` que use `Categoria` y añade un
+  comentario explicando por qué elegiste `type` o `interface` en cada caso.
+</Callout>
+
+<Callout type="mastery">
+  Puedes justificar por qué elegiste `type` o `interface` en cada caso y sabes qué puede hacer cada
+  uno que el otro no.
+</Callout>
+
+## Resumen
+
+- `type` nombra cualquier tipo; `interface`, solo formas de objeto.
+- Para objetos simples, son casi intercambiables.
+- `interface` se extiende con `extends` y se fusiona si se declara dos veces.
+- `type` puede expresar uniones, tuplas y tipos de función, y se combina con `&`.
+- Convención: `interface` para entidades y `Props`; `type` para lo demás.

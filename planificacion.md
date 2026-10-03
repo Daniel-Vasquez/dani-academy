@@ -1826,6 +1826,17 @@ npx tsc             # compila y comprueba tipos de todo el proyecto
 - No valida datos externos en ejecución (eso llega con Zod).
 ````
 
+### Notas de implementación (Tanda 1 ya ejecutada)
+
+Cambios respecto al código de esta Tanda, descubiertos al verificarla. **El código real del repositorio manda:**
+
+- **`Callout.astro` no usa `not-prose`** en el contenedor: `@tailwindcss/typography` ignora todo lo que está dentro de un `not-prose`, aunque se vuelva a añadir `prose` dentro (las listas perdían la numeración). Solo el título del cuadro es `not-prose`; el contenido hereda los estilos del artículo.
+- **Precarga de fuentes** en `BaseLayout.astro` (`<link rel="preload">` de los `woff2` *latin* de Source Serif 4 e Inter, importados con `?url`): sin ella, el cambio de fuente provocaba un CLS de 0,26 en la sección B1.1.
+- **Ajustes de contraste en el código** (`global.css`): algunos colores de `github-light` (comentarios, verde, rojo y naranja) y el gris de comentarios de `github-dark` no llegan a 4,5:1 sobre `--surface`; se sobrescriben solo en el tema correspondiente.
+- **Código en línea dentro de un `Callout`** con fondo `--surface-2`, para que se distinga del fondo del cuadro.
+- **Astro 7 permite un solo `astro dev` por proyecto** (archivo de bloqueo `.astro/dev.json`). Para levantar un segundo servidor, usa `astro dev --port <n> --ignore-lock`.
+- Verificado con Lighthouse (móvil, claro y oscuro, build de producción): rendimiento 97–100, accesibilidad, buenas prácticas y SEO 100, CLS 0 en las 9 páginas.
+
 ### Criterios de aceptación — Tanda 1
 
 - [ ] `/` redirige a `/cursos/typescript-desde-cero`.

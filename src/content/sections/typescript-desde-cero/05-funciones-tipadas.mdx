@@ -1,0 +1,182 @@
+---
+sectionId: "B1.5"
+course: "B1"
+title: "Funciones tipadas"
+order: 5
+minutes: 60
+summary: "Parámetros, retornos, funciones como tipos y funciones asíncronas con Promise<T>."
+---
+
+Las funciones son los **bordes** de tu código: por ellas entran y salen los datos. Por eso es donde más rinde tipar con cuidado. En esta sección vas a tipar parámetros y retornos, describir funciones como tipos y, lo más importante para tus proyectos, trabajar con funciones asíncronas que llaman a APIs.
+
+## Parámetros y retorno
+
+```ts
+function calcularVolumen(series: number, reps: number, peso: number): number {
+  return series * reps * peso;
+}
+```
+
+- Los **parámetros** siempre se anotan (TypeScript no puede adivinarlos).
+- El **retorno** se infiere, pero anotarlo en funciones importantes protege el contrato: si cambias la implementación y devuelves otra cosa, el error aparece en la función y no en quien la usa.
+
+TypeScript también comprueba el número de argumentos, algo que JavaScript no hace:
+
+```ts
+calcularVolumen(4, 8); // ❌ Expected 3 arguments, but got 2.
+```
+
+## Parámetros opcionales, por defecto y _rest_
+
+```ts
+function formatearPeso(kg: number, decimales = 1, unidad?: string): string {
+  return `${kg.toFixed(decimales)} ${unidad ?? "kg"}`;
+}
+
+formatearPeso(80.456); // "80.5 kg"
+formatearPeso(80.456, 2, "kilos"); // "80.46 kilos"
+```
+
+- `decimales = 1`: tiene valor por defecto, así que es opcional y su tipo (`number`) se infiere.
+- `unidad?`: opcional sin valor por defecto; dentro de la función es `string | undefined`.
+- Los opcionales van **siempre al final**.
+
+Con _rest parameters_ recibes un número variable de argumentos como array:
+
+```ts
+function sumarKm(...distancias: number[]): number {
+  return distancias.reduce((acc, km) => acc + km, 0);
+}
+
+sumarKm(5, 3.2, 10); // 18.2
+```
+
+## Funciones flecha y funciones como tipo
+
+Las funciones flecha se tipan igual:
+
+```ts
+const doble = (n: number): number => n * 2;
+```
+
+A veces lo que quieres tipar es **la forma de una función**, por ejemplo, un _callback_:
+
+```ts
+type Filtro = (tarea: Tarea) => boolean;
+
+interface Tarea {
+  id: string;
+  titulo: string;
+  hecha: boolean;
+}
+
+const pendientes: Filtro = (t) => !t.hecha; // `t` ya es Tarea: no hace falta anotarlo
+const urgentes: Filtro = (t) => t.titulo.startsWith("!");
+
+function filtrar(tareas: Tarea[], filtro: Filtro): Tarea[] {
+  return tareas.filter(filtro);
+}
+```
+
+Fíjate en que `t` no lleva tipo: TypeScript lo deduce del contexto (`Filtro`). Esto se llama _contextual typing_ y es lo que hace que los _callbacks_ de `map`, `filter` o los eventos de React estén tipados sin esfuerzo.
+
+## `void` y `undefined`
+
+Una función que no devuelve nada útil tiene retorno `void`:
+
+```ts
+function registrar(mensaje: string): void {
+  console.log(`[academy] ${mensaje}`);
+}
+```
+
+`void` significa "no te importa lo que devuelve". Es distinto de `undefined`, que es un valor concreto. En la práctica: usa `void` para funciones que solo producen efectos (registrar, guardar, pintar).
+
+Y si declaras un retorno distinto de `void`, TypeScript comprueba que todos los caminos devuelven algo:
+
+```ts
+function nivel(puntos: number): string {
+  if (puntos > 4) return "alto";
+  // ❌ Function lacks ending return statement and return type does not include 'undefined'.
+}
+```
+
+## Funciones asíncronas y `Promise<T>`
+
+Una función `async` **siempre** devuelve una promesa. Su tipo de retorno es `Promise<T>`, donde `T` es lo que obtienes con `await`:
+
+```ts
+interface Usuario {
+  id: number;
+  name: string;
+  email: string;
+}
+
+async function obtenerUsuario(id: number): Promise<Usuario | null> {
+  const res = await fetch(`https://jsonplaceholder.typicode.com/users/${id}`);
+  if (!res.ok) return null;
+  return (await res.json()) as Usuario;
+}
+
+const usuario = await obtenerUsuario(1); // Usuario | null
+if (usuario) console.log(usuario.email);
+```
+
+Anotar `Promise<Usuario | null>` es especialmente valioso aquí: quien llama sabe sin mirar el código que debe comprobar el caso `null`.
+
+### `as`: una promesa que haces tú, no una comprobación
+
+`res.json()` devuelve `Promise<any>`: TypeScript no puede saber qué te va a mandar el servidor. El `as Usuario` le dice al compilador "confía en mí, es un `Usuario`". Pero **no comprueba nada** en ejecución:
+
+```ts
+const datos = (await res.json()) as Usuario;
+datos.email.toLowerCase(); // si la API no envía email, esto explota igualmente
+```
+
+Úsalo con conciencia: es una afirmación tuya, no una validación. En el curso I1 aprenderás a validar de verdad con Zod.
+
+<Callout type="note">
+  Cada vez que escribas `as`, pregúntate: "¿y si me equivoco?". Si la respuesta es "la app se
+  rompe", ese dato necesita validación.
+</Callout>
+
+## Sobrecargas (solo para reconocerlas)
+
+Algunas librerías declaran varias firmas para la misma función. Se llaman sobrecargas y las verás al leer tipos ajenos:
+
+```ts
+function formatear(valor: number): string;
+function formatear(valor: Date): string;
+function formatear(valor: number | Date): string {
+  return valor instanceof Date ? valor.toLocaleDateString("es") : valor.toFixed(2);
+}
+```
+
+No necesitas escribirlas por ahora: casi siempre una unión (`number | Date`) es suficiente.
+
+## Errores comunes
+
+- **Olvidar el `await`:** `const u = obtenerUsuario(1)` es una `Promise<Usuario | null>`, no un usuario. Al hacer `u.email`: `Property 'email' does not exist on type 'Promise<Usuario | null>'.`
+- **Poner `Promise<T>` sin `async`** (o al revés): una función `async` siempre devuelve `Promise`.
+- **Abusar de `as`** para silenciar errores en lugar de comprobar los datos.
+- **Parámetros opcionales antes de obligatorios:** `A required parameter cannot follow an optional parameter.`
+
+<Callout type="exercise">
+  1. Escribe `obtenerUsuario(id: number): Promise<Usuario | null>` contra `https://jsonplaceholder.typicode.com/users/:id` y devuelve `null` si la respuesta no es 200.
+  2. Pruébala con `npx tsx` usando un id que exista (1) y otro que no (999).
+  3. Escribe un tipo `Filtro` para las tareas y dos filtros distintos que lo usen sin anotar el parámetro.
+  4. En un comentario, explica con tus palabras por qué el `as Usuario` es una promesa que haces al compilador y no una verificación real.
+</Callout>
+
+<Callout type="mastery">
+  Tipas cualquier función asíncrona de tus proyectos con su `Promise<T>` correcto y sabes qué riesgo asumes cada vez que usas `as`.
+</Callout>
+
+## Resumen
+
+- Anota los parámetros siempre y el retorno en funciones importantes.
+- Opcionales (`?`), valores por defecto y _rest parameters_ (`...args: T[]`).
+- Las funciones también son tipos: `(t: Tarea) => boolean`.
+- `void` para funciones sin retorno útil.
+- Las funciones `async` devuelven `Promise<T>`.
+- `as` no valida: es una afirmación tuya.

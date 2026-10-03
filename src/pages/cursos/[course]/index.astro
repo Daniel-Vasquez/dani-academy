@@ -1,0 +1,150 @@
+---
+import CourseLayout from "@/layouts/CourseLayout.astro";
+import Badge from "@/components/ui/Badge.astro";
+import ButtonLink from "@/components/ui/ButtonLink.astro";
+import { DEFAULT_PASSING_SCORE, LEVELS, QUIZ_QUESTIONS } from "@/lib/constants";
+import {
+  courseUrl,
+  getCourseBySlug,
+  getCourseSections,
+  getCourses,
+  sectionUrl,
+} from "@/lib/content";
+
+const { course: courseSlug = "" } = Astro.params;
+const course = await getCourseBySlug(courseSlug);
+if (!course?.data.published) return Astro.rewrite("/404");
+
+const sections = await getCourseSections(course.id);
+const allCourses = await getCourses();
+
+// Tanda 4: secciones leídas desde MongoDB
+const readIds: string[] = [];
+const read = new Set(readIds);
+const readCount = sections.filter((s) => read.has(s.data.sectionId)).length;
+const firstUnread = sections.find((s) => !read.has(s.data.sectionId)) ?? sections[0];
+const totalHours = Math.round(sections.reduce((acc, s) => acc + s.data.minutes, 0) / 60);
+
+const ctaLabel =
+  readCount === 0 ? "Empezar curso" : readCount === sections.length ? "Repasar curso" : "Continuar";
+
+const prerequisites = course.data.prerequisites.map((p) => {
+  const match = allCourses.find((c) => c.id === p);
+  return match
+    ? {
+        label: `${match.id} · ${match.data.title}`,
+        href: match.data.published ? courseUrl(match) : undefined,
+      }
+    : { label: p, href: undefined };
+});
+---
+
+<CourseLayout
+  title={course.data.title}
+  description={course.data.objective}
+  course={course}
+  sections={sections}
+  readIds={readIds}
+  current="overview"
+>
+  <div class="mx-auto max-w-[68ch]">
+    <header>
+      <div class="flex flex-wrap items-center gap-2">
+        <Badge tone="accent">{LEVELS[course.data.level].label}</Badge>
+        <Badge>{course.id}</Badge>
+      </div>
+      <h1 class="mt-4 font-serif text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
+        {course.data.title}
+      </h1>
+      <p class="mt-5 font-serif text-xl leading-relaxed text-muted">{course.data.objective}</p>
+
+      <dl class="mt-8 grid grid-cols-3 gap-4 rounded-2xl bg-surface p-5">
+        <div>
+          <dt class="text-xs text-muted">Secciones</dt>
+          <dd class="mt-1 text-2xl font-semibold tabular-nums">{sections.length}</dd>
+        </div>
+        <div>
+          <dt class="text-xs text-muted">Duración</dt>
+          <dd class="mt-1 text-2xl font-semibold tabular-nums">~{totalHours} h</dd>
+        </div>
+        <div>
+          <dt class="text-xs text-muted">Evaluación</dt>
+          <dd class="mt-1 text-2xl font-semibold tabular-nums">{QUIZ_QUESTIONS} preg.</dd>
+        </div>
+      </dl>
+
+      <div class="mt-6 flex flex-wrap items-center gap-4">
+        {firstUnread && (
+          <ButtonLink href={sectionUrl(course, firstUnread)}>{ctaLabel} →</ButtonLink>
+        )}
+        <span class="text-sm text-muted">
+          <span data-read-count>
+            {readCount}/{sections.length}
+          </span>{" "}
+          secciones leídas
+        </span>
+      </div>
+
+      {prerequisites.length > 0 && (
+        <p class="mt-6 text-sm text-muted">
+          Requisitos previos:{" "}
+          {prerequisites.map((p, i) => (
+            <>
+              {p.href ? (
+                <a href={p.href} class="text-accent-strong underline-offset-2 hover:underline">
+                  {p.label}
+                </a>
+              ) : (
+                <span class="text-fg">{p.label}</span>
+              )}
+              {i < prerequisites.length - 1 && ", "}
+            </>
+          ))}
+        </p>
+      )}
+    </header>
+
+    <section aria-labelledby="contenido-curso" class="mt-16">
+      <h2 id="contenido-curso" class="font-serif text-2xl font-semibold tracking-tight">
+        Contenido del curso
+      </h2>
+      <ol class="mt-6 divide-y divide-surface-2 border-y border-surface-2">
+        {sections.map((s) => (
+          <li
+            data-section-id={s.data.sectionId}
+            data-read={String(read.has(s.data.sectionId))}
+            class="group"
+          >
+            <a
+              href={sectionUrl(course, s)}
+              class="-mx-3 flex gap-4 rounded-lg px-3 py-5 transition-colors hover:bg-surface/60"
+            >
+              <span class="mt-1 flex size-7 shrink-0 items-center justify-center rounded-full border border-surface-2 text-xs font-medium tabular-nums group-data-[read=true]:border-accent group-data-[read=true]:bg-accent group-data-[read=true]:text-accent-contrast">
+                {s.data.order}
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block font-serif text-lg font-medium text-fg">{s.data.title}</span>
+                <span class="mt-1 block text-sm text-muted">{s.data.summary}</span>
+              </span>
+              <span class="shrink-0 text-xs text-muted tabular-nums">{s.data.minutes} min</span>
+            </a>
+          </li>
+        ))}
+      </ol>
+    </section>
+
+    <section aria-labelledby="evaluacion" class="mt-14 rounded-2xl border border-surface-2 p-6">
+      <div class="flex items-center justify-between gap-4">
+        <h2 id="evaluacion" class="font-serif text-xl font-semibold">
+          Evaluación final
+        </h2>
+        <Badge tone="warning">Próximamente</Badge>
+      </div>
+      <p class="mt-3 text-sm leading-relaxed text-muted">
+        {QUIZ_QUESTIONS} preguntas sobre los conceptos clave del curso. Se aprueba con{" "}
+        {DEFAULT_PASSING_SCORE}/{QUIZ_QUESTIONS} y se desbloquea al marcar todas las secciones como
+        leídas.
+      </p>
+    </section>
+  </div>
+</CourseLayout>

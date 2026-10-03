@@ -1,0 +1,129 @@
+---
+import ProgressBar from "@/components/ui/ProgressBar.astro";
+import { LEVELS } from "@/lib/constants";
+import { courseUrl, sectionUrl, type Course, type Section } from "@/lib/content";
+
+interface Props {
+  course: Course;
+  sections: Section[];
+  readIds: string[];
+  currentSectionId?: string;
+  current?: "overview" | "quiz";
+  quizAvailable?: boolean; // false en Tanda 1; true a partir de la Tanda 5
+}
+
+const { course, sections, readIds, currentSectionId, current, quizAvailable = false } = Astro.props;
+const read = new Set(readIds);
+const readCount = sections.filter((s) => read.has(s.data.sectionId)).length;
+---
+
+<nav aria-label={`Índice de ${course.data.title}`} data-course-sidebar data-total={sections.length}>
+  <a
+    href={courseUrl(course)}
+    aria-current={current === "overview" ? "page" : undefined}
+    class="block rounded-lg px-3 py-2 transition-colors hover:bg-surface-2 aria-[current=page]:bg-surface-2"
+  >
+    <span class="text-xs font-medium tracking-wider text-muted uppercase">
+      {course.id} · {LEVELS[course.data.level].label}
+    </span>
+    <span class="mt-1 block font-serif text-lg leading-snug font-semibold">
+      {course.data.title}
+    </span>
+  </a>
+
+  <div class="mt-3 flex items-center gap-3 px-3">
+    <ProgressBar value={readCount} max={sections.length} label="Progreso del curso" />
+    <span data-read-count class="shrink-0 text-xs text-muted tabular-nums">
+      {readCount}/{sections.length}
+    </span>
+  </div>
+
+  <ol class="mt-6 space-y-0.5">
+    {sections.map((section) => {
+      const isRead = read.has(section.data.sectionId);
+      const isCurrent = section.data.sectionId === currentSectionId;
+      return (
+        <li data-section-id={section.data.sectionId} data-read={String(isRead)} class="group">
+          <a
+            href={sectionUrl(course, section)}
+            aria-current={isCurrent ? "page" : undefined}
+            class="flex items-start gap-3 rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-fg aria-[current=page]:bg-surface-2 aria-[current=page]:font-medium aria-[current=page]:text-fg"
+          >
+            <span class="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border border-surface-2 text-[0.625rem] tabular-nums group-data-[read=true]:border-accent group-data-[read=true]:bg-accent group-data-[read=true]:text-accent-contrast">
+              <span class="group-data-[read=true]:hidden">{section.data.order}</span>
+              <svg
+                class="hidden size-3 group-data-[read=true]:block"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="3"
+                aria-hidden="true"
+              >
+                <path stroke-linecap="round" stroke-linejoin="round" d="m5 13 4 4L19 7" />
+              </svg>
+            </span>
+            <span class="leading-snug">
+              {section.data.title}
+              <span data-read-label class="sr-only">
+                {isRead ? " (leída)" : ""}
+              </span>
+            </span>
+          </a>
+        </li>
+      );
+    })}
+  </ol>
+
+  <div class="mt-6 border-t border-surface-2 pt-4">
+    {quizAvailable ? (
+      <a
+        href={`${courseUrl(course)}/evaluacion`}
+        aria-current={current === "quiz" ? "page" : undefined}
+        class="flex items-center justify-between rounded-lg px-3 py-2 text-sm text-muted transition-colors hover:bg-surface-2 hover:text-fg aria-[current=page]:bg-surface-2 aria-[current=page]:text-fg"
+      >
+        Evaluación final <span class="text-xs">5 preguntas</span>
+      </a>
+    ) : (
+      <p class="flex items-center justify-between px-3 py-2 text-sm text-muted">
+        Evaluación final <span class="text-xs">Próximamente</span>
+      </p>
+    )}
+  </div>
+</nav>
+
+<script>
+  type ReadDetail = { sectionId: string; read: boolean };
+
+  const refreshCounters = () => {
+    const nav = document.querySelector<HTMLElement>("[data-course-sidebar]");
+    if (!nav) return;
+    const total = Number(nav.dataset.total ?? 0);
+    const count = nav.querySelectorAll('[data-read="true"]').length;
+    const pct = total === 0 ? 0 : Math.round((count / total) * 100);
+
+    document
+      .querySelectorAll("[data-read-count]")
+      .forEach((el) => (el.textContent = `${count}/${total}`));
+    document
+      .querySelectorAll<HTMLElement>("[data-course-sidebar] [role=progressbar]")
+      .forEach((bar) => {
+        bar.setAttribute("aria-valuenow", String(count));
+        bar.setAttribute("aria-valuetext", `${count} de ${total}`);
+        const fill = bar.querySelector<HTMLElement>("[data-progress-fill]");
+        if (fill) fill.style.width = `${pct}%`;
+      });
+  };
+
+  // El script se ejecuta una sola vez: el listener sobrevive a las navegaciones con View Transitions
+  document.addEventListener("da:section-read", (event) => {
+    const { sectionId, read } = (event as CustomEvent<ReadDetail>).detail;
+    document
+      .querySelectorAll<HTMLElement>(`[data-section-id="${CSS.escape(sectionId)}"]`)
+      .forEach((el) => {
+        el.dataset.read = String(read);
+        const label = el.querySelector("[data-read-label]");
+        if (label) label.textContent = read ? " (leída)" : "";
+      });
+    refreshCounters();
+  });
+</script>

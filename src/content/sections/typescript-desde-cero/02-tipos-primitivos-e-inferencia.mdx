@@ -1,0 +1,180 @@
+---
+sectionId: "B1.2"
+course: "B1"
+title: "Tipos primitivos e inferencia"
+order: 2
+minutes: 60
+summary: "Los tipos básicos, cuándo dejar que TypeScript infiera y por qué unknown es mejor que any."
+---
+
+La primera tentación al empezar con TypeScript es escribir el tipo de **todo**. El resultado es código más largo y, paradójicamente, menos preciso. En esta sección vas a conocer los tipos básicos y, sobre todo, vas a aprender a dejar que TypeScript los deduzca por ti: la _inferencia_ es la mitad del lenguaje.
+
+## Los tipos primitivos
+
+Son los mismos que ya conoces de JavaScript, ahora con nombre:
+
+```ts
+const nombre: string = "Dani";
+const edad: number = 30; // enteros y decimales: todo es number
+const activo: boolean = true;
+const nada: null = null;
+const sinDefinir: undefined = undefined;
+const enorme: bigint = 9007199254740993n;
+const clave: symbol = Symbol("id");
+```
+
+Fíjate en que los nombres van en **minúscula**. `String`, `Number` y `Boolean` (con mayúscula) son los objetos envoltorio de JavaScript, y casi nunca son lo que quieres.
+
+```ts
+let titulo: String = "Hola"; // ❌ funciona, pero es el tipo equivocado
+let titulo2: string = "Hola"; // ✅
+```
+
+## Inferencia: TypeScript ya lo sabe
+
+En la mayoría de los casos no hace falta escribir el tipo. TypeScript lo deduce del valor:
+
+```ts
+let nombre = "Dani"; // string
+let vasos = 0; // number
+let completado = false; // boolean
+const pesos = [80.5, 79.8]; // number[]
+const hoy = new Date(); // Date
+```
+
+Pasa el ratón por encima de cada variable en VS Code y verás el tipo inferido. A partir de aquí, el compilador vigila que no cambie:
+
+```ts
+let vasos = 0;
+vasos = "tres"; // ❌ Type 'string' is not assignable to type 'number'.
+```
+
+La inferencia también funciona con lo que **devuelven** las funciones:
+
+```ts
+function totalKm(distancias: number[]) {
+  return distancias.reduce((acc, km) => acc + km, 0);
+}
+
+const total = totalKm([5, 3.2]); // number, sin anotarlo en ningún sitio
+```
+
+### Cuándo sí anotar
+
+Hay tres situaciones en las que conviene escribir el tipo:
+
+1. **Parámetros de funciones.** TypeScript no puede adivinar qué te van a pasar.
+2. **Variables declaradas sin valor inicial.**
+3. **Retornos de funciones públicas o importantes**, para que un cambio interno no altere sin querer lo que devuelven.
+
+```ts
+function saludar(nombre: string) {
+  // 1. parámetro: obligatorio anotarlo
+  return `Hola, ${nombre}`;
+}
+
+let objetivoDiario: number; // 2. aún no tiene valor
+objetivoDiario = 8;
+
+export function calcularVolumen(series: number, reps: number, peso: number): number {
+  // 3.
+  return series * reps * peso;
+}
+```
+
+La regla práctica: **anota en los bordes** (entradas y salidas de funciones) y **deja inferir dentro**.
+
+## `any`, `unknown` y `never`
+
+Estos tres tipos especiales confunden mucho al principio.
+
+### `any`: apaga el compilador
+
+Un valor `any` acepta cualquier cosa y te deja hacer cualquier cosa con él, sin comprobar nada:
+
+```ts
+let dato: any = "texto";
+dato.toFixed(2); // TypeScript no se queja… y en ejecución explota:
+// TypeError: dato.toFixed is not a function
+```
+
+`any` es contagioso: lo que sale de un `any` también es `any`, y el agujero se extiende por el código. Úsalo solo como último recurso y deja un comentario explicando por qué.
+
+### `unknown`: el `any` seguro
+
+`unknown` también acepta cualquier valor, pero **no te deja usarlo** hasta que compruebes qué es:
+
+```ts
+function parsear(valor: unknown) {
+  valor.toUpperCase(); // ❌ 'valor' is of type 'unknown'.
+
+  if (typeof valor === "string") {
+    return valor.toUpperCase(); // ✅ aquí TypeScript sabe que es string
+  }
+  return null;
+}
+```
+
+Es el tipo correcto para todo lo que viene de fuera y no controlas: `JSON.parse`, el `catch` de un error o la respuesta de una API.
+
+### `never`: lo que no puede ocurrir
+
+`never` representa un valor que nunca existe: una función que siempre lanza un error o una rama de código imposible. Lo usarás en la sección B1.6 para que el compilador te avise cuando olvides un caso.
+
+```ts
+function fallar(mensaje: string): never {
+  throw new Error(mensaje);
+}
+```
+
+## Tipos literales: `const` vs `let`
+
+Un tipo puede ser un valor concreto, no solo una categoría:
+
+```ts
+let tema = "dark"; // string: con let el valor puede cambiar
+const tema2 = "dark"; // "dark": con const nunca cambiará
+```
+
+Los literales se combinan con `|` para crear un conjunto cerrado de valores permitidos:
+
+```ts
+let modo: "light" | "dark" = "light";
+modo = "dark"; // ✅
+modo = "sepia"; // ❌ Type '"sepia"' is not assignable to type '"light" | "dark"'.
+```
+
+Es mucho más útil que un `string` genérico: el editor te autocompleta las opciones y es imposible escribir mal un valor. Lo usarás constantemente para estados, categorías y configuración.
+
+<Callout type="tip">
+  En tu Planificador 2026, las categorías de color de los días son el candidato perfecto para un
+  tipo literal: `type Categoria = "trabajo" | "personal" | "salud"`.
+</Callout>
+
+## Errores comunes
+
+- **Anotar lo evidente.** `const vasos: number = 0` no aporta nada; `const vasos = 0` es igual de seguro.
+- **Usar `any` para "quitar el error".** El error sigue ahí; solo has dejado de verlo. Usa `unknown` y comprueba el tipo.
+- **Parámetros sin tipo.** Con `strict` activado, TypeScript te avisa: `Parameter 'nombre' implicitly has an 'any' type.` Ese aviso es tu amigo.
+- **Confundir `string` con `String`.** Usa siempre la minúscula.
+
+<Callout type="exercise">
+  1. Escribe 10 declaraciones **sin** anotar el tipo (números, textos, arrays, objetos, fechas, una
+  función). 2. Antes de mirar, escribe en un comentario el tipo que crees que inferirá TypeScript.
+  3. Comprueba con el *hover* de VS Code cuántas acertaste y entiende las que fallaste. 4. Busca en
+  uno de tus proyectos una función que reciba `any` y reescríbela para que reciba `unknown` y
+  compruebe el tipo antes de usarlo.
+</Callout>
+
+<Callout type="mastery">
+  Sabes cuándo dejar que TypeScript infiera y cuándo anotar, y nunca usas `any` sin una razón
+  explícita escrita en un comentario.
+</Callout>
+
+## Resumen
+
+- Los primitivos se escriben en minúscula: `string`, `number`, `boolean`…
+- La inferencia deduce el tipo del valor; anota en los bordes (parámetros y retornos) y deja inferir dentro.
+- `any` desactiva las comprobaciones; `unknown` acepta todo pero obliga a comprobar antes de usar.
+- `never` representa lo imposible.
+- `const` produce tipos literales; las uniones de literales crean conjuntos cerrados de valores.

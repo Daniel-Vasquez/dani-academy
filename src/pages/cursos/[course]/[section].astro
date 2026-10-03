@@ -1,0 +1,76 @@
+---
+import { render } from "astro:content";
+import CourseLayout from "@/layouts/CourseLayout.astro";
+import Callout from "@/components/mdx/Callout.astro";
+import SectionNav from "@/components/course/SectionNav.astro";
+import MarkAsReadButton from "@/components/course/MarkAsReadButton";
+import {
+  courseUrl,
+  getCourseBySlug,
+  getCourseSections,
+  sectionSlug,
+  sectionUrl,
+} from "@/lib/content";
+
+const { course: courseSlug = "", section: sectionParam = "" } = Astro.params;
+
+const course = await getCourseBySlug(courseSlug);
+if (!course?.data.published) return Astro.rewrite("/404");
+
+const sections = await getCourseSections(course.id);
+const index = sections.findIndex((s) => sectionSlug(s) === sectionParam);
+const section = sections[index];
+if (!section) return Astro.rewrite("/404");
+
+const { Content } = await render(section);
+
+// Tanda 4: sustituir por las secciones leídas del usuario (MongoDB)
+const readIds: string[] = [];
+const isRead = readIds.includes(section.data.sectionId);
+
+const prevSection = sections[index - 1];
+const nextSection = sections[index + 1];
+
+const prev = prevSection && {
+  href: sectionUrl(course, prevSection),
+  title: prevSection.data.title,
+  label: "Anterior",
+};
+// Tanda 5: la última sección enlaza a la evaluación
+const next = nextSection
+  ? { href: sectionUrl(course, nextSection), title: nextSection.data.title, label: "Siguiente" }
+  : { href: courseUrl(course), title: "Volver a la portada del curso", label: "Fin del curso" };
+---
+
+<CourseLayout
+  title={`${section.data.title} · ${course.id}`}
+  description={section.data.summary}
+  course={course}
+  sections={sections}
+  readIds={readIds}
+  currentSectionId={section.data.sectionId}
+>
+  <article class="mx-auto max-w-[68ch]">
+    <header class="mb-10">
+      <p class="text-sm text-muted">
+        <span class="font-semibold text-accent-strong">{section.data.sectionId}</span>
+        <span aria-hidden="true"> · </span>Sección {index + 1} de {sections.length}
+        <span aria-hidden="true"> · </span>
+        {section.data.minutes} min
+      </p>
+      <h1 class="mt-3 font-serif text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+        {section.data.title}
+      </h1>
+      <p class="mt-4 font-serif text-lg leading-relaxed text-muted">{section.data.summary}</p>
+    </header>
+
+    <div class="prose prose-lg max-w-none font-serif prose-headings:font-semibold prose-headings:tracking-tight prose-h2:mt-14 prose-pre:my-6">
+      <Content components={{ Callout }} />
+    </div>
+
+    <footer class="mt-16 border-t border-surface-2 pt-8">
+      <MarkAsReadButton client:visible sectionId={section.data.sectionId} initialRead={isRead} />
+      <SectionNav prev={prev} next={next} />
+    </footer>
+  </article>
+</CourseLayout>

@@ -1,0 +1,185 @@
+---
+sectionId: "B1.8"
+course: "B1"
+title: "TypeScript en Astro"
+order: 8
+minutes: 60
+summary: "Props tipadas, endpoints con APIRoute, variables de entorno y astro check."
+---
+
+Llegas al final del curso con todas las piezas: tipos primitivos, objetos, funciones, uniones y configuración. Ahora toca aplicarlas donde más las vas a usar: en tus proyectos de Astro. Al terminar esta sección, ningún archivo `.astro` ni endpoint de tus apps debería tener tipos implícitos.
+
+## Props tipadas en componentes `.astro`
+
+En un componente de Astro, las props se tipan declarando una interfaz llamada exactamente `Props` en el _frontmatter_:
+
+```astro
+---
+// src/components/Tarjeta.astro
+interface Props {
+  titulo: string;
+  descripcion?: string;
+  nivel: "basico" | "intermedio" | "avanzado";
+}
+
+const { titulo, descripcion = "", nivel } = Astro.props;
+---
+
+<article data-nivel={nivel}>
+  <h2>{titulo}</h2>
+  {descripcion && <p>{descripcion}</p>}
+</article>
+```
+
+Con esto:
+
+- `Astro.props` queda tipado automáticamente.
+- Quien use `<Tarjeta />` recibe autocompletado y errores si falta `titulo` o si `nivel` no es uno de los tres valores.
+
+```astro
+<Tarjeta titulo="TypeScript" nivel="experto" />
+<!-- ❌ Type '"experto"' is not assignable to type '"basico" | "intermedio" | "avanzado"'. -->
+```
+
+### Props que heredan de HTML
+
+Si tu componente envuelve un elemento HTML, puedes heredar todos sus atributos con `HTMLAttributes`:
+
+```astro
+---
+import type { HTMLAttributes } from "astro/types";
+
+interface Props extends HTMLAttributes<"a"> {
+  variante?: "primario" | "secundario";
+}
+
+const { variante = "primario", ...resto } = Astro.props;
+---
+
+<a {...resto} data-variante={variante}>
+  <slot />
+</a>
+```
+
+Ahora el componente acepta `href`, `target`, `aria-label` y cualquier otro atributo válido de `<a>`, con sus tipos.
+
+## Los tipos que genera Astro
+
+Astro genera tipos a partir de tu proyecto en la carpeta `.astro/` (por eso aparece en el `include` del `tsconfig.json`). Por ejemplo, de tus colecciones de contenido:
+
+```ts
+import { getCollection, type CollectionEntry } from "astro:content";
+
+type Seccion = CollectionEntry<"sections">;
+
+const secciones = await getCollection("sections");
+// secciones[0]?.data.title → string, sacado del esquema de content.config.ts
+```
+
+Si cambias el esquema de una colección, los tipos se regeneran al arrancar `astro dev` o al ejecutar `astro sync`.
+
+## Endpoints tipados con `APIRoute`
+
+Los endpoints son archivos `.ts` en `src/pages/` que exportan funciones con el nombre del método HTTP. El tipo `APIRoute` tipa todo el contexto que reciben:
+
+```ts
+// src/pages/api/hola.ts
+import type { APIRoute } from "astro";
+
+export const GET: APIRoute = ({ url }) => {
+  const nombre = url.searchParams.get("nombre") ?? "mundo"; // string | null → string
+  return Response.json({ mensaje: `Hola, ${nombre}` });
+};
+```
+
+Fíjate en el `?? "mundo"`: `searchParams.get` devuelve `string | null` y TypeScript te obliga a decidir qué hacer si falta el parámetro.
+
+Con rutas dinámicas, los parámetros también están tipados:
+
+```ts
+// src/pages/api/entrenos/[id].ts
+import type { APIRoute } from "astro";
+
+export const GET: APIRoute = async ({ params }) => {
+  const id = params.id; // string | undefined
+  if (!id) return new Response("Falta el id", { status: 400 });
+  return Response.json({ id });
+};
+```
+
+## Variables de entorno tipadas
+
+`import.meta.env` funciona, pero todo lo que contiene es `string | undefined` y nada impide un error de escritura en el nombre. Astro ofrece `astro:env`, donde declaras un esquema en `astro.config.mjs`:
+
+```js
+// astro.config.mjs
+import { defineConfig, envField } from "astro/config";
+
+export default defineConfig({
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret" }),
+      APP_TIMEZONE: envField.string({ context: "server", access: "public", default: "UTC" }),
+    },
+  },
+});
+```
+
+```ts
+import { MONGODB_URI } from "astro:env/server"; // string, garantizado
+```
+
+Ventajas: el nombre se autocompleta, el tipo es correcto y, si falta una variable obligatoria, Astro falla con un mensaje claro en lugar de dejar que la app se rompa más tarde. Además, es imposible importar un secreto desde código que se ejecute en el navegador.
+
+## `astro check`: el compilador de todo el proyecto
+
+`tsc` no entiende los archivos `.astro`. Para comprobar **todo** el proyecto, Astro ofrece:
+
+```bash
+npx astro check
+```
+
+Revisa los `.astro`, `.ts` y `.tsx` y muestra los errores con su archivo y su línea:
+
+```text
+src/components/Tarjeta.astro:12:5 - error ts(2322): Type 'number' is not assignable to type 'string'.
+Result (21 files):
+- 1 error
+```
+
+En este proyecto está como script: `npm run check`. Ejecútalo antes de cada commit; en la Tanda de calidad lo automatizarás en el CI.
+
+<Callout type="tip">
+  Los errores más habituales en `.astro` vienen de props sin `interface Props`, de `Astro.params`
+  usados sin comprobar `undefined` y de `import` de tipos sin `type`.
+</Callout>
+
+## Errores comunes
+
+- **Llamar a la interfaz de otra forma.** Astro solo tipa `Astro.props` automáticamente si la interfaz se llama `Props`.
+- **Usar `params.id` sin comprobar** que existe: es `string | undefined`.
+- **Leer secretos con `import.meta.env` en componentes de cliente.** Con `astro:env`, ese error es imposible.
+- **No ejecutar `astro check`** y descubrir los errores en producción.
+
+<Callout type="exercise">
+  1. Ejecuta `npx astro check` en tu app de entrenamiento y corrige todos los errores. 2. Tipa las
+  `Props` de todos los componentes `.astro` de una página completa. 3. Tipa uno de tus endpoints con
+  `APIRoute` y maneja el caso en que falte un parámetro. 4. Proyecto del curso: crea `src/types/`
+  con los tipos de dominio (usuario, entreno, comida, hidratación), comprueba que `strict` está
+  activo, elimina todos los `any` y consigue que `astro check` pase limpio.
+</Callout>
+
+<Callout type="mastery">
+  `astro check` pasa sin errores en uno de tus proyectos y no queda ningún `any` implícito.
+</Callout>
+
+## Resumen
+
+- `interface Props` tipa `Astro.props` y da autocompletado a quien usa el componente.
+- `HTMLAttributes<"a">` hereda los atributos de un elemento HTML.
+- Astro genera tipos para tus colecciones en `.astro/`.
+- `APIRoute` tipa el contexto de los endpoints: `params`, `url`, `request`…
+- `astro:env` da variables de entorno tipadas, validadas y seguras.
+- `astro check` comprueba todo el proyecto, incluidos los `.astro`.
+
+Has terminado las secciones del curso. Cuando las marques todas como leídas, podrás hacer la **evaluación final**.
