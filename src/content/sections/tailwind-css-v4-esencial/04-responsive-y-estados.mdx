@@ -1,0 +1,177 @@
+---
+sectionId: "B7.4"
+course: "B7"
+title: "Responsive y estados"
+order: 4
+minutes: 60
+summary: "Diseñar mobile-first con breakpoints y container queries, y estilizar estados como hover, focus, disabled, grupos y atributos."
+---
+
+Una misma página debe funcionar en un móvil de 360 px y en un monitor de 1440, y responder visualmente a lo que hace el usuario: pasar el ratón, enfocar con el teclado, desactivar un botón. En Tailwind, todo eso se hace con **variantes**: prefijos que aplican una utilidad solo en ciertas condiciones.
+
+## Mobile-first
+
+Las utilidades **sin prefijo** se aplican en todas las pantallas. Los prefijos de _breakpoint_ se aplican **a partir de** ese ancho:
+
+| Prefijo   | Desde           |
+| --------- | --------------- |
+| (ninguno) | 0 px            |
+| `sm:`     | 40rem (640 px)  |
+| `md:`     | 48rem (768 px)  |
+| `lg:`     | 64rem (1024 px) |
+| `xl:`     | 80rem (1280 px) |
+| `2xl:`    | 96rem (1536 px) |
+
+```html
+<ul class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  …
+</ul>
+```
+
+Se lee de menor a mayor: **una columna** en móvil, dos desde 640 px, tres desde 1024 px. Por eso se llama _mobile-first_: escribes primero el estilo móvil y vas **añadiendo** cambios para pantallas mayores.
+
+<Callout type="warning">
+  `sm:` no significa "en móvil". Significa "a partir de 640 px". Para algo solo en móvil, escribe el
+  estilo sin prefijo y anúlalo después: `block lg:hidden`.
+</Callout>
+
+### Mostrar y ocultar
+
+```html
+<aside class="hidden lg:block">Índice lateral</aside>
+<!-- solo desde 1024 px -->
+<details class="lg:hidden">Índice desplegable</details>
+<!-- solo por debajo -->
+```
+
+Es exactamente lo que hace esta plataforma con el índice del curso.
+
+### Breakpoints a medida
+
+Para un caso puntual, un valor arbitrario:
+
+```html
+<span class="min-[380px]:hidden">DA</span>
+<span class="hidden min-[380px]:inline">Dani Academy</span>
+```
+
+Así se abrevia la marca de la cabecera de esta plataforma en pantallas de menos de 380 px, donde no cabía la navegación.
+
+## Container queries
+
+Los _breakpoints_ miran el ancho de la **pantalla**. A veces importa el ancho del **contenedor**: la misma tarjeta puede estar en una barra lateral estrecha o en el contenido principal.
+
+```html
+<div class="@container">
+  <article class="grid gap-4 @md:grid-cols-2">…</article>
+</div>
+```
+
+`@container` marca el contenedor; `@md:` aplica cuando **ese contenedor** mide al menos 28rem, esté donde esté. En v4 vienen incluidas, sin plugins.
+
+## Estados
+
+```html
+<button
+  class="rounded-xl bg-accent-strong px-4 py-2 text-white hover:bg-accent-strong/90 focus-visible:outline-2 focus-visible:outline-offset-2 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+>
+  Marcar como leído
+</button>
+```
+
+| Variante         | Se aplica cuando…                                                     |
+| ---------------- | --------------------------------------------------------------------- |
+| `hover:`         | El ratón está encima                                                  |
+| `active:`        | Se está pulsando                                                      |
+| `focus:`         | Tiene el foco (por cualquier medio)                                   |
+| `focus-visible:` | Tiene el foco **y** el navegador cree que hay que mostrarlo (teclado) |
+| `disabled:`      | Tiene el atributo `disabled`                                          |
+
+<Callout type="tip">
+  Usa `focus-visible:` en lugar de `focus:` para los anillos de foco: aparecen al navegar con el
+  teclado, pero no al hacer clic con el ratón. Y nunca quites el contorno de foco sin poner otro:
+  quien navega con el teclado se queda a ciegas.
+</Callout>
+
+## Grupos y hermanos
+
+`group` en un padre permite que los hijos reaccionen a su estado:
+
+```html
+<a href="/cursos/typescript-desde-cero" class="group block rounded-2xl border p-5">
+  <h3 class="font-serif text-lg group-hover:underline">TypeScript desde cero</h3>
+  <span class="text-slate-500 group-hover:text-teal-700">Continuar →</span>
+</a>
+```
+
+`peer` hace lo mismo con un **hermano anterior**:
+
+```html
+<label>
+  <input type="checkbox" class="peer sr-only" />
+  <span class="rounded-full bg-slate-300 peer-checked:bg-teal-600">…</span>
+</label>
+```
+
+## Atributos: `aria-*` y `data-*`
+
+Puedes estilizar según atributos, y así el estado vive en el HTML y no en clases añadidas con JavaScript:
+
+```html
+<a
+  aria-current="page"
+  class="text-slate-500 aria-[current=page]:font-medium aria-[current=page]:text-slate-900"
+>
+  Uniones y narrowing
+</a>
+
+<li data-read="true" class="group">
+  <svg class="hidden group-data-[read=true]:block">…</svg>
+  <!-- icono de "leída" -->
+</li>
+```
+
+El índice de esta plataforma funciona así: el script solo cambia `data-read="true"`, y Tailwind se encarga de mostrar el icono.
+
+## Modo oscuro
+
+La variante `dark:` aplica estilos en modo oscuro. Por defecto sigue la preferencia del sistema (`prefers-color-scheme`); para controlarlo con un botón, se redefine:
+
+```css
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+```
+
+```html
+<div class="bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100">…</div>
+```
+
+Lo verás a fondo en el curso I7, junto con una técnica mejor: _tokens_ que cambian solos con el tema, sin repetir `dark:` en cada elemento.
+
+## Errores comunes
+
+- **Pensar en `sm:` como "móvil".**
+- **Diseñar primero para escritorio** y luego "arreglar" el móvil con docenas de excepciones.
+- **Quitar el contorno de foco** sin sustituirlo.
+- **Añadir y quitar clases con JavaScript** cuando un atributo (`aria-*`, `data-*`) y una variante lo resuelven.
+- **Media queries para componentes reutilizables** que deberían usar _container queries_.
+
+<Callout type="exercise">
+  1. Toma el layout de la sección anterior y hazlo responsive: en móvil, el índice lateral se convierte en un `<details>` desplegable bajo la cabecera.
+  2. Crea una rejilla de tarjetas de 1, 2 y 3 columnas según el ancho, y comprueba los cambios con el modo responsive de DevTools.
+  3. Crea un botón con estados `hover`, `active`, `focus-visible` y `disabled`, y recórrelo con el teclado.
+  4. Crea una tarjeta enlazada cuyo título se subraye al pasar el ratón por **toda** la tarjeta (`group`).
+  5. Marca un elemento de una lista con `data-activo="true"` y estilízalo solo con variantes `data-[…]`.
+</Callout>
+
+<Callout type="mastery">
+  Escribes primero el estilo móvil y después los *breakpoints*, y estilizas estados con variantes en
+  lugar de JavaScript.
+</Callout>
+
+## Resumen
+
+- Sin prefijo = todas las pantallas; `sm:`, `md:`, `lg:`… = a partir de ese ancho.
+- _Container queries_ (`@container`, `@md:`) responden al tamaño del contenedor.
+- `hover:`, `focus-visible:`, `disabled:` y compañía estilizan estados; cuida el foco.
+- `group` y `peer` estilizan según el estado de un padre o un hermano.
+- `aria-[…]:` y `data-[…]:` permiten que el estado viva en el HTML.

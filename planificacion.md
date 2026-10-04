@@ -4540,6 +4540,17 @@ schema: z.discriminatedUnion("mode", [
 - `submitQuiz` acepta un `mode` y, en `self`, calcula `score` como la suma de "Cumple" (no hay respuesta correcta que ocultar). El texto de las reflexiones **no** se guarda (no está en el alcance); si lo quieres, añade `notes: string[]` al documento y al validador.
 - Añade `mode: choice` explícito a los YAML existentes o confía en el `default`.
 
+### Notas de implementación (sub-tanda 8a ya ejecutada: B2–B7)
+
+- **Publicados:** B2 (4 secciones), B3 (5), B4 (5), B5 (6), B6 (7) y B7 (5), con sus evaluaciones. Un commit por curso.
+- **Cómo se verificó cada curso** (repetir en 8b–8d):
+  1. Los ejemplos se ejecutan antes de escribir la lección: Git en un repositorio de prueba, SQL con `sqlite3`, MongoDB contra Atlas en colecciones temporales (`__lab_*`, borradas después), React con el `tsc` del proyecto y las utilidades de Tailwind con su compilador. Así, los mensajes y salidas que citan las lecciones son reales.
+  2. Las afirmaciones sobre el comportamiento de una librería se comprueban en su código en `node_modules`. Esto corrigió, por ejemplo, que Better Auth responde **422** (no 409) a un correo ya registrado, que Astro **no da error** al pasar una función como prop a una isla (llega como `null`) y a qué peticiones aplica `security.checkOrigin`.
+  3. Un verificador en el navegador recorre cada curso: el curso es un enlace en `/temario`, la portada lista N secciones, cada sección tiene ≥ 2 bloques de código, "Ejercicio", "Lo dominas si…", "Errores comunes" y "Resumen" sin MDX sin procesar; después marca todo, responde la evaluación con su clave y espera 5/5 y "Completado".
+- **Reglas para los YAML de evaluación:** `prompt`, `options` y `explanation` solo admiten `` `código` `` en línea (el componente no interpreta `**negrita**` ni otro Markdown). Repartir la posición de la respuesta correcta.
+- **`@source not "../content"` en `global.css`:** Tailwind escaneaba las lecciones y generaba CSS para las clases de los ejemplos (`bg-slate-900`, `bg-amber-50`…). El MDX no necesita utilidades para pintarse (los `Callout` llevan las suyas), así que se excluye: el CSS pasó de 69,9 KB a 62,3 KB sin cambios visuales.
+- Lighthouse (con sesión, claro y oscuro) en lecciones con tablas y mucho código: rendimiento 99–100, accesibilidad 100, CLS 0.
+
 ### Criterios de aceptación — Tanda 8 (por sub-tanda)
 
 - [ ] Todos los cursos de la sub-tanda tienen `published: true`, sus secciones (número igual a `plannedSections`) y su evaluación.

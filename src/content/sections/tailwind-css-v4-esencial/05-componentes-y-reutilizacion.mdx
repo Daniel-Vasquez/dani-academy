@@ -1,0 +1,188 @@
+---
+sectionId: "B7.5"
+course: "B7"
+title: "Componentes y reutilización"
+order: 5
+minutes: 60
+summary: "Cuándo extraer componentes, cómo combinar clases condicionales con cn(), cuándo usar @utility y cómo dar estilo a contenido largo con prose."
+---
+
+Las listas largas de clases son el precio de Tailwind, y la solución no es volver a las clases semánticas: es **extraer componentes**. En esta última sección del curso vas a ver cuándo y cómo hacerlo, cómo combinar clases condicionales sin conflictos y cómo estilizar texto largo (como el de esta lección) con el plugin de tipografía.
+
+## Extraer componentes, no clases
+
+Si copias la misma lista de clases en tres sitios, no crees una clase CSS: crea un **componente**.
+
+```astro
+---
+// src/components/ui/Badge.astro
+type Tone = "neutral" | "accent" | "warning";
+interface Props {
+  tone?: Tone;
+}
+const { tone = "neutral" } = Astro.props;
+
+const tones: Record<Tone, string> = {
+  neutral: "bg-slate-100 text-slate-600 ring-slate-200",
+  accent: "bg-teal-50 text-teal-800 ring-teal-200",
+  warning: "bg-amber-50 text-amber-900 ring-amber-200",
+};
+---
+
+<span
+  class:list={[
+    "inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset",
+    tones[tone],
+  ]}
+>
+  <slot />
+</span>
+```
+
+```astro
+<Badge tone="accent">Completado</Badge>
+```
+
+- Las clases siguen escritas **completas** (Tailwind las encuentra).
+- El mapa `tones` convierte una prop en clases sin construir nombres dinámicamente.
+- `class:list` es la forma de Astro de combinar clases condicionales.
+
+Es exactamente el `Badge.astro` de esta plataforma (con sus _tokens_ en lugar de colores de la paleta).
+
+## Clases condicionales en React: `cn()`
+
+En React no hay `class:list`. La combinación habitual es `clsx` (unir clases condicionales) + `tailwind-merge` (resolver conflictos):
+
+```ts
+// src/lib/cn.ts
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]): string {
+  return twMerge(clsx(inputs));
+}
+```
+
+```tsx
+<button
+  className={cn(
+    "rounded-xl px-5 py-3 text-sm font-semibold",
+    leido ? "bg-teal-50 text-teal-800" : "bg-teal-700 text-white",
+    className, // las clases que pase quien usa el componente
+  )}
+/>
+```
+
+¿Por qué `tailwind-merge`? Porque si el componente tiene `px-5` y quien lo usa pasa `px-2`, ambas clases acaban en el HTML y **gana la que esté después en el CSS**, no la que escribiste después. `twMerge` elimina la que sobra:
+
+```ts
+cn("px-5 py-3", "px-2"); // "py-3 px-2"
+```
+
+## Un componente con variantes
+
+```tsx
+import type { ButtonHTMLAttributes } from "react";
+import { cn } from "@/lib/cn";
+
+const VARIANTES = {
+  primario: "bg-teal-700 text-white hover:bg-teal-800",
+  secundario: "bg-slate-100 text-slate-900 ring-1 ring-inset ring-slate-200 hover:bg-slate-200",
+  fantasma: "text-slate-600 hover:bg-slate-100",
+} as const;
+
+const TAMAÑOS = { sm: "px-3 py-1.5 text-sm", md: "px-5 py-2.5 text-sm" } as const;
+
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variante?: keyof typeof VARIANTES;
+  tamaño?: keyof typeof TAMAÑOS;
+}
+
+export function Button({ variante = "primario", tamaño = "md", className, ...resto }: ButtonProps) {
+  return (
+    <button
+      className={cn(
+        "inline-flex items-center gap-2 rounded-xl font-semibold transition",
+        VARIANTES[variante],
+        TAMAÑOS[tamaño],
+        className,
+      )}
+      {...resto}
+    />
+  );
+}
+```
+
+`keyof typeof VARIANTES` (curso I1.2) deriva el tipo de la prop del propio objeto: añadir una variante es añadir una línea. En el curso I7 verás `cva`, una librería que formaliza este patrón.
+
+## `@utility` y `@layer components`: con moderación
+
+A veces sí necesitas CSS propio: algo que se repite en contenido que **no controlas** con componentes, o un estilo que Tailwind no cubre. En v4, una utilidad propia se define con `@utility`:
+
+```css
+@utility scrollbar-fino {
+  scrollbar-width: thin;
+}
+```
+
+```html
+<aside class="scrollbar-fino overflow-y-auto">…</aside>
+```
+
+Funciona con variantes (`lg:scrollbar-fino`). Para estilos más complejos, `@layer components { … }` sigue disponible. Regla práctica: si puedes resolverlo con un componente, hazlo con un componente.
+
+## Contenido largo: el plugin de tipografía
+
+El texto que llega de Markdown o de un CMS no tiene clases. El plugin `@tailwindcss/typography` lo estiliza entero con una sola clase:
+
+```css
+@plugin "@tailwindcss/typography";
+```
+
+```html
+<article class="mx-auto prose prose-lg">
+  <!-- h2, p, listas, código, tablas… ya con estilo -->
+</article>
+```
+
+- `prose-lg` aumenta el tamaño; `max-w-none` quita el ancho máximo por defecto.
+- Modificadores por elemento: `prose-headings:font-semibold`, `prose-h2:mt-14`.
+- Los colores se controlan con variables (`--tw-prose-body`, `--tw-prose-links`…). Esta plataforma las conecta con sus _tokens_, así que funcionan en claro y oscuro sin `prose-invert`.
+
+### `not-prose` y una trampa real
+
+`not-prose` excluye un bloque del estilo del plugin (por ejemplo, un componente con su propio diseño dentro del texto). La trampa: **todo** lo que hay dentro de un `not-prose` queda excluido, **aunque vuelvas a poner `prose` dentro**.
+
+Esta plataforma lo sufrió: los cuadros de "Ejercicio" tenían `not-prose` en el contenedor y `prose` en el contenido, y las listas numeradas perdían los números. La solución fue aplicar `not-prose` **solo al título** del cuadro y dejar que el contenido heredase los estilos del artículo.
+
+## Errores comunes
+
+- **Repetir la misma lista de clases** en varios sitios en lugar de un componente.
+- **Concatenar clases con `+`** en lugar de `cn()`: conflictos sin resolver.
+- **Crear un `@utility` o una clase CSS** para algo que es un componente.
+- **Construir variantes con plantillas de texto** (`` `bg-${color}-600` ``).
+- **Anidar `prose` dentro de `not-prose`** esperando que funcione.
+
+<Callout type="exercise">
+  1. Crea un componente `Button` en React con variantes `primario`, `secundario` y `fantasma`, y
+  tamaños `sm` y `md`, usando `cn()`. 2. Comprueba que `<Button className="px-2" />` sobrescribe el
+  relleno horizontal gracias a `tailwind-merge`. 3. Crea un `Badge.astro` con tres tonos usando
+  `class:list` y un mapa de clases. 4. Estiliza un texto largo en Markdown con `prose prose-lg` y
+  personaliza los títulos con `prose-headings:`. 5. Busca en tus proyectos una lista de clases
+  repetida en más de dos sitios y conviértela en componente.
+</Callout>
+
+<Callout type="mastery">
+  No repites la misma lista de clases en más de dos sitios, combinas clases condicionales con `cn()`
+  y estilizas contenido largo con `prose` sin caer en la trampa de `not-prose`.
+</Callout>
+
+## Resumen
+
+- Ante la repetición, extrae un componente, no una clase CSS.
+- `class:list` en Astro y `cn()` (`clsx` + `tailwind-merge`) en React.
+- Variantes con mapas de clases completas y tipos derivados con `keyof typeof`.
+- `@utility` para utilidades propias, con moderación.
+- `prose` estiliza contenido largo; `not-prose` excluye todo lo que contiene.
+
+Has terminado las secciones del curso. Cuando las marques todas como leídas, podrás hacer la **evaluación final**.

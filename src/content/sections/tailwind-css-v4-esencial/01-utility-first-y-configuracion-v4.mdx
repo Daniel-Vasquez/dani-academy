@@ -1,0 +1,161 @@
+---
+sectionId: "B7.1"
+course: "B7"
+title: "Filosofía utility-first y configuración v4"
+order: 1
+minutes: 60
+summary: "Por qué Tailwind usa clases de utilidad, cómo se configura la versión 4 desde CSS y qué cambió respecto a la versión 3."
+---
+
+Usas Tailwind v4 en tus proyectos, pero gran parte de lo que circula por internet sigue siendo de la versión 3: archivos `tailwind.config.js`, `bg-opacity-50`, `@tailwind base`… y no funciona igual. En este curso vas a dominar Tailwind v4 desde su lógica, empezando por cómo se configura de verdad hoy.
+
+## Utility-first: estilos con clases pequeñas
+
+Tailwind no te da componentes (`.btn`, `.card`). Te da **utilidades**: clases que hacen una sola cosa.
+
+```html
+<!-- CSS tradicional -->
+<button class="btn-primario">Guardar</button>
+<style>
+  .btn-primario {
+    background: #0f766e;
+    color: white;
+    padding: 0.5rem 1.25rem;
+    border-radius: 0.75rem;
+  }
+</style>
+
+<!-- Tailwind -->
+<button class="rounded-xl bg-accent-strong px-5 py-2 text-white">Guardar</button>
+```
+
+¿Por qué funciona mejor de lo que parece?
+
+- **No inventas nombres** (`.btn-primario`, `.btn-primario-grande`…).
+- **El estilo está donde está el elemento**: al leer el componente sabes cómo se ve.
+- **El CSS no crece sin control**: las mismas utilidades se reutilizan en todo el proyecto, y Tailwind solo genera las que usas.
+- **Valores coherentes**: `p-4` siempre es lo mismo; no hay 37 márgenes ligeramente distintos.
+
+El precio son las listas de clases largas. Se resuelven extrayendo **componentes** (sección B7.5), no volviendo a las clases semánticas.
+
+## Instalación en Astro (v4)
+
+En Tailwind v4 no hay `tailwind.config.js` ni PostCSS que configurar. Con Astro y Vite:
+
+```bash
+npm i tailwindcss @tailwindcss/vite
+```
+
+```js
+// astro.config.mjs
+import { defineConfig } from "astro/config";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  vite: { plugins: [tailwindcss()] },
+});
+```
+
+```css
+/* src/styles/global.css */
+@import "tailwindcss";
+```
+
+Importa `global.css` en tu layout y listo.
+
+## La configuración vive en CSS: `@theme`
+
+Los colores, fuentes, espaciados y demás _tokens_ se definen con **variables CSS** dentro de `@theme`. Cada variable genera sus utilidades:
+
+```css
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #0d9488; /* → bg-accent, text-accent, border-accent… */
+  --font-serif: "Source Serif 4 Variable", Georgia, serif; /* → font-serif */
+  --breakpoint-3xl: 120rem; /* → 3xl:… */
+}
+```
+
+El prefijo de la variable decide qué utilidades crea: `--color-*` para colores, `--font-*` para familias, `--breakpoint-*` para _breakpoints_, `--spacing` para la escala de espaciado…
+
+Y como son variables CSS de verdad, puedes usarlas en tu propio CSS: `color: var(--color-accent)`.
+
+### `@theme inline` y los temas claro/oscuro
+
+Esta plataforma define sus colores como variables normales que cambian con el tema, y luego las conecta con Tailwind usando `@theme inline`:
+
+```css
+:root {
+  --surface: #eaedf2;
+}
+[data-theme="dark"] {
+  --surface: #161b22;
+}
+
+@theme inline {
+  --color-surface: var(--surface); /* bg-surface usa var(--surface) */
+}
+```
+
+`inline` hace que la utilidad use directamente `var(--surface)`, así que cambia sola al cambiar de tema. Lo verás a fondo en el curso I7.
+
+## Detección de clases y `@source`
+
+Tailwind escanea tus archivos y genera CSS **solo** para las clases que encuentra. En v4 lo hace automáticamente (ignora `node_modules` y lo que esté en `.gitignore`). Si una librería trae clases que también quieres generar, añade su carpeta:
+
+```css
+@source "../node_modules/mi-libreria-ui";
+```
+
+<Callout type="warning">
+  Tailwind busca clases **completas** en el texto de tus archivos. Si las construyes a trozos (`` `bg-${color}-500` ``), no las encuentra y no las genera. Escribe siempre la clase entera, por ejemplo con un objeto: `{ verde: "bg-green-500", rojo: "bg-red-500" }[color]`.
+</Callout>
+
+## Qué cambió respecto a v3
+
+| v3                                                           | v4                                 |
+| ------------------------------------------------------------ | ---------------------------------- |
+| `tailwind.config.js`                                         | `@theme` en el CSS                 |
+| `@tailwind base; @tailwind components; @tailwind utilities;` | `@import "tailwindcss";`           |
+| `content: [...]`                                             | Detección automática (+ `@source`) |
+| `bg-opacity-50`                                              | `bg-black/50` (opacidad con barra) |
+| `shadow-sm` / `shadow`                                       | `shadow-xs` / `shadow-sm`          |
+| `rounded-sm` / `rounded`                                     | `rounded-xs` / `rounded-sm`        |
+| `outline-none` (para ocultar el contorno)                    | `outline-hidden`                   |
+| `darkMode: "class"`                                          | `@custom-variant dark (…)`         |
+
+Si copias un ejemplo y "no hace nada", revisa esta tabla.
+
+## Tu editor
+
+Instala la extensión **Tailwind CSS IntelliSense** de VS Code: autocompleta clases (incluidos tus `--color-*`), muestra el CSS que genera cada una al pasar el ratón y avisa de conflictos. Y con `prettier-plugin-tailwindcss` (configurado en este proyecto), Prettier ordena las clases automáticamente al guardar.
+
+## Errores comunes
+
+- **Seguir tutoriales de v3** y crear un `tailwind.config.js` que v4 no lee.
+- **Construir nombres de clase dinámicamente**: no se generan.
+- **`bg-opacity-*`**: ya no existe; usa `bg-color/50`.
+- **Definir colores sueltos** (`bg-[#0d9488]`) por todo el código en lugar de un _token_ en `@theme`.
+
+<Callout type="exercise">
+  1. Crea un proyecto Astro nuevo y configura Tailwind v4 con `@tailwindcss/vite`. 2. Define en
+  `@theme` dos colores y una fuente, y úsalos como `bg-…`, `text-…` y `font-…`. 3. Abre el
+  `global.css` de esta plataforma y explica qué hace cada bloque (`@plugin`, `@custom-variant`,
+  `@theme inline`, `@theme`). 4. Escribe un componente que elija el color con una plantilla de texto
+  (`` `bg-${color}-500` ``), comprueba que no funciona y corrígelo con un objeto de clases
+  completas. 5. Instala Tailwind CSS IntelliSense y prueba el autocompletado de tus *tokens*.
+</Callout>
+
+<Callout type="mastery">
+  Sabes dónde se configura cada cosa en Tailwind v4 sin buscar un `tailwind.config.js` y reconoces
+  al instante un ejemplo de la versión 3.
+</Callout>
+
+## Resumen
+
+- _Utility-first_: clases pequeñas de una sola responsabilidad, generadas solo si se usan.
+- v4 se instala con `@tailwindcss/vite` y `@import "tailwindcss"`.
+- La configuración vive en `@theme`: cada variable CSS crea sus utilidades.
+- La detección de clases es automática; escribe siempre las clases completas.
+- Muchos ejemplos de internet son de v3: revisa las diferencias.
