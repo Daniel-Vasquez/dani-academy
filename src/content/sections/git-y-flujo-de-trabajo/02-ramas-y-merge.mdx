@@ -1,0 +1,170 @@
+---
+sectionId: "B2.2"
+course: "B2"
+title: "Ramas y merge"
+order: 2
+minutes: 60
+summary: "Qué es una rama por dentro, cómo se unen con merge y un flujo de trabajo en el que main siempre funciona."
+---
+
+Las ramas tienen fama de complicadas, pero por dentro son lo más simple de Git: **una etiqueta que apunta a un commit**. En cuanto lo ves así, crear, cambiar y unir ramas deja de dar miedo. En esta sección aprenderás a trabajar cada cambio en su propia rama y a unirlo después a `main`.
+
+## Una rama es un puntero
+
+Recuerda la sección anterior: cada commit apunta a su padre. Una rama es solo un **nombre** que apunta a un commit concreto:
+
+```text
+main ──▶ C3 → C2 → C1
+```
+
+Crear una rama no copia archivos ni carpetas. Crea un puntero nuevo al mismo commit:
+
+```bash
+git switch -c feat/modo-oscuro   # crea la rama y cambia a ella
+```
+
+```text
+main ─────────────┐
+                  ▼
+feat/modo-oscuro ▶ C3 → C2 → C1
+         ▲
+        HEAD
+```
+
+Al hacer commits en la rama nueva, **solo ella avanza**:
+
+```text
+feat/modo-oscuro ▶ C5 → C4 ─┐
+                            ▼
+main ─────────────────────▶ C3 → C2 → C1
+```
+
+`main` sigue intacta en `C3`. Puedes volver a ella en cualquier momento:
+
+```bash
+git switch main               # cambia de rama (tus archivos cambian a esa foto)
+git branch                    # lista ramas locales; * marca la actual
+git branch -a                 # incluye las remotas
+```
+
+<Callout type="note">
+  `git switch` y `git restore` (desde Git 2.23) sustituyen a los usos confusos de `git checkout`,
+  que hacía ambas cosas. Si ves `git checkout -b` en tutoriales antiguos, es lo mismo que `git
+  switch -c`.
+</Callout>
+
+## Unir ramas: merge
+
+Cuando la funcionalidad está lista, la unes a `main`:
+
+```bash
+git switch main
+git merge feat/modo-oscuro
+```
+
+Hay dos situaciones posibles.
+
+### Fast-forward
+
+Si `main` **no ha avanzado** desde que creaste la rama, Git simplemente mueve el puntero `main` hacia delante. No se crea ningún commit nuevo:
+
+```text
+Antes:  main ▶ C3        feat ▶ C5 → C4 → C3
+Después: main ▶ C5 (= feat)
+```
+
+```text
+Updating c954b51..81544ef
+Fast-forward
+```
+
+### Merge commit
+
+Si `main` **también avanzó** (por ejemplo, arreglaste algo urgente mientras tanto), las historias se han separado. Git crea un **commit de unión** con dos padres:
+
+```text
+        C4 ── C5   (feat)
+       /         \
+C1 ── C3 ── C6 ── M   (main)
+```
+
+```bash
+git merge feat/modo-oscuro
+# Merge made by the 'ort' strategy.
+```
+
+Si las dos ramas tocaron las mismas líneas, aparece un **conflicto**. Lo verás a fondo en la siguiente sección.
+
+### Borrar la rama
+
+Una vez unida, la rama ya no hace falta:
+
+```bash
+git branch -d feat/modo-oscuro    # -d solo borra si ya está unida (seguro)
+```
+
+Borrar la rama no borra sus commits: ya forman parte de `main`.
+
+## Un flujo de trabajo sencillo
+
+No necesitas flujos complejos. Esta regla basta para proyectos personales y equipos pequeños:
+
+1. **`main` siempre funciona** y es lo que está en producción.
+2. **Cada cambio en su rama**, con un nombre descriptivo: `feat/heatmap`, `fix/contador-indice`, `docs/readme`.
+3. Cuando está listo y probado, se une a `main` (idealmente con una Pull Request, sección B2.4).
+4. Se borra la rama.
+
+```bash
+git switch main
+git pull                          # trae lo último
+git switch -c fix/contador-indice
+# …cambios y commits pequeños…
+git switch main
+git merge fix/contador-indice
+git branch -d fix/contador-indice
+```
+
+<Callout type="tip">
+  Si a mitad de una rama necesitas cambiar a otra y tienes cambios sin commitear, Git puede negarse.
+  Haz un commit temporal o guárdalos con `git stash` (lo verás en B2.3).
+</Callout>
+
+## Ramas y Vercel: previews
+
+Vercel se integra con este flujo: cada rama que subes a GitHub genera automáticamente una **URL de preview** con esa versión del proyecto, y `main` se despliega en producción.
+
+```text
+main              → https://tu-app.vercel.app            (producción)
+feat/modo-oscuro  → https://tu-app-git-feat-modo-oscuro-usuario.vercel.app
+```
+
+Así puedes probar un cambio en un entorno real, enseñarlo o revisarlo en el móvil antes de unirlo, sin tocar producción.
+
+## Errores comunes
+
+- **Trabajar siempre en `main`.** Un cambio a medias bloquea cualquier arreglo urgente.
+- **Ramas que viven semanas.** Cuanto más se alejan de `main`, más conflictos. Une a menudo, en cambios pequeños.
+- **Olvidar en qué rama estás.** Mira el prompt de tu terminal o `git status` antes de hacer commits.
+- **Usar `git branch -D`** (mayúscula) a la ligera: fuerza el borrado aunque la rama no esté unida.
+
+<Callout type="exercise">
+  1. En tu repositorio de práctica, crea dos ramas desde `main` (`feat/a` y `feat/b`) que modifiquen
+  **archivos distintos**. 2. Une `feat/a` a `main` y observa que es un *fast-forward*. 3. Une
+  después `feat/b` y observa que ahora se crea un *merge commit*. Mira el resultado con `git lg`. 4.
+  Borra ambas ramas con `git branch -d`. 5. En un proyecto conectado a Vercel, sube una rama a
+  GitHub y abre la URL de preview que genera.
+</Callout>
+
+<Callout type="mastery">
+  Trabajas cada cambio en una rama propia sin pensarlo y sabes predecir si un merge será
+  *fast-forward* o creará un commit de unión.
+</Callout>
+
+## Resumen
+
+- Una rama es un puntero a un commit; crearla es instantáneo.
+- `git switch -c` crea y cambia; `git switch` cambia.
+- _Fast-forward_: solo se mueve el puntero. _Merge commit_: une historias que se separaron.
+- `git branch -d` borra ramas ya unidas sin perder sus commits.
+- Flujo sencillo: `main` siempre funciona, una rama por cambio.
+- Vercel crea una URL de preview por cada rama.

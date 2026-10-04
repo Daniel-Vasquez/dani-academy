@@ -1,0 +1,167 @@
+---
+sectionId: "B2.3"
+course: "B2"
+title: "Conflictos y cómo deshacer cosas"
+order: 3
+minutes: 60
+summary: "Leer y resolver conflictos, deshacer cambios en cada zona de Git y recuperar lo que creías perdido con reflog."
+---
+
+Dos situaciones convierten Git en una fuente de ansiedad: un conflicto en mitad de un merge y la sensación de haber perdido trabajo. Esta sección te da el mapa para las dos. La buena noticia: en Git es **muy difícil perder algo** que alguna vez estuvo en un commit.
+
+## Por qué aparece un conflicto
+
+Un conflicto ocurre cuando dos ramas modifican **las mismas líneas** de un archivo y Git no puede decidir cuál vale. Si tocan líneas distintas, aunque sea en el mismo archivo, Git las une solo.
+
+```bash
+git merge feat/titulo
+```
+
+```text
+Auto-merging src/pages/temario.astro
+CONFLICT (content): Merge conflict in src/pages/temario.astro
+Automatic merge failed; fix conflicts and then commit the result.
+```
+
+El merge queda **a medias** y te espera. `git status` te dice qué archivos tienen conflicto (_both modified_).
+
+## Leer los marcadores
+
+Git escribe las dos versiones dentro del archivo:
+
+```astro
+<<<<<<< HEAD
+<h1>Hola, {firstName}</h1>
+=======
+<h1>Bienvenido, {firstName}</h1>
+>>>>>>> feat/titulo
+```
+
+- Entre la línea de `<` y la de `=`: tu versión actual (`HEAD`, la rama en la que estás).
+- Entre la línea de `=` y la de `>`: la versión que intentas unir.
+
+Resolver es simplemente **editar el archivo** hasta dejar el contenido correcto y **borrar los marcadores**. Puede ser una de las dos versiones, una mezcla o algo nuevo:
+
+```astro
+<h1>Hola de nuevo, {firstName}</h1>
+```
+
+Después, marcas el archivo como resuelto y terminas el merge:
+
+```bash
+git add src/pages/temario.astro
+git commit            # Git propone un mensaje "Merge branch…"
+```
+
+Si te arrepientes a mitad, puedes cancelarlo todo y volver al estado anterior:
+
+```bash
+git merge --abort
+```
+
+### En VS Code
+
+VS Code detecta los marcadores y muestra botones encima de cada conflicto: **Accept Current Change**, **Accept Incoming Change** y **Accept Both Changes**, además de un editor de merge de tres paneles. Úsalos, pero **lee siempre el resultado**: aceptar "ambos" a ciegas suele dejar código duplicado o roto.
+
+<Callout type="tip">
+  Después de resolver, ejecuta `npm run check` y `npm run build` antes del commit. Un conflicto mal
+  resuelto compila mal más a menudo de lo que parece.
+</Callout>
+
+## Deshacer según dónde esté el cambio
+
+Elige la herramienta según **la zona** en la que está lo que quieres deshacer:
+
+| Situación                                                            | Comando                        |
+| -------------------------------------------------------------------- | ------------------------------ |
+| Cambios en un archivo que aún no están en _staging_                  | `git restore archivo`          |
+| Lo añadiste con `add` pero no quieres que entre en el commit         | `git restore --staged archivo` |
+| El último commit tiene un error o le falta algo (y no lo has subido) | `git commit --amend`           |
+| Deshacer un commit **ya subido** o compartido                        | `git revert <hash>`            |
+| Mover la rama hacia atrás (solo commits **locales**)                 | `git reset`                    |
+
+```bash
+git restore src/lib/auth.ts           # ⚠ descarta tus cambios locales en ese archivo
+git restore --staged src/lib/auth.ts  # lo saca del staging; tus cambios siguen ahí
+git commit --amend -m "fix: mensaje corregido"
+```
+
+### `revert` vs `reset`
+
+Son la pregunta clásica, y la diferencia es fundamental:
+
+- **`git revert <hash>`** crea un commit **nuevo** que hace lo contrario del indicado. El historial no se reescribe. Es **seguro en ramas compartidas** (como `main` en GitHub).
+- **`git reset <hash>`** mueve la rama hacia atrás, como si los commits posteriores no existieran. **Reescribe el historial**: úsalo solo con commits que no hayas subido.
+
+`reset` tiene tres modos, según qué hace con los cambios de los commits que "quita":
+
+```bash
+git reset --soft HEAD~1    # quita el commit; los cambios quedan en staging
+git reset --mixed HEAD~1   # (por defecto) los cambios quedan en el working directory
+git reset --hard HEAD~1    # ⚠ quita el commit Y descarta los cambios
+```
+
+`HEAD~1` significa "el commit anterior a `HEAD`".
+
+## `git stash`: guardar para después
+
+¿Estás a mitad de algo y necesitas cambiar de rama? Guarda los cambios en un cajón temporal:
+
+```bash
+git stash push -m "heatmap a medias"
+git switch main            # arreglas lo urgente…
+git switch feat/heatmap
+git stash pop              # recuperas los cambios y se quitan del cajón
+git stash list             # ver lo guardado
+```
+
+## `git reflog`: tu red de seguridad
+
+Git apunta en un registro **cada sitio por el que ha pasado `HEAD`**: commits, cambios de rama, resets, merges… Aunque un `reset --hard` haga desaparecer commits del historial, siguen existiendo y el _reflog_ sabe dónde:
+
+```bash
+git reflog
+```
+
+```text
+1c0afa8 HEAD@{0}: reset: moving to HEAD~2
+53a7165 HEAD@{1}: commit: feat: página de progreso…
+461d2f9 HEAD@{2}: commit: chore: zona horaria…
+```
+
+Para volver al estado anterior al reset:
+
+```bash
+git reset --hard 53a7165     # o: git reset --hard HEAD@{1}
+```
+
+El _reflog_ es local y se conserva unos 90 días. Lo que **nunca** estuvo en un commit (cambios sin `add` descartados con `restore` o `reset --hard`) sí se pierde: por eso conviene hacer commits a menudo.
+
+## Errores comunes
+
+- **Dejar marcadores en el archivo** y hacer commit. Busca los marcadores de conflicto en el proyecto antes de confirmar el merge.
+- **Usar `reset --hard` en commits ya subidos** y luego `push --force`: reescribe el historial que otros (o tus _previews_) ya tienen.
+- **Usar `restore` pensando que es reversible.** Los cambios que nunca se commitearon no vuelven.
+- **Entrar en pánico.** Antes de nada: `git status` y `git reflog`.
+
+<Callout type="exercise">
+  1. En tu repo de práctica, crea dos ramas que modifiquen **la misma línea** del mismo archivo y
+  únelas para provocar un conflicto. 2. Resuélvelo una vez a mano en el editor y otra vez con los
+  botones de VS Code (repitiendo el ejercicio). 3. Haz tres commits, ejecuta `git reset --hard
+  HEAD~3` "por error" y recupéralos con `git reflog`. 4. Haz un commit, súbelo a GitHub y deshazlo
+  con `git revert`. Compara el historial con el del paso anterior. 5. Prueba `git stash push` y `git
+  stash pop` cambiando de rama a mitad de una tarea.
+</Callout>
+
+<Callout type="mastery">
+  Un conflicto ya no te produce ansiedad, sabes cuándo usar `revert` y cuándo `reset`, y sabes
+  recuperar un commit con `reflog`.
+</Callout>
+
+## Resumen
+
+- Un conflicto aparece cuando dos ramas cambian las mismas líneas.
+- Resolver = editar el archivo, borrar los marcadores, `git add` y `git commit`.
+- `restore` (archivos), `restore --staged` (staging), `--amend` (último commit local).
+- `revert` deshace sin reescribir el historial; `reset` lo reescribe (solo en local).
+- `stash` guarda cambios temporalmente; `reflog` recupera commits "perdidos".

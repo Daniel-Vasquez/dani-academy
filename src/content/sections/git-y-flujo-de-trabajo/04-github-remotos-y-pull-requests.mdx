@@ -1,0 +1,151 @@
+---
+sectionId: "B2.4"
+course: "B2"
+title: "GitHub: remotos y Pull Requests"
+order: 4
+minutes: 60
+summary: "Conectar tu repositorio con GitHub por SSH, sincronizar con fetch, pull y push, y trabajar con Pull Requests."
+---
+
+Hasta ahora todo ocurría en tu ordenador. GitHub añade un **repositorio remoto**: una copia en la nube con la que sincronizas, que sirve de copia de seguridad, de punto de partida para Vercel y de lugar donde revisar cambios con **Pull Requests**. En esta sección conectas las dos partes y aprendes a trabajar como en un equipo, aunque trabajes solo.
+
+## Remotos
+
+Un remoto es otro repositorio con el que te sincronizas. Por convención, el principal se llama `origin`:
+
+```bash
+git remote -v
+```
+
+```text
+origin  git@github.com:Daniel-Vasquez/dani-academy.git (fetch)
+origin  git@github.com:Daniel-Vasquez/dani-academy.git (push)
+```
+
+Git guarda una copia local de cómo estaban las ramas del remoto la última vez que hablaste con él: son las **ramas de seguimiento**, como `origin/main`. Las ves con `git branch -a` o en `git lg`.
+
+### HTTPS o SSH
+
+GitHub **no acepta tu contraseña** para operaciones de Git desde 2021. Si el remoto usa HTTPS, te pedirá usuario y un _token_ de acceso personal (y fallará con "Password authentication is not supported" si escribes la contraseña). La alternativa más cómoda es **SSH**: una clave en tu ordenador, registrada una vez en GitHub, y no vuelves a escribir nada.
+
+```bash
+ssh -T git@github.com
+# Hi Daniel-Vasquez! You've successfully authenticated…
+
+git remote set-url origin git@github.com:Daniel-Vasquez/dani-academy.git
+```
+
+<Callout type="note">
+  Este mismo proyecto pasó por ahí: el primer `git push` por HTTPS falló pidiendo contraseña, y la
+  solución fue cambiar el remoto a SSH usando la clave que ya existía en `~/.ssh`.
+</Callout>
+
+## fetch, pull y push
+
+```bash
+git fetch            # descarga lo nuevo del remoto y actualiza origin/main; NO toca tus ramas
+git pull             # fetch + merge de origin/main en tu rama actual
+git pull --rebase    # fetch + reaplica tus commits encima de lo descargado
+git push             # sube tus commits
+git push -u origin feat/heatmap   # primera vez: sube la rama y la enlaza con el remoto
+```
+
+`-u` (_upstream_) enlaza tu rama local con la remota: a partir de ahí, `git push` y `git pull` sin argumentos saben a dónde ir.
+
+Si alguien (o tú desde otro ordenador) subió commits que no tienes, Git rechaza tu `push`:
+
+```text
+! [rejected]        main -> main (fetch first)
+```
+
+La solución **no** es `--force`: es traer primero lo nuevo (`git pull --rebase`), resolver conflictos si los hay y volver a subir.
+
+## Rebase básico
+
+`git rebase main` toma los commits de tu rama y los **reaplica encima** del último `main`, como si la hubieras creado hoy:
+
+```text
+Antes:   feat:  C4 ─ C5           Después:  feat:              C4' ─ C5'
+                /                                              /
+main:  C1 ─ C3 ─ C6               main:  C1 ─ C3 ─ C6 ────────
+```
+
+```bash
+git switch feat/heatmap
+git rebase main
+```
+
+El resultado es un historial lineal, sin _merge commits_. Pero `rebase` **reescribe** tus commits (cambian de hash), así que la regla es la misma que con `reset`: hazlo solo con commits que **nadie más** tenga.
+
+## Pull Requests
+
+Una **Pull Request** (PR) es una propuesta de unir una rama a otra en GitHub, con un espacio para describirla, revisarla y discutirla antes de mezclar. Aunque trabajes solo, aporta mucho:
+
+- Te obliga a **releer tus cambios** completos antes de unirlos.
+- Ejecuta comprobaciones automáticas (CI, _previews_ de Vercel).
+- Deja un registro de **por qué** se hizo cada cambio.
+
+El ciclo completo:
+
+```bash
+git switch -c feat/heatmap
+# …commits…
+git push -u origin feat/heatmap
+```
+
+En GitHub aparece el botón **Compare & pull request**. Escribe:
+
+- **Título**: como un buen mensaje de commit (`feat: mapa de actividad en /progreso`).
+- **Descripción**: qué cambia, por qué y cómo probarlo.
+
+### Squash merge
+
+Al mezclar una PR, GitHub ofrece tres opciones. Para ramas de funcionalidad, **Squash and merge** suele ser la mejor: une todos los commits de la rama en **uno solo** sobre `main`. Tu historial de trabajo puede ser desordenado ("wip", "arreglo", "otra vez"); `main` queda limpio, con un commit por funcionalidad.
+
+### Proteger `main`
+
+En GitHub, _Settings → Branches_, puedes exigir que todo cambio a `main` entre por PR y que pasen las comprobaciones. Así `main` siempre funciona.
+
+## La CLI de GitHub: `gh`
+
+`gh` permite hacerlo todo desde la terminal:
+
+```bash
+brew install gh
+gh auth login
+
+gh pr create --title "feat: mapa de actividad" --body "Añade el heatmap de 12 semanas a /progreso"
+gh pr view --web          # abrirla en el navegador
+gh pr checks              # estado de las comprobaciones
+gh pr merge --squash --delete-branch
+```
+
+## Errores comunes
+
+- **`git push --force` en `main`.** Puede borrar commits del remoto. Si alguna vez lo necesitas en tu rama, usa `--force-with-lease`, que se niega si el remoto cambió.
+- **Hacer `rebase` de commits ya compartidos.** Rompe el historial de cualquiera que los tenga.
+- **PRs gigantes.** Igual que los commits: una PR, un propósito.
+- **Confundir `fetch` con `pull`.** `fetch` solo descarga; `pull` además mezcla en tu rama.
+
+<Callout type="exercise">
+  1. Comprueba con `ssh -T git@github.com` que tu clave SSH funciona y, si algún proyecto usa HTTPS,
+  cámbialo a SSH con `git remote set-url`. 2. En un proyecto tuyo en GitHub, crea una rama, haz 2–3
+  commits y súbela con `git push -u`. 3. Abre una Pull Request con una descripción de qué cambia y
+  cómo probarlo, revisa el diff en GitHub y mézclala con **Squash and merge**. 4. Actualiza tu
+  `main` local con `git pull` y borra la rama local. 5. Instala `gh` y repite el ciclo completo
+  desde la terminal.
+</Callout>
+
+<Callout type="mastery">
+  Tu historial de `main` se compone de PRs mezcladas y sabes sincronizar con `fetch`, `pull
+  --rebase` y `push` sin recurrir a `--force`.
+</Callout>
+
+## Resumen
+
+- `origin` es el remoto principal; `origin/main` es tu copia de cómo está allí.
+- GitHub no acepta contraseñas en Git: usa SSH (o un token por HTTPS).
+- `fetch` descarga, `pull` descarga y mezcla, `push` sube; `-u` enlaza la rama.
+- `rebase` reaplica tus commits encima de otros: solo con commits no compartidos.
+- Las Pull Requests añaden revisión y comprobaciones; _squash merge_ mantiene `main` limpio.
+- `gh` permite crear y mezclar PRs desde la terminal.
