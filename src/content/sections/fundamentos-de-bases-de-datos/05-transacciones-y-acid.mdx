@@ -1,0 +1,126 @@
+---
+sectionId: "B4.5"
+course: "B4"
+title: "Transacciones y ACID"
+order: 5
+minutes: 60
+summary: "Qué garantiza una transacción, qué son las condiciones de carrera y qué dice realmente el teorema CAP."
+---
+
+¿Qué pasa si el servidor se cae justo después de restar dinero de una cuenta y antes de sumarlo en la otra? ¿Y si dos peticiones marcan la misma sección a la vez? Estas preguntas parecen raras hasta que te pasan en producción. Las **transacciones** son la respuesta de las bases de datos, y entenderlas te hará ver tus propias apps de otra forma.
+
+## El ejemplo clásico: una transferencia
+
+Pasar 100 de la cuenta de Dani a la de Ana son **dos** operaciones:
+
+```sql
+UPDATE cuentas SET saldo = saldo - 100 WHERE id = 1;  -- Dani
+UPDATE cuentas SET saldo = saldo + 100 WHERE id = 2;  -- Ana
+```
+
+Si algo falla entre las dos, el dinero **desaparece**. Lo que queremos es que las dos ocurran o ninguna.
+
+## Transacciones
+
+Una **transacción** agrupa varias operaciones en una unidad: o se aplican **todas** (`COMMIT`) o **ninguna** (`ROLLBACK`).
+
+```sql
+CREATE TABLE cuentas (id INTEGER PRIMARY KEY, titular TEXT, saldo INTEGER NOT NULL CHECK (saldo >= 0));
+INSERT INTO cuentas VALUES (1, 'Dani', 500), (2, 'Ana', 100);
+
+BEGIN TRANSACTION;
+UPDATE cuentas SET saldo = saldo - 100 WHERE id = 1;
+UPDATE cuentas SET saldo = saldo + 100 WHERE id = 99;  -- ¡no existe la cuenta 99!
+ROLLBACK;                                              -- algo fue mal: deshacer todo
+
+SELECT * FROM cuentas;
+```
+
+```text
+1|Dani|500     ← intacto: la resta se deshizo
+2|Ana|100
+```
+
+En una aplicación real, el código comprueba cada paso y decide `COMMIT` o `ROLLBACK`; si el proceso muere a mitad, la base de datos descarta lo no confirmado al arrancar.
+
+## ACID
+
+Las cuatro garantías de una transacción, con nombre de siglas:
+
+| Letra            | Garantía                                         | En la transferencia                           |
+| ---------------- | ------------------------------------------------ | --------------------------------------------- |
+| **A**tomicidad   | Todo o nada                                      | No puede quedar solo la resta                 |
+| **C**onsistencia | Se respetan las reglas (restricciones)           | `CHECK (saldo >= 0)` impide saldos negativos  |
+| a**I**slamiento  | Las transacciones simultáneas no se ven a medias | Nadie lee el saldo entre la resta y la suma   |
+| **D**urabilidad  | Lo confirmado sobrevive a un fallo               | Tras el `COMMIT`, un corte de luz no lo borra |
+
+La consistencia en acción:
+
+```sql
+UPDATE cuentas SET saldo = saldo - 600 WHERE id = 1;
+-- Runtime error: CHECK constraint failed: saldo >= 0
+```
+
+## Condiciones de carrera
+
+Sin cuidado, dos operaciones simultáneas pueden pisarse. El caso típico es **leer, calcular en el código y escribir**:
+
+```ts
+// ❌ Dos peticiones a la vez pueden leer el mismo valor
+const doc = await col.findOne({ userId });
+await col.updateOne({ userId }, { $set: { vasos: doc.vasos + 1 } });
+// Ambas leen 3, ambas escriben 4: se pierde un vaso
+```
+
+La solución es que **la base de datos haga la operación de forma atómica**, en una sola instrucción:
+
+```ts
+// ✅ La suma la hace MongoDB, de forma atómica
+await col.updateOne({ userId }, { $inc: { vasos: 1 } });
+```
+
+Lo mismo con la unicidad: comprobar "¿existe?" y luego insertar falla con peticiones simultáneas. Un **índice único** es la garantía real. Así funciona "marcar como leído" en esta plataforma: un `upsert` atómico más un índice único en `(userId, sectionId)`, probado con 8 peticiones simultáneas que dejan un solo documento.
+
+<Callout type="note">
+  En MongoDB, cada operación sobre **un documento** es atómica. Por eso un buen modelado (lo que se
+  modifica junto, en el mismo documento) evita la mayoría de transacciones multi-documento. Las
+  verás en A2.
+</Callout>
+
+## El teorema CAP, sin humo
+
+Cuando una base de datos está repartida en varios servidores, puede ocurrir una **partición**: se corta la red entre ellos. En ese momento hay que elegir:
+
+- **Consistencia (C)**: responder solo con datos garantizadamente actuales, aunque algunos servidores se nieguen a responder.
+- **Disponibilidad (A)**: responder siempre, aunque algún dato pueda estar desactualizado.
+
+La **tolerancia a particiones (P)** no es opcional en un sistema distribuido: las redes fallan. Así que el teorema, en la práctica, dice: **durante un fallo de red, elige entre C y A**. Fuera de esos fallos, puedes tener ambas.
+
+MongoDB, por defecto, prioriza la consistencia: solo el nodo primario acepta escrituras, y si no hay primario, las escrituras esperan hasta que se elige uno nuevo (unos segundos).
+
+## Errores comunes
+
+- **Operaciones relacionadas sin transacción** (o sin modelarlas en un solo documento).
+- **Leer, calcular en JavaScript y escribir** en lugar de usar operaciones atómicas (`$inc`, `UPDATE … SET x = x + 1`).
+- **Comprobar unicidad en el código** en lugar de con un índice único.
+- **Pensar que CAP significa "elige dos de tres" siempre.** Solo aplica cuando la red falla.
+
+<Callout type="exercise">
+  1. En `sqlite3`, crea la tabla `cuentas` y haz la transferencia **sin transacción**, simulando un fallo entre los dos `UPDATE` (ejecuta solo el primero). Mira el saldo total.
+  2. Repite con `BEGIN TRANSACTION` y `ROLLBACK` y compara.
+  3. Prueba la restricción `CHECK (saldo >= 0)` intentando dejar una cuenta en negativo.
+  4. Busca en tu app de entrenamiento una operación que lea un valor, lo modifique en JavaScript y lo guarde. Reescríbela con una operación atómica (`$inc`, `$push`, `$addToSet`).
+</Callout>
+
+<Callout type="mastery">
+  Reconoces en tus apps qué operaciones deberían ser atómicas y sabes protegerlas con transacciones,
+  operaciones atómicas o índices únicos.
+</Callout>
+
+## Resumen
+
+- Una transacción agrupa operaciones: todas (`COMMIT`) o ninguna (`ROLLBACK`).
+- ACID: atomicidad, consistencia, aislamiento y durabilidad.
+- Leer-calcular-escribir provoca condiciones de carrera; usa operaciones atómicas.
+- Los índices únicos garantizan unicidad incluso con peticiones simultáneas.
+- CAP: ante un fallo de red, un sistema distribuido elige entre consistencia y disponibilidad.

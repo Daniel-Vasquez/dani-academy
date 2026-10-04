@@ -1,0 +1,130 @@
+---
+sectionId: "B4.2"
+course: "B4"
+title: "Modelado: entidades y relaciones"
+order: 2
+minutes: 60
+summary: "Identificar entidades, atributos y claves, reconocer relaciones 1:1, 1:N y N:M, y normalizar sin dogmas."
+---
+
+Antes de escribir una sola consulta hay que decidir **qué guardar y cómo se relaciona**. Es el paso que más se salta y el que más problemas da después. En esta sección vas a modelar datos como lo hace un profesional, usando esta misma plataforma como ejemplo.
+
+## Entidades y atributos
+
+- Una **entidad** es una "cosa" sobre la que guardas información: Usuario, Curso, Sección, Evaluación.
+- Un **atributo** es un dato de esa cosa: el nombre del usuario, el título del curso.
+
+Truco para encontrarlas: describe tu app en una frase y subraya los sustantivos.
+
+> "Un **usuario** lee las **secciones** de un **curso** y hace la **evaluación** del curso."
+
+## Claves
+
+Cada fila o documento necesita una forma de identificarse sin ambigüedad.
+
+- **Clave primaria**: el identificador único de cada registro (`id`, o `_id` en MongoDB).
+- **Clave foránea**: un campo que guarda la clave primaria **de otra entidad** para relacionarlas (`usuario_id` en una lectura).
+
+¿Qué usar como clave primaria?
+
+- **Clave artificial**: un valor sin significado (`1`, `ObjectId`, un UUID). Nunca cambia. Es la opción por defecto.
+- **Clave natural**: un dato real que ya es único (el correo, el código `B1.3`). Cómodo, pero si ese dato cambia, hay que actualizarlo en todas partes.
+
+<Callout type="note">
+  Dani Academy usa una clave natural deliberadamente: `B1.3` identifica una sección para siempre
+  aunque cambie su título o su URL. Por eso el plan insiste en que esos identificadores no cambien
+  nunca.
+</Callout>
+
+## Tipos de relación
+
+### Uno a uno (1:1)
+
+Un registro de A se relaciona con **uno** de B. Ejemplo: un usuario y su configuración de perfil. Suelen poder fusionarse en una sola entidad.
+
+### Uno a muchos (1:N)
+
+Un registro de A se relaciona con **muchos** de B, y cada B con **uno** de A. Es la más común.
+
+- Un curso tiene muchas secciones; cada sección pertenece a un curso.
+- Un usuario tiene muchos intentos de evaluación.
+
+La clave foránea va en el lado "muchos": la sección guarda el `curso_id`.
+
+### Muchos a muchos (N:M)
+
+Muchos de A se relacionan con muchos de B. Un usuario lee muchas secciones y cada sección la leen muchos usuarios. En bases relacionales se necesita una **tabla intermedia**:
+
+```text
+usuarios ──1:N──▶ lecturas ◀──N:1── secciones
+                  (usuario_id, seccion_id, leida_en)
+```
+
+La tabla intermedia puede tener sus propios atributos: aquí, **cuándo** se leyó.
+
+## Diagrama entidad-relación
+
+El modelo de esta plataforma, en un diagrama:
+
+```text
+┌──────────┐ 1      N ┌─────────────┐ N      1 ┌────────────┐ N     1 ┌─────────┐
+│ Usuario  │──────────│  Lectura    │──────────│  Sección   │─────────│  Curso  │
+│ id       │          │ usuario_id  │          │ id (B1.3)  │         │ id (B1) │
+│ nombre   │          │ seccion_id  │          │ curso_id   │         │ título  │
+│ email    │          │ leida_en    │          │ título     │         └─────────┘
+└──────────┘          └─────────────┘          └────────────┘              │ 1
+     │ 1                                                                    │
+     │                ┌──────────────────────┐ N                            │
+     └──────────── N  │ Intento de evaluación│───────────────────────────────┘
+                      │ usuario_id, curso_id │
+                      │ nota, aprobado, fecha│
+                      └──────────────────────┘
+```
+
+Herramientas como [dbdiagram.io](https://dbdiagram.io) o Excalidraw sirven para dibujarlos. Lo importante no es la notación, es tener el mapa.
+
+## Normalización sin dogmas
+
+**Normalizar** es organizar los datos para que **cada dato viva en un solo sitio**. Así, cambiarlo es cambiarlo una vez. Las tres primeras "formas normales", en lenguaje práctico:
+
+1. **1FN**: cada celda guarda **un solo valor**. Nada de `secciones_leidas = "B1.1,B1.2,B1.3"` en una columna de texto.
+2. **2FN**: cada atributo depende de **toda** la clave. En `lecturas (usuario_id, seccion_id, …)`, el título de la sección no va ahí: depende solo de `seccion_id`.
+3. **3FN**: los atributos no dependen de otros atributos. Si guardas `curso_id` y `curso_titulo` en la sección, el título depende del curso, no de la sección: va en la tabla de cursos.
+
+```text
+❌ lecturas(usuario_id, usuario_email, seccion_id, seccion_titulo, curso_titulo, leida_en)
+   → cambiar el título de un curso obliga a tocar miles de filas
+
+✅ lecturas(usuario_id, seccion_id, leida_en)  + usuarios, secciones y cursos por separado
+```
+
+¿Y cuándo **desnormalizar** (duplicar a propósito)? Cuando un dato se lee muchísimo más de lo que cambia y duplicarlo ahorra consultas. Es habitual en MongoDB y lo verás en I4. La regla: normaliza por defecto y desnormaliza **con una razón**.
+
+## Errores comunes
+
+- **Listas dentro de un campo de texto** ("B1.1,B1.2"): imposible de consultar bien.
+- **Duplicar datos sin razón**: tarde o temprano, las copias se contradicen.
+- **Usar como clave un dato que puede cambiar**, como el correo.
+- **Saltarse el diagrama** y descubrir la relación N:M cuando ya hay datos en producción.
+
+<Callout type="exercise">
+  1. Escribe la frase que describe tu app de entrenamiento y subraya las entidades. 2. Para cada par
+  de entidades, decide el tipo de relación (1:1, 1:N o N:M) y dónde va la clave foránea. 3. Dibuja
+  el diagrama entidad-relación completo de **esta plataforma** (usuarios, cursos, secciones,
+  lecturas e intentos de evaluación) sin mirar el de arriba, y compáralo después con el modelo de
+  datos de `planificacion.md`. 4. Busca en el diagrama algún dato duplicado y decide si está
+  justificado.
+</Callout>
+
+<Callout type="mastery">
+  Identificas el tipo de relación entre dos entidades al primer vistazo y sabes dónde colocar cada
+  clave foránea.
+</Callout>
+
+## Resumen
+
+- Entidades = cosas; atributos = sus datos.
+- Clave primaria identifica; clave foránea relaciona. Artificial por defecto, natural si es estable.
+- Relaciones 1:1, 1:N (clave en el lado "muchos") y N:M (tabla intermedia).
+- El diagrama entidad-relación es el mapa antes de construir.
+- Normaliza para que cada dato viva en un sitio; desnormaliza solo con una razón.

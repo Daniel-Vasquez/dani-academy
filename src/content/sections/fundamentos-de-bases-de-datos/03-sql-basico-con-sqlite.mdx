@@ -1,0 +1,189 @@
+---
+sectionId: "B4.3"
+course: "B4"
+title: "SQL básico con SQLite"
+order: 3
+minutes: 60
+summary: "Crear tablas, insertar, consultar, actualizar y borrar datos, y unir tablas con JOIN, practicando con SQLite."
+---
+
+SQL es el idioma de las bases de datos relacionales y lleva 50 años vigente. Aunque uses MongoDB, merece la pena: aparece en entrevistas, en herramientas de analítica y en casi cualquier proyecto profesional, y te obliga a pensar los datos con claridad. Vas a practicar con **SQLite**, que ya viene instalado en tu Mac.
+
+## Empezar con `sqlite3`
+
+```bash
+sqlite3 academy.db
+```
+
+Se abre una consola donde escribes SQL (cada sentencia termina en `;`). Configura una salida legible:
+
+```sql
+.headers on
+.mode column
+PRAGMA foreign_keys = ON;  -- SQLite no comprueba las claves foráneas si no lo activas
+```
+
+`.quit` para salir. El archivo `academy.db` **es** la base de datos completa.
+
+## Crear tablas
+
+Con el modelo de la sección anterior:
+
+```sql
+CREATE TABLE usuarios (
+  id     INTEGER PRIMARY KEY,
+  nombre TEXT NOT NULL,
+  email  TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE cursos (
+  id     TEXT PRIMARY KEY,            -- clave natural: 'B1'
+  titulo TEXT NOT NULL
+);
+
+CREATE TABLE secciones (
+  id       TEXT PRIMARY KEY,          -- 'B1.3'
+  curso_id TEXT NOT NULL REFERENCES cursos(id),
+  titulo   TEXT NOT NULL,
+  orden    INTEGER NOT NULL
+);
+
+CREATE TABLE lecturas (
+  usuario_id INTEGER NOT NULL REFERENCES usuarios(id),
+  seccion_id TEXT    NOT NULL REFERENCES secciones(id),
+  leida_en   TEXT    NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (usuario_id, seccion_id)  -- no se puede leer dos veces la misma sección
+);
+```
+
+Las **restricciones** (`NOT NULL`, `UNIQUE`, `PRIMARY KEY`, `REFERENCES`) son reglas que la base de datos hace cumplir aunque tu código tenga un error.
+
+## Insertar
+
+```sql
+INSERT INTO usuarios (nombre, email) VALUES ('Dani', 'dani@ejemplo.com'), ('Ana', 'ana@ejemplo.com');
+INSERT INTO cursos VALUES ('B1', 'TypeScript desde cero'), ('B2', 'Git y flujo de trabajo');
+INSERT INTO secciones VALUES
+  ('B1.1', 'B1', 'Qué es TypeScript', 1), ('B1.2', 'B1', 'Tipos primitivos', 2),
+  ('B1.3', 'B1', 'Arrays', 3),            ('B1.4', 'B1', 'type vs interface', 4),
+  ('B2.1', 'B2', 'Modelo mental', 1),     ('B2.2', 'B2', 'Ramas', 2);
+INSERT INTO lecturas (usuario_id, seccion_id) VALUES (1, 'B1.1'), (1, 'B1.2'), (1, 'B1.3'), (1, 'B2.1'), (2, 'B1.1');
+```
+
+Las restricciones en acción:
+
+```sql
+INSERT INTO lecturas (usuario_id, seccion_id) VALUES (1, 'B1.1');
+-- Runtime error: UNIQUE constraint failed: lecturas.usuario_id, lecturas.seccion_id
+INSERT INTO lecturas (usuario_id, seccion_id) VALUES (1, 'Z9.9');
+-- Runtime error: FOREIGN KEY constraint failed
+```
+
+## Consultar: `SELECT`
+
+```sql
+SELECT id, titulo FROM secciones
+WHERE curso_id = 'B1' AND orden <= 2
+ORDER BY orden
+LIMIT 10;
+```
+
+- `SELECT` qué columnas (`*` = todas).
+- `FROM` qué tabla.
+- `WHERE` qué filas.
+- `ORDER BY` en qué orden (`DESC` para invertir).
+- `LIMIT` cuántas como máximo.
+
+## Modificar: `UPDATE` y `DELETE`
+
+```sql
+UPDATE secciones SET titulo = 'Arrays, tuplas y objetos' WHERE id = 'B1.3';
+DELETE FROM lecturas WHERE usuario_id = 2 AND seccion_id = 'B1.1';
+```
+
+<Callout type="warning">
+  Un `UPDATE` o `DELETE` **sin `WHERE`** afecta a **todas** las filas. Antes de ejecutar uno,
+  escribe primero el `SELECT` con el mismo `WHERE` y comprueba qué filas devuelve.
+</Callout>
+
+## Unir tablas: `JOIN`
+
+Los datos están repartidos en tablas; `JOIN` los vuelve a juntar usando las claves:
+
+```sql
+SELECT u.nombre, s.id, s.titulo
+FROM lecturas l
+JOIN usuarios  u ON u.id = l.usuario_id
+JOIN secciones s ON s.id = l.seccion_id
+WHERE u.nombre = 'Dani'
+ORDER BY s.id
+LIMIT 3;
+```
+
+```text
+nombre  id    titulo
+------  ----  -----------------
+Dani    B1.1  Qué es TypeScript
+Dani    B1.2  Tipos primitivos
+Dani    B1.3  Arrays
+```
+
+- `JOIN` (o `INNER JOIN`) solo devuelve filas que tienen pareja en ambas tablas.
+- `LEFT JOIN` devuelve **todas** las de la izquierda, con `NULL` donde no hay pareja. Útil para "secciones leídas y no leídas".
+
+## Agrupar: `GROUP BY`
+
+El porcentaje de cada curso que ha leído Dani:
+
+```sql
+SELECT c.id AS curso,
+       COUNT(l.seccion_id) AS leidas,
+       COUNT(s.id)         AS total,
+       ROUND(100.0 * COUNT(l.seccion_id) / COUNT(s.id)) AS porcentaje
+FROM cursos c
+JOIN secciones s ON s.curso_id = c.id
+LEFT JOIN lecturas l ON l.seccion_id = s.id AND l.usuario_id = 1
+GROUP BY c.id
+ORDER BY c.id;
+```
+
+```text
+curso  leidas  total  porcentaje
+-----  ------  -----  ----------
+B1     3       4      75.0
+B2     1       2      50.0
+```
+
+`GROUP BY` junta las filas por curso y las funciones de agregación (`COUNT`, `SUM`, `AVG`, `MAX`) resumen cada grupo. `COUNT(l.seccion_id)` no cuenta los `NULL` del `LEFT JOIN`: por eso da las leídas.
+
+<Callout type="tip">
+  La página `/progreso` de esta plataforma calcula exactamente esto, pero con MongoDB. En el curso
+  I4 escribirás la versión con el *aggregation pipeline* y en A3 compararás ambas.
+</Callout>
+
+## Errores comunes
+
+- **Olvidar `PRAGMA foreign_keys = ON`** en SQLite: acepta claves foráneas inválidas sin quejarse.
+- **`UPDATE` o `DELETE` sin `WHERE`.**
+- **Usar `JOIN` cuando necesitabas `LEFT JOIN`**: desaparecen las filas sin pareja (las secciones no leídas).
+- **Concatenar texto del usuario en una consulta SQL**: abre la puerta a la inyección SQL. Lo verás en A5.
+
+<Callout type="exercise">
+  1. Crea `academy.db` con `sqlite3` y las cuatro tablas de esta sección. 2. Inserta al menos 2
+  usuarios, 2 cursos, 6 secciones y varias lecturas. 3. Provoca a propósito un error de `UNIQUE` y
+  otro de clave foránea. 4. Escribe una consulta que devuelva, para un usuario, el porcentaje de
+  secciones leídas de cada curso. 5. Escribe otra que liste las secciones **no leídas** de un curso
+  (pista: `LEFT JOIN` y `WHERE l.seccion_id IS NULL`).
+</Callout>
+
+<Callout type="mastery">
+  Escribes un `SELECT` con `JOIN` y `GROUP BY` sin ayuda y sabes cuándo necesitas `LEFT JOIN`.
+</Callout>
+
+## Resumen
+
+- `CREATE TABLE` define columnas y restricciones que la base de datos hace cumplir.
+- `INSERT`, `SELECT`, `UPDATE` y `DELETE` cubren el día a día; cuidado con `WHERE`.
+- `JOIN` une tablas por sus claves; `LEFT JOIN` conserva las filas sin pareja.
+- `GROUP BY` con `COUNT`, `SUM` o `AVG` resume datos por grupos.
+- SQLite es un archivo: perfecto para practicar y para apps embebidas.

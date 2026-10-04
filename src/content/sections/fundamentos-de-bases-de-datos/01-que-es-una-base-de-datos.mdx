@@ -1,0 +1,131 @@
+---
+sectionId: "B4.1"
+course: "B4"
+title: "Qué es una base de datos"
+order: 1
+minutes: 60
+summary: "Por qué no basta con un archivo JSON, qué hace un gestor de bases de datos y qué tipos existen para elegir con criterio."
+---
+
+Usas MongoDB en tus proyectos, pero lo elegiste porque venía en el tutorial. Para "subir de nivel" con los datos hay que dar un paso atrás: entender **qué problema resuelve una base de datos**, qué tipos existen y por qué cada uno encaja en casos distintos. Este curso es independiente de MongoDB; el siguiente, B5, lo aplica todo a MongoDB.
+
+## ¿Por qué no un archivo JSON?
+
+Tu Planificador podría guardar todo en un `datos.json`. Funciona con un usuario y pocos datos. Ahora imagina que crece:
+
+- **Concurrencia**: dos peticiones escriben a la vez y una sobrescribe la otra. Pierdes datos.
+- **Rendimiento**: para buscar los días de una categoría hay que leer y recorrer **todo** el archivo.
+- **Durabilidad**: si el servidor se cae a mitad de una escritura, el archivo queda corrupto.
+- **Consultas**: "notas de marzo con imagen, ordenadas por fecha" significa escribir ese bucle a mano.
+- **Integridad**: nada impide guardar una fecha con formato incorrecto o una categoría que no existe.
+
+Además, en Vercel ni siquiera tienes un disco persistente: cada función puede ejecutarse en una máquina distinta.
+
+## Qué hace un gestor de bases de datos
+
+Un **SGBD** (sistema gestor de bases de datos) es el programa que resuelve esos problemas por ti:
+
+| Problema       | Lo que aporta el SGBD                                                     |
+| -------------- | ------------------------------------------------------------------------- |
+| Almacenamiento | Formato eficiente en disco, compresión                                    |
+| Consultas      | Un lenguaje (SQL, la API de MongoDB) para pedir datos sin escribir bucles |
+| Rendimiento    | Índices para encontrar datos sin leerlo todo                              |
+| Concurrencia   | Varios clientes leen y escriben a la vez sin pisarse                      |
+| Durabilidad    | Lo confirmado sobrevive a un corte de luz                                 |
+| Integridad     | Reglas: tipos, campos obligatorios, valores únicos                        |
+
+## Tipos de bases de datos
+
+### Relacionales (SQL)
+
+Los datos viven en **tablas** con columnas fijas, y las tablas se relacionan entre sí. Se consultan con **SQL**. Ejemplos: PostgreSQL, MySQL, SQLite.
+
+```text
+usuarios                          entrenos
+| id | nombre | email       |     | id | usuario_id | km  | fecha      |
+|----|--------|-------------|     |----|------------|-----|------------|
+| 1  | Dani   | dani@…      |     | 7  | 1          | 5.2 | 2026-10-01 |
+```
+
+**Brillan en**: datos muy relacionados, informes con cruces, reglas estrictas, operaciones que deben ser exactas (dinero, inventario).
+
+### Documentales (NoSQL)
+
+Los datos son **documentos** parecidos a JSON, agrupados en colecciones. Cada documento puede tener estructura anidada. Ejemplo: **MongoDB**.
+
+```js
+{
+  _id: ObjectId("…"),
+  nombre: "Dani",
+  entrenos: [{ km: 5.2, fecha: ISODate("2026-10-01") }]
+}
+```
+
+**Brillan en**: datos que se leen juntos, estructuras que cambian, desarrollo rápido con JavaScript (el formato es casi el mismo que tus objetos).
+
+### Otras familias
+
+- **Clave-valor** (Redis): un diccionario gigante en memoria, rapidísimo. Ideal para cachés, sesiones y contadores.
+- **Columnares** (ClickHouse): para analítica sobre millones de filas.
+- **Grafos** (Neo4j): cuando lo importante son las conexiones (redes sociales, recomendaciones).
+- **Vectoriales**: búsqueda por similitud, muy usadas con IA.
+
+No compiten: muchas aplicaciones usan varias a la vez.
+
+## Servidor vs embebida
+
+- **Servidor de base de datos**: un programa aparte al que te conectas por red (MongoDB, PostgreSQL). Varios clientes a la vez.
+- **Base de datos embebida**: una librería que vive dentro de tu aplicación y guarda todo en un archivo (SQLite). Sin red ni configuración. La usan tu móvil, tu navegador y la mitad de las apps de escritorio.
+
+## ¿Dónde vive tu MongoDB?
+
+Cuando usas **MongoDB Atlas**, el servidor de base de datos corre en máquinas de la nube (AWS, Google Cloud o Azure) que Atlas gestiona por ti. Un **clúster** son normalmente **tres** servidores con copias de los datos (un _replica set_): si uno se cae, otro toma el relevo.
+
+```text
+Tu app (Vercel)  ──── red, TLS ────▶  Atlas: clúster
+                                       ├─ primario   (lecturas y escrituras)
+                                       ├─ secundario (copia)
+                                       └─ secundario (copia)
+```
+
+Por eso la URI empieza por `mongodb+srv://`: el DNS te da la lista de servidores del clúster.
+
+## SQL o NoSQL: cómo elegir
+
+No hay un ganador, pero sí preguntas útiles:
+
+1. **¿Cómo se leen los datos?** Si casi siempre se leen juntos (un día del planificador con sus notas), documentos. Si se cruzan de muchas formas (informes), tablas.
+2. **¿Cuán estable es la estructura?** Estable y estricta favorece SQL; cambiante, documentos.
+3. **¿Hay operaciones que deben ser exactas** entre muchos registros? SQL lo pone más fácil (aunque MongoDB también tiene transacciones).
+4. **¿Qué conoce tu equipo?** Es un factor real.
+
+Lo verás a fondo en A3, cuando compares las dos versiones de esta misma plataforma.
+
+## Errores comunes
+
+- **Elegir base de datos por moda.** Elige por cómo vas a leer y escribir los datos.
+- **Pensar que NoSQL significa "sin esquema".** Los datos siempre tienen forma; la diferencia es dónde se valida.
+- **Guardar estado en el disco de una función _serverless_.** Se pierde entre ejecuciones.
+- **Creer que una base de datos solo guarda.** Su valor está en consultar, proteger y mantener la integridad.
+
+<Callout type="exercise">
+  1. Haz una lista de los datos que guarda tu Planificador 2026 (días, categorías, notas, imágenes,
+  avisos…). 2. Para cada uno, decide si encajaría mejor en una base de datos relacional, documental
+  o clave-valor, y justifícalo en una frase. 3. Entra en MongoDB Atlas y localiza en qué proveedor y
+  región está tu clúster y cuántos nodos tiene. 4. Escribe un párrafo explicando por qué un archivo
+  JSON no serviría para tu app de entrenamiento en Vercel.
+</Callout>
+
+<Callout type="mastery">
+  Puedes explicar qué problemas resuelve una base de datos y cuándo elegirías una relacional y
+  cuándo una documental.
+</Callout>
+
+## Resumen
+
+- Un archivo JSON no resuelve concurrencia, rendimiento, durabilidad ni integridad.
+- Un SGBD aporta consultas, índices, concurrencia, durabilidad y reglas.
+- Relacionales: tablas y SQL. Documentales: documentos tipo JSON. Hay más familias.
+- Servidor (por red) frente a embebida (un archivo dentro de la app).
+- Atlas ejecuta tu MongoDB como un _replica set_ de tres nodos en la nube.
+- Se elige según cómo se leen y escriben los datos, no por moda.

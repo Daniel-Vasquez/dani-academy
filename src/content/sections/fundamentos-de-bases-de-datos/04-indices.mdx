@@ -1,0 +1,136 @@
+---
+sectionId: "B4.4"
+course: "B4"
+title: "Índices"
+order: 4
+minutes: 60
+summary: "Qué es un índice, qué cuesta, por qué importa el orden de los campos y cómo comprobar si una consulta lo usa."
+---
+
+Con 100 filas, cualquier consulta es instantánea. Con 100 000, una consulta mal planteada empieza a notarse, y con millones tumba un servidor. Los **índices** son la herramienta número uno de rendimiento en cualquier base de datos, relacional o documental. En esta sección vas a medir su efecto con tus propias manos.
+
+## La analogía del libro
+
+Para encontrar "normalización" en un libro de 500 páginas tienes dos opciones:
+
+1. **Leer todas las páginas** hasta encontrarla.
+2. Ir al **índice** del final, buscar la palabra (está en orden alfabético) y saltar a la página indicada.
+
+Una base de datos sin índice hace lo primero: un **escaneo completo** (_full scan_). Con índice, hace lo segundo. Por dentro, un índice es una estructura ordenada (normalmente un **árbol B**) que guarda los valores de una o varias columnas junto con dónde está cada fila.
+
+## Medirlo en SQLite
+
+Crea una tabla con 100 000 entrenos aleatorios (en `sqlite3`):
+
+```sql
+CREATE TABLE entrenos (id INTEGER PRIMARY KEY, usuario_id INTEGER NOT NULL, km REAL, fecha TEXT);
+
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
+INSERT INTO entrenos (usuario_id, km, fecha)
+SELECT abs(random()) % 1000, abs(random()) % 15, date('2026-01-01', '+' || (i % 270) || ' days')
+FROM n;
+```
+
+`EXPLAIN QUERY PLAN` te dice **cómo** va a ejecutar la consulta, y `.timer on` cuánto tarda:
+
+```sql
+.timer on
+EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE usuario_id = 42;
+```
+
+```text
+QUERY PLAN
+`--SCAN entrenos                         ← lee las 100 000 filas
+Run Time: real 0.002 user 0.001350
+```
+
+Ahora crea el índice y repite:
+
+```sql
+CREATE INDEX idx_entrenos_usuario ON entrenos(usuario_id);
+EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE usuario_id = 42;
+```
+
+```text
+QUERY PLAN
+`--SEARCH entrenos USING INDEX idx_entrenos_usuario (usuario_id=?)
+Run Time: real 0.000 user 0.000011
+```
+
+`SCAN` = recorrer todo; `SEARCH … USING INDEX` = saltar directamente. El tiempo de CPU pasa de 1,35 ms a 0,01 ms: **más de 100 veces menos**. Con millones de filas la diferencia es entre milisegundos y segundos.
+
+## Lo que cuesta un índice
+
+No hay nada gratis:
+
+- **Escrituras más lentas**: cada `INSERT`, `UPDATE` o `DELETE` debe actualizar también todos los índices de la tabla.
+- **Espacio**: el índice ocupa disco y memoria.
+
+Por eso no se indexa "todo por si acaso": se indexan los campos por los que **filtras u ordenas con frecuencia**.
+
+## Índices únicos
+
+Además de acelerar, un índice puede **imponer una regla**: que no haya dos valores iguales.
+
+```sql
+CREATE UNIQUE INDEX idx_usuarios_email ON usuarios(email);
+```
+
+Esta plataforma usa uno en MongoDB sobre `(userId, sectionId)` en `section_progress`: es lo que garantiza que marcar una sección dos veces no cree dos documentos, incluso con peticiones simultáneas.
+
+## Índices compuestos: el orden importa
+
+Un índice puede cubrir varias columnas. Piensa en una guía telefónica ordenada por **apellido y luego nombre**:
+
+- Buscar "García" → rápido.
+- Buscar "García, Ana" → rápido.
+- Buscar solo "Ana" → **inútil**: los "Ana" están repartidos por toda la guía.
+
+```sql
+CREATE INDEX idx_usuario_fecha ON entrenos(usuario_id, fecha);
+
+EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE usuario_id = 42 ORDER BY fecha DESC;
+-- SEARCH entrenos USING INDEX idx_usuario_fecha (usuario_id=?)   ✅ filtra y ordena con el índice
+
+EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE fecha = '2026-03-01';
+-- SCAN entrenos                                                 ❌ fecha no es la primera columna
+```
+
+La regla general: un índice compuesto sirve para consultas que usan sus columnas **de izquierda a derecha**. En B5 verás la regla ESR, que lo concreta para MongoDB.
+
+## ¿Qué indexar?
+
+1. Lista las consultas **más frecuentes** de tu app.
+2. Mira por qué campos filtran (`WHERE`) y ordenan (`ORDER BY`).
+3. Crea índices para esos campos, en ese orden.
+4. **Comprueba** con `EXPLAIN` que se usan.
+
+Las claves primarias ya tienen índice automáticamente.
+
+## Errores comunes
+
+- **No tener índices** hasta que la app va lenta en producción.
+- **Indexar todas las columnas**: escrituras lentas y espacio desperdiciado.
+- **Un índice compuesto en el orden equivocado**, que no sirve para la consulta real.
+- **Suponer que se usa** sin comprobarlo con `EXPLAIN`.
+
+<Callout type="exercise">
+  1. Crea la tabla `entrenos` con 100 000 filas usando la consulta recursiva de esta sección. 2.
+  Mide con `.timer on` y `EXPLAIN QUERY PLAN` una consulta por `usuario_id` antes y después de crear
+  el índice. 3. Crea el índice compuesto `(usuario_id, fecha)` y comprueba qué consultas lo
+  aprovechan y cuáles no. 4. Lista las 3 consultas más frecuentes de tu app de entrenamiento y
+  decide qué índices necesitaría cada una.
+</Callout>
+
+<Callout type="mastery">
+  Sabes qué campos de tus consultas necesitan índice, en qué orden, y compruebas con `EXPLAIN` que
+  se usan.
+</Callout>
+
+## Resumen
+
+- Un índice es una estructura ordenada que evita recorrer toda la tabla.
+- Acelera lecturas, pero ralentiza escrituras y ocupa espacio.
+- Un índice único además impone que no haya duplicados.
+- En un índice compuesto, el orden de las columnas decide para qué consultas sirve.
+- `EXPLAIN` muestra si una consulta hace `SCAN` o `SEARCH … USING INDEX`.
