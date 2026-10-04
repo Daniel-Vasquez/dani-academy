@@ -1,0 +1,149 @@
+---
+sectionId: "B3.3"
+course: "B3"
+title: "HTTP a fondo"
+order: 3
+minutes: 60
+summary: "La anatomía de peticiones y respuestas, los métodos, los códigos de estado que de verdad usarás y las cabeceras clave."
+---
+
+HTTP es el idioma en el que hablan el navegador y tu servidor. Cada `fetch`, cada formulario y cada página es un intercambio HTTP. Cuando diseñes tus propias APIs (curso I3), elegirás métodos, códigos de estado y cabeceras; si los eliges bien, tu API se explica sola. Esta sección te da el vocabulario.
+
+## Anatomía de una petición y una respuesta
+
+HTTP es texto con una estructura fija:
+
+```http
+PUT /api/progress/B1.3 HTTP/1.1
+Host: academy.tudominio.com
+Origin: https://academy.tudominio.com
+Cookie: better-auth.session_token=…
+Content-Type: application/json
+
+{"read": true}
+```
+
+- **Línea inicial**: método (`PUT`), ruta (`/api/progress/B1.3`) y versión.
+- **Cabeceras**: pares `Nombre: valor` con información extra.
+- **Línea vacía**.
+- **Cuerpo** (opcional): los datos que envías.
+
+La respuesta tiene la misma forma, con un **código de estado** en la primera línea:
+
+```http
+HTTP/1.1 204 No Content
+Cache-Control: private, no-store
+```
+
+## Métodos
+
+| Método   | Intención                          | ¿Cuerpo? | ¿Idempotente?     |
+| -------- | ---------------------------------- | -------- | ----------------- |
+| `GET`    | Leer un recurso                    | No       | Sí                |
+| `POST`   | Crear o ejecutar una acción        | Sí       | **No**            |
+| `PUT`    | Reemplazar o establecer un recurso | Sí       | Sí                |
+| `PATCH`  | Modificar parte de un recurso      | Sí       | No necesariamente |
+| `DELETE` | Borrar un recurso                  | No       | Sí                |
+
+**Idempotente** significa que repetir la misma petición deja el servidor en el mismo estado que hacerla una vez. En esta plataforma, "marcar como leído" es `PUT /api/progress/B1.3`: marcarlo dos veces deja una sola marca. Enviar una evaluación es `POST`: cada envío crea un intento nuevo.
+
+`GET` debe ser **seguro**: nunca debería modificar nada. Los navegadores, buscadores y _prefetchers_ lo repiten libremente.
+
+## Códigos de estado
+
+El primer dígito indica la familia: **2xx** todo bien, **3xx** ve a otro sitio, **4xx** el cliente se equivocó, **5xx** falló el servidor.
+
+| Código                    | Significado                    | Ejemplo real                                     |
+| ------------------------- | ------------------------------ | ------------------------------------------------ |
+| 200 OK                    | Éxito con contenido            | `GET /temario`                                   |
+| 201 Created               | Recurso creado                 | `POST` que crea un usuario                       |
+| 204 No Content            | Éxito sin cuerpo               | `PUT /api/progress/B1.3`                         |
+| 301 / 308                 | Movido para siempre            | `http://` → `https://`                           |
+| 302 / 307                 | Redirección temporal           | Sin sesión → `/login?redirect=…`                 |
+| 304 Not Modified          | Usa tu copia en caché          | Revalidación con `ETag`                          |
+| 400 Bad Request           | Petición mal formada           | `PUT /api/progress/Z9.9`                         |
+| 401 Unauthorized          | No autenticado                 | Llamar a la API sin sesión                       |
+| 403 Forbidden             | Autenticado, pero no permitido | Evaluación bloqueada                             |
+| 404 Not Found             | No existe                      | `/cursos/xyz`                                    |
+| 409 Conflict              | Choca con el estado actual     | Guardar una versión que otro ya modificó         |
+| 422 Unprocessable         | Bien formada pero inválida     | Registrarse con un correo ya usado (Better Auth) |
+| 429 Too Many Requests     | Demasiadas peticiones          | Muchos logins fallidos seguidos                  |
+| 500 Internal Server Error | Error no controlado            | Una excepción sin capturar                       |
+| 503 Service Unavailable   | Servicio caído temporalmente   | `/api/health` sin MongoDB                        |
+
+La diferencia entre **401** y **403** es la más confundida: 401 = "no sé quién eres", 403 = "sé quién eres y no puedes".
+
+## Cabeceras clave
+
+| Cabecera                | Para qué                                                     |
+| ----------------------- | ------------------------------------------------------------ |
+| `Content-Type`          | Qué formato tiene el cuerpo: `application/json`, `text/html` |
+| `Accept`                | Qué formatos acepta el cliente                               |
+| `Authorization`         | Credenciales (por ejemplo, `Bearer <token>`)                 |
+| `Cookie` / `Set-Cookie` | Enviar y establecer cookies (sección B3.4)                   |
+| `Location`              | A dónde redirigir (con 3xx)                                  |
+| `Cache-Control`         | Cómo cachear la respuesta (sección B3.5)                     |
+| `Origin`                | Desde qué sitio se hace la petición                          |
+
+## JSON
+
+JSON es el formato estándar para intercambiar datos entre cliente y servidor:
+
+```ts
+// Cliente
+const res = await fetch("/api/progress/B1.3", { method: "PUT" });
+if (!res.ok) console.error(res.status); // res.ok es true para 200–299
+
+// Servidor (Astro)
+return Response.json({ error: "No autenticado" }, { status: 401 });
+```
+
+`Response.json()` serializa el objeto y pone `Content-Type: application/json` por ti.
+
+## Probar con `curl`
+
+```bash
+curl -i https://jsonplaceholder.typicode.com/posts/1                 # -i muestra las cabeceras
+curl -i -X POST https://jsonplaceholder.typicode.com/posts \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Hola","body":"Mundo","userId":1}'
+```
+
+```text
+HTTP/2 201
+content-type: application/json; charset=utf-8
+{ "title": "Hola", "body": "Mundo", "userId": 1, "id": 101 }
+```
+
+<Callout type="tip">
+  En la pestaña Network, clic derecho sobre una petición → *Copy* → *Copy as cURL* te da el comando
+  exacto para repetirla en la terminal.
+</Callout>
+
+## Errores comunes
+
+- **Devolver 200 con `{ "error": … }`.** El cliente cree que todo fue bien. Usa el código adecuado.
+- **Usar `GET` para acciones que modifican datos.** Un _prefetch_ puede ejecutarlas sin que nadie haga clic.
+- **Confundir 401 y 403.**
+- **Olvidar `Content-Type: application/json`** al enviar JSON: muchos servidores no sabrán leer el cuerpo.
+- **Responder 500 a errores del usuario.** Un dato inválido es un 400 o 422, no un fallo del servidor.
+
+<Callout type="exercise">
+  1. Abre la pestaña Network en tu app de entrenamiento e identifica 5 peticiones: método, ruta,
+  código de estado y `Content-Type`. 2. Repite una de ellas con *Copy as cURL* en la terminal. 3.
+  Completa una tabla con los códigos 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 409, 422,
+  429, 500 y 503, con un ejemplo de cuándo los usarías en tus propias apps. 4. Haz un `POST` y un
+  `PUT` con `curl` a `jsonplaceholder.typicode.com` y compara las respuestas.
+</Callout>
+
+<Callout type="mastery">
+  Eliges el método y el código de estado correctos al diseñar un endpoint y sabes explicar por qué.
+</Callout>
+
+## Resumen
+
+- Una petición: método, ruta, cabeceras y cuerpo; una respuesta: código, cabeceras y cuerpo.
+- `GET` lee sin modificar; `PUT` y `DELETE` son idempotentes; `POST` no.
+- 2xx éxito, 3xx redirección, 4xx error del cliente, 5xx error del servidor.
+- 401 = no autenticado; 403 = no permitido.
+- `curl -i` y la pestaña Network permiten ver y repetir cualquier petición.

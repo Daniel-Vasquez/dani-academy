@@ -1,0 +1,131 @@
+---
+sectionId: "B3.1"
+course: "B3"
+title: "Cliente, servidor y el viaje de una petición"
+order: 1
+minutes: 60
+summary: "Qué es un servidor, qué son las IP y los puertos, y todo lo que ocurre entre escribir una URL y ver la página."
+---
+
+Despliegas en Vercel, compras dominios en Namecheap y conectas tus apps a MongoDB Atlas. Todo funciona, pero entre "escribo la URL" y "veo la página" hay una cadena de pasos que hoy es invisible para ti. Cuando algo falla (un dominio que no resuelve, un certificado caducado, una API que tarda), saber **en qué eslabón** está el problema es media solución. Esta sección dibuja la cadena completa.
+
+## Cliente y servidor
+
+- Un **cliente** pide cosas: tu navegador, `curl`, la app del móvil, o tu propio servidor cuando llama a MongoDB.
+- Un **servidor** es un **programa** que espera peticiones y responde. También se llama "servidor" a la máquina donde corre, pero lo importante es el programa.
+
+Cuando ejecutas `npm run dev`, tu Mac pasa a ser un servidor: el programa de Astro espera peticiones en un puerto.
+
+Un mismo programa puede ser servidor y cliente a la vez: tu app de Astro **responde** al navegador y, para hacerlo, **pide** datos a MongoDB.
+
+## IP, puertos y localhost
+
+- Una **dirección IP** identifica una máquina en la red: `76.76.21.21`, o `2606:4700::6810` en IPv6.
+- Un **puerto** identifica **qué programa** de esa máquina atiende: es como el número de departamento dentro de un edificio.
+
+| Puerto | Uso habitual |
+| ------ | ------------ |
+| 80     | HTTP         |
+| 443    | HTTPS        |
+| 22     | SSH          |
+| 27017  | MongoDB      |
+| 4321   | `astro dev`  |
+
+`localhost` (o `127.0.0.1`) significa "esta misma máquina". `http://localhost:4321` es "el programa que escucha en el puerto 4321 de mi ordenador".
+
+Solo un programa puede escuchar en un puerto a la vez. Si está ocupado, Astro prueba el siguiente (4322, 4323…). Para saber quién lo ocupa:
+
+```bash
+lsof -i :4321
+```
+
+```text
+COMMAND  PID  USER   FD  TYPE  NODE NAME
+node    2495  dani   29u IPv6   TCP localhost:4321 (LISTEN)
+```
+
+## El viaje de una petición
+
+Escribes `https://academy.tudominio.com/temario` y pulsas Enter:
+
+1. **DNS**: el navegador pregunta qué IP corresponde a `academy.tudominio.com` (sección B3.2).
+2. **TCP**: abre una conexión con esa IP en el puerto 443.
+3. **TLS**: negocia el cifrado y comprueba el certificado del dominio (sección B3.5).
+4. **Petición HTTP**: envía `GET /temario` con sus cabeceras y cookies (sección B3.3).
+5. **Servidor**: Vercel recibe la petición, ejecuta tu función de Astro, el _middleware_ lee la cookie de sesión, consulta MongoDB y genera el HTML.
+6. **Respuesta HTTP**: código de estado, cabeceras y el HTML.
+7. **Renderizado**: el navegador lee el HTML, descubre que necesita CSS, JavaScript y fuentes, y hace **más peticiones** (repitiendo parte del viaje).
+8. **Interactividad**: se ejecuta el JavaScript de las islas (React) y la página responde a tus clics.
+
+Puedes ver gran parte de este viaje con `curl`:
+
+```bash
+curl -v https://example.com
+```
+
+```text
+* Host example.com:443 was resolved.           ← 1. DNS
+* Connected to example.com (93.184.215.14)     ← 2. TCP
+* SSL connection using TLSv1.3                 ← 3. TLS
+> GET / HTTP/2                                 ← 4. petición
+> Host: example.com
+< HTTP/2 200                                   ← 6. respuesta
+< content-type: text/html
+```
+
+Las líneas con `>` son lo que envía el cliente; las de `<`, lo que responde el servidor.
+
+## Estático, SSR y SPA
+
+¿Quién genera el HTML y cuándo? Hay tres modelos:
+
+| Modelo             | El HTML se genera…                                              | Ejemplo                                       |
+| ------------------ | --------------------------------------------------------------- | --------------------------------------------- |
+| **Estático (SSG)** | Una vez, al compilar. Se sirve el mismo archivo a todos         | Un blog, una landing                          |
+| **SSR**            | En el servidor, **en cada petición**                            | Dani Academy: cada página depende del usuario |
+| **SPA**            | En el navegador, con JavaScript, a partir de un HTML casi vacío | Muchas apps de React "clásicas"               |
+
+Astro puede hacer los dos primeros y mezclarlos; y con las islas, añade JavaScript solo donde hace falta. Esta plataforma usa `output: "server"`, porque cada página muestra el progreso de quien la visita.
+
+<Callout type="note">
+  Que una página sea SSR no significa que sea lenta: el servidor responde en decenas de
+  milisegundos. Lo que pesa de verdad suele ser el JavaScript y las imágenes que se descargan
+  después.
+</Callout>
+
+## La pestaña Network
+
+DevTools (`Cmd` + `Opción` + `I`) → **Network** muestra cada petición del paso 7: tipo, tamaño, tiempo y orden. Recarga la página con la pestaña abierta y fíjate en:
+
+- La primera fila: el documento HTML (_Doc_).
+- Los CSS, JS y fuentes que descubre después.
+- La columna **Waterfall**: qué peticiones se hacen en paralelo y cuáles esperan a otras.
+
+## Errores comunes
+
+- **"El servidor es la máquina."** El servidor es el programa; si se cae el proceso, la máquina sigue encendida pero no responde nadie.
+- **Confundir puerto ocupado con error de la app.** Si `astro dev` cambia de puerto, otro proceso tiene el tuyo: `lsof -i :4321`.
+- **Pensar que una página es "una petición".** Una página típica hace decenas: HTML, CSS, JS, fuentes, imágenes, APIs.
+- **Culpar al código de algo que falla antes**, en DNS o TLS. `curl -v` te dice en qué paso se corta.
+
+<Callout type="exercise">
+  1. Arranca tu app de Astro en local y localiza con `lsof -i :4321` (o el puerto que use) el
+  proceso que la sirve. 2. Ejecuta `curl -v` contra la URL de tu app en Vercel e identifica en la
+  salida los pasos de DNS, conexión, TLS, petición y respuesta. 3. Abre la pestaña Network en tu app
+  de entrenamiento, recarga y anota cuántas peticiones hace la página y cuál es la más pesada. 4.
+  Escribe en 10 pasos qué ocurre desde que escribes la URL de tu app hasta que puedes pulsar un
+  botón.
+</Callout>
+
+<Callout type="mastery">
+  Puedes explicar el viaje completo de una petición a alguien que no programa y señalar en qué paso
+  podría fallar cada problema típico.
+</Callout>
+
+## Resumen
+
+- El cliente pide y el servidor (un programa) responde.
+- La IP identifica la máquina; el puerto, el programa dentro de ella.
+- Una visita implica DNS, TCP, TLS, petición, respuesta y renderizado, y muchas peticiones más.
+- `curl -v` y la pestaña Network muestran ese viaje.
+- Estático, SSR y SPA se diferencian en quién genera el HTML y cuándo.

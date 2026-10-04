@@ -1,0 +1,147 @@
+---
+sectionId: "B3.5"
+course: "B3"
+title: "CORS, HTTPS y caché"
+order: 5
+minutes: 60
+summary: "Por qué falla un fetch a otro dominio, cómo protege HTTPS tus datos y cómo la caché hace que tu web vuele."
+---
+
+Tres temas que suelen aparecer como errores misteriosos: un `fetch` que funciona en Postman pero falla en el navegador (CORS), un candado que avisa de "conexión no segura" (HTTPS) y cambios que "no se ven" después de desplegar (caché). Los tres tienen una lógica clara que vas a entender en esta sección.
+
+## Same-Origin Policy
+
+Un **origen** es la combinación de **protocolo + dominio + puerto**:
+
+```text
+https://academy.tudominio.com:443
+└─┬──┘ └────────┬───────────┘ └┬┘
+protocolo     dominio        puerto
+```
+
+Por seguridad, el navegador aplica la **Same-Origin Policy**: el JavaScript de una página solo puede **leer las respuestas** de peticiones a su propio origen. Si no existiera, cualquier web que visitaras podría hacer `fetch` a tu banco con tus cookies y leer tus datos.
+
+Estos son orígenes distintos de `https://academy.tudominio.com`:
+
+- `http://academy.tudominio.com` (otro protocolo)
+- `https://api.tudominio.com` (otro subdominio)
+- `http://localhost:4321` (todo distinto)
+
+## CORS: permitir orígenes concretos
+
+**CORS** (_Cross-Origin Resource Sharing_) es la forma en que un servidor dice "acepto que este otro origen lea mis respuestas":
+
+```http
+Access-Control-Allow-Origin: https://academy.tudominio.com
+```
+
+El error típico en la consola:
+
+```text
+Access to fetch at 'https://api.otrodominio.com/datos' from origin
+'http://localhost:4321' has been blocked by CORS policy: No
+'Access-Control-Allow-Origin' header is present on the requested resource.
+```
+
+Claves para entenderlo:
+
+- **Lo bloquea el navegador**, no el servidor. Por eso la misma petición funciona con `curl` o Postman: no aplican la política.
+- **Se arregla en el servidor** que recibe la petición, añadiendo las cabeceras. Desde el cliente no se puede "desactivar".
+- Para peticiones "no simples" (por ejemplo `PUT` o `Content-Type: application/json`), el navegador envía antes una petición **`OPTIONS` de comprobación** (_preflight_) y solo continúa si la respuesta lo permite.
+
+```ts
+// Endpoint de Astro que permite que otro origen lea la respuesta
+export const GET: APIRoute = () =>
+  Response.json(
+    { ok: true },
+    { headers: { "Access-Control-Allow-Origin": "https://academy.tudominio.com" } },
+  );
+```
+
+<Callout type="note">
+  Si el frontend y la API están en el mismo origen (como en Dani Academy, donde Astro sirve ambos),
+  no necesitas CORS en absoluto. Es una de las ventajas de tener los endpoints dentro del mismo
+  proyecto.
+</Callout>
+
+### CORS no es protección contra CSRF
+
+CORS impide **leer** respuestas de otro origen, pero el navegador puede **enviar** ciertas peticiones igualmente: las "simples", como un formulario HTML que hace `POST` a tu web desde otra, no pasan por _preflight_. Por eso existen protecciones adicionales: la cookie `SameSite` (sección B3.4) y la comprobación de origen de Astro (`security.checkOrigin`, activa por defecto), que rechaza con **403** los `POST`, `PUT`, `PATCH` o `DELETE` de otro origen que llegan sin cuerpo o con tipo de formulario (`application/x-www-form-urlencoded`, `multipart/form-data` o `text/plain`). Las de otro origen con JSON ya las frena el _preflight_ de CORS.
+
+## HTTPS y TLS
+
+HTTPS es HTTP dentro de un canal cifrado con **TLS**. Garantiza tres cosas:
+
+1. **Confidencialidad**: nadie en medio (la Wi-Fi del café) puede leer el tráfico.
+2. **Integridad**: nadie puede modificar la página por el camino.
+3. **Autenticidad**: hablas de verdad con `academy.tudominio.com` y no con un impostor.
+
+La tercera se basa en un **certificado**: un documento que dice "esta clave pertenece a este dominio", firmado por una **autoridad de certificación** en la que el navegador confía. **Let's Encrypt** emite certificados gratuitos y automáticos; es lo que usan Vercel y la mayoría de _hostings_ por debajo. Duran 90 días y se renuevan solos.
+
+```bash
+curl -vI https://academy.tudominio.com 2>&1 | grep -E "subject|issuer|expire"
+```
+
+Errores típicos: certificado caducado, emitido para otro dominio (`www` vs raíz) o contenido mixto (una página HTTPS que carga recursos por `http://`).
+
+## Caché HTTP
+
+La forma más rápida de responder una petición es **no hacerla**. `Cache-Control` indica quién puede guardar una respuesta y cuánto tiempo:
+
+| Valor                                 | Significado                                         |
+| ------------------------------------- | --------------------------------------------------- |
+| `public, max-age=3600`                | Cualquiera (navegador y CDN) puede guardarla 1 hora |
+| `public, max-age=31536000, immutable` | Un año, y no cambiará nunca                         |
+| `s-maxage=60`                         | Tiempo solo para cachés compartidas (CDN)           |
+| `private`                             | Solo el navegador del usuario, nunca la CDN         |
+| `no-store`                            | No guardar en ningún sitio                          |
+
+En esta plataforma:
+
+- Los archivos de `/_astro/` (CSS y JS) llevan `max-age=31536000, immutable`. Es seguro porque su nombre incluye un _hash_ del contenido (`Quiz.BbdQaIp4.js`): si cambian, cambia el nombre.
+- `/api/health` responde con `no-store`, porque debe reflejar el estado real en cada llamada.
+- Las páginas con datos del usuario **nunca** deben quedar en una caché compartida, o otro usuario podría ver tu progreso.
+
+### ETag y 304
+
+El servidor puede enviar un identificador de versión:
+
+```http
+HTTP/1.1 200 OK
+ETag: "a1b2c3"
+```
+
+La próxima vez, el navegador pregunta "¿ha cambiado?" con `If-None-Match: "a1b2c3"`. Si no cambió, el servidor responde **304 Not Modified** sin cuerpo, y el navegador usa su copia.
+
+### CDN
+
+Una CDN (como la _Edge Network_ de Vercel) guarda copias de tus respuestas en servidores repartidos por el mundo, cerca de tus usuarios. Lo estático se sirve desde la CDN; lo dinámico llega a tu función.
+
+## Errores comunes
+
+- **Intentar arreglar CORS en el cliente** (con `mode: "no-cors"` o extensiones del navegador). Se arregla en el servidor.
+- **`Access-Control-Allow-Origin: *` con credenciales.** El navegador lo rechaza; y abrir la API a todos rara vez es lo que quieres.
+- **Cachear en la CDN respuestas privadas.**
+- **Recursos `http://` en páginas `https://`** (contenido mixto).
+- **Cachear archivos sin _hash_ en el nombre** durante mucho tiempo: los usuarios no verán tus cambios.
+
+<Callout type="exercise">
+  1. Desde una página en `localhost`, haz un `fetch` a una API que no tenga CORS habilitado, lee el
+  error en la consola y explica qué ha pasado. 2. Repite la misma petición con `curl` y explica por
+  qué ahí sí funciona. 3. Inspecciona con `curl -I` las cabeceras `cache-control` de un archivo de
+  `/_astro/` de tu app en Vercel y de una página HTML. 4. Con `curl -vI`, identifica quién emitió el
+  certificado de tu dominio y cuándo caduca.
+</Callout>
+
+<Callout type="mastery">
+  Puedes diagnosticar un error de CORS sin buscarlo en internet, sabes qué garantiza HTTPS y decides
+  qué respuestas se pueden cachear y cuáles no.
+</Callout>
+
+## Resumen
+
+- Un origen es protocolo + dominio + puerto; el navegador aísla los orígenes.
+- CORS lo aplica el navegador y se configura en el servidor que responde.
+- HTTPS cifra, protege la integridad y autentica al servidor con un certificado.
+- `Cache-Control` decide quién guarda una respuesta y cuánto tiempo; lo privado, nunca en la CDN.
+- `ETag` y 304 permiten revalidar sin volver a descargar.

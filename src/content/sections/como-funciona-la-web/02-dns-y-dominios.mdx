@@ -1,0 +1,127 @@
+---
+sectionId: "B3.2"
+course: "B3"
+title: "DNS y dominios"
+order: 2
+minutes: 60
+summary: "Cómo se traduce un dominio a una IP, qué significa cada tipo de registro y qué haces realmente al conectar Namecheap con Vercel."
+---
+
+Compras un dominio en Namecheap, copias un par de valores que te da Vercel y, al rato, tu web funciona. Ese "al rato" y esos valores tienen explicación. El **DNS** es la agenda telefónica de internet, y entenderlo te permite configurar dominios sin seguir un tutorial y diagnosticar por qué un dominio "no carga".
+
+## Qué resuelve el DNS
+
+Los ordenadores se comunican con IP, pero las personas recordamos nombres. El DNS (_Domain Name System_) traduce:
+
+```text
+academy.tudominio.com  ──DNS──▶  76.76.21.21
+```
+
+La consulta no va a un único sitio. Es una cadena de servidores, cada uno responsable de una parte del nombre:
+
+1. Tu ordenador pregunta a un **resolvedor** (el de tu proveedor de internet, `1.1.1.1` o `8.8.8.8`).
+2. El resolvedor pregunta a los servidores **raíz**: "¿quién lleva `.com`?".
+3. Los servidores de `.com` responden: "`tudominio.com` lo llevan los _nameservers_ de Namecheap".
+4. Los _nameservers_ de tu dominio dan la respuesta final.
+
+El resolvedor **guarda la respuesta en caché** durante un tiempo, para no repetir el viaje.
+
+## Tipos de registro
+
+En el panel DNS de tu dominio (en Namecheap, _Advanced DNS_) defines **registros**. Los que usarás:
+
+| Registro | Apunta a             | Uso                                                   |
+| -------- | -------------------- | ----------------------------------------------------- |
+| `A`      | Una IPv4             | `tudominio.com → 76.76.21.21`                         |
+| `AAAA`   | Una IPv6             | Lo mismo con direcciones IPv6                         |
+| `CNAME`  | **Otro nombre**      | `www → cname.vercel-dns.com`                          |
+| `MX`     | Servidores de correo | Para recibir email en `@tudominio.com`                |
+| `TXT`    | Texto libre          | Verificar que el dominio es tuyo, SPF para el correo… |
+| `NS`     | _Nameservers_        | Quién responde por el dominio                         |
+
+### A vs CNAME
+
+- Un `A` dice "esta es la IP".
+- Un `CNAME` dice "pregunta por este otro nombre". Útil cuando la IP la gestiona otro (Vercel puede cambiarla sin que toques nada).
+
+Una restricción importante: el dominio raíz (`tudominio.com`, sin subdominio, también llamado _apex_) **no puede** ser un `CNAME`. Por eso Vercel te pide un registro `A` para la raíz y un `CNAME` para los subdominios.
+
+## TTL y "propagación"
+
+Cada registro tiene un **TTL** (_Time To Live_): los segundos durante los que los resolvedores pueden guardar la respuesta en caché.
+
+```text
+academy.tudominio.com.  1800  IN  CNAME  cname.vercel-dns.com.
+                        ^^^^ TTL: 30 minutos
+```
+
+Cuando cambias un registro, los resolvedores que ya tenían la respuesta antigua la siguen usando **hasta que expira su TTL**. A esto se le llama, no muy exactamente, "propagación": no hay nada que se propague, solo cachés que caducan. Truco: **baja el TTL** unas horas antes de un cambio importante.
+
+## Lo que haces al conectar Namecheap con Vercel
+
+```text
+Namecheap (Advanced DNS)
+  A      @         76.76.21.21              ← la raíz apunta a la IP de Vercel
+  CNAME  www       cname.vercel-dns.com     ← www apunta a un nombre de Vercel
+  CNAME  academy   cname.vercel-dns.com     ← un subdominio para Dani Academy
+```
+
+- `@` significa "el propio dominio".
+- Los valores exactos los muestra Vercel en _Settings → Domains_: copia siempre los que te indique, porque pueden ser distintos para tu proyecto.
+- Vercel comprueba que el registro existe, marca el dominio como válido y **emite el certificado HTTPS** automáticamente.
+
+## Subdominios
+
+Un subdominio es solo otro nombre bajo tu dominio: `academy.tudominio.com`, `planner.tudominio.com`. Cada uno puede apuntar a un sitio distinto (un proyecto de Vercel, un VPS, otro servicio), y no cuestan nada extra.
+
+## Consultar el DNS con `dig`
+
+`dig` (incluido en macOS) pregunta directamente al DNS:
+
+```bash
+dig +short tudominio.com A
+dig +short academy.tudominio.com CNAME
+dig tudominio.com NS
+dig +short tudominio.com MX
+```
+
+```text
+$ dig academy.tudominio.com
+;; ANSWER SECTION:
+academy.tudominio.com.  1799  IN  CNAME  cname.vercel-dns.com.
+cname.vercel-dns.com.   1799  IN  A      76.76.21.21
+```
+
+Para saltarte cachés locales, pregunta a un resolvedor concreto: `dig @1.1.1.1 tudominio.com`.
+
+<Callout type="tip">
+  Si un dominio nuevo "no funciona", primero `dig`. Si `dig` ya devuelve la IP correcta, el problema
+  no es el DNS: está en el servidor, el certificado o la caché de tu navegador.
+</Callout>
+
+## Errores comunes
+
+- **Poner un `CNAME` en la raíz.** No está permitido; usa el registro `A` que indique el proveedor.
+- **Dejar registros antiguos** que contradicen los nuevos (dos `A` para el mismo nombre apuntando a sitios distintos).
+- **Cambiar los _nameservers_** sin querer al seguir un tutorial: entonces Namecheap deja de mandar y tus registros allí no sirven.
+- **Esperar resultados inmediatos** con un TTL alto.
+
+<Callout type="exercise">
+  1. Ejecuta `dig` sobre tus dominios (raíz, `www` y subdominios) y documenta en una tabla cada
+  registro, su tipo, su valor, su TTL y por qué existe. 2. Compara la respuesta de `dig @1.1.1.1` y
+  `dig @8.8.8.8` para el mismo nombre. 3. Identifica qué *nameservers* tiene cada dominio con `dig
+  NS`. 4. Dibuja el camino de una consulta DNS de tu subdominio, desde tu Mac hasta la IP de Vercel.
+</Callout>
+
+<Callout type="mastery">
+  Puedes configurar un dominio o subdominio nuevo hacia Vercel sin seguir un tutorial y diagnosticar
+  con `dig` si un problema es del DNS o no.
+</Callout>
+
+## Resumen
+
+- El DNS traduce nombres en IP mediante una cadena de servidores con caché.
+- `A` → IP; `CNAME` → otro nombre; `MX` → correo; `TXT` → verificaciones; `NS` → quién manda.
+- La raíz del dominio no puede ser `CNAME`.
+- El TTL decide cuánto tardan en verse los cambios.
+- `dig` es la herramienta para comprobar qué responde realmente el DNS.

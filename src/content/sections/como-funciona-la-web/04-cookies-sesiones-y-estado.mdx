@@ -1,0 +1,119 @@
+---
+sectionId: "B3.4"
+course: "B3"
+title: "Cookies, sesiones y estado"
+order: 4
+minutes: 60
+summary: "Cómo recuerda el servidor quién eres si HTTP no tiene memoria: cookies, sus atributos de seguridad y sesiones frente a tokens."
+---
+
+Cada petición HTTP llega al servidor **sin memoria** de las anteriores. Y sin embargo, después de iniciar sesión, el servidor sabe quién eres en cada clic. El truco son las **cookies**. En esta sección vas a ver exactamente qué cookie usa Better Auth en tus proyectos, qué significa cada uno de sus atributos y por qué están ahí.
+
+## HTTP no tiene estado
+
+Para el servidor, la petición número 50 de tu sesión es tan desconocida como la primera. HTTP es _stateless_: cada petición debe llevar consigo todo lo necesario para atenderla.
+
+¿Cómo sabe entonces que eres tú? Porque el navegador **adjunta automáticamente** un dato que el servidor le dio al iniciar sesión.
+
+## Cookies
+
+Una cookie es un pequeño valor que el **servidor pide guardar** al navegador con la cabecera `Set-Cookie`:
+
+```http
+HTTP/1.1 200 OK
+Set-Cookie: better-auth.session_token=abc123…; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000
+```
+
+A partir de ahí, el navegador la **envía en cada petición** a ese dominio:
+
+```http
+GET /temario HTTP/1.1
+Cookie: better-auth.session_token=abc123…
+```
+
+En Dani Academy, el _middleware_ lee esa cookie en cada petición y llama a Better Auth para saber qué usuario es (`Astro.locals.user`).
+
+## Los atributos, uno a uno
+
+| Atributo              | Qué hace                                                    | Por qué importa                                              |
+| --------------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
+| `HttpOnly`            | JavaScript **no** puede leerla (`document.cookie` no la ve) | Si alguien inyecta un script (XSS), no puede robar tu sesión |
+| `Secure`              | Solo se envía por HTTPS                                     | Nadie la lee en una red Wi-Fi pública                        |
+| `SameSite=Lax`        | No se envía en peticiones `POST` desde **otros** sitios     | Protege contra CSRF (que otra web actúe en tu nombre)        |
+| `Max-Age` / `Expires` | Cuándo caduca                                               | Sin ellos, desaparece al cerrar el navegador                 |
+| `Path`                | Para qué rutas se envía                                     | `/` = todo el sitio                                          |
+| `Domain`              | Para qué (sub)dominios                                      | Sin él, solo el dominio exacto que la creó                   |
+
+`SameSite` tiene tres valores: `Strict` (nunca desde otros sitios, ni siquiera al seguir un enlace), `Lax` (sí al navegar con enlaces, no en `POST` ni `fetch` desde otros sitios) y `None` (siempre, y exige `Secure`). `Lax` es el equilibrio habitual.
+
+<Callout type="note">
+  En local, la cookie de esta app no lleva `Secure` porque `localhost` usa HTTP. En producción, con
+  HTTPS, Better Auth la marca como `Secure` y añade el prefijo `__Secure-` a su nombre
+  (`__Secure-better-auth.session_token`): el navegador rechaza cualquier cookie con ese prefijo que
+  no venga por HTTPS.
+</Callout>
+
+## Sesión en servidor vs token
+
+Hay dos grandes formas de usar ese dato:
+
+**Sesión en servidor** (lo que hace Better Auth): la cookie contiene un identificador aleatorio; los datos de la sesión están en la base de datos (colección `session` en MongoDB).
+
+- ✅ Cerrar sesión es inmediato: se borra el documento y la cookie deja de valer.
+- ✅ Puedes ver y revocar las sesiones activas.
+- ❌ Hay que consultar la base de datos (Better Auth lo suaviza con una caché firmada de unos minutos: `cookieCache`).
+
+**Token autocontenido (JWT)**: el propio valor contiene los datos del usuario, firmados para que no se puedan alterar.
+
+- ✅ El servidor no consulta la base de datos para validarlo.
+- ❌ No se puede revocar antes de que caduque (salvo con listas negras, que reintroducen la consulta).
+- ❌ Suele guardarse en `localStorage`, donde un script inyectado sí puede leerlo.
+
+Para una app web como esta, la sesión en servidor con cookie `HttpOnly` es la opción más sencilla y segura.
+
+## `localStorage` vs cookies
+
+|                           | Cookie                   | `localStorage`           |
+| ------------------------- | ------------------------ | ------------------------ |
+| ¿Se envía al servidor?    | Sí, automáticamente      | No                       |
+| ¿JavaScript puede leerla? | Solo si no es `HttpOnly` | Siempre                  |
+| Tamaño                    | ~4 KB                    | ~5 MB                    |
+| Uso típico                | Sesión, autenticación    | Preferencias de interfaz |
+
+Esta plataforma guarda en `localStorage` solo el tema claro/oscuro (`da-theme`): si alguien lo leyera, no ganaría nada. La sesión va en una cookie `HttpOnly`.
+
+## Verlas en DevTools
+
+DevTools → **Application** → **Cookies** muestra cada cookie con sus atributos. La columna _HttpOnly_ marcada significa que ni tú desde la consola puedes leerla:
+
+```js
+document.cookie; // "" → la cookie de sesión no aparece: es HttpOnly
+```
+
+## Errores comunes
+
+- **Guardar tokens de sesión en `localStorage`.** Cualquier XSS los roba.
+- **Cookies de sesión sin `HttpOnly` o sin `Secure`** en producción.
+- **`SameSite=None` "para que funcione"** sin entender que abre la puerta al CSRF.
+- **Creer que borrar la cookie en el navegador cierra la sesión en el servidor.** Con sesiones en servidor, el documento sigue existiendo hasta que caduca o se borra.
+
+<Callout type="exercise">
+  1. Inicia sesión en tu app de entrenamiento y, en DevTools → Application → Cookies, documenta cada
+  cookie y sus atributos. 2. Ejecuta `document.cookie` en la consola y explica por qué no aparece la
+  cookie de sesión. 3. Abre MongoDB Compass y localiza tu documento en la colección `session`.
+  Cierra sesión y comprueba que desaparece. 4. Explica con tus palabras qué ataque impediría cada
+  atributo si faltara: `HttpOnly`, `Secure` y `SameSite`.
+</Callout>
+
+<Callout type="mastery">
+  Entiendes cómo sabe tu servidor quién eres en cada petición y puedes justificar cada atributo de
+  una cookie de sesión.
+</Callout>
+
+## Resumen
+
+- HTTP no tiene memoria: el navegador envía una cookie en cada petición.
+- `Set-Cookie` la crea; el navegador la devuelve automáticamente.
+- `HttpOnly` frena el robo por XSS, `Secure` exige HTTPS y `SameSite` frena el CSRF.
+- Sesión en servidor = identificador en la cookie + datos en la base de datos; revocable al instante.
+- La sesión, en cookie `HttpOnly`; `localStorage`, solo para datos no sensibles.
