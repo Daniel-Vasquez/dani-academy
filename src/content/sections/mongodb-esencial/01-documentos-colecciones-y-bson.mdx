@@ -1,0 +1,141 @@
+---
+sectionId: "B5.1"
+course: "B5"
+title: "Documentos, colecciones y BSON"
+order: 1
+minutes: 60
+summary: "Cómo organiza MongoDB los datos, qué es BSON, qué contiene un ObjectId y cómo explorar tu clúster con mongosh y Compass."
+---
+
+Llevas tiempo guardando datos en MongoDB Atlas desde tus apps, pero probablemente siempre a través de código copiado. En este curso vas a dominar la herramienta que más usas. Empezamos por lo básico de verdad: cómo están organizados tus datos y en qué se diferencian de un objeto de JavaScript.
+
+## La jerarquía
+
+```text
+Clúster (Atlas)
+└── Base de datos: dani_academy
+    ├── Colección: user
+    ├── Colección: section_progress
+    │   ├── Documento { userId: "…", sectionId: "B1.3", … }
+    │   └── Documento { … }
+    └── Colección: study_sessions
+```
+
+- **Clúster**: los servidores de MongoDB (en Atlas, un _replica set_ de tres nodos).
+- **Base de datos**: un espacio con nombre dentro del clúster. Puedes tener varias (una por proyecto o por entorno).
+- **Colección**: un grupo de documentos, equivalente a una tabla.
+- **Documento**: un registro, con forma de objeto JSON.
+
+Las bases de datos y colecciones se crean solas la primera vez que insertas algo en ellas.
+
+## Documentos
+
+```js
+{
+  _id: ObjectId("6ac198dded8fd13366c7b66f"),
+  userId: "u1",
+  tipo: "running",
+  km: 5.2,
+  fecha: ISODate("2026-10-01T07:00:00Z"),
+  tags: ["mañana", "suave"],
+  ritmo: { min: 5, seg: 40 }
+}
+```
+
+- Cada documento tiene un **`_id`** único en su colección. Si no lo pones, se genera.
+- Pueden tener **arrays** y **objetos anidados**: un documento puede contener toda la información de un "día de entreno" sin repartirla en tablas.
+- Los documentos de una colección **no tienen por qué** tener los mismos campos. Que se pueda no significa que convenga: tu código espera una forma concreta, y por eso validamos (lo verás en I4).
+
+## BSON: más tipos que JSON
+
+MongoDB no guarda JSON, sino **BSON** (_Binary JSON_): un formato binario con más tipos.
+
+| Tipo BSON                                      | En JavaScript  | Por qué importa                         |
+| ---------------------------------------------- | -------------- | --------------------------------------- |
+| `ObjectId`                                     | `ObjectId`     | Identificador único con fecha incluida  |
+| `Date`                                         | `Date`         | Fechas reales, comparables y ordenables |
+| `Int32` / `Double`                             | `number`       | Enteros y decimales                     |
+| `Decimal128`                                   | `Decimal128`   | Decimales exactos (dinero)              |
+| `Boolean`, `String`, `Array`, `Object`, `null` | los de siempre |                                         |
+
+JSON no tiene fechas: una fecha en JSON es solo un texto. En BSON es un tipo propio, y eso permite consultar "entrenos desde el 1 de octubre" correctamente (B5.5).
+
+## ObjectId por dentro
+
+Un `ObjectId` son 12 bytes que se escriben como 24 caracteres hexadecimales:
+
+```text
+6ac198dd  ed8fd13366  c7b66f
+└──┬───┘  └───┬────┘  └─┬──┘
+ fecha    aleatorio   contador
+(segundos)
+```
+
+- Se genera **en tu aplicación** (en el driver), sin preguntar al servidor.
+- Incluye la **fecha de creación**: `oid.getTimestamp()` te la devuelve.
+- Los `ObjectId` creados más tarde son "mayores": ordenar por `_id` es casi ordenar por fecha de creación.
+
+## Explorar: mongosh y Compass
+
+**MongoDB Compass** es la aplicación gráfica oficial: conectas con tu URI y navegas por bases de datos, colecciones, documentos e índices. Es la forma más rápida de ver qué hay realmente guardado.
+
+**mongosh** es la consola. Se instala con `brew install mongosh`:
+
+```bash
+mongosh "mongodb+srv://cluster0.xxxxx.mongodb.net/" --username academy_app
+```
+
+```js
+use dani_academy                    // cambia de base de datos
+show collections
+db.section_progress.find().limit(3)
+db.section_progress.countDocuments({ userId: "6ac1…" })
+db.user.findOne({}, { email: 1, name: 1 })
+```
+
+<Callout type="warning">
+  En mongosh tienes acceso total a los datos reales. Antes de un `deleteMany` o un `updateMany`,
+  ejecuta un `find` con el mismo filtro y comprueba qué documentos afectará.
+</Callout>
+
+## Las colecciones que crea Better Auth
+
+En tu app de entrenamiento (y en esta plataforma), Better Auth crea sus propias colecciones:
+
+| Colección      | Contenido                                                                                                          |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `user`         | Nombre, correo, `emailVerified`, fechas                                                                            |
+| `session`      | Un documento por sesión activa: `token`, `userId`, `expiresAt`                                                     |
+| `account`      | Cómo se autentica cada usuario; con correo y contraseña, `providerId: "credential"` y el **hash** de la contraseña |
+| `verification` | Códigos temporales (no se usan si no hay verificación de correo)                                                   |
+
+Fíjate en que `account.password` nunca es la contraseña: es un _hash_ con forma `sal:hash`.
+
+## Errores comunes
+
+- **Confundir base de datos y clúster.** Tu URI conecta con el clúster; el nombre de la base de datos se elige en el código (`MONGODB_DB`).
+- **Escribir sin querer en la base de datos equivocada** porque falta el nombre y se usa la de por defecto (`test`).
+- **Guardar fechas como texto** porque "en JSON son texto".
+- **Tratar la flexibilidad del esquema como permiso para el desorden.** Cada colección debe tener una forma clara.
+
+<Callout type="exercise">
+  1. Instala MongoDB Compass y conéctate a tu clúster de Atlas. 2. Explora la base de datos de tu
+  app de entrenamiento: anota qué colecciones hay, cuántos documentos tiene cada una y la forma de
+  un documento típico. 3. Localiza las colecciones de Better Auth (`user`, `session`, `account`) y
+  comprueba que `account.password` es un *hash*. 4. Instala `mongosh`, conéctate y repite tres
+  consultas de esta sección. 5. Toma un `_id` cualquiera y obtén su fecha de creación con
+  `getTimestamp()`.
+</Callout>
+
+<Callout type="mastery">
+  Sabes qué es un `ObjectId` y qué información contiene, y puedes explorar cualquier colección de
+  tus proyectos con Compass o mongosh.
+</Callout>
+
+## Resumen
+
+- Clúster → base de datos → colección → documento.
+- Los documentos son objetos tipo JSON con `_id`, arrays y objetos anidados.
+- BSON añade tipos que JSON no tiene: `ObjectId`, `Date`, `Decimal128`…
+- Un `ObjectId` incluye su fecha de creación y lo genera el driver.
+- Compass y mongosh te permiten ver qué hay realmente guardado.

@@ -1,0 +1,161 @@
+---
+sectionId: "B5.5"
+course: "B5"
+title: "Fechas, ObjectId y errores comunes"
+order: 5
+minutes: 60
+summary: "Guardar fechas como Date y mostrarlas en tu zona horaria, trabajar con ObjectId desde las URLs y entender los errores más habituales."
+---
+
+Tres fuentes de bugs que aparecen tarde o temprano en cualquier proyecto con MongoDB: fechas guardadas como texto, identificadores que llegan como string desde una URL y errores con códigos misteriosos. Esta sección los resuelve con lo que ya has visto funcionar en esta plataforma.
+
+## Fechas: siempre `Date`
+
+```ts
+// ❌ Texto
+await col.insertOne({ userId: "u3", fecha: "2026-10-05" });
+
+// ✅ Date
+await col.insertOne({ userId: "u3", fecha: new Date("2026-10-05T18:00:00Z") });
+```
+
+Con texto, las consultas por rango **no funcionan** cuando las comparas con fechas:
+
+```ts
+await col.countDocuments({ userId: "u3", fecha: { $gte: new Date("2026-01-01") } });
+// 0  ← el documento con fecha en texto no aparece
+```
+
+MongoDB no compara textos con fechas: son tipos distintos. Además, con `Date` puedes ordenar, agrupar por día o mes (`$dateToString`, `$dateTrunc`) y calcular duraciones.
+
+### Zonas horarias: UTC en la base de datos, local en la interfaz
+
+Un `Date` representa **un instante**; MongoDB lo guarda en UTC. La zona horaria solo importa al **mostrar** o al **agrupar por días**:
+
+```ts
+// Mostrar en la zona del usuario
+new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Mexico_City" })
+  .format(doc.fecha);
+
+// Agrupar por día en esa zona (en una agregación)
+{ $dateToString: { format: "%Y-%m-%d", date: "$startedAt", timezone: "America/Mexico_City" } }
+```
+
+<Callout type="note">
+  Así funciona la página `/progreso` de esta plataforma: una sesión a las 23:30 de Ciudad de México
+  (las 05:30 UTC del día siguiente) cuenta en **su** día gracias a `timezone` en la agregación. Sin
+  él, caería en el día siguiente.
+</Callout>
+
+### Migrar fechas guardadas como texto
+
+```ts
+const conTexto = await col.find({ fecha: { $type: "string" } }).toArray();
+for (const doc of conTexto) {
+  await col.updateOne({ _id: doc._id }, { $set: { fecha: new Date(doc.fecha) } });
+}
+```
+
+`$type: "string"` encuentra los documentos cuyo campo es texto. Pruébalo primero en una copia o con pocos documentos.
+
+## ObjectId desde una URL
+
+Una ruta como `/notas/6ac198dded8fd13366c7b66f` te da el identificador como **texto**. Para buscarlo, conviértelo:
+
+```ts
+import { ObjectId } from "mongodb";
+
+export function toObjectId(id: string): ObjectId | null {
+  return ObjectId.isValid(id) ? ObjectId.createFromHexString(id) : null;
+}
+
+const _id = toObjectId(params.id ?? "");
+if (!_id) return new Response("Identificador no válido", { status: 400 });
+const nota = await notas.findOne({ _id });
+```
+
+Si conviertes un texto inválido sin comprobar, el driver lanza:
+
+```text
+BSONError: input must be a 24 character hex string, 12 byte Uint8Array, or an integer
+```
+
+Sin la validación, eso sería un **500** en lugar de un **400**.
+
+### Comparar ObjectId
+
+Un `ObjectId` es un objeto, así que `===` compara referencias, no valores:
+
+```ts
+const a = new ObjectId("6ac198dded8fd13366c7b66f");
+const b = new ObjectId("6ac198dded8fd13366c7b66f");
+a === b; // false
+a.equals(b); // true
+a.toHexString() === "6ac198dded8fd13366c7b66f"; // true
+```
+
+### Enviar documentos al cliente
+
+`JSON.stringify` convierte un `ObjectId` en su texto hexadecimal, pero tus tipos siguen diciendo `ObjectId`. Para APIs y componentes, es más claro **mapear** el documento a un objeto propio:
+
+```ts
+const dto = { id: doc._id.toHexString(), titulo: doc.titulo, fecha: doc.fecha.toISOString() };
+```
+
+<Callout type="tip">
+  Esta plataforma evita el problema guardando `userId` como **texto** (el `id` que da la sesión de
+  Better Auth): nunca hay que convertir ni comparar ObjectId para filtrar por usuario.
+</Callout>
+
+## Errores habituales y su causa
+
+| Error                                                                                | Causa                                                                  | Qué hacer                                                                         |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `E11000 duplicate key error … index: userId_1_cursoId_1 dup key: …` (código `11000`) | Insertar un valor repetido en un índice único                          | Esperado con upserts simultáneos; en otro caso, es un dato duplicado real (→ 409) |
+| `MongoServerSelectionError` / _timeout_                                              | No llega al clúster: IP no permitida en Atlas, URI incorrecta, sin red | Revisar _Network Access_ en Atlas y la URI                                        |
+| `bad auth : authentication failed`                                                   | Usuario o contraseña incorrectos en la URI                             | Revisar el usuario de base de datos (no el de tu cuenta de Atlas)                 |
+| `BSONError: input must be a 24 character hex string…`                                | `new ObjectId()` con un texto inválido                                 | Validar con `ObjectId.isValid`                                                    |
+| `Document failed validation` (código `121`)                                          | El documento no cumple el `$jsonSchema` de la colección                | Corregir el dato; el validador está haciendo su trabajo                           |
+
+Para capturar un error concreto:
+
+```ts
+import { MongoServerError } from "mongodb";
+
+try {
+  await usuarios.insertOne(datos);
+} catch (error) {
+  if (error instanceof MongoServerError && error.code === 11000) {
+    return Response.json({ error: "Ese correo ya está registrado" }, { status: 409 });
+  }
+  throw error;
+}
+```
+
+## Errores comunes
+
+- **Fechas como texto** "porque vienen así del formulario": conviértelas al recibirlas.
+- **Agrupar por día sin zona horaria.**
+- **`new ObjectId(texto)` sin validar** el texto que llega de la URL.
+- **Comparar ObjectId con `===`.**
+- **Tratar todos los errores como 500**: un duplicado o un id inválido son errores del cliente.
+
+<Callout type="exercise">
+  1. Busca en tu Planificador 2026 campos de fecha guardados como texto con `{ campo: { $type: "string" } }` en Compass.
+  2. Escribe un script de migración que los convierta a `Date` y pruébalo primero con un documento.
+  3. Crea la función `toObjectId` y úsala en un endpoint que reciba un id por la URL; comprueba que un id inválido devuelve 400.
+  4. Provoca un error `E11000` con un índice único y captúralo para devolver un 409.
+</Callout>
+
+<Callout type="mastery">
+  Nunca más guardas una fecha como texto, validas los ObjectId que llegan del exterior y sabes
+  interpretar los errores habituales de MongoDB.
+</Callout>
+
+## Resumen
+
+- Fechas siempre como `Date`: se guardan en UTC y se muestran o agrupan en la zona del usuario.
+- `$type: "string"` encuentra datos mal tipados para migrarlos.
+- Convierte los ids de la URL con `ObjectId.isValid` y `createFromHexString`.
+- Compara ObjectId con `.equals()` o por su texto, nunca con `===`.
+- Cada error común tiene una causa clara; un duplicado o un id inválido no son un 500.

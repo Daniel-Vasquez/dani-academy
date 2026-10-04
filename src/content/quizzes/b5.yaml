@@ -1,0 +1,63 @@
+course: B5
+passingScore: 4
+questions:
+  - prompt: "¿Por qué se crea un único `MongoClient` por proceso en lugar de uno en cada petición?"
+    options:
+      - "Porque cada `MongoClient` abre su propio pool de conexiones: crear uno por petición agota rápidamente las conexiones del clúster."
+      - "Porque MongoDB solo permite un cliente por base de datos."
+      - "Porque así las consultas no necesitan `await`."
+      - "Porque el driver no puede reconectarse si se cierra el cliente."
+    answer: 0
+    explanation: "Un `MongoClient` gestiona un pool de conexiones que se reutilizan entre consultas. Abrirlas es caro y el clúster tiene un límite (unas 500 en el plan gratuito de Atlas). Por eso se crea uno en un módulo (`src/lib/mongo.ts`) y se comparte."
+
+  - prompt: "¿Qué documentos devuelve este filtro?"
+    code: |
+      entrenos.find({
+        userId: "u1",
+        tipo: { $in: ["running", "movilidad"] },
+        km: { $gte: 5 },
+      })
+    options:
+      - "Los de `u1` que sean de running o tengan al menos 5 km."
+      - "Todos los entrenos de running o movilidad de cualquier usuario."
+      - "Los de `u1` con exactamente 5 km."
+      - "Los de `u1` cuyo tipo sea running o movilidad y que tengan 5 km o más."
+    answer: 3
+    explanation: "Los campos de un filtro se combinan con Y. `$in` acepta cualquiera de los valores de la lista y `$gte` significa mayor o igual. Para un O entre condiciones distintas haría falta `$or`."
+
+  - prompt: 'El array `leidas` ya contiene "B1.3". ¿Qué ocurre si ejecutas `{ $addToSet: { leidas: "B1.3" } }` y después `{ $push: { leidas: "B1.3" } }`?'
+    options:
+      - "Los dos lo añaden: queda tres veces."
+      - "Ninguno lo añade, porque ya existe."
+      - "`$addToSet` no lo añade porque ya está; `$push` sí lo añade y queda duplicado."
+      - "`$push` falla con un error de clave duplicada."
+    answer: 2
+    explanation: "`$addToSet` solo añade el valor si no está en el array; `$push` siempre lo añade al final. Para listas sin repetidos, como las secciones leídas, se usa `$addToSet`."
+
+  - prompt: "¿Qué hace `upsert: true` en esta operación cuando se ejecuta dos veces seguidas?"
+    code: |
+      progreso.updateOne(
+        { userId: "u1", cursoId: "B1" },
+        { $addToSet: { leidas: "B1.3" }, $setOnInsert: { creado: new Date() } },
+        { upsert: true },
+      )
+    options:
+      - "Crea dos documentos, uno por cada llamada."
+      - "La primera vez crea el documento (con `creado`); la segunda lo encuentra y no duplica nada, y `creado` no cambia."
+      - "Falla la segunda vez porque el documento ya existe."
+      - "Reemplaza el documento entero cada vez."
+    answer: 1
+    explanation: "Con `upsert`, si nada cumple el filtro se crea un documento; si existe, se actualiza. `$setOnInsert` solo actúa al crear y `$addToSet` no duplica, así que la operación es idempotente: llamarla una o diez veces da el mismo resultado."
+
+  - prompt: "Según la regla ESR, ¿qué índice sirve mejor a esta consulta?"
+    code: |
+      entrenos
+        .find({ userId: "u1", km: { $gte: 5 } })
+        .sort({ fecha: -1 })
+    options:
+      - "`{ km: 1, fecha: -1, userId: 1 }`"
+      - "`{ fecha: -1, userId: 1, km: 1 }`"
+      - "Tres índices simples: `{ userId: 1 }`, `{ km: 1 }` y `{ fecha: -1 }`."
+      - "`{ userId: 1, fecha: -1, km: 1 }`"
+    answer: 3
+    explanation: "ESR: primero los campos de igualdad (`userId`), después los de ordenación (`fecha`) y al final los de rango (`km`). Así el índice filtra por usuario, entrega los documentos ya ordenados y aplica el rango sin ordenar en memoria."

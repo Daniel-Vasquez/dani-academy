@@ -1,0 +1,166 @@
+---
+sectionId: "B5.4"
+course: "B5"
+title: "Update y Delete"
+order: 4
+minutes: 60
+summary: "Modificar documentos con operadores atómicos, hacer upserts idempotentes y borrar con seguridad."
+---
+
+Actualizar bien es lo que separa un código que funciona de uno que pierde datos en cuanto dos peticiones coinciden. MongoDB ofrece **operadores de actualización** que modifican el documento directamente en el servidor, de forma atómica. En esta sección vas a usarlos y a entender cómo está hecho el "Marcar como leído" de esta plataforma.
+
+## `updateOne` y `updateMany`
+
+```ts
+const r = await entrenos.updateOne(
+  { userId: "u1", tipo: "fuerza" }, // filtro: qué documento
+  { $inc: { series: 1 }, $set: { notas: "pierna" } }, // qué cambiar
+);
+// r.matchedCount: 1, r.modifiedCount: 1
+```
+
+- `matchedCount`: cuántos documentos cumplían el filtro.
+- `modifiedCount`: cuántos cambiaron de verdad (si ya tenían esos valores, es 0).
+
+`updateMany` aplica la misma actualización a **todos** los que cumplan el filtro.
+
+## Operadores de actualización
+
+| Operador       | Hace                                                   | Ejemplo                                    |
+| -------------- | ------------------------------------------------------ | ------------------------------------------ |
+| `$set`         | Asigna valores                                         | `{ $set: { notas: "pierna", km: 6 } }`     |
+| `$unset`       | Elimina campos                                         | `{ $unset: { notas: "" } }`                |
+| `$inc`         | Suma (o resta)                                         | `{ $inc: { vasos: 1 } }`                   |
+| `$push`        | Añade al final de un array                             | `{ $push: { tags: "series" } }`            |
+| `$addToSet`    | Añade al array **si no está ya**                       | `{ $addToSet: { leidas: "B1.3" } }`        |
+| `$pull`        | Quita de un array los que coincidan                    | `{ $pull: { leidas: "B1.3" } }`            |
+| `$setOnInsert` | Asigna solo si el documento se **crea** (con `upsert`) | `{ $setOnInsert: { creado: new Date() } }` |
+
+<Callout type="warning">
+  Si pasas un objeto **sin operadores** a `updateOne`, el driver lanza un error: protege de
+  reemplazar el documento entero por accidente. Para reemplazar a propósito existe `replaceOne`.
+</Callout>
+
+### `$push` vs `$addToSet`
+
+```ts
+await col.updateOne({ userId: "u1" }, { $push: { leidas: "B1.3" } });
+await col.updateOne({ userId: "u1" }, { $push: { leidas: "B1.3" } });
+// leidas: ["B1.3", "B1.3"]  ← duplicado
+
+await col.updateOne({ userId: "u1" }, { $addToSet: { leidas: "B1.3" } }); // dos veces
+// leidas: ["B1.3"]          ← sin duplicados
+```
+
+## Atomicidad: deja que MongoDB haga la cuenta
+
+```ts
+// ❌ Leer, calcular en JavaScript y escribir: dos peticiones a la vez pierden un vaso
+const doc = await agua.findOne({ userId });
+await agua.updateOne({ userId }, { $set: { vasos: doc!.vasos + 1 } });
+
+// ✅ Una sola operación atómica en el servidor
+await agua.updateOne({ userId }, { $inc: { vasos: 1 } });
+```
+
+Cada operación sobre **un documento** es atómica en MongoDB. Los operadores te permiten aprovecharlo.
+
+## Upsert: crear o actualizar en una operación
+
+Con `upsert: true`, si ningún documento cumple el filtro, **se crea** uno a partir del filtro y la actualización:
+
+```ts
+await progreso.updateOne(
+  { userId: "u1", cursoId: "B1" },
+  {
+    $addToSet: { leidas: "B1.3" },
+    $set: { actualizado: new Date() },
+    $setOnInsert: { creado: new Date() },
+  },
+  { upsert: true },
+);
+```
+
+| Llamada | Resultado                                                                                                 |
+| ------- | --------------------------------------------------------------------------------------------------------- |
+| Primera | No existe → se crea `{ userId, cursoId, leidas: ["B1.3"], actualizado, creado }` (`upsertedId` con valor) |
+| Segunda | Existe → `$addToSet` no duplica; solo cambia `actualizado`                                                |
+
+Llamarla una o diez veces deja el mismo resultado: es **idempotente**. Perfecto para un botón que el usuario puede pulsar dos veces.
+
+### Cómo lo hace esta plataforma
+
+Dani Academy guarda una lectura por documento en `section_progress` y usa `$setOnInsert` para no tocar la fecha original al repetir:
+
+```ts
+await col.updateOne(
+  { userId, sectionId },
+  { $setOnInsert: { courseId, readAt: now } },
+  { upsert: true },
+);
+```
+
+Junto con un **índice único** en `(userId, sectionId)`, garantiza un solo documento incluso con peticiones simultáneas. Si dos upserts coinciden exactamente, uno puede fallar con el error de clave duplicada (11000), y el código lo ignora porque significa "ya estaba marcada".
+
+## `findOneAndUpdate`: actualizar y obtener el documento
+
+```ts
+const actualizado = await entrenos.findOneAndUpdate(
+  { userId: "u2" },
+  { $inc: { km: 1 } },
+  { returnDocument: "after" }, // "before" (por defecto) o "after"
+);
+// actualizado: el documento ya modificado, o null si no había ninguno
+```
+
+En el driver actual devuelve **directamente el documento**. En tutoriales antiguos verás `result.value`: era la forma de versiones anteriores.
+
+## Borrar
+
+```ts
+await entrenos.deleteOne({ _id: id });
+await entrenos.deleteMany({ userId: "u2" });
+```
+
+<Callout type="warning">
+  `deleteMany({})` con un filtro vacío borra **toda** la colección. Antes de borrar, ejecuta un
+  `countDocuments` con el mismo filtro.
+</Callout>
+
+### Borrado lógico
+
+A veces no conviene borrar de verdad (historial, auditoría, "deshacer"). El **borrado lógico** marca el documento:
+
+```ts
+await notas.updateOne({ _id: id }, { $set: { deletedAt: new Date() } });
+// y en las consultas: { deletedAt: { $exists: false } }
+```
+
+## Errores comunes
+
+- **Leer-calcular-escribir** en lugar de `$inc`, `$push` o `$addToSet`.
+- **Olvidar `$set`** y pasar el objeto directamente.
+- **`$push` cuando no quieres duplicados.**
+- **`updateMany` o `deleteMany` con un filtro demasiado amplio.**
+- **Comprobar "si existe, actualiza; si no, crea"** con dos consultas: usa `upsert`.
+
+<Callout type="exercise">
+  1. Implementa `marcarLeido(userId, cursoId, seccionId)` con un upsert y `$addToSet`, y
+  `desmarcarLeido` con `$pull`. 2. Llama dos veces a `marcarLeido` con la misma sección y comprueba
+  en Compass que no hay duplicados. 3. Implementa un contador de vasos de agua con `$inc` y pruébalo
+  con 10 llamadas en paralelo (`Promise.all`): el resultado debe ser exactamente 10. 4. Añade
+  borrado lógico a las notas de tu Planificador.
+</Callout>
+
+<Callout type="mastery">
+  Eliges el operador de actualización correcto en cada caso, entiendes `upsert` y nunca
+  lees-calculas-escribes cuando existe un operador atómico.
+</Callout>
+
+## Resumen
+
+- `updateOne`/`updateMany` con operadores: `$set`, `$unset`, `$inc`, `$push`, `$addToSet`, `$pull`.
+- Las operaciones sobre un documento son atómicas: aprovéchalo en lugar de calcular en JavaScript.
+- `upsert` crea o actualiza en una sola operación; `$setOnInsert` solo actúa al crear.
+- `findOneAndUpdate` devuelve el documento modificado.
+- Borra con cuidado, y considera el borrado lógico.

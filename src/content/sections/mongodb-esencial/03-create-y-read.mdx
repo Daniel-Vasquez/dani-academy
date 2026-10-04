@@ -1,0 +1,177 @@
+---
+sectionId: "B5.3"
+course: "B5"
+title: "Create y Read"
+order: 3
+minutes: 60
+summary: "Insertar documentos y consultarlos con filtros, operadores, proyecciones, orden y límites."
+---
+
+Con la conexión lista, toca lo que harás a diario: **guardar y consultar**. MongoDB tiene un lenguaje de consultas propio que se escribe con objetos de JavaScript. En esta sección aprenderás a pedir exactamente los documentos y los campos que necesitas, ni más ni menos.
+
+## Insertar
+
+```ts
+interface Entreno {
+  _id?: ObjectId;
+  userId: string;
+  tipo: "fuerza" | "running";
+  km?: number;
+  series?: number;
+  fecha: Date;
+}
+
+const entrenos = db.collection<Entreno>("entrenos");
+
+const { insertedId } = await entrenos.insertOne({
+  userId: "u1",
+  tipo: "running",
+  km: 5.2,
+  fecha: new Date("2026-10-01T07:00:00Z"),
+});
+// insertedId es un ObjectId generado por el driver
+
+const { insertedCount } = await entrenos.insertMany([
+  { userId: "u1", tipo: "fuerza", series: 4, fecha: new Date("2026-10-02T07:00:00Z") },
+  { userId: "u1", tipo: "running", km: 8, fecha: new Date("2026-10-03T07:00:00Z") },
+  { userId: "u2", tipo: "running", km: 3, fecha: new Date("2026-10-03T08:00:00Z") },
+]);
+// insertedCount: 3
+```
+
+## Leer uno: `findOne`
+
+```ts
+const entreno = await entrenos.findOne({ userId: "u1", tipo: "fuerza" });
+// Entreno | null
+```
+
+Devuelve el primer documento que cumple el filtro, o `null` si no hay ninguno. Comprueba siempre el `null`.
+
+## Leer muchos: `find`
+
+`find` no devuelve los documentos: devuelve un **cursor**, que los va trayendo por lotes. Con `toArray()` los cargas todos en memoria:
+
+```ts
+const lista = await entrenos.find({ userId: "u1" }).toArray();
+```
+
+Para colecciones grandes, recorre el cursor sin cargarlo entero:
+
+```ts
+for await (const e of entrenos.find({ userId: "u1" })) {
+  console.log(e.fecha);
+}
+```
+
+## Filtros
+
+Un filtro es un objeto. Varios campos se combinan con **Y**:
+
+```ts
+{ userId: "u1", tipo: "running" }   // userId = "u1" Y tipo = "running"
+```
+
+Para comparar, se usan **operadores** que empiezan por `$`:
+
+| Operador      | Significado                        | Ejemplo                                                    |
+| ------------- | ---------------------------------- | ---------------------------------------------------------- |
+| `$eq`, `$ne`  | Igual, distinto                    | `{ tipo: { $ne: "fuerza" } }`                              |
+| `$gt`, `$gte` | Mayor, mayor o igual               | `{ km: { $gte: 5 } }`                                      |
+| `$lt`, `$lte` | Menor, menor o igual               | `{ fecha: { $lt: new Date("2026-10-03") } }`               |
+| `$in`, `$nin` | Está (o no) en una lista           | `{ tipo: { $in: ["fuerza", "movilidad"] } }`               |
+| `$exists`     | El campo existe (o no)             | `{ km: { $exists: false } }`                               |
+| `$regex`      | Coincide con una expresión regular | `{ nombre: { $regex: "^da", $options: "i" } }`             |
+| `$or`         | Al menos una condición             | `{ $or: [{ km: { $gte: 10 } }, { series: { $gte: 5 } }] }` |
+
+Un rango de fechas combina dos operadores sobre el mismo campo:
+
+```ts
+{ fecha: { $gte: new Date("2026-10-01"), $lt: new Date("2026-11-01") } }  // todo octubre
+```
+
+### Buscar dentro de arrays y objetos
+
+```ts
+{ tags: "suave" }               // documentos cuyo array tags contiene "suave"
+{ "ritmo.min": { $lt: 6 } }     // campo anidado: notación con punto (entre comillas)
+```
+
+## Proyección: solo los campos que necesitas
+
+```ts
+const ligeros = await entrenos
+  .find({ userId: "u1" })
+  .project({ _id: 0, km: 1, fecha: 1 }) // 1 = incluir, 0 = excluir
+  .toArray();
+// [{ km: 8, fecha: … }, { km: 5.2, fecha: … }]
+```
+
+Traer menos campos significa menos datos por la red y menos memoria. `_id` se incluye siempre, salvo que lo excluyas.
+
+## Ordenar, limitar y paginar
+
+```ts
+const ultimos = await entrenos
+  .find({ userId: "u1", tipo: "running", km: { $gte: 5 } })
+  .project({ _id: 0, km: 1, fecha: 1 })
+  .sort({ fecha: -1 }) // 1 ascendente, -1 descendente
+  .limit(10)
+  .toArray();
+```
+
+```text
+[{ km: 8, fecha: 2026-10-03 }, { km: 5.2, fecha: 2026-10-01 }]
+```
+
+Para contar sin traer documentos:
+
+```ts
+await entrenos.countDocuments({ tipo: { $in: ["fuerza", "movilidad"] } }); // 1
+```
+
+`skip(n)` sirve para paginar (`skip(20).limit(10)` = página 3), pero se vuelve lento con números grandes; en A2 verás la paginación por cursor.
+
+## Funciones tipadas para tu app
+
+```ts
+export async function crearEntreno(datos: Omit<Entreno, "_id">) {
+  const { insertedId } = await entrenos.insertOne(datos);
+  return insertedId.toHexString();
+}
+
+export function listarEntrenos(userId: string, desde: Date, hasta: Date) {
+  return entrenos
+    .find({ userId, fecha: { $gte: desde, $lt: hasta } })
+    .sort({ fecha: 1 })
+    .toArray();
+}
+```
+
+## Errores comunes
+
+- **Olvidar `toArray()`** y trabajar con el cursor como si fuera un array.
+- **No comprobar el `null`** de `findOne`.
+- **Traer documentos enteros** cuando solo necesitas dos campos.
+- **Filtrar en JavaScript** (`(await find({})).filter(…)`) lo que debería filtrar MongoDB.
+- **Escribir el operador sin `$`** o fuera de su objeto: `{ km: $gte: 5 }` no es válido.
+
+<Callout type="exercise">
+  1. Crea una colección de prueba `entrenos` e inserta 10 documentos variados con `insertMany`. 2.
+  Escribe consultas para: los entrenos de `running` con más de 5 km; los de una semana concreta; los
+  que **no** tienen el campo `km`. 3. Escribe las funciones tipadas `crearEntreno` y
+  `listarEntrenos(userId, desde, hasta)`. 4. Añade una proyección que devuelva solo la fecha y los
+  km, ordenados del más reciente al más antiguo.
+</Callout>
+
+<Callout type="mastery">
+  Escribes filtros con operadores, proyecciones y ordenaciones sin consultar la documentación.
+</Callout>
+
+## Resumen
+
+- `insertOne` e `insertMany` crean documentos; el `_id` lo genera el driver.
+- `findOne` devuelve un documento o `null`; `find` devuelve un cursor.
+- Los filtros son objetos; los operadores (`$gte`, `$in`, `$exists`…) comparan.
+- `project` elige campos, `sort` ordena y `limit` acota.
+- Filtra en MongoDB, no en JavaScript.
