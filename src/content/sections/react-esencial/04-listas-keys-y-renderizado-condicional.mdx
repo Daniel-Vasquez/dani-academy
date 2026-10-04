@@ -1,0 +1,180 @@
+---
+sectionId: "B6.4"
+course: "B6"
+title: "Listas, keys y renderizado condicional"
+order: 4
+minutes: 60
+summary: "Mostrar listas con map, elegir bien las keys y decidir qué se muestra con ternarios, && y retornos tempranos."
+---
+
+Casi todas las interfaces muestran **listas** (secciones, cursos, entrenos) y deciden **qué mostrar según el estado** (cargando, vacío, error). En JSX no hay `for` ni `if` dentro de las llaves, pero JavaScript ya tiene todo lo necesario. En esta sección aprenderás los patrones que usarás a diario y el porqué de la famosa `key`.
+
+## Listas con `map`
+
+Para mostrar una lista, transforma cada dato en un elemento con `map`:
+
+```tsx
+interface Seccion {
+  id: string;
+  titulo: string;
+  leida: boolean;
+}
+
+export function ListaSecciones({ secciones }: { secciones: Seccion[] }) {
+  return (
+    <ul>
+      {secciones.map((s) => (
+        <li key={s.id}>
+          {s.leida ? "✓" : "○"} {s.titulo}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+`map` devuelve un array de elementos JSX, y React sabe mostrar arrays.
+
+## `key`: identidad en una lista
+
+Cada elemento de una lista necesita una prop `key` **única y estable**. Sin ella, React avisa en la consola:
+
+```text
+Each child in a list should have a unique "key" prop.
+```
+
+React usa la `key` para saber **qué elemento es cuál** entre un render y el siguiente. Si añades, quitas o reordenas, la `key` le permite conservar el estado de cada elemento y tocar solo lo que cambió.
+
+### Por qué no el índice
+
+```tsx
+{
+  tareas.map((t, i) => <TareaEditable key={i} tarea={t} />);
+} // ❌ si la lista cambia de orden
+{
+  tareas.map((t) => <TareaEditable key={t.id} tarea={t} />);
+} // ✅
+```
+
+Si borras la primera tarea, todas se desplazan una posición: la tarea que antes tenía `key={1}` ahora tiene `key={0}`. React cree que es **la misma** que antes ocupaba la posición 0 y le asigna su estado interno (lo que estabas escribiendo en ella, por ejemplo). Resultado: el texto aparece en la tarea equivocada.
+
+Usa un identificador del dato: el `id` de la base de datos, el `sectionId` (`B1.3`)… El índice solo es aceptable si la lista nunca cambia de orden ni de tamaño.
+
+## Renderizado condicional
+
+### Ternario: una cosa u otra
+
+```tsx
+<span>{s.leida ? "Leída" : "Pendiente"}</span>
+```
+
+### `&&`: algo o nada
+
+```tsx
+{
+  error && <p role="alert">{error}</p>;
+}
+```
+
+Si `error` es `null` o una cadena vacía, no se muestra nada.
+
+<Callout type="warning">
+  Cuidado con los números: `{secciones.length && <Lista />}` muestra un **0** cuando la lista está
+  vacía, porque `0` es un valor que React sí pinta. Usa una comparación explícita: `
+  {secciones.length > 0 && <Lista />}`.
+</Callout>
+
+### Retorno temprano: casos especiales primero
+
+Cuando un caso cambia todo el componente, sal antes del `return` principal:
+
+```tsx
+export function ListaSecciones({ secciones }: { secciones: Seccion[] }) {
+  if (secciones.length === 0) {
+    return <p className="text-muted">Este curso aún no tiene secciones.</p>;
+  }
+
+  return (
+    <ul>
+      {secciones.map((s) => (
+        <li key={s.id}>{s.titulo}</li>
+      ))}
+    </ul>
+  );
+}
+```
+
+### Variables antes del `return`
+
+Para lógica más compleja, calcula fuera del JSX:
+
+```tsx
+const leidas = secciones.filter((s) => s.leida).length;
+let mensaje: string;
+if (leidas === 0) mensaje = "Empieza por la primera sección";
+else if (leidas === secciones.length) mensaje = "¡Curso completado!";
+else mensaje = `Llevas ${leidas} de ${secciones.length}`;
+
+return <p>{mensaje}</p>;
+```
+
+## Estados de carga, vacío y error
+
+Los cuatro estados que toda lista que viene de un servidor debe contemplar:
+
+```tsx
+type Estado =
+  | { status: "loading" }
+  | { status: "error"; mensaje: string }
+  | { status: "ok"; secciones: Seccion[] };
+
+function Contenido({ estado }: { estado: Estado }) {
+  if (estado.status === "loading") return <p>Cargando…</p>;
+  if (estado.status === "error") return <p role="alert">{estado.mensaje}</p>;
+  if (estado.secciones.length === 0) return <p>No hay secciones.</p>;
+  return <ListaSecciones secciones={estado.secciones} />;
+}
+```
+
+Es la unión discriminada del curso B1.6 aplicada a la interfaz.
+
+## Filtrar y ordenar antes de mostrar
+
+`map` puede ir encadenado con `filter` y `sort` (sobre una **copia**, porque `sort` modifica el array original):
+
+```tsx
+const pendientes = secciones
+  .filter((s) => !s.leida)
+  .toSorted((a, b) => a.titulo.localeCompare(b.titulo, "es"));
+```
+
+`toSorted` devuelve un array nuevo sin tocar el original (si tu entorno no lo tiene, usa `[...secciones].sort(…)`).
+
+## Errores comunes
+
+- **Olvidar la `key`** o usar el índice en listas que cambian.
+- **`key` repetidas**: dos elementos con la misma `key` confunden a React.
+- **`{lista.length && …}`** que pinta un 0.
+- **`sort` directamente sobre el estado o las props**: los muta.
+- **No contemplar el estado vacío.**
+
+<Callout type="exercise">
+  1. Crea una lista de tareas con estado: añadir desde un input, marcar como hecha y borrar. 2. Usa
+  como `key` un id generado con `crypto.randomUUID()` al crear cada tarea. 3. Cambia la `key` al
+  índice, borra la primera tarea mientras escribes en otra y observa el error; vuelve al id. 4.
+  Muestra un mensaje cuando la lista esté vacía y un contador "N pendientes". 5. Añade un filtro
+  "Todas / Pendientes / Hechas".
+</Callout>
+
+<Callout type="mastery">
+  Puedes explicar qué falla si usas el índice del array como `key` al reordenar, y manejas sin dudar
+  los estados de carga, vacío y error.
+</Callout>
+
+## Resumen
+
+- `map` convierte datos en elementos; cada uno necesita una `key` única y estable.
+- La `key` da identidad: con el índice, el estado se mezcla al reordenar.
+- Ternario para "esto o aquello", `&&` para "esto o nada", retorno temprano para casos especiales.
+- `{n && …}` pinta un 0: compara explícitamente.
+- Contempla siempre los estados de carga, vacío y error.

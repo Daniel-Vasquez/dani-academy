@@ -1,0 +1,178 @@
+---
+sectionId: "B6.3"
+course: "B6"
+title: "Estado con useState y eventos"
+order: 3
+minutes: 60
+summary: "Por qué una variable normal no actualiza la interfaz, cómo funciona useState y cómo actualizar arrays y objetos sin mutarlos."
+---
+
+Hasta ahora tus componentes mostraban datos que llegan de fuera. Para que reaccionen a lo que hace el usuario (un clic, un texto escrito) necesitan **memoria propia**: el **estado**. Es el concepto central de React, y entenderlo bien evita la mayoría de bugs extraños.
+
+## Por qué una variable normal no sirve
+
+```tsx
+export function ContadorRoto() {
+  let vasos = 0;
+  return <button onClick={() => (vasos = vasos + 1)}>Vasos: {vasos}</button>;
+}
+```
+
+Pulsas y no pasa nada. Dos motivos:
+
+1. Cambiar una variable **no avisa a React** de que tiene que volver a pintar.
+2. Aunque volviera a pintar, la función del componente se ejecutaría de nuevo y `vasos` volvería a valer `0`.
+
+## `useState`
+
+```tsx
+import { useState } from "react";
+
+export function Contador() {
+  const [vasos, setVasos] = useState(0);
+  return <button onClick={() => setVasos(vasos + 1)}>Vasos de agua: {vasos}</button>;
+}
+```
+
+`useState(valorInicial)` devuelve una **tupla** (curso B1.3):
+
+- `vasos`: el valor actual.
+- `setVasos`: la función para cambiarlo.
+
+Cuando llamas a `setVasos`, React guarda el nuevo valor y **vuelve a ejecutar** el componente (un _render_), que ahora lee el valor actualizado.
+
+### Tipos
+
+TypeScript infiere el tipo del valor inicial (`number`). Cuando el inicial no basta para deducirlo, indícalo:
+
+```tsx
+const [error, setError] = useState<string | null>(null);
+const [secciones, setSecciones] = useState<string[]>([]);
+```
+
+## El estado es una foto
+
+Dentro de un _render_, el estado **no cambia**, aunque llames a la función que lo actualiza:
+
+```tsx
+function sumarTres() {
+  setVasos(vasos + 1);
+  setVasos(vasos + 1);
+  setVasos(vasos + 1);
+  // Las tres leen el mismo `vasos` (por ejemplo, 0): el resultado es 1, no 3
+}
+```
+
+Cuando el nuevo valor depende del anterior, usa la **forma funcional**, que recibe siempre el valor más reciente:
+
+```tsx
+function sumarTres() {
+  setVasos((v) => v + 1);
+  setVasos((v) => v + 1);
+  setVasos((v) => v + 1); // ahora sí: +3
+}
+```
+
+## Eventos
+
+Los manejadores de eventos reciben un objeto con información del evento. TypeScript lo tipa según el elemento:
+
+```tsx
+function Buscador() {
+  const [texto, setTexto] = useState("");
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setTexto(e.target.value);
+  }
+
+  function handleClick(e: React.MouseEvent<HTMLButtonElement>) {
+    console.log("Buscar", texto, e.shiftKey);
+  }
+
+  return (
+    <>
+      <input value={texto} onChange={handleChange} />
+      <button onClick={handleClick}>Buscar</button>
+    </>
+  );
+}
+```
+
+Si escribes el manejador en línea (`onChange={(e) => setTexto(e.target.value)}`), TypeScript deduce el tipo de `e` solo.
+
+<Callout type="warning">
+  Pasa la función, no su resultado: `onClick={guardar}` o `onClick={() => guardar(id)}`. Con
+  `onClick={guardar()}` la ejecutas en cada render.
+</Callout>
+
+## Inmutabilidad: nunca modifiques el estado
+
+React decide si algo cambió **comparando referencias**. Si modificas el objeto o el array original, la referencia es la misma y React puede no enterarse:
+
+```tsx
+// ❌ Mutar
+secciones.push("B1.3");
+setSecciones(secciones);
+
+// ✅ Crear uno nuevo
+setSecciones([...secciones, "B1.3"]); // añadir
+setSecciones(secciones.filter((id) => id !== "B1.3")); // quitar
+setSecciones(secciones.map((id) => (id === "B1.3" ? "B1.4" : id))); // reemplazar
+```
+
+Con objetos, lo mismo:
+
+```tsx
+const [perfil, setPerfil] = useState({ nombre: "Dani", objetivoVasos: 8 });
+
+setPerfil({ ...perfil, objetivoVasos: 10 }); // copia y cambia un campo
+setPerfil((p) => ({ ...p, objetivoVasos: p.objetivoVasos + 1 }));
+```
+
+## Un ejemplo real: el botón de esta plataforma
+
+El botón "Marcar como leído" que estás usando ahora mismo guarda su estado con `useState` y lo cambia **antes** de que responda el servidor (actualización optimista):
+
+```tsx
+const [read, setRead] = useState(initialRead);
+const [error, setError] = useState<string | null>(null);
+
+async function toggle() {
+  const previous = read;
+  setRead(!previous); // la interfaz cambia al instante
+  const res = await fetch(`/api/progress/${sectionId}`, { method: previous ? "DELETE" : "PUT" });
+  if (!res.ok) {
+    setRead(previous); // si falla, se deshace
+    setError("No se pudo guardar.");
+  }
+}
+```
+
+## Errores comunes
+
+- **Usar una variable normal** para algo que debe redibujar la interfaz.
+- **Mutar arrays u objetos del estado** (`push`, `splice`, asignar propiedades).
+- **Esperar que el estado cambie en la línea siguiente** a llamar a `setX`.
+- **No usar la forma funcional** cuando el nuevo valor depende del anterior.
+- **`onClick={funcion()}`** en lugar de `onClick={funcion}`.
+
+<Callout type="exercise">
+  1. Crea un contador de hidratación con botones `+` y `−`, que nunca baje de 0. 2. Añade un
+  objetivo diario (8 vasos): cuando se alcance, cambia el color y muestra un mensaje. 3. Añade un
+  botón "+3" usando la forma funcional, y comprueba que con la forma normal solo sumaría 1. 4. Crea
+  una lista de etiquetas en el estado: añadir desde un input y quitar con un botón, sin mutar el
+  array.
+</Callout>
+
+<Callout type="mastery">
+  Nunca mutas el estado directamente, usas la forma funcional cuando toca y sabes por qué una
+  variable normal no actualiza la interfaz.
+</Callout>
+
+## Resumen
+
+- El estado es la memoria del componente; cambiarlo provoca un nuevo render.
+- `useState` devuelve `[valor, setValor]`; tipa con `useState<T>()` cuando haga falta.
+- Dentro de un render, el estado es una foto: usa `setX((prev) => …)` si dependes del anterior.
+- Los eventos están tipados (`ChangeEvent`, `MouseEvent`).
+- Nunca mutes: crea arrays y objetos nuevos con `...`, `map` y `filter`.

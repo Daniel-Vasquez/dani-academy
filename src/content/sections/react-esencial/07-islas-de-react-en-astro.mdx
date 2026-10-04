@@ -1,0 +1,149 @@
+---
+sectionId: "B6.7"
+course: "B6"
+title: "Islas de React en Astro"
+order: 7
+minutes: 60
+summary: "Qué es la arquitectura de islas, qué hace cada directiva client:, qué props pueden cruzar a una isla y cómo comunicar islas entre sí."
+---
+
+En una app de React clásica, **toda** la página es JavaScript. Astro hace lo contrario: la página es HTML estático y solo las partes interactivas se convierten en **islas** de React. Es la razón de que esta plataforma cargue tan rápido. En esta última sección del curso vas a entender cómo funcionan las islas y cómo elegir cuándo y cómo se activan.
+
+## La arquitectura de islas
+
+```text
+┌───────────────────────────────────────────────┐
+│ Cabecera (HTML)                               │
+├──────────────┬────────────────────────────────┤
+│ Índice (HTML)│ Contenido de la sección (HTML) │
+│              │                                │
+│              │ ┌────────────────────────────┐ │
+│              │ │ 🏝 MarkAsReadButton (React) │ │
+│              │ └────────────────────────────┘ │
+└──────────────┴────────────────────────────────┘
+```
+
+- Todo lo que no es interactivo se genera como **HTML** en el servidor y no envía JavaScript.
+- Cada componente interactivo es una **isla** independiente: se envía su JavaScript y se "hidrata" (React toma el control del HTML ya pintado).
+
+Una página de sección de esta plataforma solo descarga React cuando llegas al botón del final.
+
+## Usar un componente React en Astro
+
+```astro
+---
+// src/pages/cursos/[course]/[section].astro
+import MarkAsReadButton from "@/components/course/MarkAsReadButton";
+---
+
+<article>
+  <h1>Arrays, tuplas y objetos</h1>
+  <!-- contenido estático: cero JavaScript -->
+</article>
+
+<MarkAsReadButton client:visible sectionId="B1.3" initialRead={false} />
+```
+
+Sin una directiva `client:*`, el componente se renderiza **solo como HTML**: se ve, pero no responde a clics. La directiva es lo que lo convierte en isla.
+
+## Las directivas `client:*`
+
+| Directiva                           | Se hidrata…                               | Cuándo usarla                                                      |
+| ----------------------------------- | ----------------------------------------- | ------------------------------------------------------------------ |
+| `client:load`                       | En cuanto carga la página                 | Interactivo e importante desde el primer momento (el cuestionario) |
+| `client:idle`                       | Cuando el navegador queda libre           | Interactivo pero no urgente                                        |
+| `client:visible`                    | Cuando entra en pantalla                  | Por debajo del pliegue (el botón "Marcar como leído")              |
+| `client:media="(max-width: 768px)"` | Si se cumple la _media query_             | Solo en móvil o solo en escritorio                                 |
+| `client:only="react"`               | Solo en el cliente, sin HTML del servidor | Depende de APIs del navegador (`window`, `localStorage`)           |
+
+Esta plataforma usa `client:load` en el login, el registro y la evaluación (hay que poder usarlos ya) y `client:visible` en el botón de cada sección (está al final del texto).
+
+<Callout type="tip">
+  Empieza con `client:visible` o `client:idle` y sube a `client:load` solo si el usuario necesita la
+  interacción nada más entrar. Cada `client:load` adelanta la descarga de JavaScript.
+</Callout>
+
+## Qué props pueden cruzar a una isla
+
+Las props se calculan en el servidor y se envían al navegador **serializadas** dentro del HTML. Solo pueden cruzar datos:
+
+- ✅ Textos, números, booleanos, `null`, arrays y objetos planos, `Date`, `Map`, `Set`, `URL`.
+- ❌ **Funciones**: Astro no da ningún error, pero la prop llega a la isla como `null`. Un `onCambio` pasado desde Astro simplemente no existe en el navegador.
+- ⚠️ **Instancias de clases** (un `ObjectId`, por ejemplo): llegan como objetos planos, sin sus métodos. Convierte antes a datos simples (`id.toHexString()`).
+
+```astro
+<!-- ✅ -->
+<Quiz client:load courseId="B1" questions={publicQuestions} />
+
+<!-- ❌ la función se pierde por el camino: en la isla, onTerminar es null -->
+<Quiz client:load onTerminar={() => console.log("fin")} />
+```
+
+Todo lo que pasas como prop **es visible** en el código fuente de la página. Por eso la evaluación de esta plataforma envía las preguntas **sin** las respuestas correctas: se filtran en el servidor antes de llegar a la isla.
+
+### `children` y _slots_
+
+El contenido entre etiquetas llega a React como `children`, ya renderizado como HTML estático:
+
+```astro
+<Card client:visible titulo="Evaluación">
+  <p>5 preguntas sobre los conceptos clave.</p>
+</Card>
+```
+
+## Comunicar islas entre sí
+
+Cada isla es una aplicación de React **independiente**: no comparten estado ni contexto. ¿Cómo se entera el índice lateral (HTML) de que pulsaste el botón (React)? Opciones de menos a más compleja:
+
+1. **El servidor como fuente de verdad**: tras el cambio, la siguiente página ya muestra el dato actualizado.
+2. **Eventos del DOM**: la isla emite un evento y un `<script>` de Astro lo escucha. Es lo que hace esta plataforma:
+
+```tsx
+// En la isla (React)
+document.dispatchEvent(new CustomEvent("da:section-read", { detail: { sectionId, read } }));
+```
+
+```astro
+<script>
+  // En CourseSidebar.astro
+  document.addEventListener("da:section-read", (event) => {
+    const { sectionId, read } = (event as CustomEvent<{ sectionId: string; read: boolean }>).detail;
+    // …actualiza el icono y el contador
+  });
+</script>
+```
+
+3. **Un _store_ compartido** como [nanostores](https://github.com/nanostores/nanostores), que funciona entre islas y frameworks. Lo verás en A8.
+
+## Errores comunes
+
+- **Olvidar la directiva `client:*`**: el componente se ve pero no funciona.
+- **`client:load` en todo** "por si acaso": pierdes la ventaja de Astro.
+- **Pasar funciones como props desde Astro**: no hay error, solo llegan como `null`.
+- **Enviar datos sensibles en las props**: acaban en el HTML.
+- **Usar `window` o `localStorage` durante el render** de un componente que se renderiza en el servidor: no existen allí. Úsalos en efectos o eventos, o usa `client:only`.
+
+<Callout type="exercise">
+  1. Crea una página Astro estática con tres islas que usen `client:load`, `client:idle` y
+  `client:visible`; abre la pestaña Network y observa cuándo se descarga el JavaScript de cada una
+  al hacer scroll. 2. Renderiza un componente React **sin** directiva y comprueba que no responde a
+  clics. 3. Pasa una función como prop desde Astro y muestra en la isla `String(prop === null)`:
+  comprobarás que la función ha llegado como `null`. 4. Comunica dos islas con un `CustomEvent`: un
+  botón en una isla que actualiza un contador en otra parte de la página. 5. Revisa las islas de tu
+  app de entrenamiento y ajusta cada directiva al momento en que de verdad hace falta.
+</Callout>
+
+<Callout type="mastery">
+  Eliges la directiva `client:*` adecuada para cada componente, sabes qué puede cruzar como prop y
+  cómo comunicar islas entre sí.
+</Callout>
+
+## Resumen
+
+- Astro genera HTML y solo envía JavaScript para las islas.
+- Sin `client:*`, un componente React es solo HTML.
+- `load`, `idle`, `visible`, `media` y `only` deciden cuándo se hidrata cada isla.
+- Las props se serializan: solo datos, nunca funciones ni secretos.
+- Las islas no comparten estado: comunícalas con el servidor, eventos del DOM o un _store_.
+
+Has terminado las secciones del curso. Cuando las marques todas como leídas, podrás hacer la **evaluación final**.

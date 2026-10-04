@@ -1,0 +1,176 @@
+---
+sectionId: "B6.5"
+course: "B6"
+title: "Formularios controlados"
+order: 5
+minutes: 60
+summary: "Inputs controlados y no controlados, un estado para todo el formulario, envío con onSubmit y validación con mensajes accesibles."
+---
+
+Los formularios son el punto donde el usuario te da datos, y donde más cosas pueden salir mal: valores vacíos, formatos incorrectos, dobles envíos. En esta sección vas a construirlos con React sin librerías, para entender lo que después hacen por ti herramientas como `react-hook-form` (curso I2), que es la que usan el registro y el login de esta plataforma.
+
+## Controlado vs no controlado
+
+Hay dos formas de manejar un `input` en React:
+
+**No controlado**: el navegador guarda el valor y tú lo lees cuando lo necesitas (al enviar).
+
+```tsx
+function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+  e.preventDefault();
+  const datos = new FormData(e.currentTarget);
+  console.log(datos.get("email"));
+}
+
+<form onSubmit={handleSubmit}>
+  <input name="email" type="email" defaultValue="" />
+</form>;
+```
+
+**Controlado**: React guarda el valor en el estado y el input muestra lo que dice el estado.
+
+```tsx
+const [email, setEmail] = useState("");
+
+<input value={email} onChange={(e) => setEmail(e.target.value)} />;
+```
+
+El controlado te permite reaccionar **mientras** se escribe (validar, formatear, habilitar un botón). Para formularios sencillos que solo se leen al enviar, el no controlado es más simple.
+
+<Callout type="warning">
+  Si pones `value` sin `onChange`, el input queda bloqueado (React avisa: *You provided a `value`
+  prop to a form field without an `onChange` handler*). Usa `defaultValue` si quieres un valor
+  inicial en un input no controlado.
+</Callout>
+
+## Un estado para todo el formulario
+
+Con varios campos, un objeto en el estado y un único manejador:
+
+```tsx
+interface Registro {
+  nombre: string;
+  email: string;
+  password: string;
+}
+
+export function FormRegistro() {
+  const [datos, setDatos] = useState<Registro>({ nombre: "", email: "", password: "" });
+
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const { name, value } = e.target;
+    setDatos((d) => ({ ...d, [name]: value }));
+  }
+
+  return (
+    <form>
+      <input name="nombre" value={datos.nombre} onChange={handleChange} />
+      <input name="email" type="email" value={datos.email} onChange={handleChange} />
+      <input name="password" type="password" value={datos.password} onChange={handleChange} />
+    </form>
+  );
+}
+```
+
+`[name]: value` usa el atributo `name` del input como clave: un solo manejador sirve para todos los campos.
+
+## Enviar: `onSubmit` y `preventDefault`
+
+```tsx
+async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+  e.preventDefault(); // sin esto, el navegador recarga la página
+  setEnviando(true);
+  try {
+    await guardar(datos);
+  } finally {
+    setEnviando(false);
+  }
+}
+
+<form onSubmit={handleSubmit}>
+  …
+  <button type="submit" disabled={enviando}>
+    {enviando ? "Guardando…" : "Guardar"}
+  </button>
+</form>;
+```
+
+- Usa `onSubmit` en el formulario, no `onClick` en el botón: así también funciona al pulsar Enter.
+- Deshabilita el botón mientras se envía para evitar dobles envíos.
+
+## Validación con mensajes
+
+```tsx
+type Errores = Partial<Record<keyof Registro, string>>;
+
+function validar(d: Registro): Errores {
+  const errores: Errores = {};
+  if (d.nombre.trim().length < 2) errores.nombre = "Mínimo 2 caracteres";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) errores.email = "Introduce un correo válido";
+  if (d.password.length < 8) errores.password = "Mínimo 8 caracteres";
+  return errores;
+}
+```
+
+```tsx
+const errores = validar(datos);
+const esValido = Object.keys(errores).length === 0;
+```
+
+`Partial<Record<…>>` es un _utility type_ (curso I1.3): "un objeto con, como mucho, una clave por campo del formulario".
+
+### Mostrar los errores de forma accesible
+
+```tsx
+<label htmlFor="email">Correo</label>
+<input
+  id="email"
+  name="email"
+  type="email"
+  value={datos.email}
+  onChange={handleChange}
+  onBlur={() => setTocados((t) => ({ ...t, email: true }))}
+  aria-invalid={Boolean(tocados.email && errores.email)}
+  aria-describedby={errores.email ? "email-error" : undefined}
+/>
+{tocados.email && errores.email && <p id="email-error">{errores.email}</p>}
+```
+
+- Muestra el error **después** de que el usuario haya salido del campo (`onBlur`), no mientras escribe la primera letra.
+- `aria-invalid` y `aria-describedby` hacen que un lector de pantalla anuncie el error al llegar al campo. Es exactamente lo que hace el formulario de registro de esta plataforma.
+- Usa `autoComplete="email"`, `"new-password"` o `"current-password"`: ayuda a los gestores de contraseñas.
+
+<Callout type="note">
+  La validación del cliente es para la **experiencia de usuario**. El servidor debe validar
+  **siempre** otra vez, porque cualquiera puede saltarse tu formulario y llamar a la API
+  directamente. Lo harás con Zod en el curso I1.
+</Callout>
+
+## Errores comunes
+
+- **Olvidar `e.preventDefault()`**: la página se recarga y se pierde todo.
+- **`value` sin `onChange`**: input bloqueado.
+- **Validar solo en el cliente.**
+- **Mostrar errores antes de que el usuario haya escrito nada.**
+- **Errores sin `aria-describedby`**: un lector de pantalla no los relaciona con el campo.
+
+<Callout type="exercise">
+  1. Construye un formulario de registro (nombre, correo y contraseña) controlado, con un único
+  estado y un único `handleChange`. 2. Añade validación con mensajes bajo cada campo, mostrados solo
+  después de salir del campo. 3. Deshabilita el botón mientras el formulario no sea válido y
+  mientras se envía. 4. Simula el envío con una promesa de 1 segundo y muestra "Creando cuenta…". 5.
+  Comprueba con el teclado (Tab y Enter) que puedes rellenarlo y enviarlo sin ratón.
+</Callout>
+
+<Callout type="mastery">
+  Construyes un formulario con validación y mensajes accesibles sin librerías, y sabes cuándo
+  conviene controlado o no controlado.
+</Callout>
+
+## Resumen
+
+- Controlado: el estado manda (`value` + `onChange`). No controlado: lo lees al enviar (`FormData`).
+- Un objeto en el estado y `[name]: value` manejan formularios de varios campos.
+- `onSubmit` + `preventDefault`, y botón deshabilitado mientras se envía.
+- Valida en el cliente para guiar al usuario y en el servidor para protegerte.
+- `aria-invalid` y `aria-describedby` hacen los errores accesibles.

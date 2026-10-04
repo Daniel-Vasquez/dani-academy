@@ -1,0 +1,155 @@
+---
+sectionId: "B6.6"
+course: "B6"
+title: "useEffect y llamadas a APIs"
+order: 6
+minutes: 60
+summary: "Qué es un efecto, cuándo no hace falta useEffect, cómo funcionan las dependencias y la limpieza, y cómo cargar datos sin condiciones de carrera."
+---
+
+`useEffect` es el hook más usado y el más malentendido. Mucha gente lo usa para todo, y acaba con renders infinitos, peticiones duplicadas y datos que llegan en el orden equivocado. En esta sección vas a aprender **qué es** un efecto, **cuándo no lo necesitas** y cómo cargar datos de una API de forma robusta.
+
+## Qué es un efecto
+
+Un componente debería ser una función "pura": recibe props y estado, devuelve JSX. Pero a veces necesitas **sincronizarte con algo de fuera de React**: el título de la pestaña, un temporizador, una suscripción, una petición de red. Eso es un **efecto**:
+
+```tsx
+import { useEffect } from "react";
+
+function TituloPestaña({ leidas }: { leidas: number }) {
+  useEffect(() => {
+    document.title = `${leidas} secciones leídas · Dani Academy`;
+  }, [leidas]);
+
+  return null;
+}
+```
+
+`useEffect(función, dependencias)` ejecuta la función **después** de que React haya pintado la pantalla.
+
+## Las dependencias
+
+El segundo argumento indica **cuándo** volver a ejecutar el efecto:
+
+| Dependencias | Se ejecuta…                                               |
+| ------------ | --------------------------------------------------------- |
+| `[leidas]`   | Al montar y cada vez que `leidas` cambia                  |
+| `[]`         | Solo al montar el componente                              |
+| (sin array)  | Después de **cada** render (casi nunca es lo que quieres) |
+
+Incluye **todo** valor del componente que uses dentro del efecto (props, estado, funciones). Si falta una dependencia, el efecto trabaja con un valor antiguo; el _linter_ de React (`react-hooks/exhaustive-deps`) te avisa.
+
+## La limpieza
+
+Si el efecto crea algo que hay que deshacer (un temporizador, un _listener_), devuelve una función de **limpieza**. React la ejecuta antes de volver a ejecutar el efecto y al desmontar el componente:
+
+```tsx
+useEffect(() => {
+  const id = window.setInterval(() => setSegundos((s) => s + 1), 1000);
+  return () => window.clearInterval(id); // limpieza
+}, []);
+```
+
+Sin limpieza, cada vez que el componente se monta deja un intervalo vivo: se acumulan.
+
+<Callout type="note">
+  En desarrollo, con `StrictMode`, React monta, desmonta y vuelve a montar cada componente para que
+  detectes efectos sin limpieza. Si ves que un efecto se ejecuta dos veces solo en desarrollo, es
+  eso.
+</Callout>
+
+## Cuándo NO necesitas `useEffect`
+
+**Para calcular datos a partir de otros**: calcula directamente durante el render.
+
+```tsx
+// ❌ Estado duplicado y un render extra
+const [porcentaje, setPorcentaje] = useState(0);
+useEffect(() => setPorcentaje(Math.round((leidas / total) * 100)), [leidas, total]);
+
+// ✅ Se calcula en cada render; es instantáneo
+const porcentaje = Math.round((leidas / total) * 100);
+```
+
+**Para reaccionar a una acción del usuario**: hazlo en el manejador del evento.
+
+```tsx
+// ❌ Un efecto que "detecta" que se pulsó un botón
+// ✅ El fetch va dentro del onClick, como en el botón "Marcar como leído"
+```
+
+**Para cargar datos que ya tienes en el servidor**: en Astro, lo habitual es leerlos en el _frontmatter_ de la página y pasarlos como props. Así no hay _spinner_ ni petición extra. Esta plataforma lo hace así: la página consulta MongoDB y el botón recibe `initialRead`.
+
+## Cargar datos de una API
+
+Cuando de verdad necesitas pedir datos desde el navegador:
+
+```tsx
+type Estado<T> = { s: "loading" } | { s: "ok"; data: T } | { s: "error"; msg: string };
+
+interface Usuario {
+  id: number;
+  name: string;
+  email: string;
+}
+
+export function PerfilUsuario({ id }: { id: number }) {
+  const [estado, setEstado] = useState<Estado<Usuario>>({ s: "loading" });
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setEstado({ s: "loading" });
+
+    fetch(`https://jsonplaceholder.typicode.com/users/${id}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: Usuario) => setEstado({ s: "ok", data }))
+      .catch((e: unknown) => {
+        if (!ctrl.signal.aborted) setEstado({ s: "error", msg: String(e) });
+      });
+
+    return () => ctrl.abort(); // cancela la petición si cambia `id` o se desmonta
+  }, [id]);
+
+  if (estado.s === "loading") return <p>Cargando…</p>;
+  if (estado.s === "error") return <p role="alert">Error: {estado.msg}</p>;
+  return (
+    <p>
+      {estado.data.name} · {estado.data.email}
+    </p>
+  );
+}
+```
+
+### Por qué el `AbortController`
+
+Si `id` cambia de 1 a 2 rápidamente, se lanzan dos peticiones. Si la del 1 llega **después** que la del 2, sin cancelar mostrarías el usuario equivocado: una **condición de carrera**. La limpieza aborta la petición anterior y el `if (!ctrl.signal.aborted)` evita actualizar el estado con una respuesta obsoleta.
+
+## Errores comunes
+
+- **Efectos sin array de dependencias** que hacen `setState`: render infinito.
+- **Dependencias incompletas**: el efecto usa valores viejos.
+- **Olvidar la limpieza** de intervalos, _listeners_ o peticiones.
+- **Usar un efecto para calcular datos derivados** en lugar de calcularlos en el render.
+- **No manejar los estados de carga y error.**
+
+<Callout type="exercise">
+  1. Crea un componente que muestre los usuarios de `https://jsonplaceholder.typicode.com/users` con
+  estados de carga, error y lista. 2. Añade un selector de usuario que cargue el detalle con
+  `useEffect` y `AbortController`; cambia rápido de usuario y comprueba en la pestaña Network que
+  las peticiones anteriores aparecen como canceladas. 3. Crea un cronómetro con `setInterval` y
+  limpieza; móntalo y desmóntalo con un botón y comprueba que no se acumulan intervalos. 4. Busca en
+  tus proyectos un `useEffect` que calcule datos derivados y sustitúyelo por un cálculo directo.
+</Callout>
+
+<Callout type="mastery">
+  Sabes qué pasa si olvidas una dependencia o la limpieza de un efecto, y distingues cuándo un
+  efecto es necesario y cuándo no.
+</Callout>
+
+## Resumen
+
+- Un efecto sincroniza tu componente con algo externo, después del render.
+- Las dependencias deciden cuándo se repite; incluye todo lo que uses dentro.
+- La limpieza deshace lo que el efecto creó (intervalos, _listeners_, peticiones).
+- No uses efectos para datos derivados ni para reaccionar a clics.
+- Al cargar datos: estados de carga y error, y `AbortController` contra las condiciones de carrera.

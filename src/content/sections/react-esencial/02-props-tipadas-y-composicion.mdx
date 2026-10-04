@@ -1,0 +1,175 @@
+---
+sectionId: "B6.2"
+course: "B6"
+title: "Props tipadas y composición"
+order: 2
+minutes: 60
+summary: "Pasar datos a los componentes con props tipadas, usar children para componer y comunicar hijos con padres mediante funciones."
+---
+
+Un componente que siempre muestra lo mismo sirve de poco. Las **props** son los parámetros de un componente: lo que lo hace reutilizable. En esta sección vas a tiparlas con TypeScript, a usar `children` para componer piezas y a pasar funciones para que un hijo avise a su padre.
+
+## Props: los parámetros del componente
+
+Las props llegan como **un objeto** en el primer parámetro de la función. Lo habitual es desestructurarlo y tiparlo con una interfaz:
+
+```tsx
+interface TarjetaCursoProps {
+  id: string;
+  titulo: string;
+  secciones: number;
+}
+
+export function TarjetaCurso({ id, titulo, secciones }: TarjetaCursoProps) {
+  return (
+    <article className="rounded-2xl border p-5">
+      <span className="text-xs text-muted">{id}</span>
+      <h3 className="font-serif text-lg">{titulo}</h3>
+      <p>{secciones} secciones</p>
+    </article>
+  );
+}
+```
+
+```tsx
+<TarjetaCurso id="B1" titulo="TypeScript desde cero" secciones={8} />
+<TarjetaCurso id="B2" titulo="Git y flujo de trabajo" secciones="4" />
+// ❌ Type 'string' is not assignable to type 'number'.
+```
+
+Los textos van entre comillas; cualquier otro valor (números, booleanos, objetos, funciones), entre llaves.
+
+Las props son de **solo lectura**: un componente nunca debe modificarlas. Si un dato tiene que cambiar, es **estado** (sección B6.3).
+
+## Opcionales y valores por defecto
+
+```tsx
+interface BadgeProps {
+  texto: string;
+  tono?: "neutral" | "accent" | "warning";
+}
+
+export function Badge({ texto, tono = "neutral" }: BadgeProps) {
+  return <span data-tono={tono}>{texto}</span>;
+}
+
+<Badge texto="En curso" />                       // tono = "neutral"
+<Badge texto="Completado" tono="accent" />
+<Badge texto="Hecho" tono="verde" />            // ❌ no es uno de los tonos permitidos
+```
+
+La unión de literales (curso B1.2) convierte `tono` en un conjunto cerrado de opciones con autocompletado.
+
+## `children`: componer en lugar de configurar
+
+`children` es una prop especial: lo que pones **entre** la etiqueta de apertura y la de cierre.
+
+```tsx
+import type { ReactNode } from "react";
+
+interface CardProps {
+  titulo: string;
+  children: ReactNode;
+}
+
+export function Card({ titulo, children }: CardProps) {
+  return (
+    <section className="rounded-2xl border p-6">
+      <h2 className="font-serif text-xl">{titulo}</h2>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+```
+
+```tsx
+<Card titulo="Evaluación final">
+  <p>5 preguntas. Se aprueba con 4/5.</p>
+  <Badge texto="Disponible" tono="accent" />
+</Card>
+```
+
+`ReactNode` acepta cualquier cosa que React sepa mostrar: texto, números, elementos, listas, `null`.
+
+### Composición frente a muchas props
+
+Es tentador añadir una prop por cada variante: `mostrarBoton`, `textoBoton`, `iconoBoton`, `colorBoton`… Con `children`, el que usa el componente decide qué va dentro, y el componente solo se ocupa del marco:
+
+```tsx
+// ❌ Configuración: el componente debe prever cada caso
+<Card titulo="Evaluación" mostrarBoton textoBoton="Empezar" hrefBoton="/evaluacion" />
+
+// ✅ Composición: el contenido lo decide quien lo usa
+<Card titulo="Evaluación">
+  <a href="/evaluacion">Empezar</a>
+</Card>
+```
+
+## Props de tipo función: que el hijo avise al padre
+
+Los datos bajan de padre a hijo con props. Para que un hijo **comunique algo** hacia arriba, el padre le pasa una función:
+
+```tsx
+interface BotonLeidoProps {
+  seccionId: string;
+  onCambio: (seccionId: string, leido: boolean) => void;
+}
+
+export function BotonLeido({ seccionId, onCambio }: BotonLeidoProps) {
+  return <button onClick={() => onCambio(seccionId, true)}>Marcar como leído</button>;
+}
+```
+
+```tsx
+<BotonLeido seccionId="B1.3" onCambio={(id, leido) => console.log(id, leido)} />
+```
+
+Por convención, estas props empiezan por `on` (`onCambio`, `onGuardar`).
+
+## Heredar los atributos de HTML
+
+Si tu componente envuelve un elemento HTML, puedes aceptar todos sus atributos:
+
+```tsx
+import type { ButtonHTMLAttributes } from "react";
+
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+  variante?: "primario" | "secundario";
+}
+
+export function Button({ variante = "primario", className, ...resto }: ButtonProps) {
+  return <button data-variante={variante} className={className} {...resto} />;
+}
+
+<Button type="submit" disabled aria-label="Guardar">
+  Guardar
+</Button>; // ✅ todos los atributos de <button>
+```
+
+## Errores comunes
+
+- **Modificar una prop** (`props.titulo = "…"`): las props son de solo lectura.
+- **Pasar números entre comillas** (`secciones="8"`): llega un texto.
+- **Diez props booleanas** para controlar variantes de contenido: usa `children`.
+- **Olvidar tipar `children`** como `ReactNode`.
+- **Usar `any` en las props** "para que funcione": pierdes todas las comprobaciones.
+
+<Callout type="exercise">
+  1. Crea `Card`, `Badge` y `Button` tipados como en esta sección. 2. Compón con ellos una tarjeta
+  de curso: título, badge de estado y botón "Continuar". 3. Añade a `Badge` una prop `tono` con tres
+  valores y comprueba que TypeScript rechaza uno inventado. 4. Crea un componente hijo que reciba
+  una función `onSeleccionar` y avise al padre de qué curso se ha elegido.
+</Callout>
+
+<Callout type="mastery">
+  Tipas las props de cualquier componente, usas `children` en lugar de multiplicar props y sabes
+  comunicar un hijo con su padre mediante funciones.
+</Callout>
+
+## Resumen
+
+- Las props son un objeto tipado que recibe el componente; son de solo lectura.
+- Opcionales con `?` y valores por defecto al desestructurar.
+- `children: ReactNode` permite componer en lugar de configurar.
+- Los datos bajan con props; los avisos suben con funciones (`onAlgo`).
+- `extends ButtonHTMLAttributes<…>` hereda los atributos del elemento HTML.
