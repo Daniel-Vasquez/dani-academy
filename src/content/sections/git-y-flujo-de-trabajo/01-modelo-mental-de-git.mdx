@@ -4,27 +4,99 @@ course: "B2"
 title: "El modelo mental de Git"
 order: 1
 minutes: 60
-summary: "Las tres zonas de Git, qué es realmente un commit, cómo leer el historial y qué no debe subirse nunca."
+summary: "Creas un repositorio de práctica desde cero y sigues cada archivo por las tres zonas de Git, abres un commit por dentro para ver que es una foto, separas cambios con git add -p y proteges tus secretos con .gitignore."
 ---
 
-Usas Git a diario con cuatro comandos: `add`, `commit`, `push` y, cuando algo sale mal, buscar en internet. Funciona hasta que aparece un conflicto o un "detached HEAD" y no sabes qué está pasando. La causa casi siempre es la misma: falta el **modelo mental**. En esta sección vas a construirlo; el resto del curso se apoya en él.
+Usas Git a diario: `git add .`, `git commit -m "cambios"`, `git push`. Funciona hasta que algo sale raro: un archivo que "no se sube", un `.env` que acabó en GitHub, un commit que mezcla tres cosas distintas. Casi todos esos problemas vienen de no tener claro **dónde está cada cambio en cada momento**. En esta sección vas a construir ese modelo mental con un repositorio de práctica: seguirás un archivo por las **tres zonas** de Git, abrirás un commit por dentro para ver qué guarda de verdad, aprenderás a hacer commits pequeños aunque hayas cambiado muchas cosas y blindarás el repositorio contra secretos.
 
-## Las tres zonas
+**Lo que tendrás al terminar:** un repositorio `planificador` con seis commits limpios y un `.gitignore` profesional. Lo usarás en las cuatro secciones del curso.
 
-Git trabaja con tres lugares distintos. Entenderlos es entender Git:
+**Requisitos:** Git 2.23 o superior (compruébalo con `git --version`; macOS trae uno reciente con las herramientas de Xcode) y Node.js para ejecutar el pequeño programa de ejemplo.
 
-```text
- Working directory        Staging area           Repositorio (.git)
- (tus archivos)    ──add──▶ (lo que irá en   ──commit──▶ (historial de
-                            el próximo commit)            commits)
-        ◀──────────── restore ────────────────────────────
+## Paso 1: configurar Git una sola vez
+
+Antes de crear nada, Git necesita saber quién eres (cada commit lleva autor) y cómo quieres trabajar. Ejecuta esto **una sola vez** en tu Mac:
+
+```bash
+git config --global user.name "Tu Nombre"
+git config --global user.email "tu-correo@ejemplo.com"
+git config --global init.defaultBranch main
+git config --global core.editor "code --wait"
+git config --global --list
 ```
 
-1. **Working directory**: los archivos que ves y editas en VS Code.
-2. **Staging area** (o _index_): una zona intermedia donde preparas **exactamente** lo que entrará en el próximo commit.
-3. **Repositorio**: la carpeta oculta `.git`, donde se guardan todos los commits.
+- **`user.name` y `user.email`**: aparecen en cada commit. Usa el mismo correo que en GitHub, para que GitHub asocie los commits a tu cuenta.
+- **`init.defaultBranch main`**: los repositorios nuevos empiezan en `main` (el nombre estándar actual, el que espera GitHub).
+- **`core.editor "code --wait"`**: cuando Git necesite que escribas un texto largo (un mensaje de commit sin `-m`, un _merge_), abrirá VS Code y esperará a que cierres la pestaña.
+- **`--global`**: se guarda en `~/.gitconfig` y vale para todos tus repositorios. `--list` te muestra el resultado.
 
-`git add` copia cambios del _working directory_ al _staging_. `git commit` convierte el _staging_ en un commit nuevo. Nada más.
+<Callout type="risk">
+
+- **El correo es público:** queda grabado en cada commit que subas a un repositorio público. Si no quieres exponer tu correo personal, GitHub te da uno anónimo en _Settings_ → _Emails_ (del tipo `12345+usuario@users.noreply.github.com`). Úsalo aquí.
+- **`code --wait` necesita el comando `code`:** si al hacer commit ves `code: command not found`, instálalo desde VS Code con `Cmd` + `Shift` + `P` → _Shell Command: Install 'code' command in PATH_.
+- **Idioma de los mensajes:** en este curso, las salidas de Git aparecen en inglés, que es lo habitual en macOS. Si tu Git está en español, los mensajes serán equivalentes.
+
+</Callout>
+
+## Paso 2: crear el repositorio y conocer las tres zonas
+
+Crea el proyecto de práctica y conviértelo en repositorio:
+
+```bash
+mkdir planificador
+cd planificador
+git init
+git status
+```
+
+```text
+Initialized empty Git repository in /Users/tu-usuario/planificador/.git/
+
+On branch main
+
+No commits yet
+
+nothing to commit (create/copy files and use "git add" to track)
+```
+
+`git init` crea una carpeta oculta, **`.git`**. Ahí vive **todo** el historial: si borras `.git`, la carpeta vuelve a ser una carpeta normal sin historia.
+
+Antes de seguir, el modelo mental. Git trabaja con **tres zonas**:
+
+| Zona                                              | Qué es                                   | Analogía                                 |
+| ------------------------------------------------- | ---------------------------------------- | ---------------------------------------- |
+| **Working directory** (directorio de trabajo)     | Los archivos que ves y editas en VS Code | La mesa donde trabajas                   |
+| **Staging area** (área de preparación, o _index_) | Lo que irá en el próximo commit          | La caja donde metes lo que vas a enviar  |
+| **Repositorio** (`.git`)                          | Los commits guardados para siempre       | El archivo con todos los envíos sellados |
+
+Y tres comandos para moverse entre ellas: **`git add`** pasa cambios de la mesa a la caja, **`git commit`** sella la caja y la archiva, y **`git status`** te dice qué hay en cada sitio.
+
+Crea dos archivos. Primero `README.md`:
+
+```markdown
+# Planificador 2026
+
+Organizador de tareas por categorías: trabajo, personal, salud y estudio.
+```
+
+Después `src/tareas.js` (crea la carpeta `src`):
+
+```js
+// Lista de tareas del Planificador 2026
+const tareas = [
+  { titulo: "Revisar pull request", categoria: "trabajo", hecha: false },
+  { titulo: "Correr 5 km", categoria: "salud", hecha: true },
+  { titulo: "Leer sección B2.1", categoria: "estudio", hecha: false },
+];
+
+function pendientes(lista) {
+  return lista.filter((t) => !t.hecha);
+}
+
+console.log(`Tareas pendientes: ${pendientes(tareas).length}`);
+```
+
+Comprueba que funciona con `node src/tareas.js` (verás `Tareas pendientes: 2`) y pregunta a Git:
 
 ```bash
 git status
@@ -32,146 +104,533 @@ git status
 
 ```text
 On branch main
-Changes to be committed:        ← staging
-        modified:   src/lib/auth.ts
-Changes not staged for commit:  ← working directory
-        modified:   src/pages/login.astro
-Untracked files:                ← archivos que Git aún no conoce
-        notas.txt
+
+No commits yet
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	README.md
+	src/
+
+nothing added to commit but untracked files present (use "git add" to track)
 ```
 
-`git status` te dice en qué zona está cada archivo. Úsalo antes y después de cada operación: es tu mapa.
-
-## Elegir qué entra en un commit
-
-La _staging area_ existe para que tus commits sean **pequeños y con un solo propósito**, aunque hayas tocado muchas cosas a la vez:
+**Untracked** significa que los archivos están en tu mesa, pero Git todavía no los vigila. Mete **solo** el README en la caja:
 
 ```bash
-git add src/lib/auth.ts       # un archivo concreto
-git add -p                    # elegir trozo a trozo (y = sí, n = no, s = dividir)
-git diff                      # qué has cambiado y NO está en staging
-git diff --staged             # qué entrará en el próximo commit
+git add README.md
+git status
 ```
 
-`git add -p` es probablemente el comando que más mejorará tus commits: te enseña cada bloque de cambios y te pregunta si lo incluyes.
+```text
+On branch main
 
-<Callout type="tip">
-  Antes de cada `git commit`, ejecuta `git diff --staged`. Es tu última revisión: si ves algo que no
-  debería ir (un `console.log`, una contraseña), todavía estás a tiempo.
+No commits yet
+
+Changes to be committed:
+  (use "git rm --cached <file>..." to unstage)
+	new file:   README.md
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	src/
+```
+
+Ahora mismo hay un archivo en cada zona: `README.md` está en _staging_ ("Changes to be committed") y `src/` sigue solo en tu mesa. Sella la caja:
+
+```bash
+git commit -m "docs: añade README del proyecto"
+```
+
+```text
+[main (root-commit) 78d8778] docs: añade README del proyecto
+ 1 file changed, 3 insertions(+)
+ create mode 100644 README.md
+```
+
+Haz lo mismo con `src/tareas.js`:
+
+```bash
+git add src/tareas.js
+git commit -m "feat: lista de tareas pendientes"
+git log --oneline
+```
+
+```text
+c612e72 feat: lista de tareas pendientes
+78d8778 docs: añade README del proyecto
+```
+
+Cada commit tiene un **identificador** (`c612e72`). Los tuyos serán distintos: se calculan a partir del contenido, el autor y la fecha.
+
+<Callout type="risk">
+
+- **`git add .` lo mete todo:** incluye archivos que no querías (un `.env`, un archivo de prueba, `node_modules` si no hay `.gitignore`). Acostúmbrate a mirar `git status` antes de cada commit, o añade los archivos por nombre.
+- **No inicies un repositorio dentro de otro:** si haces `git init` en una subcarpeta de un proyecto que ya es repositorio, tendrás dos historiales y comportamientos muy confusos. Antes de `git init`, comprueba con `git status` que no estás ya dentro de uno (debe decir `not a git repository`).
+- **Nunca edites a mano dentro de `.git`:** es la base de datos de Git. Un cambio manual puede corromper el historial.
+
 </Callout>
 
-## Qué es un commit
+## Paso 3: abrir un commit por dentro
 
-Un commit **no** es una lista de cambios. Es una **foto completa** del proyecto en un momento, más unos metadatos:
+Hay una idea equivocada muy extendida: "un commit guarda los cambios (un _diff_)". En realidad, un commit guarda **una foto completa del proyecto** en ese momento. Compruébalo con `git cat-file`, que muestra los objetos internos de Git:
 
-```text
-commit 81544ef
-├─ árbol: foto de todos los archivos
-├─ padre: c954b51        ← el commit anterior
-├─ autor y fecha
-└─ mensaje: "feat: conexión a MongoDB…"
+```bash
+git cat-file -p HEAD
 ```
 
-Cada commit apunta a su **padre**, y así se forma el historial: una cadena que va hacia atrás. El identificador (`81544ef…`) es un _hash_ calculado a partir del contenido: si cambiara una sola letra, el hash sería otro. Por eso el historial de Git es tan fiable.
-
-`git diff` calcula las diferencias **comparando dos fotos**; no están guardadas como tales.
-
-## HEAD: "dónde estás"
-
-`HEAD` es un puntero que indica **en qué commit estás ahora**. Normalmente apunta a una rama (por ejemplo, `main`), y la rama apunta al último commit:
-
 ```text
-HEAD → main → 81544ef → c954b51 → 496304c → 07f2014
+tree 15c60bec11c24732963b6109f6f85b0ed85a1099
+parent 78d8778efa8c509c9070c75ad67b7e7435b4a51c
+author Dani <dani@example.com> 1791561600 -0600
+committer Dani <dani@example.com> 1791561600 -0600
+
+feat: lista de tareas pendientes
 ```
 
-Cuando haces un commit, se crea uno nuevo cuyo padre es el actual, y la rama avanza para apuntar a él. `HEAD` la sigue.
+Un commit contiene:
 
-## Leer el historial
+- **`tree`**: la foto. Es el identificador de un "árbol" (una carpeta) con todos los archivos.
+- **`parent`**: el commit anterior. Así se encadena el historial: cada commit sabe quién es su padre.
+- **`author` y `committer`**: quién y cuándo (en segundos desde 1970 y zona horaria).
+- **El mensaje.**
+
+Abre la foto:
+
+```bash
+git cat-file -p "HEAD^{tree}"
+git cat-file -p HEAD:src
+```
+
+```text
+100644 blob 015d6f7a06f442c6fda086540d90a3759db2686c	README.md
+040000 tree 1d16301cdeae0f8b841a12a0725de7af890b5a70	src
+100644 blob 949ff6272e0290077b2b96fa9a3d1941bb490b69	tareas.js
+```
+
+La raíz contiene `README.md` (un _blob_, es decir, el contenido de un archivo) y `src` (otro _tree_), que a su vez contiene `tareas.js`. **Es la foto completa**, aunque este commit solo añadió `tareas.js`. Git no duplica espacio: si un archivo no cambia, la foto nueva reutiliza el mismo _blob_. Cuando ves un _diff_ en GitHub, Git lo **calcula** comparando dos fotos.
+
+¿Y qué es **`HEAD`**? Es un puntero que indica "dónde estás ahora":
+
+```bash
+cat .git/HEAD
+cat .git/refs/heads/main
+```
+
+```text
+ref: refs/heads/main
+c612e725948400d140e04abab2dcbdf341d29233
+```
+
+`HEAD` apunta a la rama `main`, y `main` apunta al último commit. Al hacer un commit nuevo, `main` avanza y `HEAD` la sigue. Esta cadena (`HEAD` → rama → commit) es la base de las ramas, que verás en B2.2.
+
+<Callout type="risk">
+
+- **Los archivos grandes se quedan para siempre:** como cada commit es una foto, un vídeo de 200 MB que subas y borres en el commit siguiente sigue ocupando espacio en el historial, y todo el que clone el repositorio lo descargará. No subas binarios pesados; para eso existen servicios de almacenamiento (o Git LFS).
+- **"Borrar" un archivo no lo borra del historial:** si un secreto llegó a un commit, eliminarlo en el siguiente no sirve. Sigue en la foto anterior (lo verás en el Paso 6).
+
+</Callout>
+
+## Paso 4: ver qué ha cambiado con `git diff` y `git diff --staged`
+
+En `src/tareas.js`, cambia `"Correr 5 km"` por `"Correr 10 km"` y pregunta qué ha cambiado:
+
+```bash
+git diff
+```
+
+```text
+diff --git a/src/tareas.js b/src/tareas.js
+index 949ff62..c0322fd 100644
+--- a/src/tareas.js
++++ b/src/tareas.js
+@@ -1,7 +1,7 @@
+ // Lista de tareas del Planificador 2026
+ const tareas = [
+   { titulo: "Revisar pull request", categoria: "trabajo", hecha: false },
+-  { titulo: "Correr 5 km", categoria: "salud", hecha: true },
++  { titulo: "Correr 10 km", categoria: "salud", hecha: true },
+   { titulo: "Leer sección B2.1", categoria: "estudio", hecha: false },
+ ];
+```
+
+Cómo leerlo:
+
+- **`---` / `+++`**: la versión antigua (`a/`) y la nueva (`b/`).
+- **`@@ -1,7 +1,7 @@`**: el fragmento (_hunk_) empieza en la línea 1 y abarca 7 líneas, antes y después.
+- Las líneas con **`-`** se quitan, las que llevan **`+`** se añaden y las demás son contexto.
+
+Ahora pásalo a _staging_ y repite:
+
+```bash
+git add src/tareas.js
+git diff
+git diff --staged
+```
+
+`git diff` ya **no muestra nada**, y `git diff --staged` muestra exactamente el mismo cambio de antes. Esta es la clave:
+
+- **`git diff`** compara tu mesa con la caja: lo que **todavía no** has añadido.
+- **`git diff --staged`** compara la caja con el último commit: lo que **va a entrar** en el próximo commit.
+
+Antes de cada commit, `git diff --staged` es la mejor revisión que puedes hacer. Confirma el cambio:
+
+```bash
+git commit -m "fix: corrige la distancia del entreno"
+```
+
+<Callout type="risk">
+
+- **"Hice cambios y `git diff` no muestra nada":** casi siempre es porque ya los añadiste con `git add`. Usa `git diff --staged`, o `git status` para ver en qué zona están.
+- **Los archivos nuevos no aparecen en `git diff`:** un archivo _untracked_ no tiene versión anterior con la que comparar. Aparecerá en `git diff --staged` en cuanto lo añadas.
+- **Diffs enormes de formato:** si tu editor reformatea un archivo entero al guardar, el diff mostrará cientos de líneas cambiadas y esconderá el cambio real. Haz los cambios de formato en un commit aparte (`style: formatea con Prettier`).
+
+</Callout>
+
+## Paso 5: commits pequeños con `git add -p`
+
+Un caso muy real: llevas una hora trabajando y has hecho **dos cosas distintas** en el mismo archivo. Un buen historial tiene **un commit por idea**, para poder entenderlo, revisarlo y deshacerlo por partes. `git add -p` (de _patch_) te deja elegir **qué trozos** de un archivo pasan a _staging_.
+
+Sustituye `src/tareas.js` por esta versión, que añade una tarea nueva **y** una función para contar por categoría:
+
+```js
+// Lista de tareas del Planificador 2026
+const tareas = [
+  { titulo: "Revisar pull request", categoria: "trabajo", hecha: false },
+  { titulo: "Correr 10 km", categoria: "salud", hecha: true },
+  { titulo: "Leer sección B2.1", categoria: "estudio", hecha: false },
+  { titulo: "Llamar a mamá", categoria: "personal", hecha: false },
+];
+
+function pendientes(lista) {
+  return lista.filter((t) => !t.hecha);
+}
+
+function contarPorCategoria(lista) {
+  const conteo = { trabajo: 0, personal: 0, salud: 0, estudio: 0 };
+  for (const tarea of lista) {
+    conteo[tarea.categoria] += 1;
+  }
+  return conteo;
+}
+
+console.log(`Tareas pendientes: ${pendientes(tareas).length}`);
+console.log(contarPorCategoria(tareas));
+```
+
+```bash
+git add -p
+```
+
+Git te enseña el cambio y pregunta qué hacer con él:
+
+```text
+diff --git a/src/tareas.js b/src/tareas.js
+index c0322fd..5fc0380 100644
+--- a/src/tareas.js
++++ b/src/tareas.js
+@@ -3,10 +3,20 @@ const tareas = [
+   { titulo: "Revisar pull request", categoria: "trabajo", hecha: false },
+   { titulo: "Correr 10 km", categoria: "salud", hecha: true },
+   { titulo: "Leer sección B2.1", categoria: "estudio", hecha: false },
++  { titulo: "Llamar a mamá", categoria: "personal", hecha: false },
+ ];
+
+ function pendientes(lista) {
+   return lista.filter((t) => !t.hecha);
+ }
+
++function contarPorCategoria(lista) {
++  const conteo = { trabajo: 0, personal: 0, salud: 0, estudio: 0 };
++  for (const tarea of lista) {
++    conteo[tarea.categoria] += 1;
++  }
++  return conteo;
++}
++
+ console.log(`Tareas pendientes: ${pendientes(tareas).length}`);
++console.log(contarPorCategoria(tareas));
+(1/1) Stage this hunk [y,n,q,a,d,s,e,p,P,?]?
+```
+
+Como los cambios están cerca, Git los ha agrupado en un solo trozo. Las respuestas más útiles son: **`y`** (sí, añade este trozo), **`n`** (no), **`s`** (_split_, divídelo en trozos más pequeños), **`q`** (salir) y **`?`** (ayuda). Responde así:
+
+1. **`s`**: Git responde `Split into 3 hunks.` y te los presenta uno a uno, preguntando por cada uno con `(1/3) Stage this hunk…?`, `(2/3)…` y `(3/3)…`.
+2. **`n`** al primero (la tarea "Llamar a mamá"): irá en otro commit.
+3. **`y`** al segundo (la función `contarPorCategoria`).
+4. **`y`** al tercero (el `console.log` que la usa).
+
+Comprueba el resultado:
+
+```bash
+git status --short
+git diff --staged
+```
+
+```text
+MM src/tareas.js
+```
+
+La doble `M` es la prueba de que el archivo está **en dos zonas a la vez**: la primera columna dice que hay cambios en _staging_ y la segunda, que quedan otros en la mesa. `git diff --staged` muestra solo la función y su `console.log`. Haz los dos commits:
+
+```bash
+git commit -m "feat: cuenta las tareas por categoría"
+git add src/tareas.js
+git commit -m "feat: añade tarea personal de ejemplo"
+node src/tareas.js
+```
+
+```text
+Tareas pendientes: 3
+{ trabajo: 1, personal: 1, salud: 1, estudio: 1 }
+```
+
+<Callout type="risk">
+
+- **Commits que no funcionan solos:** con `add -p` es fácil confirmar una función sin la línea que la importa, o al revés. Cada commit debería funcionar por sí mismo; si dudas, revisa `git diff --staged` antes de confirmar. (Aquí, el `console.log` y la función van juntos por eso).
+- **`s` no siempre puede dividir:** si los cambios están en líneas consecutivas, Git no puede separarlos y `s` no aparece entre las opciones. Usa `e` (_edit_) para editar el trozo a mano, o haz los cambios en dos momentos distintos.
+- **VS Code lo hace con el ratón:** en el panel _Source Control_, abre el diff de un archivo, selecciona líneas y usa _Stage Selected Ranges_. Es lo mismo que `add -p`, con interfaz gráfica.
+
+</Callout>
+
+## Paso 6: proteger el repositorio con `.gitignore`
+
+Algunos archivos **nunca** deben entrar en Git: dependencias que se reinstalan (`node_modules/`), resultados de compilar (`dist/`), archivos del sistema (`.DS_Store`) y, sobre todo, **secretos** (`.env`). Simula un proyecto real creando esos archivos:
+
+```bash
+printf 'API_TOKEN="token-secreto-1234567890"\n' > .env
+mkdir -p node_modules/fake dist
+echo "x" > node_modules/fake/index.js
+echo "x" > dist/a.js
+touch .DS_Store
+git status --short
+```
+
+```text
+?? .DS_Store
+?? .env
+?? dist/
+?? node_modules/
+```
+
+Un `git add .` ahora subiría tu token. Crea `.gitignore` en la raíz del proyecto:
+
+```gitignore
+# Dependencias: se reinstalan con npm install
+node_modules/
+
+# Resultado de compilar: se regenera con npm run build
+dist/
+.astro/
+
+# Secretos y configuración local: NUNCA se suben
+.env
+.env.*
+!.env.example
+
+# Archivos del sistema y del editor
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+```
+
+Y crea `.env.example`, la plantilla que **sí** se sube para documentar qué variables necesita el proyecto (con valores vacíos):
+
+```bash
+printf 'API_TOKEN=""\n' > .env.example
+git status --short
+```
+
+```text
+?? .env.example
+?? .gitignore
+```
+
+Los archivos ignorados han desaparecido de `git status`. Las reglas de `.gitignore`:
+
+- **`node_modules/`** (con `/` al final): una carpeta y todo lo que contiene.
+- **`.env.*`**: cualquier archivo que empiece por `.env.` (`.env.local`, `.env.production`…).
+- **`!.env.example`**: el `!` es una **excepción**; vuelve a incluir un archivo que una regla anterior excluía. El orden importa: la excepción va después.
+- **`#`**: comentarios.
+
+Si alguna vez no sabes por qué Git ignora (o no) un archivo, pregúntaselo:
+
+```bash
+git check-ignore -v .env node_modules/fake/index.js .DS_Store
+```
+
+```text
+.gitignore:9:.env	.env
+.gitignore:2:node_modules/	node_modules/fake/index.js
+.gitignore:14:.DS_Store	.DS_Store
+```
+
+Cada línea dice qué regla (archivo y número de línea) ignora cada ruta. Confirma:
+
+```bash
+git add .gitignore .env.example
+git commit -m "chore: añade .gitignore y .env.example"
+```
+
+<Callout type="risk">
+
+- **`.gitignore` no afecta a archivos que ya están en Git.** Es la trampa más común: si `.env` se subió **antes** de crear la regla, Git lo sigue vigilando y verás sus cambios en `git status`. Para dejar de versionarlo sin borrarlo de tu disco: `git rm --cached .env` y un commit. Comprueba qué archivos de entorno vigila Git con `git ls-files | grep env`: solo debería salir `.env.example`.
+- **Un secreto que llegó a GitHub está comprometido.** `git rm --cached` lo saca de los commits **futuros**, pero sigue en los anteriores, y cualquiera que haya clonado o visto el repositorio puede tenerlo. Lo primero, siempre: **genera un secreto nuevo** (nueva contraseña de MongoDB, nuevo `BETTER_AUTH_SECRET`) e invalida el viejo. Reescribir el historial es secundario.
+- **`git add -f`** fuerza a añadir un archivo ignorado. Si lo ves en un tutorial para "arreglar" algo, desconfía.
+- **Un `.gitignore` global** (`git config --global core.excludesFile ~/.gitignore_global`) es buen sitio para `.DS_Store` y archivos de tu editor, que no son cosa del proyecto. Pero mantén `.env` y `node_modules/` en el del proyecto: así protegen a cualquiera que lo clone.
+
+</Callout>
+
+## Paso 7: escribir buenos mensajes y leer el historial
+
+Mira tu historial con la vista que usarás a diario:
 
 ```bash
 git log --oneline --graph --all
 ```
 
 ```text
-* 53a7165 (HEAD -> main, origin/main) feat: página de progreso…
-* 461d2f9 chore: zona horaria por defecto America/Mexico_City
-* 1c0afa8 feat: índice del temario…
+* f698b16 chore: añade .gitignore y .env.example
+* 43489f6 feat: añade tarea personal de ejemplo
+* 6b29e14 feat: cuenta las tareas por categoría
+* 5a96b7d fix: corrige la distancia del entreno
+* c612e72 feat: lista de tareas pendientes
+* 78d8778 docs: añade README del proyecto
 ```
 
-- `--oneline`: un commit por línea.
-- `--graph`: dibuja las ramas y sus uniones.
-- `--all`: muestra todas las ramas, no solo la actual.
+- **`--oneline`**: un commit por línea.
+- **`--graph`**: dibuja las ramas con `*` y líneas (ahora es recto; en B2.2 verás bifurcaciones).
+- **`--all`**: incluye todas las ramas, no solo la actual.
 
-Créate un alias para no escribirlo cada vez:
+Todos los mensajes siguen **Conventional Commits**, una convención muy extendida: `tipo: descripción`. Los tipos más comunes:
 
-```bash
-git config --global alias.lg "log --oneline --graph --all"
-git lg
-```
+| Tipo       | Cuándo usarlo                               | Ejemplo                                           |
+| ---------- | ------------------------------------------- | ------------------------------------------------- |
+| `feat`     | Funcionalidad nueva para el usuario         | `feat: añade gráfica de peso semanal`             |
+| `fix`      | Corrección de un error                      | `fix: corrige el total de agua al cambiar de día` |
+| `docs`     | Solo documentación                          | `docs: explica las variables de entorno`          |
+| `style`    | Formato, sin cambiar el comportamiento      | `style: formatea con Prettier`                    |
+| `refactor` | Reorganizar código sin cambiar qué hace     | `refactor: extrae el cálculo de rachas`           |
+| `test`     | Añadir o corregir tests                     | `test: cubre el caso de semana vacía`             |
+| `chore`    | Mantenimiento (dependencias, configuración) | `chore: actualiza Astro a la 7.3`                 |
 
-## Buenos mensajes de commit
+Las reglas de un buen mensaje:
 
-Un mensaje responde a "¿qué hace este commit?" en una línea. La convención más extendida, **Conventional Commits**, añade un prefijo de tipo:
+1. **Describe el qué, en presente y en una línea corta** (unos 50–70 caracteres): `fix: corrige la distancia del entreno`, no `arreglos` ni `cambios varios`.
+2. **Un commit, una idea**: si necesitas una "y" en el mensaje, probablemente son dos commits.
+3. **El porqué va en el cuerpo:** para un cambio que no es evidente, ejecuta `git commit` sin `-m`. Se abrirá VS Code: escribe el título, deja una línea en blanco y explica el motivo. Guarda y cierra la pestaña.
 
-| Prefijo     | Para…                                                 |
-| ----------- | ----------------------------------------------------- |
-| `feat:`     | una funcionalidad nueva                               |
-| `fix:`      | corregir un error                                     |
-| `docs:`     | documentación                                         |
-| `refactor:` | reorganizar código sin cambiar su comportamiento      |
-| `chore:`    | tareas de mantenimiento (dependencias, configuración) |
-| `test:`     | añadir o cambiar tests                                |
+<Callout type="risk">
 
-```bash
-git commit -m "fix: el contador del índice no se actualizaba al desmarcar"
-```
+- **Mensajes que no dicen nada** (`wip`, `cambios`, `.`) hacen que dentro de tres meses no puedas encontrar cuándo se introdujo un error. Con `git log --oneline --grep "agua"` puedes buscar commits por su mensaje, pero solo si los mensajes son descriptivos.
+- **Un commit gigante al final del día** es imposible de revisar y de deshacer por partes. Haz commit cada vez que algo pequeño funcione.
+- **Conventional Commits no es obligatorio**, pero algunas herramientas lo aprovechan para generar _changelogs_ y versiones automáticamente. Lo importante es que el equipo (aunque seas tú solo) use siempre la misma convención.
 
-Este mismo proyecto, Dani Academy, usa esta convención en todos sus commits: revísalos con `git lg` para ver ejemplos reales.
+</Callout>
 
-## `.gitignore`: lo que nunca se sube
-
-Algunos archivos no deben entrar jamás en el repositorio:
-
-```gitignore
-node_modules/   # se reinstala con npm install; pesa cientos de MB
-dist/           # se genera al compilar
-.env            # contiene secretos: URI de MongoDB, BETTER_AUTH_SECRET…
-.env.*
-!.env.example   # la plantilla sí, sin valores reales
-.DS_Store
-```
-
-`.gitignore` solo afecta a archivos **no rastreados**. Si ya subiste un `.env` por error, añadirlo al `.gitignore` no lo borra del historial: tendrás que dejar de rastrearlo y, sobre todo, **cambiar los secretos** (lo verás en el curso de seguridad).
-
-```bash
-git rm --cached .env   # deja de rastrearlo, pero conserva el archivo en tu disco
-```
-
-## Errores comunes
-
-- **`git add .` por costumbre.** Mete todo, incluidos cambios a medias y archivos temporales. Revisa con `git status` y usa `git add -p`.
-- **Commits gigantes** con mensajes como "cambios" o "arreglos". Imposibles de revisar y de deshacer por partes.
-- **Creer que `.gitignore` borra archivos ya subidos.** Solo evita añadir nuevos.
-- **Trabajar sin mirar `git status`.** La mayoría de los sustos de Git vienen de no saber en qué zona está cada cosa.
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea un repositorio de práctica (`git init`) y haz 5 commits pequeños usando `git add -p` y
-  mensajes con Conventional Commits. 2. En uno de ellos, modifica dos cosas no relacionadas en el
-  mismo archivo y usa `git add -p` para separarlas en dos commits. 3. Configura el alias `git lg` y
-  revisa el historial resultante. 4. En tus proyectos reales, ejecuta `git ls-files | grep -i env` y
-  comprueba que no hay ningún `.env` versionado.
+
+1. En `planificador`, edita `src/tareas.js` para hacer **a la vez** estos cambios: marca "Leer sección B2.1" como hecha, añade una función `completadas(lista)` y muestra su resultado con `console.log`, y añade una línea al `README.md` explicando cómo ejecutar el proyecto.
+2. Con `git add -p` (y `git add` para el README), conviértelos en **tres commits** con mensajes Conventional Commits.
+3. Revisa cada commit antes de hacerlo con `git diff --staged`.
+4. Comprueba con `git ls-files | grep env` que el único archivo de entorno versionado es `.env.example`.
+5. Dibuja en papel las tres zonas y escribe dónde está cada archivo de `planificador` ahora mismo (incluidos `.env` y `node_modules/`).
+
+</Callout>
+
+Solución. Así queda `src/tareas.js` con todos los cambios:
+
+```js
+// Lista de tareas del Planificador 2026
+const tareas = [
+  { titulo: "Revisar pull request", categoria: "trabajo", hecha: false },
+  { titulo: "Correr 10 km", categoria: "salud", hecha: true },
+  { titulo: "Leer sección B2.1", categoria: "estudio", hecha: true },
+  { titulo: "Llamar a mamá", categoria: "personal", hecha: false },
+];
+
+function pendientes(lista) {
+  return lista.filter((t) => !t.hecha);
+}
+
+function completadas(lista) {
+  return lista.filter((t) => t.hecha);
+}
+
+function contarPorCategoria(lista) {
+  const conteo = { trabajo: 0, personal: 0, salud: 0, estudio: 0 };
+  for (const tarea of lista) {
+    conteo[tarea.categoria] += 1;
+  }
+  return conteo;
+}
+
+console.log(`Tareas pendientes: ${pendientes(tareas).length}`);
+console.log(`Tareas completadas: ${completadas(tareas).length}`);
+console.log(contarPorCategoria(tareas));
+```
+
+Y `README.md`:
+
+```markdown
+# Planificador 2026
+
+Organizador de tareas por categorías: trabajo, personal, salud y estudio.
+
+Ejecútalo con `node src/tareas.js`.
+```
+
+La secuencia de comandos (en `git add -p`, responde según el trozo que te muestre: `y` a lo que pertenece a ese commit y `n` al resto; usa `s` si un trozo mezcla dos cambios):
+
+```bash
+git add -p src/tareas.js          # y solo al trozo de "hecha: true"
+git diff --staged
+git commit -m "feat: marca como leída la sección B2.1"
+
+git add -p src/tareas.js          # y a los trozos de completadas()
+git diff --staged
+git commit -m "feat: muestra el número de tareas completadas"
+
+git add README.md
+git diff --staged
+git commit -m "docs: explica cómo ejecutar el proyecto"
+
+git ls-files | grep env
+git log --oneline
+node src/tareas.js
+```
+
+```text
+.env.example
+```
+
+```text
+Tareas pendientes: 2
+Tareas completadas: 2
+{ trabajo: 1, personal: 1, salud: 1, estudio: 1 }
+```
+
+Y el dibujo: **working directory** = todos los archivos, incluidos `.env`, `node_modules/`, `dist/` y `.DS_Store`. **Staging** = vacía (después de un commit, coincide con el último commit). **Repositorio** = `README.md`, `src/tareas.js`, `.gitignore` y `.env.example`, nueve commits en total. Los archivos ignorados viven **solo** en la mesa.
+
+<Callout type="risk">
+
+- **El orden de los trozos depende de tus cambios:** si al editar dejaste el cambio de `hecha: true` pegado a otro, Git puede mostrártelos en un solo trozo sin opción `s`. En ese caso, deshaz uno de los dos, haz el primer commit y vuelve a aplicarlo.
+- **`git commit -am`** (añadir y confirmar a la vez) es cómodo, pero añade **todos** los archivos modificados que Git ya vigila, sin preguntarte. Úsalo solo cuando `git status` muestre exactamente lo que quieres confirmar.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes dibujar en papel las tres zonas de Git, indicar en cuál está cada archivo según `git
-  status` y explicar qué es `HEAD`.
+
+Puedes dibujar en papel las tres zonas de Git y decir en qué zona está cada archivo de tu proyecto, sabes qué muestran `git diff` y `git diff --staged`, separas cambios con `git add -p` y compruebas con `git ls-files` que ningún secreto está versionado.
+
 </Callout>
 
 ## Resumen
 
-- Git tiene tres zonas: _working directory_, _staging area_ y repositorio.
-- `add` prepara, `commit` guarda una foto completa enlazada con su padre.
-- `HEAD` indica dónde estás; normalmente apunta a una rama.
-- `git add -p` y `git diff --staged` hacen commits pequeños y revisados.
-- Conventional Commits da mensajes claros y consistentes.
-- `.gitignore` evita subir `node_modules`, compilados y secretos.
+- Tres zonas: _working directory_ (tu mesa), _staging area_ (la caja del próximo commit) y repositorio (`.git`). `add` mueve a la caja; `commit` la sella.
+- Un commit es una **foto completa** (un _tree_) con un padre, un autor y un mensaje; el diff se calcula comparando fotos.
+- `HEAD` apunta a la rama actual, y la rama apunta a un commit.
+- `git diff` = cambios aún no añadidos; `git diff --staged` = lo que entrará en el próximo commit.
+- `git add -p` separa cambios en commits pequeños; `.gitignore` solo afecta a archivos que Git aún no vigila.

@@ -4,148 +4,481 @@ course: "B2"
 title: "GitHub: remotos y Pull Requests"
 order: 4
 minutes: 60
-summary: "Conectar tu repositorio con GitHub por SSH, sincronizar con fetch, pull y push, y trabajar con Pull Requests."
+summary: "Subes planificador a GitHub, entiendes qué hacen fetch, pull y push, actualizas una rama con rebase y --force-with-lease y completas una Pull Request con gh hasta el squash merge."
 ---
 
-Hasta ahora todo ocurría en tu ordenador. GitHub añade un **repositorio remoto**: una copia en la nube con la que sincronizas, que sirve de copia de seguridad, de punto de partida para Vercel y de lugar donde revisar cambios con **Pull Requests**. En esta sección conectas las dos partes y aprendes a trabajar como en un equipo, aunque trabajes solo.
+Hasta ahora, todo tu historial vivía en una sola carpeta de tu Mac. Un **remoto** es otra copia del repositorio en otro sitio (normalmente GitHub) con la que sincronizas commits. Es tu copia de seguridad, el punto de encuentro con otras personas y lo que dispara los despliegues de Vercel. En esta sección vas a subir `planificador` a GitHub, entender qué hace realmente cada comando de sincronización (la mayoría de los sustos con `git pull` vienen de no saberlo), mantener una rama al día con `rebase` y completar el ciclo profesional de una **Pull Request**: rama, PR, revisión, _squash merge_ y limpieza.
 
-## Remotos
+**Lo que tendrás al terminar:** `planificador` en GitHub con `main` protegido, y una funcionalidad mezclada mediante una Pull Request creada desde la terminal con `gh`.
 
-Un remoto es otro repositorio con el que te sincronizas. Por convención, el principal se llama `origin`:
+**Requisitos:** el repositorio `planificador` de B2.3, una cuenta de GitHub y tu clave SSH configurada en GitHub (es la que te permite hacer `git push` sin contraseña; si `ssh -T git@github.com` responde `Hi tu-usuario!`, está lista).
 
-```bash
-git remote -v
-```
+## Paso 1: instalar `gh` y crear el repositorio en GitHub
 
-```text
-origin  git@github.com:Daniel-Vasquez/dani-academy.git (fetch)
-origin  git@github.com:Daniel-Vasquez/dani-academy.git (push)
-```
-
-Git guarda una copia local de cómo estaban las ramas del remoto la última vez que hablaste con él: son las **ramas de seguimiento**, como `origin/main`. Las ves con `git branch -a` o en `git lg`.
-
-### HTTPS o SSH
-
-GitHub **no acepta tu contraseña** para operaciones de Git desde 2021. Si el remoto usa HTTPS, te pedirá usuario y un _token_ de acceso personal (y fallará con "Password authentication is not supported" si escribes la contraseña). La alternativa más cómoda es **SSH**: una clave en tu ordenador, registrada una vez en GitHub, y no vuelves a escribir nada.
-
-```bash
-ssh -T git@github.com
-# Hi Daniel-Vasquez! You've successfully authenticated…
-
-git remote set-url origin git@github.com:Daniel-Vasquez/dani-academy.git
-```
-
-<Callout type="note">
-  Este mismo proyecto pasó por ahí: el primer `git push` por HTTPS falló pidiendo contraseña, y la
-  solución fue cambiar el remoto a SSH usando la clave que ya existía en `~/.ssh`.
-</Callout>
-
-## fetch, pull y push
-
-```bash
-git fetch            # descarga lo nuevo del remoto y actualiza origin/main; NO toca tus ramas
-git pull             # fetch + merge de origin/main en tu rama actual
-git pull --rebase    # fetch + reaplica tus commits encima de lo descargado
-git push             # sube tus commits
-git push -u origin feat/heatmap   # primera vez: sube la rama y la enlaza con el remoto
-```
-
-`-u` (_upstream_) enlaza tu rama local con la remota: a partir de ahí, `git push` y `git pull` sin argumentos saben a dónde ir.
-
-Si alguien (o tú desde otro ordenador) subió commits que no tienes, Git rechaza tu `push`:
-
-```text
-! [rejected]        main -> main (fetch first)
-```
-
-La solución **no** es `--force`: es traer primero lo nuevo (`git pull --rebase`), resolver conflictos si los hay y volver a subir.
-
-## Rebase básico
-
-`git rebase main` toma los commits de tu rama y los **reaplica encima** del último `main`, como si la hubieras creado hoy:
-
-```text
-Antes:   feat:  C4 ─ C5           Después:  feat:              C4' ─ C5'
-                /                                              /
-main:  C1 ─ C3 ─ C6               main:  C1 ─ C3 ─ C6 ────────
-```
-
-```bash
-git switch feat/heatmap
-git rebase main
-```
-
-El resultado es un historial lineal, sin _merge commits_. Pero `rebase` **reescribe** tus commits (cambian de hash), así que la regla es la misma que con `reset`: hazlo solo con commits que **nadie más** tenga.
-
-## Pull Requests
-
-Una **Pull Request** (PR) es una propuesta de unir una rama a otra en GitHub, con un espacio para describirla, revisarla y discutirla antes de mezclar. Aunque trabajes solo, aporta mucho:
-
-- Te obliga a **releer tus cambios** completos antes de unirlos.
-- Ejecuta comprobaciones automáticas (CI, _previews_ de Vercel).
-- Deja un registro de **por qué** se hizo cada cambio.
-
-El ciclo completo:
-
-```bash
-git switch -c feat/heatmap
-# …commits…
-git push -u origin feat/heatmap
-```
-
-En GitHub aparece el botón **Compare & pull request**. Escribe:
-
-- **Título**: como un buen mensaje de commit (`feat: mapa de actividad en /progreso`).
-- **Descripción**: qué cambia, por qué y cómo probarlo.
-
-### Squash merge
-
-Al mezclar una PR, GitHub ofrece tres opciones. Para ramas de funcionalidad, **Squash and merge** suele ser la mejor: une todos los commits de la rama en **uno solo** sobre `main`. Tu historial de trabajo puede ser desordenado ("wip", "arreglo", "otra vez"); `main` queda limpio, con un commit por funcionalidad.
-
-### Proteger `main`
-
-En GitHub, _Settings → Branches_, puedes exigir que todo cambio a `main` entre por PR y que pasen las comprobaciones. Así `main` siempre funciona.
-
-## La CLI de GitHub: `gh`
-
-`gh` permite hacerlo todo desde la terminal:
+`gh` es la herramienta oficial de GitHub para la terminal. Instálala con Homebrew e inicia sesión:
 
 ```bash
 brew install gh
 gh auth login
+```
 
-gh pr create --title "feat: mapa de actividad" --body "Añade el heatmap de 12 semanas a /progreso"
-gh pr view --web          # abrirla en el navegador
-gh pr checks              # estado de las comprobaciones
+`gh auth login` te hace unas preguntas: elige **GitHub.com**, protocolo **SSH** (el mismo que ya usas con `git`), **Skip** cuando te ofrezca subir una clave SSH (la tuya ya está en GitHub) y **Login with a web browser**. Te mostrará un código; pégalo en la página que se abre y autoriza.
+
+Ahora, desde la carpeta `planificador`, crea el repositorio en GitHub, conéctalo y sube `main`, todo en un comando:
+
+```bash
+gh repo create planificador --private --source=. --remote=origin --push
+```
+
+- **`--private`**: solo tú lo ves (usa `--public` para un portfolio).
+- **`--source=.`**: el repositorio local es la carpeta actual.
+- **`--remote=origin`**: añade el remoto con el nombre `origin`.
+- **`--push`**: sube la rama actual.
+
+Si prefieres hacerlo sin `gh`: crea el repositorio vacío en github.com (botón **New**, **sin** README ni `.gitignore`, para que no haya conflictos con tu historial) y conéctalo a mano:
+
+```bash
+git remote add origin git@github.com:tu-usuario/planificador.git
+git push -u origin main
+```
+
+```text
+To github.com:tu-usuario/planificador.git
+ * [new branch]      main -> main
+branch 'main' set up to track 'origin/main'.
+```
+
+Comprueba la conexión:
+
+```bash
+git remote -v
+git branch -vv
+```
+
+```text
+origin	git@github.com:tu-usuario/planificador.git (fetch)
+origin	git@github.com:tu-usuario/planificador.git (push)
+  feat/peso-objetivo 27b5ff5 wip: peso objetivo
+* main               fcd822e [origin/main] Merge branch 'feat/tema-sepia'
+```
+
+- **`origin`** es solo un **apodo** para la URL del remoto (podrías llamarlo de otra forma, pero `origin` es la convención).
+- **`[origin/main]`** indica que tu `main` **rastrea** (_tracks_) la rama `main` de GitHub. Eso lo hizo `-u` (_upstream_): a partir de ahora, `git push` y `git pull` sin argumentos saben con qué rama sincronizar.
+
+<Callout type="risk">
+
+- **Usa la URL SSH (`git@github.com:…`), no la HTTPS (`https://github.com/…`):** con HTTPS, `git push` te pedirá usuario y contraseña, y GitHub ya no acepta contraseñas (`Password authentication is not supported for Git operations`). Si tu remoto es HTTPS, cámbialo con `git remote set-url origin git@github.com:tu-usuario/planificador.git`.
+- **Revisa qué subes la primera vez:** `git push` sube **todo el historial**, no solo los archivos actuales. Si alguna vez confirmaste un `.env` (B2.1), estará en GitHub aunque ya no exista. Antes del primer _push_ de un proyecto antiguo, busca con `git log --all --oneline -- .env`; si aparece algo, cambia esos secretos.
+- **Crear el repositorio en GitHub con README** hace que GitHub tenga un commit que tú no tienes, y tu primer `git push` será rechazado. Si te pasa, `git pull --rebase origin main` y vuelve a subir.
+
+</Callout>
+
+## Paso 2: entender `fetch`, `pull` y `push`
+
+Esta es la parte que más confusiones causa. Tu repositorio guarda **una copia de cómo estaba GitHub la última vez que preguntaste**: las ramas `origin/main`, `origin/feat/...` (las _remote-tracking branches_). Los tres comandos:
+
+| Comando     | Qué hace                                                        | Toca tus archivos |
+| ----------- | --------------------------------------------------------------- | ----------------- |
+| `git fetch` | Descarga los commits nuevos de GitHub y actualiza `origin/main` | No                |
+| `git pull`  | `fetch` + mezcla `origin/main` en tu rama actual                | Sí                |
+| `git push`  | Sube tus commits y mueve la rama en GitHub                      | No                |
+
+Simula que alguien (tú desde otro ordenador, o una edición en la web de GitHub) añade un commit. En github.com, abre `README.md`, pulsa el lápiz, añade al final una sección "Licencia" con el texto `Uso personal.` y confirma con **Commit changes**. Después, en tu terminal:
+
+```bash
+git status
+```
+
+```text
+On branch main
+Your branch is up to date with 'origin/main'.
+```
+
+**"Up to date" miente**: dice que estás al día con _tu copia_ de `origin/main`, que es de antes de la edición. Git no consulta GitHub hasta que se lo pides. Pregúntale:
+
+```bash
+git fetch
+git status
+git log --oneline --graph --all --decorate -3
+```
+
+```text
+From github.com:tu-usuario/planificador
+   fcd822e..294df31  main       -> origin/main
+On branch main
+Your branch is behind 'origin/main' by 1 commit, and can be fast-forwarded.
+  (use "git pull" to update your local branch)
+* 294df31 (origin/main, origin/HEAD) docs: añade la licencia
+*   fcd822e (HEAD -> main) Merge branch 'feat/tema-sepia'
+```
+
+Ahora sí: `origin/main` va un commit por delante de tu `main`. `fetch` **no ha tocado tus archivos**; solo ha actualizado tu copia de GitHub. Puedes revisar qué ha cambiado antes de traerlo (`git diff main origin/main`). Tráelo:
+
+```bash
+git pull
+```
+
+```text
+Updating fcd822e..294df31
+Fast-forward
+ README.md | 4 ++++
+ 1 file changed, 4 insertions(+)
+```
+
+<Callout type="risk">
+
+- **`git status` no sabe nada de GitHub hasta que haces `fetch`.** VS Code hace `fetch` automáticamente cada cierto tiempo (si activas `git.autofetch`), pero en la terminal es cosa tuya. Antes de empezar a trabajar: `git switch main` y `git pull`.
+- **`pull` en la rama equivocada mezcla cosas inesperadas.** `git pull` trae la rama que rastrea la rama **actual**. Mira siempre en qué rama estás antes de un `pull`.
+- **No trabajes nunca en `main` directamente si hay más gente:** si tu `main` y el de GitHub divergen, cada `pull` crea merges innecesarios (Paso 3).
+
+</Callout>
+
+## Paso 3: cuando tu `main` y el de GitHub divergen
+
+Si haces un commit en `main` mientras otra persona sube otro a GitHub, las dos líneas divergen, como dos ramas (B2.2). Simúlalo: añade otra línea al README desde la web de GitHub (por ejemplo, una sección "Autora") y, **sin hacer `pull`**, cambia algo en local:
+
+```bash
+sed -i '' 's/vasos de 250 ml/vasos de 250 ml (un vaso estándar)/' src/agua.js
+git commit -am "docs: aclara el tamaño del vaso"
+git pull
+```
+
+```text
+hint: You have divergent branches and need to specify how to reconcile them.
+hint: You can do so by running one of the following commands sometime before
+hint: your next pull:
+hint:
+hint:   git config pull.rebase false  # merge
+hint:   git config pull.rebase true   # rebase
+hint:   git config pull.ff only       # fast-forward only
+hint:
+hint: You can replace "git config" with "git config --global" to set a default
+hint: preference for all repositories. You can also pass --rebase, --no-rebase,
+hint: or --ff-only on the command line to override the configured default per
+hint: invocation.
+fatal: Need to specify how to reconcile divergent branches.
+```
+
+Git te pide que elijas cómo combinar. Las dos opciones razonables:
+
+- **Merge** (`pull.rebase false`): crea un merge commit cada vez que pasa esto. El historial se llena de `Merge branch 'main' of github.com:…`, que no aportan nada.
+- **Rebase** (`pull.rebase true`): **reaplica tus commits locales encima** de los que llegaron. El historial queda en línea recta, como si hubieras hecho tu cambio después.
+
+Para `pull`, el _rebase_ es lo más limpio. Hazlo ahora y déjalo configurado para siempre:
+
+```bash
+git pull --rebase
+git config --global pull.rebase true
+git log --oneline --graph -3
+git push
+```
+
+```text
+Successfully rebased and updated refs/heads/main.
+* b3b639b docs: aclara el tamaño del vaso
+* 1acc118 docs: añade la autoría
+* 294df31 docs: añade la licencia
+```
+
+Tu commit quedó **después** del de GitHub, en línea recta. Fíjate en que tu commit tiene un identificador nuevo: _rebase_ no mueve commits, crea copias nuevas con otro padre (y por eso otro identificador).
+
+<Callout type="risk">
+
+- **Un rebase puede tener conflictos**, uno por cada commit que reaplica. Se resuelven igual que en B2.3 (editar, `git add`), pero se continúa con `git rebase --continue` en lugar de `git commit`. Para cancelar y volver a como estabas: `git rebase --abort`.
+- **La regla de oro del rebase:** nunca hagas rebase de commits que **otras personas** ya tienen y sobre los que trabajan. Como crea commits nuevos, sus copias quedarían huérfanas. Rebasar tus commits **locales** (como aquí) o tu propia rama es seguro.
+
+</Callout>
+
+## Paso 4: una rama, un _push_ y una Pull Request
+
+Ahora el flujo completo de una funcionalidad. Crea la rama y el archivo `src/resumen.js`:
+
+```bash
+git switch -c feat/resumen-diario
+```
+
+```js
+// Resumen del día: tareas pendientes y agua
+const tareasPendientes = 2;
+const vasos = 5;
+
+function resumenDiario(pendientes, vasosDeAgua) {
+  const tareas = pendientes === 1 ? "1 tarea pendiente" : `${pendientes} tareas pendientes`;
+  return `Hoy: ${tareas} y ${vasosDeAgua * 250} ml de agua`;
+}
+
+console.log(resumenDiario(tareasPendientes, vasos));
+```
+
+```bash
+node src/resumen.js
+git add src/resumen.js
+git commit -m "feat: resumen diario de tareas y agua"
+git push -u origin feat/resumen-diario
+```
+
+```text
+Hoy: 2 tareas pendientes y 1250 ml de agua
+To github.com:tu-usuario/planificador.git
+ * [new branch]      feat/resumen-diario -> feat/resumen-diario
+branch 'feat/resumen-diario' set up to track 'origin/feat/resumen-diario'.
+```
+
+La rama ya está en GitHub. Ahora la **Pull Request** (PR): una propuesta de mezclar `feat/resumen-diario` en `main`, con un espacio para revisar el diff, comentar y ejecutar comprobaciones automáticas antes de mezclar. Créala desde la terminal:
+
+```bash
+gh pr create --base main --title "feat: resumen diario de tareas y agua" --body "## Qué cambia
+- Nuevo src/resumen.js con un resumen del día (tareas pendientes y agua).
+
+## Cómo probarlo
+node src/resumen.js
+
+Debe mostrar: Hoy: 2 tareas pendientes y 1250 ml de agua"
+```
+
+`gh` responde con la URL de la PR (`https://github.com/tu-usuario/planificador/pull/1`). Ábrela en el navegador con:
+
+```bash
+gh pr view --web
+```
+
+En la página de la PR verás tres pestañas: **Conversation** (la descripción y los comentarios), **Commits** y **Files changed** (el diff completo, donde puedes comentar línea por línea). Si el proyecto está conectado a Vercel, en _Conversation_ aparecerá un comentario del bot de Vercel con la **URL de _preview_** de la rama (B2.2), y la PR mostrará el estado del despliegue entre las comprobaciones.
+
+Una buena descripción de PR responde tres preguntas: **qué** cambia, **por qué** y **cómo probarlo**. Aunque trabajes solo, tú dentro de seis meses eres "otra persona".
+
+Si sigues trabajando en la rama, cada _push_ actualiza la PR automáticamente:
+
+```bash
+printf '\n// Mostrar el resumen también los domingos\n' >> src/resumen.js
+git commit -am "feat: nota sobre el domingo"
+git push
+```
+
+```text
+To github.com:tu-usuario/planificador.git
+   28307f4..3ff385c  feat/resumen-diario -> feat/resumen-diario
+```
+
+Gracias al `-u` del primer _push_, ya no hace falta indicar la rama.
+
+<Callout type="risk">
+
+- **Revisa tu propia PR antes de pedir revisión:** en _Files changed_ se ven cosas que en el editor no (un `console.log` olvidado, un archivo que no debía ir, un cambio de formato que ensucia el diff). Es la última oportunidad barata de corregir.
+- **PRs gigantes no se revisan, se aprueban a ciegas.** Una PR de 2000 líneas recibe "LGTM" sin leerla; una de 150 recibe comentarios útiles. Divide las funcionalidades grandes en varias PR pequeñas.
+- **Las comillas en `--body`:** si la descripción contiene comillas dobles o comillas invertidas, la terminal las interpretará. Para descripciones largas, usa `gh pr create --fill` (toma el título y el cuerpo de tus commits) o `--web` (abre el formulario en el navegador).
+
+</Callout>
+
+## Paso 5: actualizar tu rama con `rebase`
+
+Mientras tu PR espera, `main` sigue avanzando (alguien mezcla otra PR). Simúlalo editando de nuevo el README en la web de GitHub, directamente en `main`. Tu rama ahora parte de un `main` antiguo:
+
+```bash
+git fetch
+git log --oneline --graph --all --decorate -6
+```
+
+```text
+* 3506c10 (origin/main, origin/HEAD) docs: matiza la licencia
+| * 3ff385c (HEAD -> feat/resumen-diario, origin/feat/resumen-diario) feat: nota sobre el domingo
+| * 28307f4 feat: resumen diario de tareas y agua
+|/
+* b3b639b (main) docs: aclara el tamaño del vaso
+* 1acc118 docs: añade la autoría
+* 294df31 docs: añade la licencia
+```
+
+Para traer lo nuevo de `main` a tu rama, **rebasa tu rama sobre `origin/main`**:
+
+```bash
+git rebase origin/main
+git log --oneline --graph --decorate -4
+```
+
+```text
+Successfully rebased and updated refs/heads/feat/resumen-diario.
+* 5b5bba6 (HEAD -> feat/resumen-diario) feat: nota sobre el domingo
+* ae286dd feat: resumen diario de tareas y agua
+* 3506c10 (origin/main, origin/HEAD) docs: matiza la licencia
+* b3b639b (main) docs: aclara el tamaño del vaso
+```
+
+Tus dos commits están ahora **encima** del último `main`, con identificadores nuevos. Súbelos:
+
+```bash
+git push
+```
+
+```text
+ ! [rejected]        feat/resumen-diario -> feat/resumen-diario (non-fast-forward)
+error: failed to push some refs to 'github.com:tu-usuario/planificador.git'
+hint: Updates were rejected because the tip of your current branch is behind
+hint: its remote counterpart. If you want to integrate the remote changes,
+hint: use 'git pull' before pushing again.
+```
+
+GitHub rechaza el _push_ porque su rama tiene commits (`28307f4`, `3ff385c`) que tu rama ya no tiene: el rebase los sustituyó por copias. Aquí **sí** quieres reemplazar la rama remota, porque es **tuya** y los commits viejos sobran. Usa la versión segura del forzado:
+
+```bash
+git push --force-with-lease
+```
+
+```text
+ + 3ff385c...5b5bba6 feat/resumen-diario -> feat/resumen-diario (forced update)
+```
+
+<Callout type="risk">
+
+- **No sigas el consejo del mensaje (`git pull`) después de un rebase:** mezclaría los commits viejos con sus copias nuevas y tendrías cada cambio duplicado en el historial. Tras rebasar una rama que ya subiste, lo correcto es `--force-with-lease`.
+- **`--force-with-lease` frente a `--force`:** los dos reemplazan la rama remota, pero `--force-with-lease` **se niega** si alguien subió commits a esa rama desde tu último `fetch`. `--force` los borraría sin avisar. Usa siempre `--force-with-lease`, y **nunca** fuerces `main`.
+- **¿Rebase o merge para actualizar la rama?** También puedes hacer `git merge origin/main` en tu rama: no reescribe nada, no necesita forzar y es más seguro si alguien más trabaja en la rama. El rebase deja un historial más limpio. Con _squash merge_ (Paso 6), la diferencia en `main` desaparece, así que elige lo que te resulte más cómodo.
+
+</Callout>
+
+## Paso 6: mezclar con _squash merge_ y limpiar
+
+Cuando la PR está lista (revisada y con las comprobaciones en verde), toca mezclarla. GitHub ofrece tres botones; el más recomendable para la mayoría de proyectos es **Squash and merge**: junta todos los commits de la PR en **uno solo** en `main`, con el título de la PR. Así `main` tiene un commit por funcionalidad, aunque en la rama hicieras veinte commits de "wip".
+
+Desde la terminal:
+
+```bash
+gh pr checks
 gh pr merge --squash --delete-branch
 ```
 
-## Errores comunes
+- **`gh pr checks`** muestra el estado de las comprobaciones (el despliegue de Vercel, tests en CI).
+- **`gh pr merge --squash --delete-branch`** hace el _squash merge_ en GitHub, borra la rama remota y, en tu repositorio, te cambia a `main`, lo actualiza y borra la rama local.
 
-- **`git push --force` en `main`.** Puede borrar commits del remoto. Si alguna vez lo necesitas en tu rama, usa `--force-with-lease`, que se niega si el remoto cambió.
-- **Hacer `rebase` de commits ya compartidos.** Rompe el historial de cualquiera que los tenga.
-- **PRs gigantes.** Igual que los commits: una PR, un propósito.
-- **Confundir `fetch` con `pull`.** `fetch` solo descarga; `pull` además mezcla en tu rama.
+Si mezclas desde la web (botón **Squash and merge**), haz tú la limpieza local:
+
+```bash
+git switch main
+git pull --prune
+git log --oneline -3
+```
+
+```text
+Updating b3b639b..7c19077
+Fast-forward
+ README.md      |  2 +-
+ src/resumen.js | 12 ++++++++++++
+ 2 files changed, 13 insertions(+), 1 deletion(-)
+ create mode 100644 src/resumen.js
+7c19077 feat: resumen diario de tareas y agua (#1)
+3506c10 docs: matiza la licencia
+b3b639b docs: aclara el tamaño del vaso
+```
+
+Un solo commit con todo el trabajo y el número de la PR (`#1`) en el mensaje, que en GitHub enlaza a la discusión completa. `--prune` borra tus copias de ramas remotas que ya no existen. Ahora borra la rama local:
+
+```bash
+git branch -vv
+git branch -d feat/resumen-diario
+```
+
+```text
+  feat/resumen-diario 5b5bba6 [origin/feat/resumen-diario: gone] feat: nota sobre el domingo
+* main                7c19077 [origin/main] feat: resumen diario de tareas y agua (#1)
+error: the branch 'feat/resumen-diario' is not fully merged
+hint: If you are sure you want to delete it, run 'git branch -D feat/resumen-diario'
+```
+
+**`gone`** confirma que la rama ya no existe en GitHub. Y `-d` se niega porque, con _squash_, los commits de tu rama **no están** en `main`: hay uno nuevo con el mismo contenido, pero distinto identificador. Git no puede saber que es equivalente. Como la PR está mezclada, es seguro forzar:
+
+```bash
+git branch -D feat/resumen-diario
+```
+
+<Callout type="risk">
+
+- **Después de un _squash_, no sigas trabajando en la misma rama.** Sus commits viejos chocarían con el commit "aplastado" de `main` en la siguiente PR. Para el siguiente cambio, crea una rama nueva desde `main` actualizado.
+- **`-D` solo cuando la rama tenga `gone` o sepas que la PR está mezclada.** Si borras con `-D` una rama cuya PR no se mezcló, pierdes ese trabajo (salvo por `reflog`).
+- **El mensaje del _squash_ es el título de la PR:** escríbelo como un buen mensaje de commit (Conventional Commits), porque es lo que quedará en `main` para siempre.
+- **Configura GitHub para ayudarte:** en _Settings_ → _General_ → _Pull Requests_, deja activado solo **Allow squash merging** y marca **Automatically delete head branches**, para que GitHub borre la rama remota al mezclar.
+
+</Callout>
+
+## Paso 7: proteger `main`
+
+Para que `main` **solo** cambie mediante PRs (y no por un `git push` despistado), activa una regla de protección: en el repositorio, _Settings_ → _Rules_ → _Rulesets_ → _New ruleset_ → _New branch ruleset_:
+
+1. **Ruleset name:** `main protegido`. **Enforcement status:** _Active_.
+2. **Target branches:** _Add target_ → _Include default branch_.
+3. Marca **Restrict deletions** y **Block force pushes**.
+4. Marca **Require a pull request before merging**. Si trabajas solo, deja **Required approvals** en 0 (GitHub no te deja aprobar tus propias PR).
+5. Si tienes comprobaciones automáticas (Vercel o, más adelante, tests en CI), marca **Require status checks to pass** y añádelas.
+6. Pulsa **Create**.
+
+Desde ese momento, un `git push` directo a `main` será rechazado por GitHub, y la única forma de cambiar `main` será una PR.
+
+<Callout type="risk">
+
+- **En repositorios privados con el plan gratuito de GitHub, las reglas no se aplican:** puedes crearlas, pero GitHub solo las hace cumplir en repositorios públicos o con un plan de pago (Pro, Team). En un repositorio privado gratuito, la protección depende de tu disciplina: nunca `git push` a `main`.
+- **No te bloquees fuera:** si activas "Require status checks" con una comprobación que nunca se ejecuta (un nombre mal escrito), ninguna PR podrá mezclarse. Añade las comprobaciones después de verlas funcionar en una PR.
+- **Los administradores pueden saltarse las reglas** si así se configura (_Bypass list_). No te añadas "por si acaso": la protección existe precisamente para los días con prisa.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Comprueba con `ssh -T git@github.com` que tu clave SSH funciona y, si algún proyecto usa HTTPS,
-  cámbialo a SSH con `git remote set-url`. 2. En un proyecto tuyo en GitHub, crea una rama, haz 2–3
-  commits y súbela con `git push -u`. 3. Abre una Pull Request con una descripción de qué cambia y
-  cómo probarlo, revisa el diff en GitHub y mézclala con **Squash and merge**. 4. Actualiza tu
-  `main` local con `git pull` y borra la rama local. 5. Instala `gh` y repite el ciclo completo
-  desde la terminal.
+
+1. Sube uno de tus proyectos reales (el Planificador 2026 o tu app de entrenamiento) a GitHub con `gh repo create`, si aún no está, y conéctalo a Vercel.
+2. Configura el repositorio: solo _squash merging_, borrado automático de ramas y la regla de protección de `main`.
+3. Haz el próximo cambio real del proyecto mediante una PR: rama, commits, `push -u`, `gh pr create` con qué/por qué/cómo probarlo, revisión de _Files changed_ y de la _preview_ de Vercel, y `gh pr merge --squash --delete-branch`.
+4. Comprueba con `git log --oneline` que `main` termina con un commit `(#1)` y que la rama ya no existe ni en local ni en GitHub (`git branch -a`).
+
+</Callout>
+
+Solución: la secuencia completa de comandos, de principio a fin. Sustituye `mi-proyecto` y la rama por los tuyos.
+
+```bash
+# 1. Subir el proyecto (solo la primera vez)
+cd ~/proyectos/mi-proyecto
+git status
+git log --all --oneline -- .env
+gh repo create mi-proyecto --private --source=. --remote=origin --push
+
+# 2. Configurar el repositorio: solo squash y borrado automático de ramas
+gh repo edit --enable-squash-merge --enable-merge-commit=false --enable-rebase-merge=false --delete-branch-on-merge
+
+# 3. El ciclo de una PR
+git switch main
+git pull
+git switch -c feat/mi-cambio
+# ...edita, prueba y haz commits pequeños...
+git push -u origin feat/mi-cambio
+gh pr create --base main --fill
+gh pr view --web
+gh pr checks
+gh pr merge --squash --delete-branch
+
+# 4. Comprobar
+git log --oneline -3
+git branch -a
+```
+
+La regla de protección de `main` (paso 2 del ejercicio) se crea en la web, como en el Paso 7: `gh` no tiene un comando sencillo para ello. La conexión con Vercel se hace en vercel.com → _Add New_ → _Project_ → importar el repositorio de GitHub; a partir de ahí, cada _push_ a una rama genera una _preview_ y cada cambio en `main` despliega producción.
+
+<Callout type="risk">
+
+- **`git log --all --oneline -- .env` antes del primer _push_:** si devuelve algún commit, ese `.env` acabará en GitHub con el historial. Cambia esos secretos **antes** de subir.
+- **`gh pr create --fill`** usa el mensaje del primer commit como título y los commits como descripción. Revísalo en la web y completa el "por qué" y el "cómo probarlo".
+- **`gh repo edit` cambia la configuración del repositorio remoto** sin pedir confirmación. Comprueba el resultado en _Settings_ → _General_.
+- **Si la _preview_ de Vercel falla y producción no**, revisa las variables de entorno del entorno _Preview_ en Vercel: es el motivo más habitual (B2.2).
+
 </Callout>
 
 <Callout type="mastery">
-  Tu historial de `main` se compone de PRs mezcladas y sabes sincronizar con `fetch`, `pull
-  --rebase` y `push` sin recurrir a `--force`.
+
+Tu historial de `main` se compone solo de PRs mezcladas, sabes que `git status` no ve GitHub hasta que haces `fetch`, actualizas tu rama con `rebase` y `--force-with-lease` sin miedo, y nunca fuerzas un _push_ a `main`.
+
 </Callout>
 
 ## Resumen
 
-- `origin` es el remoto principal; `origin/main` es tu copia de cómo está allí.
-- GitHub no acepta contraseñas en Git: usa SSH (o un token por HTTPS).
-- `fetch` descarga, `pull` descarga y mezcla, `push` sube; `-u` enlaza la rama.
-- `rebase` reaplica tus commits encima de otros: solo con commits no compartidos.
-- Las Pull Requests añaden revisión y comprobaciones; _squash merge_ mantiene `main` limpio.
-- `gh` permite crear y mezclar PRs desde la terminal.
+- `origin` es un apodo para la URL del remoto; `push -u` conecta tu rama con la de GitHub para usar `push`/`pull` sin argumentos.
+- `fetch` actualiza tu copia de GitHub (`origin/main`) sin tocar tus archivos; `pull` = `fetch` + mezcla; configura `pull.rebase true`.
+- Rebase reaplica tus commits encima de otro punto con identificadores nuevos: tras rebasar una rama ya subida, `--force-with-lease`.
+- Una PR propone mezclar una rama con revisión y comprobaciones; con _squash merge_, `main` tiene un commit por PR.
+- Tras un _squash_, borra la rama local con `-D` (verás `gone`) y empieza el siguiente cambio en una rama nueva desde `main`.

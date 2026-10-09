@@ -4,167 +4,515 @@ course: "B2"
 title: "Ramas y merge"
 order: 2
 minutes: 60
-summary: "Qué es una rama por dentro, cómo se unen con merge y un flujo de trabajo en el que main siempre funciona."
+summary: "Compruebas que una rama es solo un puntero, desarrollas funcionalidades en ramas propias, provocas los dos tipos de merge (fast-forward y merge commit) y adoptas un flujo donde main siempre se puede desplegar."
 ---
 
-Las ramas tienen fama de complicadas, pero por dentro son lo más simple de Git: **una etiqueta que apunta a un commit**. En cuanto lo ves así, crear, cambiar y unir ramas deja de dar miedo. En esta sección aprenderás a trabajar cada cambio en su propia rama y a unirlo después a `main`.
+Trabajar directamente en `main` funciona hasta el día en que estás a mitad de una funcionalidad y necesitas arreglar un error urgente: el código de `main` está a medias y no puedes desplegarlo. Las **ramas** resuelven eso: cada cambio vive aislado hasta que está terminado. En esta sección vas a descubrir que una rama es algo mucho más simple de lo que parece (un archivo de 41 bytes), vas a trabajar con varias ramas a la vez en el repositorio `planificador` y vas a provocar los dos tipos de _merge_ para reconocerlos en cualquier historial.
 
-## Una rama es un puntero
+**Lo que tendrás al terminar:** tres funcionalidades nuevas en `planificador` (tema, agua y racha), cada una desarrollada en su propia rama y mezclada en `main`, y un historial que sabrás leer línea a línea.
 
-Recuerda la sección anterior: cada commit apunta a su padre. Una rama es solo un **nombre** que apunta a un commit concreto:
+**Requisitos:** el repositorio `planificador` de B2.1, con `git status` limpio (`nothing to commit, working tree clean`).
 
-```text
-main ──▶ C3 → C2 → C1
-```
+## Paso 1: comprobar que una rama es solo un puntero
 
-Crear una rama no copia archivos ni carpetas. Crea un puntero nuevo al mismo commit:
+Mira las ramas que tienes y dónde están guardadas:
 
 ```bash
-git switch -c feat/modo-oscuro   # crea la rama y cambia a ella
+git branch
+ls .git/refs/heads
 ```
 
 ```text
-main ─────────────┐
-                  ▼
-feat/modo-oscuro ▶ C3 → C2 → C1
-         ▲
-        HEAD
+* main
+main
 ```
 
-Al hacer commits en la rama nueva, **solo ella avanza**:
-
-```text
-feat/modo-oscuro ▶ C5 → C4 ─┐
-                            ▼
-main ─────────────────────▶ C3 → C2 → C1
-```
-
-`main` sigue intacta en `C3`. Puedes volver a ella en cualquier momento:
+El `*` marca la rama actual. Y la rama `main` es, literalmente, **un archivo** dentro de `.git/refs/heads/`. Crea otra rama y compara los dos archivos:
 
 ```bash
-git switch main               # cambia de rama (tus archivos cambian a esa foto)
-git branch                    # lista ramas locales; * marca la actual
-git branch -a                 # incluye las remotas
+git branch experimento
+cat .git/refs/heads/main .git/refs/heads/experimento
+git log --oneline -1 --decorate
 ```
 
-<Callout type="note">
-  `git switch` y `git restore` (desde Git 2.23) sustituyen a los usos confusos de `git checkout`,
-  que hacía ambas cosas. Si ves `git checkout -b` en tutoriales antiguos, es lo mismo que `git
-  switch -c`.
+```text
+060ecdbee836af6b9ad9b75a5cf22ff7c879dd7d
+060ecdbee836af6b9ad9b75a5cf22ff7c879dd7d
+060ecdb (HEAD -> main, experimento) docs: explica cómo ejecutar el proyecto
+```
+
+Los dos archivos contienen **el mismo identificador de commit**. Eso es una rama: **un nombre que apunta a un commit**. No copia archivos ni carpetas; por eso crear una rama es instantáneo aunque el proyecto tenga miles de archivos. `--decorate` muestra los punteros entre paréntesis: `HEAD -> main` (estás en `main`) y `experimento` (otra etiqueta sobre el mismo commit).
+
+La analogía: los commits son las páginas de un libro, y las ramas son **marcapáginas**. Puedes tener varios marcapáginas en el mismo libro, y moverlos no cambia ninguna página.
+
+Borra la rama de prueba:
+
+```bash
+git branch -d experimento
+```
+
+```text
+Deleted branch experimento (was 060ecdb).
+```
+
+<Callout type="risk">
+
+- **Borrar una rama no borra commits:** solo quita el marcapáginas. Si esos commits no están en ninguna otra rama, quedan "sueltos" y Git los elimina pasado un tiempo (unas semanas). Mientras tanto, se pueden recuperar con `git reflog` (B2.3).
+- **Nombres de rama con mayúsculas o espacios:** como las ramas son archivos, en macOS `Feat/Agua` y `feat/agua` pueden chocar entre sí (el sistema de archivos no distingue mayúsculas). Usa siempre minúsculas, sin espacios ni acentos: `feat/modo-oscuro`.
+
 </Callout>
 
-## Unir ramas: merge
+## Paso 2: crear una rama y trabajar en ella
 
-Cuando la funcionalidad está lista, la unes a `main`:
+Vas a añadir un cambio de tema claro/oscuro. Crea la rama y cámbiate a ella en un solo comando:
+
+```bash
+git switch -c feat/modo-oscuro
+cat .git/HEAD
+```
+
+```text
+Switched to a new branch 'feat/modo-oscuro'
+ref: refs/heads/feat/modo-oscuro
+```
+
+`git switch -c` (de _create_) crea la rama en el commit actual y mueve `HEAD` a ella: `HEAD` ya no apunta a `main`. Crea `src/tema.js`:
+
+```js
+// Tema de color del Planificador: claro u oscuro
+const TEMAS = ["light", "dark"];
+
+function siguienteTema(actual) {
+  return actual === "light" ? "dark" : "light";
+}
+
+function esTemaValido(valor) {
+  return TEMAS.includes(valor);
+}
+
+console.log(`Tema inicial: light → tras pulsar el botón: ${siguienteTema("light")}`);
+console.log(`¿"sepia" es un tema válido? ${esTemaValido("sepia")}`);
+```
+
+```bash
+node src/tema.js
+git add src/tema.js
+git commit -m "feat: alterna entre tema claro y oscuro"
+git log --oneline --graph --all --decorate -3
+```
+
+```text
+Tema inicial: light → tras pulsar el botón: dark
+¿"sepia" es un tema válido? false
+* ec87e67 (HEAD -> feat/modo-oscuro) feat: alterna entre tema claro y oscuro
+* 060ecdb (main) docs: explica cómo ejecutar el proyecto
+* eddf840 feat: muestra el número de tareas completadas
+```
+
+Al hacer commit, **solo avanza el marcapáginas de la rama actual**: `feat/modo-oscuro` está en el commit nuevo y `main` se ha quedado uno atrás. Compruébalo cambiando de rama:
 
 ```bash
 git switch main
+ls src
+```
+
+```text
+Switched to branch 'main'
+tareas.js
+```
+
+`src/tema.js` **ha desaparecido** de tu carpeta. No se ha perdido: está en el commit de la otra rama. Al cambiar de rama, Git pone en tu mesa la foto del commit al que apunta esa rama.
+
+<Callout type="risk">
+
+- **`git switch` frente a `git checkout`:** verás `git checkout -b rama` en muchos tutoriales. Hace lo mismo, pero `checkout` también sirve para descartar archivos y es fácil confundirse. Desde Git 2.23 existen `switch` (cambiar de rama) y `restore` (archivos); usa esos.
+- **Cambiar de rama con cambios sin confirmar:** si tienes cambios en un archivo que es distinto en la otra rama, Git se niega a cambiar para no pisarlos: `error: Your local changes to the following files would be overwritten by checkout`. Haz commit antes, o guárdalos temporalmente con `git stash` (B2.3).
+- **Los cambios sin confirmar "viajan" contigo:** si el archivo modificado es igual en las dos ramas, Git te deja cambiar y **se lleva el cambio** a la otra rama (verás `M README.md` al cambiar). Es fácil acabar confirmando algo en la rama equivocada. Mira `git status` antes de cambiar.
+
+</Callout>
+
+## Paso 3: el _merge_ más simple, el _fast-forward_
+
+Desde `main`, trae los cambios de la rama:
+
+```bash
 git merge feat/modo-oscuro
 ```
 
-Hay dos situaciones posibles.
-
-### Fast-forward
-
-Si `main` **no ha avanzado** desde que creaste la rama, Git simplemente mueve el puntero `main` hacia delante. No se crea ningún commit nuevo:
-
 ```text
-Antes:  main ▶ C3        feat ▶ C5 → C4 → C3
-Después: main ▶ C5 (= feat)
-```
-
-```text
-Updating c954b51..81544ef
+Updating 060ecdb..ec87e67
 Fast-forward
+ src/tema.js | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+ create mode 100644 src/tema.js
 ```
 
-### Merge commit
+**Fast-forward** (avance rápido) significa que Git no ha tenido que mezclar nada: `main` no había avanzado desde que creaste la rama, así que basta con **mover el marcapáginas** de `main` hasta el commit de la rama. No se crea ningún commit nuevo. La rama ya no hace falta:
 
-Si `main` **también avanzó** (por ejemplo, arreglaste algo urgente mientras tanto), las historias se han separado. Git crea un **commit de unión** con dos padres:
+```bash
+git branch -d feat/modo-oscuro
+```
 
 ```text
-        C4 ── C5   (feat)
-       /         \
-C1 ── C3 ── C6 ── M   (main)
+Deleted branch feat/modo-oscuro (was ec87e67).
 ```
 
-```bash
-git merge feat/modo-oscuro
-# Merge made by the 'ort' strategy.
-```
+<Callout type="risk">
 
-Si las dos ramas tocaron las mismas líneas, aparece un **conflicto**. Lo verás a fondo en la siguiente sección.
+- **`merge` trae la otra rama a la rama en la que estás.** El error clásico es ejecutar `git merge main` estando en la rama de la funcionalidad cuando querías lo contrario. Antes de un merge, mira en qué rama estás (`git branch` o `git status`).
+- **Un fast-forward no deja rastro de que existió una rama:** el historial queda en línea recta. Si quieres que quede constancia (por ejemplo, para deshacer la funcionalidad entera de una vez), usa `--no-ff` (Paso 5).
 
-### Borrar la rama
-
-Una vez unida, la rama ya no hace falta:
-
-```bash
-git branch -d feat/modo-oscuro    # -d solo borra si ya está unida (seguro)
-```
-
-Borrar la rama no borra sus commits: ya forman parte de `main`.
-
-## Un flujo de trabajo sencillo
-
-No necesitas flujos complejos. Esta regla basta para proyectos personales y equipos pequeños:
-
-1. **`main` siempre funciona** y es lo que está en producción.
-2. **Cada cambio en su rama**, con un nombre descriptivo: `feat/heatmap`, `fix/contador-indice`, `docs/readme`.
-3. Cuando está listo y probado, se une a `main` (idealmente con una Pull Request, sección B2.4).
-4. Se borra la rama.
-
-```bash
-git switch main
-git pull                          # trae lo último
-git switch -c fix/contador-indice
-# …cambios y commits pequeños…
-git switch main
-git merge fix/contador-indice
-git branch -d fix/contador-indice
-```
-
-<Callout type="tip">
-  Si a mitad de una rama necesitas cambiar a otra y tienes cambios sin commitear, Git puede negarse.
-  Haz un commit temporal o guárdalos con `git stash` (lo verás en B2.3).
 </Callout>
 
-## Ramas y Vercel: previews
+## Paso 4: ramas que divergen y el _merge commit_
 
-Vercel se integra con este flujo: cada rama que subes a GitHub genera automáticamente una **URL de preview** con esa versión del proyecto, y `main` se despliega en producción.
+Lo habitual en la vida real es que, mientras trabajas en una rama, `main` también avance (otra funcionalidad, un arreglo urgente). Vas a provocarlo con dos ramas que parten del mismo punto.
 
-```text
-main              → https://tu-app.vercel.app            (producción)
-feat/modo-oscuro  → https://tu-app-git-feat-modo-oscuro-usuario.vercel.app
+Primera rama, el registro de agua:
+
+```bash
+git switch -c feat/agua
 ```
 
-Así puedes probar un cambio en un entorno real, enseñarlo o revisarlo en el móvil antes de unirlo, sin tocar producción.
+Crea `src/agua.js`:
 
-## Errores comunes
+```js
+// Registro de hidratación: vasos de 250 ml
+const ML_POR_VASO = 250;
+const OBJETIVO_ML = 2000;
 
-- **Trabajar siempre en `main`.** Un cambio a medias bloquea cualquier arreglo urgente.
-- **Ramas que viven semanas.** Cuanto más se alejan de `main`, más conflictos. Une a menudo, en cambios pequeños.
-- **Olvidar en qué rama estás.** Mira el prompt de tu terminal o `git status` antes de hacer commits.
-- **Usar `git branch -D`** (mayúscula) a la ligera: fuerza el borrado aunque la rama no esté unida.
+function progresoAgua(vasos) {
+  const ml = vasos * ML_POR_VASO;
+  const porcentaje = Math.min(100, Math.round((ml / OBJETIVO_ML) * 100));
+  return `${ml} ml de ${OBJETIVO_ML} ml (${porcentaje} %)`;
+}
+
+console.log(`Hoy: ${progresoAgua(5)}`);
+```
+
+```bash
+node src/agua.js
+git add src/agua.js
+git commit -m "feat: registra los vasos de agua del día"
+```
+
+```text
+Hoy: 1250 ml de 2000 ml (63 %)
+```
+
+Segunda rama, **desde `main`** (no desde `feat/agua`):
+
+```bash
+git switch main
+git switch -c docs/readme-tema
+```
+
+Sustituye `README.md` por:
+
+```markdown
+# Planificador 2026
+
+Organizador de tareas por categorías: trabajo, personal, salud y estudio.
+
+Ejecútalo con `node src/tareas.js`.
+
+## Tema de color
+
+`node src/tema.js` muestra cómo se alterna entre el tema claro y el oscuro.
+```
+
+```bash
+git commit -am "docs: documenta el cambio de tema"
+git log --oneline --graph --all --decorate -5
+```
+
+```text
+* 6e5e8a7 (HEAD -> docs/readme-tema) docs: documenta el cambio de tema
+| * 5ff4696 (feat/agua) feat: registra los vasos de agua del día
+|/
+* ec87e67 (main) feat: alterna entre tema claro y oscuro
+* 060ecdb docs: explica cómo ejecutar el proyecto
+* eddf840 feat: muestra el número de tareas completadas
+```
+
+El historial se ha **bifurcado**: las dos ramas salen de `ec87e67` y cada una tiene un commit que la otra no tiene. Ahora mézclalas en `main`, una tras otra:
+
+```bash
+git switch main
+git merge feat/agua
+git merge docs/readme-tema
+```
+
+La primera es un _fast-forward_ (`main` no había avanzado). Pero en la segunda, `main` **ya no está** donde nació `docs/readme-tema`: ahora incluye el commit del agua. No basta con mover el puntero. Git tiene que **combinar** las dos líneas y crea un **merge commit**. Como ese commit necesita un mensaje, Git abre VS Code con uno ya escrito (`Merge branch 'docs/readme-tema'`): cierra la pestaña para aceptarlo. La salida:
+
+```text
+Merge made by the 'ort' strategy.
+ README.md | 4 ++++
+ 1 file changed, 4 insertions(+)
+```
+
+```bash
+git log --oneline --graph --all --decorate -6
+```
+
+```text
+*   38cc512 (HEAD -> main) Merge branch 'docs/readme-tema'
+|\
+| * 6e5e8a7 (docs/readme-tema) docs: documenta el cambio de tema
+* | 5ff4696 (feat/agua) feat: registra los vasos de agua del día
+|/
+* ec87e67 feat: alterna entre tema claro y oscuro
+* 060ecdb docs: explica cómo ejecutar el proyecto
+* eddf840 feat: muestra el número de tareas completadas
+```
+
+Abre el merge commit por dentro, como en B2.1:
+
+```bash
+git cat-file -p HEAD
+```
+
+```text
+tree f788b421e1e6d1fa17e0956f244d2b83f1aad8a9
+parent 5ff4696ea077607b8c385f5d43c8e3aa1ba4b50f
+parent 6e5e8a79a01b8ad1a5ad4effd4dac0037982a539
+author Dani <dani@example.com> 1791565200 -0600
+```
+
+**Dos `parent`**: esa es la única diferencia entre un merge commit y uno normal. Su foto (`tree`) contiene el resultado de combinar ambas líneas: el `agua.js` de una y el `README.md` de la otra. `'ort'` es el nombre del algoritmo de mezcla que usa Git por defecto; no tienes que hacer nada con él.
+
+Borra las dos ramas, que ya están integradas:
+
+```bash
+git branch -d feat/agua docs/readme-tema
+```
+
+<Callout type="risk">
+
+- **Si prefieres no abrir el editor**, añade `--no-edit` (`git merge docs/readme-tema --no-edit`) para aceptar el mensaje por defecto.
+- **Si las dos ramas cambian las mismas líneas**, Git no puede decidir y se detiene con un **conflicto**. Es lo que aprenderás a resolver en B2.3. Aquí no ha pasado porque cada rama tocaba un archivo distinto.
+- **Merges que nadie revisa:** combinar sin conflictos no significa que el resultado funcione. Si una rama renombra una función y la otra la usa con el nombre viejo, Git mezcla sin quejarse y el código se rompe. Ejecuta el proyecto (y los tests, cuando los tengas) después de cada merge.
+
+</Callout>
+
+## Paso 5: proteger tu trabajo al borrar ramas, y `--no-ff`
+
+`git branch -d` solo borra ramas **ya mezcladas**. Compruébalo con una rama abandonada:
+
+```bash
+git switch -c feat/abandonada
+echo "// borrador" >> src/agua.js
+git commit -am "wip: borrador"
+git switch main
+git branch -d feat/abandonada
+```
+
+```text
+error: the branch 'feat/abandonada' is not fully merged
+hint: If you are sure you want to delete it, run 'git branch -D feat/abandonada'
+```
+
+Git te protege: esa rama tiene un commit que no está en ninguna otra parte. Si de verdad quieres descartarla, usa la `D` mayúscula:
+
+```bash
+git branch -D feat/abandonada
+```
+
+Por último, la opción `--no-ff`, que **obliga** a crear un merge commit aunque fuera posible un _fast-forward_. Crea la funcionalidad de racha:
+
+```bash
+git switch -c feat/racha
+```
+
+Crea `src/racha.js`:
+
+```js
+// Racha de días con entreno
+function racha(dias) {
+  let n = 0;
+  for (const hecho of dias.toReversed()) {
+    if (!hecho) break;
+    n += 1;
+  }
+  return n;
+}
+
+console.log(`Racha actual: ${racha([true, false, true, true, true])} días`);
+```
+
+```bash
+node src/racha.js
+git add src/racha.js
+git commit -m "feat: calcula la racha de días con entreno"
+git switch main
+git merge --no-ff feat/racha --no-edit
+git log --oneline --graph --decorate -4
+git branch -d feat/racha
+```
+
+```text
+Racha actual: 3 días
+Merge made by the 'ort' strategy.
+ src/racha.js | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+ create mode 100644 src/racha.js
+*   eaf25e7 (HEAD -> main) Merge branch 'feat/racha'
+|\
+| * 5ac3f2c (feat/racha) feat: calcula la racha de días con entreno
+|/
+*   38cc512 Merge branch 'docs/readme-tema'
+|\
+| * 6e5e8a7 docs: documenta el cambio de tema
+```
+
+La "burbuja" del historial deja constancia de que esos commits formaron una unidad. Si la racha diera problemas, podrías deshacer la funcionalidad entera revirtiendo **un solo** commit, el de merge (B2.3).
+
+<Callout type="risk">
+
+- **`-D` no pide confirmación:** borra la rama aunque tenga trabajo único. Si te equivocas, tienes unos días para recuperarla con `git reflog` (B2.3), pero no lo conviertas en costumbre.
+- **¿Fast-forward o `--no-ff`?** Es una decisión de equipo. Muchos equipos ni la toman: en GitHub, las Pull Requests deciden cómo se mezcla (B2.4). Lo importante es reconocer ambos en un historial.
+- **`toReversed()`** devuelve una copia invertida sin tocar el array original (a diferencia de `reverse()`). Necesita Node 20 o superior.
+
+</Callout>
+
+## Paso 6: un flujo de trabajo por ramas
+
+Ya tienes las herramientas; ahora la disciplina. El flujo que usan la mayoría de equipos pequeños (y el que usarás en tus proyectos) se basa en una regla: **`main` siempre se puede desplegar**. Para cualquier cambio:
+
+1. **Actualiza `main` y crea una rama desde ahí:** `git switch main`, después `git switch -c tipo/descripcion-corta`.
+2. **Trabaja en la rama** con commits pequeños (B2.1).
+3. **Comprueba que todo funciona** en la rama: el proyecto arranca, `npm run check` pasa.
+4. **Mezcla en `main`** (en B2.4 lo harás con una Pull Request en GitHub) y **borra la rama**.
+
+Para los nombres de rama, usa los mismos prefijos que en los commits: `feat/modo-oscuro`, `fix/total-agua`, `docs/readme`, `chore/actualizar-astro`. Así, `git branch` se lee como una lista de tareas.
+
+**Ramas y Vercel.** Si tu proyecto está conectado a Vercel desde GitHub, cada rama que subas recibe automáticamente un **despliegue de _preview_**: una URL propia (del estilo `planificador-git-feat-modo-oscuro-tuusuario.vercel.app`) con el código de esa rama, separada de producción. Así puedes probar el modo oscuro en tu móvil, o enseñarlo, **antes** de mezclarlo. Producción solo se actualiza cuando cambia `main`. Lo pondrás en práctica en B2.4, al subir ramas a GitHub.
+
+<Callout type="risk">
+
+- **Las _previews_ comparten base de datos y secretos** si usas las mismas variables de entorno en _Preview_ y en _Production_. Una rama con un error en una consulta puede borrar datos reales. En Vercel, configura variables distintas para _Preview_ (una base de datos de pruebas).
+- **El login puede fallar en las _previews_:** las librerías de autenticación como Better Auth solo aceptan peticiones del dominio configurado (`BETTER_AUTH_URL`). En una URL de _preview_, que es distinta, el login se rechaza por seguridad. Esta misma plataforma tiene ese comportamiento; se resuelve añadiendo los dominios de _preview_ a la lista de orígenes de confianza (curso I5).
+- **Ramas que viven semanas** acumulan diferencias con `main` y acaban en conflictos enormes. Mantén las ramas cortas: horas o pocos días.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. En tu repositorio de práctica, crea dos ramas desde `main` (`feat/a` y `feat/b`) que modifiquen
-  **archivos distintos**. 2. Une `feat/a` a `main` y observa que es un *fast-forward*. 3. Une
-  después `feat/b` y observa que ahora se crea un *merge commit*. Mira el resultado con `git lg`. 4.
-  Borra ambas ramas con `git branch -d`. 5. En un proyecto conectado a Vercel, sube una rama a
-  GitHub y abre la URL de preview que genera.
+
+1. Desde `main`, crea la rama `feat/colores` y en ella un archivo `src/colores.js` que asocie cada categoría del Planificador con un color (trabajo `#0284c7`, personal `#d97706`, salud `#0d9488`, estudio `#f25c76`) e imprima la lista. Haz commit.
+2. Vuelve a `main`, crea la rama `docs/categorias` y añade al `README.md` una sección "Categorías" con las cuatro categorías. Haz commit.
+3. Antes de mezclar, predice: ¿qué merge será _fast-forward_ y cuál creará un merge commit? Mezcla las dos ramas en `main` y comprueba tu predicción con `git log --oneline --graph --decorate`.
+4. Borra las ramas y comprueba con `git branch` que solo queda `main`.
+
+</Callout>
+
+Solución. Primera rama:
+
+```bash
+git switch main
+git switch -c feat/colores
+```
+
+`src/colores.js`:
+
+```js
+// Color asociado a cada categoría del Planificador 2026
+const COLORES = {
+  trabajo: "#0284c7",
+  personal: "#d97706",
+  salud: "#0d9488",
+  estudio: "#f25c76",
+};
+
+for (const [categoria, color] of Object.entries(COLORES)) {
+  console.log(`${categoria.padEnd(9)} ${color}`);
+}
+```
+
+```bash
+node src/colores.js
+git add src/colores.js
+git commit -m "feat: asigna un color a cada categoría"
+```
+
+```text
+trabajo   #0284c7
+personal  #d97706
+salud     #0d9488
+estudio   #f25c76
+```
+
+Segunda rama, desde `main`:
+
+```bash
+git switch main
+git switch -c docs/categorias
+```
+
+`README.md` completo:
+
+```markdown
+# Planificador 2026
+
+Organizador de tareas por categorías: trabajo, personal, salud y estudio.
+
+Ejecútalo con `node src/tareas.js`.
+
+## Tema de color
+
+`node src/tema.js` muestra cómo se alterna entre el tema claro y el oscuro.
+
+## Categorías
+
+- Trabajo
+- Personal
+- Salud
+- Estudio
+```
+
+```bash
+git commit -am "docs: documenta las categorías"
+git switch main
+git merge feat/colores
+git merge docs/categorias --no-edit
+git log --oneline --graph --decorate -4
+git branch -d feat/colores docs/categorias
+git branch
+```
+
+```text
+*   d387499 (HEAD -> main) Merge branch 'docs/categorias'
+|\
+| * 8016015 (docs/categorias) docs: documenta las categorías
+* | 6b539d0 (feat/colores) feat: asigna un color a cada categoría
+|/
+*   eaf25e7 Merge branch 'feat/racha'
+|\
+Deleted branch feat/colores (was 6b539d0).
+Deleted branch docs/categorias (was 8016015).
+* main
+```
+
+La predicción correcta: `feat/colores` es un _fast-forward_, porque `main` no había avanzado desde que la creaste. `docs/categorias` crea un merge commit, porque cuando la mezclas `main` ya incluye el commit de los colores. (Tus identificadores serán distintos).
+
+<Callout type="risk">
+
+- **Si `docs/categorias` sale de `feat/colores` en lugar de `main`** (porque olvidaste el `git switch main`), los dos merges serán _fast-forward_ y el historial quedará en línea recta. No es un error grave, pero la rama de documentación arrastraría código que no es suyo. Mira siempre en qué rama estás antes de `git switch -c`.
+- **`padEnd(9)`** rellena con espacios hasta 9 caracteres para alinear la salida en la terminal. Con textos más largos que 9, no recorta: la columna se descuadra.
+
 </Callout>
 
 <Callout type="mastery">
-  Trabajas cada cambio en una rama propia sin pensarlo y sabes predecir si un merge será
-  *fast-forward* o creará un commit de unión.
+
+Trabajas cada cambio en una rama propia sin pensarlo, sabes que una rama es un puntero a un commit, predices si un merge será _fast-forward_ o creará un merge commit, y `main` en tus proyectos siempre se puede desplegar.
+
 </Callout>
 
 ## Resumen
 
-- Una rama es un puntero a un commit; crearla es instantáneo.
-- `git switch -c` crea y cambia; `git switch` cambia.
-- _Fast-forward_: solo se mueve el puntero. _Merge commit_: une historias que se separaron.
-- `git branch -d` borra ramas ya unidas sin perder sus commits.
-- Flujo sencillo: `main` siempre funciona, una rama por cambio.
-- Vercel crea una URL de preview por cada rama.
+- Una rama es un archivo con el identificador de un commit: un marcapáginas. Crearla es instantáneo.
+- `git switch -c rama` crea y cambia; al hacer commit solo avanza la rama actual.
+- _Fast-forward_: el destino no avanzó y basta con mover el puntero. _Merge commit_: las líneas divergieron y se crea un commit con dos padres.
+- `git branch -d` solo borra ramas mezcladas; `-D` fuerza el borrado.
+- Flujo: `main` siempre desplegable, una rama corta por cambio y una _preview_ de Vercel por rama.
