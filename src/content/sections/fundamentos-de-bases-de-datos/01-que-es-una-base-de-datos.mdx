@@ -4,128 +4,288 @@ course: "B4"
 title: "Qué es una base de datos"
 order: 1
 minutes: 60
-summary: "Por qué no basta con un archivo JSON, qué hace un gestor de bases de datos y qué tipos existen para elegir con criterio."
+summary: "Compruebas con un experimento por qué un archivo JSON pierde datos con escrituras simultáneas, conoces qué resuelve un gestor de bases de datos y comparas los modelos relacional, documental y clave-valor."
 ---
 
-Usas MongoDB en tus proyectos, pero lo elegiste porque venía en el tutorial. Para "subir de nivel" con los datos hay que dar un paso atrás: entender **qué problema resuelve una base de datos**, qué tipos existen y por qué cada uno encaja en casos distintos. Este curso es independiente de MongoDB; el siguiente, B5, lo aplica todo a MongoDB.
+¿Por qué no guardar los datos de una app en un archivo `datos.json` y ya? Es tentador: lo lees, lo modificas y lo vuelves a escribir. Funciona en tu Mac con un solo usuario… hasta que no. En esta sección vas a **demostrarlo con un experimento**: 50 escrituras simultáneas sobre un archivo JSON frente a las mismas 50 sobre una base de datos SQLite. El resultado explica, mejor que cualquier definición, qué hace un gestor de bases de datos por ti. Después verás los grandes tipos de bases de datos y cuándo encaja cada uno, con el mismo dato representado de las dos formas que usarás en tu carrera: tablas y documentos.
 
-## ¿Por qué no un archivo JSON?
+**Lo que tendrás al terminar:** un proyecto `db-lab` (lo usarás en todo el curso B4) con tu primera base de datos SQLite, y un criterio claro para elegir tipo de base de datos.
 
-Tu Planificador podría guardar todo en un `datos.json`. Funciona con un usuario y pocos datos. Ahora imagina que crece:
+**Requisitos:** Node.js 22.13 o superior (incluye el módulo `node:sqlite`; compruébalo con `node -v`) y `sqlite3`, que viene instalado en macOS (`sqlite3 --version`).
 
-- **Concurrencia**: dos peticiones escriben a la vez y una sobrescribe la otra. Pierdes datos.
-- **Rendimiento**: para buscar los días de una categoría hay que leer y recorrer **todo** el archivo.
-- **Durabilidad**: si el servidor se cae a mitad de una escritura, el archivo queda corrupto.
-- **Consultas**: "notas de marzo con imagen, ordenadas por fecha" significa escribir ese bucle a mano.
-- **Integridad**: nada impide guardar una fecha con formato incorrecto o una categoría que no existe.
+## Paso 1: crear el laboratorio
 
-Además, en Vercel ni siquiera tienes un disco persistente: cada función puede ejecutarse en una máquina distinta.
-
-## Qué hace un gestor de bases de datos
-
-Un **SGBD** (sistema gestor de bases de datos) es el programa que resuelve esos problemas por ti:
-
-| Problema       | Lo que aporta el SGBD                                                     |
-| -------------- | ------------------------------------------------------------------------- |
-| Almacenamiento | Formato eficiente en disco, compresión                                    |
-| Consultas      | Un lenguaje (SQL, la API de MongoDB) para pedir datos sin escribir bucles |
-| Rendimiento    | Índices para encontrar datos sin leerlo todo                              |
-| Concurrencia   | Varios clientes leen y escriben a la vez sin pisarse                      |
-| Durabilidad    | Lo confirmado sobrevive a un corte de luz                                 |
-| Integridad     | Reglas: tipos, campos obligatorios, valores únicos                        |
-
-## Tipos de bases de datos
-
-### Relacionales (SQL)
-
-Los datos viven en **tablas** con columnas fijas, y las tablas se relacionan entre sí. Se consultan con **SQL**. Ejemplos: PostgreSQL, MySQL, SQLite.
-
-```text
-usuarios                          entrenos
-| id | nombre | email       |     | id | usuario_id | km  | fecha      |
-|----|--------|-------------|     |----|------------|-----|------------|
-| 1  | Dani   | dani@…      |     | 7  | 1          | 5.2 | 2026-10-01 |
+```bash
+mkdir db-lab
+cd db-lab
+code .
 ```
 
-**Brillan en**: datos muy relacionados, informes con cruces, reglas estrictas, operaciones que deben ser exactas (dinero, inventario).
+Crea `package.json`:
 
-### Documentales (NoSQL)
-
-Los datos son **documentos** parecidos a JSON, agrupados en colecciones. Cada documento puede tener estructura anidada. Ejemplo: **MongoDB**.
-
-```js
+```json
 {
-  _id: ObjectId("…"),
-  nombre: "Dani",
-  entrenos: [{ km: 5.2, fecha: ISODate("2026-10-01") }]
+  "name": "db-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module"
 }
 ```
 
-**Brillan en**: datos que se leen juntos, estructuras que cambian, desarrollo rápido con JavaScript (el formato es casi el mismo que tus objetos).
+No necesitas instalar nada: Node trae SQLite integrado desde la versión 22.
 
-### Otras familias
+## Paso 2: el experimento, JSON frente a SQLite
 
-- **Clave-valor** (Redis): un diccionario gigante en memoria, rapidísimo. Ideal para cachés, sesiones y contadores.
-- **Columnares** (ClickHouse): para analítica sobre millones de filas.
-- **Grafos** (Neo4j): cuando lo importante son las conexiones (redes sociales, recomendaciones).
-- **Vectoriales**: búsqueda por similitud, muy usadas con IA.
+Imagina la API de tareas de B3.3, pero guardando en un archivo en lugar de en memoria. Cada vez que alguien crea una tarea, el servidor **lee** el archivo, **añade** la tarea y lo **reescribe** entero. Ahora imagina que 50 personas pulsan "Guardar" en el mismo segundo. Crea `json-vs-sqlite.js`:
 
-No compiten: muchas aplicaciones usan varias a la vez.
+```js
+// Archivo: json-vs-sqlite.js
+// Compara un archivo JSON con una base de datos SQLite ante 50 escrituras simultáneas
+import { readFile, writeFile, rm } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 
-## Servidor vs embebida
+const ESCRITURAS = 50;
 
-- **Servidor de base de datos**: un programa aparte al que te conectas por red (MongoDB, PostgreSQL). Varios clientes a la vez.
-- **Base de datos embebida**: una librería que vive dentro de tu aplicación y guarda todo en un archivo (SQLite). Sin red ni configuración. La usan tu móvil, tu navegador y la mitad de las apps de escritorio.
+// ─── 1. Un archivo JSON como "base de datos" ───
+const ARCHIVO = "tareas.json";
+await writeFile(ARCHIVO, "[]");
 
-## ¿Dónde vive tu MongoDB?
+async function anadirTareaJson(titulo) {
+  const tareas = JSON.parse(await readFile(ARCHIVO, "utf-8")); // leer todo
+  tareas.push({ id: tareas.length + 1, titulo }); // modificar en memoria
+  await writeFile(ARCHIVO, JSON.stringify(tareas, null, 2)); // reescribir todo
+}
 
-Cuando usas **MongoDB Atlas**, el servidor de base de datos corre en máquinas de la nube (AWS, Google Cloud o Azure) que Atlas gestiona por ti. Un **clúster** son normalmente **tres** servidores con copias de los datos (un _replica set_): si uno se cae, otro toma el relevo.
+// 50 peticiones "a la vez", como 50 usuarios pulsando "Guardar" en el mismo segundo
+await Promise.all(Array.from({ length: ESCRITURAS }, (_, i) => anadirTareaJson(`Tarea ${i + 1}`)));
+const enJson = JSON.parse(await readFile(ARCHIVO, "utf-8"));
+console.log(`JSON:   ${ESCRITURAS} escrituras → ${enJson.length} tareas guardadas`);
 
-```text
-Tu app (Vercel)  ──── red, TLS ────▶  Atlas: clúster
-                                       ├─ primario   (lecturas y escrituras)
-                                       ├─ secundario (copia)
-                                       └─ secundario (copia)
+// ─── 2. La misma operación con SQLite ───
+await rm("tareas.db", { force: true });
+const db = new DatabaseSync("tareas.db");
+db.exec("CREATE TABLE tareas (id INTEGER PRIMARY KEY, titulo TEXT NOT NULL)");
+const insertar = db.prepare("INSERT INTO tareas (titulo) VALUES (?)");
+
+await Promise.all(Array.from({ length: ESCRITURAS }, async (_, i) => insertar.run(`Tarea ${i + 1}`)));
+const { total } = db.prepare("SELECT COUNT(*) AS total FROM tareas").get();
+console.log(`SQLite: ${ESCRITURAS} escrituras → ${total} tareas guardadas`);
+
+// ─── 3. Un corte a mitad de escritura ───
+const completo = JSON.stringify(enJson, null, 2);
+await writeFile(ARCHIVO, completo.slice(0, completo.length / 2)); // el proceso "muere" a la mitad
+try {
+  JSON.parse(await readFile(ARCHIVO, "utf-8"));
+} catch (error) {
+  console.log(`JSON tras un corte: ${error.message}`);
+}
+db.close();
 ```
 
-Por eso la URI empieza por `mongodb+srv://`: el DNS te da la lista de servidores del clúster.
+```bash
+node json-vs-sqlite.js
+```
 
-## SQL o NoSQL: cómo elegir
+```text
+JSON:   50 escrituras → 1 tareas guardadas
+SQLite: 50 escrituras → 50 tareas guardadas
+JSON tras un corte: Unterminated string in JSON at position 24 (line 4 column 6)
+```
 
-No hay un ganador, pero sí preguntas útiles:
+**De 50 tareas, el archivo JSON conserva una.** Ejecútalo varias veces: casi siempre verás `1`, y de vez en cuando el script se detendrá con `SyntaxError: Unexpected end of JSON input`, porque el archivo quedó **corrupto** a mitad de las escrituras. Qué ha pasado:
 
-1. **¿Cómo se leen los datos?** Si casi siempre se leen juntos (un día del planificador con sus notas), documentos. Si se cruzan de muchas formas (informes), tablas.
-2. **¿Cuán estable es la estructura?** Estable y estricta favorece SQL; cambiante, documentos.
-3. **¿Hay operaciones que deben ser exactas** entre muchos registros? SQL lo pone más fácil (aunque MongoDB también tiene transacciones).
-4. **¿Qué conoce tu equipo?** Es un factor real.
+1. Las 50 llamadas a `anadirTareaJson` empiezan casi a la vez. **Todas leen el archivo cuando aún está vacío** (`[]`).
+2. Cada una añade **su** tarea a **su** copia en memoria: 50 arrays distintos, cada uno con una sola tarea.
+3. Cada una reescribe el archivo entero con su array. **La última en escribir gana** y borra el trabajo de las otras 49. Es una **escritura perdida** (_lost update_), un tipo de **condición de carrera**.
+4. Si una escritura empieza mientras otra aún no ha terminado, el archivo puede quedar con medio contenido, que no es JSON válido.
 
-Lo verás a fondo en A3, cuando compares las dos versiones de esta misma plataforma.
+Y la tercera línea simula algo inevitable en producción: el proceso se detiene **a mitad de escribir** (un despliegue, un fallo de memoria, un corte de luz). El archivo queda con medio JSON y **toda** la información se vuelve ilegible, no solo la última tarea.
 
-## Errores comunes
+SQLite guardó las 50, sin un solo cambio en la lógica de tu código. La base de datos se encargó de ordenar las escrituras.
 
-- **Elegir base de datos por moda.** Elige por cómo vas a leer y escribir los datos.
-- **Pensar que NoSQL significa "sin esquema".** Los datos siempre tienen forma; la diferencia es dónde se valida.
-- **Guardar estado en el disco de una función _serverless_.** Se pierde entre ejecuciones.
-- **Creer que una base de datos solo guarda.** Su valor está en consultar, proteger y mantener la integridad.
+<Callout type="risk">
+
+- **Esto no es un problema "de muchos usuarios":** basta con que tu propio navegador envíe dos peticiones seguidas (un doble clic en "Guardar", dos pestañas abiertas) para perder datos con un archivo JSON.
+- **Tampoco funciona en Vercel:** el sistema de archivos de una función de Vercel es de solo lectura (salvo `/tmp`, que se borra en cada arranque) y cada instancia tiene el suyo. Un `datos.json` en producción no se comparte entre peticiones ni sobrevive a un despliegue.
+- **`node:sqlite` es reciente:** en Node 22.5–22.12 necesita el _flag_ `--experimental-sqlite`, y en algunas versiones muestra un aviso `ExperimentalWarning` al cargarse. No afecta al resultado.
+
+</Callout>
+
+## Paso 3: qué hace un gestor de bases de datos por ti
+
+Un **SGBD** (sistema gestor de bases de datos) es el programa que hay detrás: SQLite, PostgreSQL, MySQL, MongoDB. En el experimento acabas de ver dos de sus cuatro trabajos:
+
+| Trabajo            | Qué significa                                                                         | Lo que hacía tu archivo JSON                              |
+| ------------------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| **Almacenamiento** | Guarda los datos en disco en un formato eficiente, en páginas pequeñas                | Reescribía el archivo **entero** por cada cambio          |
+| **Consultas**      | Encuentra datos sin leerlo todo: "las tareas pendientes de Dani, ordenadas por fecha" | Había que cargar todo en memoria y filtrar con JavaScript |
+| **Concurrencia**   | Ordena las operaciones simultáneas para que ninguna pise a otra                       | Perdió 49 de 50 escrituras                                |
+| **Durabilidad**    | Lo confirmado sobrevive a un corte: nunca deja un archivo a medias                    | Medio JSON ilegible                                       |
+
+Mira por dentro la base de datos que se ha creado:
+
+```bash
+ls -la tareas.db
+sqlite3 tareas.db ".schema"
+sqlite3 -header -column tareas.db "SELECT id, titulo FROM tareas ORDER BY id DESC LIMIT 3;"
+sqlite3 tareas.db "SELECT COUNT(*) FROM tareas WHERE titulo LIKE 'Tarea 1%';"
+```
+
+```text
+-rw-r--r--@ 1 tu-usuario  staff  8192  9 oct 15:33 tareas.db
+CREATE TABLE tareas (id INTEGER PRIMARY KEY, titulo TEXT NOT NULL);
+id  titulo
+--  --------
+50  Tarea 50
+49  Tarea 49
+48  Tarea 48
+11
+```
+
+- **`tareas.db` es un único archivo de 8 KB**, organizado en páginas de 4 KB. Al insertar, SQLite solo modifica las páginas afectadas, no todo el archivo.
+- **`.schema`** muestra la estructura: la tabla y sus columnas, con sus tipos y restricciones (`NOT NULL`).
+- **La última consulta** cuenta las tareas cuyo título empieza por "Tarea 1" (`Tarea 1`, `Tarea 10`…`Tarea 19`): 11. Es una pregunta que el SGBD responde sin que tú escribas un bucle. Ese lenguaje es **SQL**, y lo aprenderás en B4.3.
+
+<Callout type="risk">
+
+- **Un SGBD no te protege de todo:** si tu código lee un dato, lo modifica en JavaScript y lo vuelve a guardar (como hacía `anadirTareaJson`), puedes perder escrituras **también con una base de datos**. La solución es pedirle a la base de datos que haga la modificación ella misma (`UPDATE … SET contador = contador + 1`), o usar transacciones. Lo verás en B4.5.
+- **El archivo `.db` no se edita a mano ni se copia "en caliente":** copiarlo mientras una app escribe en él puede dar una copia corrupta. Para copias de seguridad, `sqlite3 tareas.db ".backup copia.db"`.
+
+</Callout>
+
+## Paso 4: los tipos de bases de datos
+
+Todas resuelven los cuatro trabajos del paso anterior, pero organizan los datos de forma distinta. Para entenderlo, representa los mismos datos (Dani y dos de sus entrenos) en los dos modelos principales.
+
+**Relacional** (SQLite, PostgreSQL, MySQL): los datos viven en **tablas** con columnas fijas, como hojas de cálculo muy estrictas. Las relaciones se expresan con identificadores que apuntan a otras tablas:
+
+```text
+usuarios                         entrenos
+| id | nombre | email         |  | id | usuario_id | fecha      | km  |
+|----|--------|---------------|  |----|------------|------------|-----|
+| 1  | Dani   | dani@ejem.com |  | 1  | 1          | 2026-10-01 | 5.2 |
+                                 | 2  | 1          | 2026-10-03 | 8.0 |
+```
+
+**Documental** (MongoDB): los datos viven en **documentos** con forma de JSON, agrupados en colecciones. Un documento puede **anidar** datos relacionados:
+
+```json
+{
+  "_id": 1,
+  "nombre": "Dani",
+  "email": "dani@ejem.com",
+  "entrenos": [
+    { "fecha": "2026-10-01", "km": 5.2 },
+    { "fecha": "2026-10-03", "km": 8.0 }
+  ]
+}
+```
+
+| Tipo            | Ejemplos                                                                                            | Cómo guarda                                        | Brilla en                                                                          | Sufre con                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Relacional**  | PostgreSQL, MySQL, SQLite                                                                           | Tablas con columnas fijas, relacionadas por claves | Datos muy relacionados y consistencia estricta (pagos, inventario, reservas)       | Datos de forma muy variable; cambiar el esquema en tablas enormes |
+| **Documental**  | MongoDB                                                                                             | Documentos JSON (BSON) en colecciones              | Datos que se leen juntos, esquema que evoluciona, desarrollo rápido con JavaScript | Muchas relaciones cruzadas que hay que combinar en cada consulta  |
+| **Clave-valor** | Redis, Vercel KV                                                                                    | Una clave → un valor, normalmente en memoria       | Cachés, sesiones, contadores, límites de peticiones: lecturas en microsegundos     | Cualquier consulta que no sea "dame el valor de esta clave"       |
+| **Otras**       | Elasticsearch (búsqueda), InfluxDB (series temporales), Neo4j (grafos), pgvector (vectores para IA) | Especializadas                                     | Un problema concreto                                                               | Todo lo demás                                                     |
+
+La regla práctica: **relacional** cuando las relaciones y la consistencia son el centro (si dudas, PostgreSQL rara vez es mala elección); **documental** cuando los datos se leen como "objetos completos" y su forma evoluciona; **clave-valor** como complemento para velocidad. Muchas apps reales combinan varias: MongoDB para los datos, Redis para la caché.
+
+<Callout type="risk">
+
+- **"NoSQL no tiene esquema" es medio verdad:** MongoDB no te **obliga** a definir columnas, pero tus datos siempre tienen una forma que tu código espera. Si no la controlas tú (con validación, como hace esta plataforma con `$jsonSchema`), acabarás con documentos de cinco formas distintas y errores en producción.
+- **Anidar no siempre es buena idea:** si un usuario acumula miles de entrenos dentro de su documento, el documento crece sin límite (MongoDB tiene un máximo de 16 MB) y cada lectura del usuario arrastra todos sus entrenos. Cuándo anidar y cuándo separar es la gran decisión del modelado documental (curso I4).
+- **Elegir base de datos por moda** sale caro: migrar de una a otra con datos en producción es de los trabajos más arriesgados que existen. Elige por la forma de tus datos y tus consultas.
+
+</Callout>
+
+## Paso 5: servidor de base de datos frente a base de datos embebida
+
+Hay otra diferencia importante, independiente del tipo:
+
+- **Embebida** (SQLite): la base de datos es **un archivo** y el motor es **una librería** dentro de tu programa. No hay que instalar ni arrancar nada, no hay red de por medio. Tu `tareas.db` es exactamente eso. La usan los navegadores, los móviles, las apps de escritorio y muchas herramientas.
+- **Servidor** (PostgreSQL, MySQL, MongoDB): la base de datos es **otro programa**, normalmente en otra máquina, al que tu app se conecta por red, con usuario y contraseña. Muchas instancias de tu app (como las funciones de Vercel) pueden usar la misma base de datos a la vez.
+
+Tu clúster de **MongoDB Atlas** es del segundo tipo, y conecta con todo lo que viste en B3:
+
+- Vive en servidores de un proveedor de nube (AWS, Google Cloud o Azure) en la **región** que elegiste al crearlo. Puedes verla en Atlas → tu clúster → _Overview_.
+- Es un **conjunto de réplicas** (_replica set_): tres servidores con copias de los mismos datos. Si uno cae, otro toma el relevo. Por eso tu cadena de conexión empieza por `mongodb+srv://`: es un **registro DNS** (de tipo `SRV`, B3.2) que lista los tres servidores.
+- Cada consulta viaja por la red, cifrada con **TLS** (B3.5), desde la región de tu función de Vercel hasta la de Atlas. Si están lejos, cada consulta suma decenas de milisegundos (B3.1).
+- Solo acepta conexiones de las IPs permitidas en _Network Access_. Por eso, para Vercel (que no tiene IPs fijas), hace falta permitir `0.0.0.0/0`.
+
+<Callout type="risk">
+
+- **SQLite no sirve directamente en Vercel:** el archivo `.db` viviría en el disco efímero de cada función, que no se comparte y desaparece. Para SQLite en la nube existen servicios específicos (como Turso). Para tus proyectos en Vercel, una base de datos servidor como Atlas es lo natural.
+- **Elige la región de Atlas cerca de la de Vercel:** una función en Washington (`iad1`, la región por defecto de Vercel) consultando un clúster en São Paulo multiplica la latencia de cada página por el número de consultas que hace.
+- **La cadena de conexión es un secreto:** contiene el usuario y la contraseña. Va en `.env` y en las variables de Vercel, nunca en el código ni en Git.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Haz una lista de los datos que guarda tu Planificador 2026 (días, categorías, notas, imágenes,
-  avisos…). 2. Para cada uno, decide si encajaría mejor en una base de datos relacional, documental
-  o clave-valor, y justifícalo en una frase. 3. Entra en MongoDB Atlas y localiza en qué proveedor y
-  región está tu clúster y cuántos nodos tiene. 4. Escribe un párrafo explicando por qué un archivo
-  JSON no serviría para tu app de entrenamiento en Vercel.
+
+1. Lista los datos que guarda (o guardaría) tu **Planificador 2026**: tareas, categorías, usuarios, preferencias, sesiones, eventos de calendario, adjuntos…
+2. Para cada uno, decide en qué tipo de base de datos encajaría mejor y justifícalo con lo aprendido: forma de los datos, relaciones, cómo se consultan y con qué frecuencia cambian.
+3. Modifica `json-vs-sqlite.js` para que, en lugar de crear 50 tareas, haga 50 veces "marcar la tarea 1 como hecha y sumar 1 a su contador de ediciones". ¿Cuántas ediciones registra el JSON? Explica por qué.
+
+</Callout>
+
+Solución del punto 2, una propuesta razonada:
+
+| Dato                                                       | Tipo                                                                          | Por qué                                                                                            |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Usuarios (nombre, correo, _hash_ de contraseña)            | Documental (MongoDB) o relacional                                             | Forma estable y consultas por correo; cualquiera de los dos, y ya usas MongoDB                     |
+| Tareas (título, categoría, hecha, fecha límite, subtareas) | Documental                                                                    | Se leen como objetos completos; las subtareas se anidan en la tarea                                |
+| Categorías de color                                        | Ninguna: constante en el código                                               | Son cuatro valores fijos que no edita el usuario                                                   |
+| Preferencias (tema, vista por defecto)                     | `localStorage` o un campo del usuario                                         | Pequeñas, de un solo usuario y no secretas                                                         |
+| Sesiones de login                                          | Documental (como Better Auth en esta plataforma) o clave-valor (Redis)        | Lectura en cada petición por una clave única y caducidad automática                                |
+| Eventos de calendario compartidos con otras personas       | Relacional                                                                    | Muchas relaciones N:M (eventos ↔ invitados) y consistencia (no reservar dos veces la misma franja) |
+| Archivos adjuntos                                          | Almacenamiento de objetos (Vercel Blob, S3); en la base de datos, solo la URL | Las bases de datos no están hechas para guardar archivos grandes                                   |
+
+Solución del punto 3. Sustituye la sección 1 de `json-vs-sqlite.js` por esta y ejecuta el archivo:
+
+```js
+// ─── 1. Un archivo JSON como "base de datos" ───
+const ARCHIVO = "tareas.json";
+await writeFile(ARCHIVO, JSON.stringify([{ id: 1, titulo: "Correr 5 km", hecha: false, ediciones: 0 }]));
+
+async function marcarHechaJson() {
+  const tareas = JSON.parse(await readFile(ARCHIVO, "utf-8"));
+  tareas[0].hecha = true;
+  tareas[0].ediciones += 1;
+  await writeFile(ARCHIVO, JSON.stringify(tareas, null, 2));
+}
+
+await Promise.all(Array.from({ length: ESCRITURAS }, () => marcarHechaJson()));
+const enJson = JSON.parse(await readFile(ARCHIVO, "utf-8"));
+console.log(`JSON:   ${ESCRITURAS} ediciones → contador = ${enJson[0].ediciones}`);
+```
+
+```text
+JSON:   50 ediciones → contador = 1
+SQLite: 50 escrituras → 50 tareas guardadas
+JSON tras un corte: Unterminated string in JSON at position 45 (line 4 column 27)
+```
+
+El contador dice 1 por la misma razón que antes: las 50 llamadas leen `ediciones: 0` antes de que ninguna escriba, cada una calcula `0 + 1` y la última escritura gana. Es el patrón **leer → modificar → escribir** sin protección. (La línea del corte cambia de posición porque el contenido del archivo es otro; también aquí, de vez en cuando, el archivo se corromperá durante las escrituras).
+
+<Callout type="risk">
+
+- **El mismo error existe con MongoDB:** `const tarea = await tareas.findOne(...)`, `tarea.ediciones += 1` y `await tareas.replaceOne(...)` pierde ediciones exactamente igual con peticiones simultáneas. La forma correcta es pedírselo a la base de datos en una sola operación: `updateOne({ _id }, { $inc: { ediciones: 1 } })` (curso B5).
+- **Las pruebas con un solo usuario no detectan estos fallos:** en tu Mac, probando a mano, nunca habrá dos peticiones a la vez. Por eso el experimento lanza 50 con `Promise.all`: reproducir la concurrencia a propósito es la única forma de verla antes que tus usuarios.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes explicar qué problemas resuelve una base de datos y cuándo elegirías una relacional y
-  cuándo una documental.
+
+Puedes explicar cuándo elegirías SQL y cuándo NoSQL: qué hace un gestor de bases de datos que un archivo JSON no puede (almacenamiento, consultas, concurrencia y durabilidad), qué forma de datos favorece cada modelo, y la diferencia entre una base de datos embebida como SQLite y un servidor como tu clúster de Atlas.
+
 </Callout>
 
 ## Resumen
 
-- Un archivo JSON no resuelve concurrencia, rendimiento, durabilidad ni integridad.
-- Un SGBD aporta consultas, índices, concurrencia, durabilidad y reglas.
-- Relacionales: tablas y SQL. Documentales: documentos tipo JSON. Hay más familias.
-- Servidor (por red) frente a embebida (un archivo dentro de la app).
-- Atlas ejecuta tu MongoDB como un _replica set_ de tres nodos en la nube.
-- Se elige según cómo se leen y escriben los datos, no por moda.
+- Un archivo JSON pierde escrituras simultáneas (leer → modificar → escribir) y se corrompe si el proceso muere a mitad de escribir.
+- Un SGBD se encarga del almacenamiento, las consultas, la concurrencia y la durabilidad.
+- Relacional = tablas con columnas fijas y claves (SQL); documental = documentos JSON anidables (MongoDB); clave-valor = acceso ultrarrápido por clave (Redis).
+- Embebida (SQLite, un archivo y una librería) frente a servidor (Atlas: otro programa en la red, con réplicas, TLS y región).
+- Elige por la forma de tus datos y tus consultas, no por moda; muchas apps combinan varias.

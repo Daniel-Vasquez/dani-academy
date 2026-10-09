@@ -4,133 +4,349 @@ course: "B4"
 title: "Índices"
 order: 4
 minutes: 60
-summary: "Qué es un índice, qué cuesta, por qué importa el orden de los campos y cómo comprobar si una consulta lo usa."
+summary: "Llenas una tabla con 100 000 entrenos y mides cómo un índice convierte un recorrido completo en una búsqueda directa, por qué importa el orden de un índice compuesto y cuánto cuesta cada índice al escribir."
 ---
 
-Con 100 filas, cualquier consulta es instantánea. Con 100 000, una consulta mal planteada empieza a notarse, y con millones tumba un servidor. Los **índices** son la herramienta número uno de rendimiento en cualquier base de datos, relacional o documental. En esta sección vas a medir su efecto con tus propias manos.
+Con los datos de prueba de B4.3, todas las consultas son instantáneas: siete lecturas se recorren en un abrir y cerrar de ojos. Con 100 000 filas ya no, y con millones, una consulta sin índice puede tardar segundos y tumbar tu servidor en hora punta. El **índice** es la herramienta que más rendimiento da en una base de datos… y también la que más se usa mal. En esta sección no te vas a creer nada sin medirlo: vas a llenar una tabla con 100 000 entrenos, mirarás cómo decide la base de datos ejecutar cada consulta, medirás el antes y el después de cada índice, y medirás también lo que cuestan.
 
-## La analogía del libro
+**Lo que tendrás al terminar:** `indices.js`, un banco de pruebas que puedes adaptar a cualquier consulta, e `indices-academia.sql`, con los índices que necesita el modelo de Dani Academy.
 
-Para encontrar "normalización" en un libro de 500 páginas tienes dos opciones:
+**Requisitos:** el proyecto `db-lab` con `academia.db` de B4.3.
 
-1. **Leer todas las páginas** hasta encontrarla.
-2. Ir al **índice** del final, buscar la palabra (está en orden alfabético) y saltar a la página indicada.
+## Paso 1: qué es un índice
 
-Una base de datos sin índice hace lo primero: un **escaneo completo** (_full scan_). Con índice, hace lo segundo. Por dentro, un índice es una estructura ordenada (normalmente un **árbol B**) que guarda los valores de una o varias columnas junto con dónde está cada fila.
+Piensa en un libro de 500 páginas y en la pregunta "¿en qué páginas se habla de transacciones?". Sin índice, la única forma de responder es **leer el libro entero**, página a página. Con el **índice alfabético** del final, vas a la letra T, encuentras "transacciones: 312, 318" y saltas directamente.
 
-## Medirlo en SQLite
+Un índice de base de datos es exactamente eso: una estructura aparte, **ordenada** por una o varias columnas, que guarda para cada valor dónde están las filas que lo tienen. Como está ordenada, encontrar un valor es como buscar en un diccionario: no hace falta mirarlo todo. Internamente es un árbol B (_B-tree_), y encontrar un valor entre un millón cuesta unos 20 pasos en lugar de un millón.
 
-Crea una tabla con 100 000 entrenos aleatorios (en `sqlite3`):
+La base de datos te dice **cómo** piensa ejecutar una consulta con `EXPLAIN QUERY PLAN`. Las dos palabras que debes reconocer:
 
-```sql
-CREATE TABLE entrenos (id INTEGER PRIMARY KEY, usuario_id INTEGER NOT NULL, km REAL, fecha TEXT);
+- **`SCAN`**: recorrer la tabla **entera**, fila a fila (leer el libro completo).
+- **`SEARCH … USING INDEX`**: buscar en un índice e ir directamente a las filas (consultar el índice del libro).
 
-WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
-INSERT INTO entrenos (usuario_id, km, fecha)
-SELECT abs(random()) % 1000, abs(random()) % 15, date('2026-01-01', '+' || (i % 270) || ' days')
-FROM n;
-```
+En `academia.db` ya hay índices, aunque no hayas escrito ninguno:
 
-`EXPLAIN QUERY PLAN` te dice **cómo** va a ejecutar la consulta, y `.timer on` cuánto tarda:
-
-```sql
-.timer on
-EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE usuario_id = 42;
+```bash
+sqlite3 academia.db ".indexes"
+sqlite3 academia.db "EXPLAIN QUERY PLAN SELECT * FROM usuarios WHERE email = 'ana@ejemplo.com'"
+sqlite3 academia.db "EXPLAIN QUERY PLAN SELECT * FROM lecturas WHERE seccion_id = 'B1.1'"
 ```
 
 ```text
+sqlite_autoindex_cursos_1     sqlite_autoindex_secciones_1
+sqlite_autoindex_lecturas_1   sqlite_autoindex_usuarios_1
 QUERY PLAN
-`--SCAN entrenos                         ← lee las 100 000 filas
-Run Time: real 0.002 user 0.001350
+`--SEARCH usuarios USING INDEX sqlite_autoindex_usuarios_1 (email=?)
+QUERY PLAN
+`--SCAN lecturas
 ```
 
-Ahora crea el índice y repite:
+SQLite crea **automáticamente** un índice para cada `UNIQUE` y cada clave primaria compuesta, porque para comprobar que un valor no se repite tiene que poder buscarlo rápido. Por eso buscar un usuario por `email` es un `SEARCH`. Pero buscar las lecturas de **una sección** es un `SCAN`: nadie ha creado un índice por `seccion_id`.
+
+<Callout type="risk">
+
+- **`EXPLAIN QUERY PLAN` es la herramienta, no la intuición:** que una columna tenga un índice no garantiza que se use. Si la consulta está escrita de forma que el índice no sirve (Paso 4), la base de datos hará un `SCAN` igualmente. Comprueba siempre el plan.
+- **Con tablas diminutas, el plan engaña poco y el tiempo nada:** recorrer 7 filas es instantáneo con o sin índice. Para ver el efecto real necesitas volumen, y por eso el resto de la sección trabaja con 100 000 filas.
+
+</Callout>
+
+## Paso 2: el banco de pruebas con 100 000 filas
+
+Crea `indices.js` en `db-lab`. Construye una tabla de entrenos de 1000 usuarios con 100 entrenos cada uno, y mide la misma consulta en cinco escenarios:
+
+```js
+// Archivo: indices.js
+// 100 000 entrenos: cuánto ganan las lecturas con un índice y cuánto pierden las escrituras
+import { rmSync, statSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+
+const ARCHIVO = "indices.db";
+const FILAS = 100_000;
+const USUARIOS = 1_000;
+
+// Mide cuánto tarda una función, repitiéndola para que el resultado sea estable
+function medir(fn, repeticiones = 50) {
+  const inicio = performance.now();
+  for (let i = 0; i < repeticiones; i++) fn();
+  return (performance.now() - inicio) / repeticiones;
+}
+
+function crearBaseDeDatos(indices) {
+  rmSync(ARCHIVO, { force: true });
+  const db = new DatabaseSync(ARCHIVO);
+  db.exec(`CREATE TABLE entrenos (
+    id INTEGER PRIMARY KEY,
+    usuario_id INTEGER NOT NULL,
+    fecha TEXT NOT NULL,
+    km REAL NOT NULL
+  )`);
+  for (const sql of indices) db.exec(sql);
+
+  const insertar = db.prepare("INSERT INTO entrenos (usuario_id, fecha, km) VALUES (?, ?, ?)");
+  const inicio = performance.now();
+  db.exec("BEGIN"); // todas las inserciones en una transacción: mucho más rápido (B4.5)
+  for (let i = 0; i < FILAS; i++) {
+    const usuarioId = (i % USUARIOS) + 1;
+    const dia = new Date(Date.UTC(2025, 0, 1) + (i % 365) * 86_400_000).toISOString().slice(0, 10);
+    insertar.run(usuarioId, dia, Math.round(Math.random() * 150) / 10);
+  }
+  db.exec("COMMIT");
+  const msInsertar = performance.now() - inicio;
+  return { db, msInsertar, kb: Math.round(statSync(ARCHIVO).size / 1024) };
+}
+
+const plan = (db, sql) => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all().map((p) => p.detail).join(" + ");
+
+// ─── 1. Sin índices ───
+const { db } = crearBaseDeDatos([]);
+const CONSULTA = "SELECT fecha, km FROM entrenos WHERE usuario_id = ? ORDER BY fecha DESC LIMIT 10";
+const consulta = db.prepare(CONSULTA);
+
+console.log("Sin índice:");
+console.log(`  plan:   ${plan(db, CONSULTA.replace("?", "42"))}`);
+console.log(`  tiempo: ${medir(() => consulta.all(42)).toFixed(3)} ms por consulta`);
+
+// ─── 2. Índice simple en usuario_id ───
+db.exec("CREATE INDEX idx_entrenos_usuario ON entrenos (usuario_id)");
+const conIndice = db.prepare(CONSULTA);
+console.log("Con índice en (usuario_id):");
+console.log(`  plan:   ${plan(db, CONSULTA.replace("?", "42"))}`);
+console.log(`  tiempo: ${medir(() => conIndice.all(42)).toFixed(3)} ms por consulta`);
+
+// ─── 3. Índice compuesto en el orden correcto: (usuario_id, fecha) ───
+db.exec("DROP INDEX idx_entrenos_usuario");
+db.exec("CREATE INDEX idx_entrenos_usuario_fecha ON entrenos (usuario_id, fecha)");
+const compuesto = db.prepare(CONSULTA);
+console.log("Con índice compuesto (usuario_id, fecha):");
+console.log(`  plan:   ${plan(db, CONSULTA.replace("?", "42"))}`);
+console.log(`  tiempo: ${medir(() => compuesto.all(42)).toFixed(3)} ms por consulta`);
+
+// ─── 4. El mismo índice compuesto, pero consultando solo por fecha ───
+const SOLO_FECHA = "SELECT COUNT(*) FROM entrenos WHERE fecha = '2025-06-01'";
+console.log("Consulta solo por fecha con el índice (usuario_id, fecha):");
+console.log(`  plan:   ${plan(db, SOLO_FECHA)}`);
+db.close();
+
+// ─── 5. El coste: tiempo de inserción y tamaño del archivo ───
+console.log("Coste de mantener índices al insertar 100 000 filas:");
+for (const [nombre, indices] of [
+  ["0 índices", []],
+  ["1 índice ", ["CREATE INDEX i1 ON entrenos (usuario_id, fecha)"]],
+  ["3 índices", ["CREATE INDEX i1 ON entrenos (usuario_id, fecha)", "CREATE INDEX i2 ON entrenos (fecha)", "CREATE INDEX i3 ON entrenos (km)"]],
+]) {
+  const resultado = crearBaseDeDatos(indices);
+  resultado.db.close();
+  console.log(`  ${nombre}: ${Math.round(resultado.msInsertar)} ms · ${resultado.kb} KB`);
+}
+rmSync(ARCHIVO, { force: true });
+```
+
+La consulta que se mide es la de una pantalla típica, "los 10 últimos entrenos de un usuario":
 
 ```sql
-CREATE INDEX idx_entrenos_usuario ON entrenos(usuario_id);
-EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE usuario_id = 42;
+SELECT fecha, km FROM entrenos WHERE usuario_id = ? ORDER BY fecha DESC LIMIT 10
+```
+
+Partes importantes del script:
+
+- **`medir`** repite la consulta 50 veces y calcula la media: una sola medición varía demasiado para compararla.
+- **`plan`** ejecuta `EXPLAIN QUERY PLAN` y une sus líneas.
+- Las 100 000 inserciones van entre `BEGIN` y `COMMIT` (una transacción): sin ella, tardarían muchísimo más, porque SQLite confirmaría en disco cada fila por separado. Lo entenderás en B4.5.
+
+```bash
+node indices.js
 ```
 
 ```text
-QUERY PLAN
-`--SEARCH entrenos USING INDEX idx_entrenos_usuario (usuario_id=?)
-Run Time: real 0.000 user 0.000011
+Sin índice:
+  plan:   SCAN entrenos + USE TEMP B-TREE FOR ORDER BY
+  tiempo: 1.837 ms por consulta
+Con índice en (usuario_id):
+  plan:   SEARCH entrenos USING INDEX idx_entrenos_usuario (usuario_id=?) + USE TEMP B-TREE FOR ORDER BY
+  tiempo: 0.030 ms por consulta
+Con índice compuesto (usuario_id, fecha):
+  plan:   SEARCH entrenos USING INDEX idx_entrenos_usuario_fecha (usuario_id=?)
+  tiempo: 0.008 ms por consulta
+Consulta solo por fecha con el índice (usuario_id, fecha):
+  plan:   SCAN entrenos USING COVERING INDEX idx_entrenos_usuario_fecha
+Coste de mantener índices al insertar 100 000 filas:
+  0 índices: 80 ms · 2964 KB
+  1 índice : 126 ms · 5292 KB
+  3 índices: 329 ms · 9104 KB
 ```
 
-`SCAN` = recorrer todo; `SEARCH … USING INDEX` = saltar directamente. El tiempo de CPU pasa de 1,35 ms a 0,01 ms: **más de 100 veces menos**. Con millones de filas la diferencia es entre milisegundos y segundos.
+(Tus tiempos serán distintos según tu Mac, pero las proporciones se mantienen). En los pasos siguientes vas a leer este resultado línea a línea.
 
-## Lo que cuesta un índice
+<Callout type="risk">
 
-No hay nada gratis:
+- **Medir en tu Mac no es medir en producción:** aquí la base de datos está en tu disco SSD y casi toda en memoria. En un servidor con millones de filas, que no caben en memoria, la diferencia entre `SCAN` y `SEARCH` pasa de milisegundos a **segundos**. Las proporciones son lo importante.
+- **`Math.random()` hace que cada ejecución tenga datos distintos:** no afecta a los tiempos, pero si necesitas resultados idénticos entre ejecuciones (por ejemplo, para un test), genera los datos de forma determinista.
 
-- **Escrituras más lentas**: cada `INSERT`, `UPDATE` o `DELETE` debe actualizar también todos los índices de la tabla.
-- **Espacio**: el índice ocupa disco y memoria.
+</Callout>
 
-Por eso no se indexa "todo por si acaso": se indexan los campos por los que **filtras u ordenas con frecuencia**.
+## Paso 3: del recorrido completo a la búsqueda directa
 
-## Índices únicos
+**Sin índice**, el plan es `SCAN entrenos + USE TEMP B-TREE FOR ORDER BY`:
 
-Además de acelerar, un índice puede **imponer una regla**: que no haya dos valores iguales.
+1. **`SCAN`**: lee las 100 000 filas para quedarse con las 100 del usuario 42.
+2. **`USE TEMP B-TREE FOR ORDER BY`**: después las **ordena** por fecha en una estructura temporal, para devolver las 10 más recientes.
+
+**Con un índice en `usuario_id`**, el plan es `SEARCH … USING INDEX idx_entrenos_usuario (usuario_id=?)`: va directamente a las 100 filas del usuario 42, sin mirar las otras 99 900. La consulta pasa de **1,837 ms** a **0,030 ms**: unas **60 veces más rápida**. Pero el plan aún dice `USE TEMP B-TREE FOR ORDER BY`: el índice encuentra las filas, pero no están ordenadas por fecha, y hay que ordenarlas.
+
+El índice se crea con una línea:
 
 ```sql
-CREATE UNIQUE INDEX idx_usuarios_email ON usuarios(email);
+CREATE INDEX idx_entrenos_usuario ON entrenos (usuario_id);
 ```
 
-Esta plataforma usa uno en MongoDB sobre `(userId, sectionId)` en `section_progress`: es lo que garantiza que marcar una sección dos veces no cree dos documentos, incluso con peticiones simultáneas.
+El nombre (`idx_entrenos_usuario`) es libre, pero la convención `idx_tabla_columnas` te dirá qué es cuando lo veas en un plan dentro de seis meses.
 
-## Índices compuestos: el orden importa
+<Callout type="risk">
 
-Un índice puede cubrir varias columnas. Piensa en una guía telefónica ordenada por **apellido y luego nombre**:
+- **Crear un índice en una tabla grande en producción no es gratis:** la base de datos tiene que leer toda la tabla y construir el árbol, lo que puede tardar minutos y, en algunas bases de datos, bloquear las escrituras mientras tanto. Crea los índices al diseñar la tabla, o en momentos de poco tráfico.
+- **Un índice no ayuda si la consulta devuelve casi toda la tabla:** si el 90 % de los entrenos son de un mismo usuario, buscar sus filas en el índice y luego saltar a la tabla puede ser **más lento** que un `SCAN`. Por eso la base de datos a veces ignora un índice. Los índices brillan cuando la consulta selecciona una parte pequeña de los datos.
 
-- Buscar "García" → rápido.
-- Buscar "García, Ana" → rápido.
-- Buscar solo "Ana" → **inútil**: los "Ana" están repartidos por toda la guía.
+</Callout>
+
+## Paso 4: índices compuestos, el orden importa
+
+**Con el índice compuesto `(usuario_id, fecha)`**, el plan queda en `SEARCH … USING INDEX idx_entrenos_usuario_fecha (usuario_id=?)`, **sin** `USE TEMP B-TREE`, y la consulta baja a **0,008 ms**. ¿Por qué ya no hay que ordenar?
+
+Un índice compuesto se ordena **primero** por la primera columna y, **dentro de cada valor**, por la segunda. Como una guía telefónica: por apellido y, dentro de cada apellido, por nombre. En esquema simplificado:
+
+```text
+usuario_id │ fecha
+───────────┼────────────
+        41 │ 2025-12-25
+        42 │ 2025-01-01   ← empiezan las filas del usuario 42…
+        42 │ 2025-01-02
+        42 │ …
+        42 │ 2025-12-31   ← …ya ordenadas por fecha
+        43 │ 2025-01-01
+```
+
+Las filas del usuario 42 están **juntas y ya en orden de fecha**: la base de datos lee las 10 últimas directamente, sin ordenar nada. Esa es la regla de oro de los índices compuestos: **primero las columnas que filtras con igualdad (`=`), después la que usas para ordenar o para rangos (`>`, `<`, `BETWEEN`)**.
+
+Y la cara B, la cuarta línea del resultado: con ese mismo índice, una consulta **solo por fecha** (`WHERE fecha = '2025-06-01'`) vuelve a ser un `SCAN`. Lo de `USING COVERING INDEX` significa que, en vez de recorrer la tabla, recorre el índice entero (que es más pequeño), pero sigue siendo un recorrido completo. Igual que una guía telefónica ordenada por apellido no te ayuda a buscar a todas las personas que se llaman "Ana": tendrías que leerla entera.
+
+<Callout type="risk">
+
+- **Un índice `(a, b)` sirve para consultas por `a` y por `a` + `b`, pero no por `b` sola.** Si necesitas las dos (por usuario y fecha, y solo por fecha), necesitas dos índices. Por la misma razón, un índice `(usuario_id, fecha)` hace innecesario uno solo en `(usuario_id)`: ya está contenido en él.
+- **Las funciones sobre la columna anulan el índice:** `WHERE LOWER(email) = 'ana@ejemplo.com'` o `WHERE substr(fecha, 1, 7) = '2025-06'` no pueden usar el índice de `email` o de `fecha`, porque el índice guarda los valores originales. Normaliza los datos al guardarlos (correos en minúsculas, como hace esta plataforma) y escribe las condiciones sobre la columna tal cual (`fecha >= '2025-06-01' AND fecha < '2025-07-01'`).
+- **`LIKE '%texto%'` nunca usa un índice normal:** empezar por `%` obliga a mirar todas las filas. Para buscar texto dentro de textos hacen falta índices de texto completo (_full-text search_).
+
+</Callout>
+
+## Paso 5: el coste de los índices
+
+La última parte del resultado mide lo que nadie cuenta en los tutoriales:
+
+```text
+Coste de mantener índices al insertar 100 000 filas:
+  0 índices: 80 ms · 2964 KB
+  1 índice : 126 ms · 5292 KB
+  3 índices: 329 ms · 9104 KB
+```
+
+- **Escrituras más lentas:** con 3 índices, insertar es **4 veces más lento** que sin ninguno. Cada `INSERT`, `UPDATE` o `DELETE` tiene que actualizar la tabla **y cada uno de sus índices**, manteniéndolos ordenados.
+- **Más espacio:** con 3 índices, el archivo ocupa **el triple**. Cada índice es una copia ordenada de sus columnas.
+
+Los índices son un **intercambio**: lecturas mucho más rápidas a cambio de escrituras más lentas y más espacio. En una app típica (como esta plataforma), cada dato se lee muchas más veces de las que se escribe, y el intercambio compensa con creces para las consultas frecuentes. Pero un índice que ninguna consulta usa es **coste puro**.
+
+Hay un tercer tipo de índice que ya conoces: el **único**. Además de acelerar búsquedas, **impide duplicados**:
 
 ```sql
-CREATE INDEX idx_usuario_fecha ON entrenos(usuario_id, fecha);
-
-EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE usuario_id = 42 ORDER BY fecha DESC;
--- SEARCH entrenos USING INDEX idx_usuario_fecha (usuario_id=?)   ✅ filtra y ordena con el índice
-
-EXPLAIN QUERY PLAN SELECT * FROM entrenos WHERE fecha = '2026-03-01';
--- SCAN entrenos                                                 ❌ fecha no es la primera columna
+CREATE UNIQUE INDEX idx_usuarios_email ON usuarios (email);
 ```
 
-La regla general: un índice compuesto sirve para consultas que usan sus columnas **de izquierda a derecha**. En B5 verás la regla ESR, que lo concreta para MongoDB.
+Es lo que SQLite creó automáticamente por el `UNIQUE` de `email`, y lo que hace esta plataforma en MongoDB con `{ userId: 1, sectionId: 1 }, { unique: true }`: el índice que impide marcar dos veces la misma sección como leída, incluso si llegan dos peticiones exactamente a la vez.
 
-## ¿Qué indexar?
+<Callout type="risk">
 
-1. Lista las consultas **más frecuentes** de tu app.
-2. Mira por qué campos filtran (`WHERE`) y ordenan (`ORDER BY`).
-3. Crea índices para esos campos, en ese orden.
-4. **Comprueba** con `EXPLAIN` que se usan.
+- **No indexes "por si acaso" todas las columnas:** cada índice frena todas las escrituras de la tabla para siempre. Indexa las columnas de tus consultas **frecuentes** (las de cada carga de página), no las de un informe que se ejecuta una vez al mes.
+- **Los índices únicos no se pueden crear si ya hay duplicados:** si intentas añadir un `UNIQUE` a una tabla que ya tiene dos usuarios con el mismo correo, fallará. Hay que limpiar los datos primero. Otra razón para definir las restricciones desde el principio.
+- **En MongoDB, la lógica es idéntica:** `createIndex({ userId: 1, readAt: -1 })` es un índice compuesto, `explain()` muestra `COLLSCAN` (el `SCAN`) o `IXSCAN` (el `SEARCH`), y el orden de los campos importa igual. Lo verás en B5.6.
 
-Las claves primarias ya tienen índice automáticamente.
+</Callout>
 
-## Errores comunes
-
-- **No tener índices** hasta que la app va lenta en producción.
-- **Indexar todas las columnas**: escrituras lentas y espacio desperdiciado.
-- **Un índice compuesto en el orden equivocado**, que no sirve para la consulta real.
-- **Suponer que se usa** sin comprobarlo con `EXPLAIN`.
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea la tabla `entrenos` con 100 000 filas usando la consulta recursiva de esta sección. 2.
-  Mide con `.timer on` y `EXPLAIN QUERY PLAN` una consulta por `usuario_id` antes y después de crear
-  el índice. 3. Crea el índice compuesto `(usuario_id, fecha)` y comprueba qué consultas lo
-  aprovechan y cuáles no. 4. Lista las 3 consultas más frecuentes de tu app de entrenamiento y
-  decide qué índices necesitaría cada una.
+
+1. Para cada una de estas consultas frecuentes de `academia.db`, mira su plan con `EXPLAIN QUERY PLAN` y decide si necesita un índice:
+   - Cuántas personas han leído una sección: `SELECT * FROM lecturas WHERE seccion_id = 'B1.1'`.
+   - Los intentos de un usuario en un curso, del más reciente al más antiguo: `SELECT * FROM intentos WHERE usuario_id = 1 AND curso_id = 'B1' ORDER BY enviado_en DESC`.
+   - Las secciones de un curso en orden: `SELECT * FROM secciones WHERE curso_id = 'B1' ORDER BY orden`.
+2. Escribe los índices en un archivo `indices-academia.sql`, aplícalos y comprueba que los planes pasan a `SEARCH` y que desaparece `USE TEMP B-TREE`.
+3. Compara tus índices con los que crea esta plataforma en MongoDB (en `scripts/db-setup.ts`) para sus colecciones de progreso y evaluaciones.
+
+</Callout>
+
+Solución. Los planes de partida:
+
+```text
+SELECT * FROM lecturas WHERE seccion_id = 'B1.1'
+`--SCAN lecturas
+
+SELECT * FROM intentos WHERE usuario_id = 1 AND curso_id = 'B1' ORDER BY enviado_en DESC
+|--SCAN intentos
+`--USE TEMP B-TREE FOR ORDER BY
+
+SELECT * FROM secciones WHERE curso_id = 'B1' ORDER BY orden
+|--SCAN secciones
+`--USE TEMP B-TREE FOR ORDER BY
+```
+
+Fíjate en que las lecturas **de un usuario** (`WHERE usuario_id = 1`) ya usan un índice: el de la clave primaria `(usuario_id, seccion_id)`, que empieza por `usuario_id`. Pero las lecturas **de una sección** no, porque `seccion_id` es la **segunda** columna (Paso 4).
+
+`indices-academia.sql`:
+
+```sql
+-- Archivo: indices-academia.sql
+-- Índices para las consultas frecuentes de academia.db
+CREATE INDEX IF NOT EXISTS idx_lecturas_seccion ON lecturas (seccion_id);
+CREATE INDEX IF NOT EXISTS idx_intentos_usuario_curso_fecha ON intentos (usuario_id, curso_id, enviado_en);
+CREATE INDEX IF NOT EXISTS idx_secciones_curso_orden ON secciones (curso_id, orden);
+```
+
+```bash
+sqlite3 academia.db < indices-academia.sql
+sqlite3 academia.db "EXPLAIN QUERY PLAN SELECT * FROM lecturas WHERE seccion_id = 'B1.1'"
+sqlite3 academia.db "EXPLAIN QUERY PLAN SELECT * FROM intentos WHERE usuario_id = 1 AND curso_id = 'B1' ORDER BY enviado_en DESC"
+sqlite3 academia.db "EXPLAIN QUERY PLAN SELECT * FROM secciones WHERE curso_id = 'B1' ORDER BY orden"
+```
+
+```text
+QUERY PLAN
+`--SEARCH lecturas USING INDEX idx_lecturas_seccion (seccion_id=?)
+QUERY PLAN
+`--SEARCH intentos USING INDEX idx_intentos_usuario_curso_fecha (usuario_id=? AND curso_id=?)
+QUERY PLAN
+`--SEARCH secciones USING INDEX idx_secciones_curso_orden (curso_id=?)
+```
+
+Los tres pasan a `SEARCH` y ya no aparece `USE TEMP B-TREE`: los índices compuestos devuelven las filas ya ordenadas. Las dos columnas de igualdad (`usuario_id`, `curso_id`) van primero y la de orden (`enviado_en`), al final, como manda la regla del Paso 4.
+
+La comparación con la plataforma: `scripts/db-setup.ts` crea en MongoDB `{ userId: 1, sectionId: 1 }` único (como tu clave primaria de `lecturas`), `{ userId: 1, courseId: 1 }` (el progreso de un usuario en un curso) y `{ userId: 1, courseId: 1, submittedAt: -1 }` para los intentos, **el mismo índice** que acabas de diseñar, con el `-1` indicando orden descendente. No tiene un índice por sección sola porque la plataforma nunca pregunta "quién ha leído esta sección": los índices se diseñan a partir de las consultas que **realmente** hace la app.
+
+<Callout type="risk">
+
+- **`IF NOT EXISTS`** permite ejecutar el script varias veces sin error. Sin él, el segundo intento falla con `index … already exists`.
+- **Un índice que solo sirve para una consulta de administración** (como "quién ha leído una sección") puede no merecer la pena en producción, porque frena cada lectura nueva que se marca. Decide con los datos: con qué frecuencia se ejecuta la consulta frente a con qué frecuencia se escribe en la tabla.
+- **`intentos WHERE curso_id = 'B1'` sola sigue siendo un `SCAN`** con estos índices, porque `curso_id` no es la primera columna de ninguno. Si una pantalla de estadísticas necesitara esa consulta, haría falta otro índice.
+
 </Callout>
 
 <Callout type="mastery">
-  Sabes qué campos de tus consultas necesitan índice, en qué orden, y compruebas con `EXPLAIN` que
-  se usan.
+
+Sabes qué campos de tus consultas necesitan índice: lees un `EXPLAIN QUERY PLAN` y distingues `SCAN` de `SEARCH`, ordenas los índices compuestos con las igualdades primero y el orden al final, sabes que un índice `(a, b)` no sirve para buscar por `b`, y no creas índices que ninguna consulta frecuente usa, porque cada uno frena las escrituras.
+
 </Callout>
 
 ## Resumen
 
-- Un índice es una estructura ordenada que evita recorrer toda la tabla.
-- Acelera lecturas, pero ralentiza escrituras y ocupa espacio.
-- Un índice único además impone que no haya duplicados.
-- En un índice compuesto, el orden de las columnas decide para qué consultas sirve.
-- `EXPLAIN` muestra si una consulta hace `SCAN` o `SEARCH … USING INDEX`.
+- Un índice es una estructura ordenada aparte que permite ir directamente a las filas (`SEARCH`) en lugar de recorrer la tabla (`SCAN`).
+- `EXPLAIN QUERY PLAN` muestra cómo se ejecutará una consulta; `USE TEMP B-TREE` significa que hay que ordenar en memoria.
+- Índice compuesto: primero las columnas de igualdad, después la de orden o rango. `(a, b)` sirve para `a` y `a` + `b`, no para `b` sola.
+- Cada índice acelera lecturas a cambio de escrituras más lentas y más espacio (aquí, 3 índices = inserciones 4 veces más lentas y el triple de tamaño).
+- Los índices únicos además impiden duplicados; indexa las consultas frecuentes, no todas las columnas.
