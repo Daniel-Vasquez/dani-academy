@@ -4,174 +4,357 @@ course: "B5"
 title: "Create y Read"
 order: 3
 minutes: 60
-summary: "Insertar documentos y consultarlos con filtros, operadores, proyecciones, orden y límites."
+summary: "Escribes funciones tipadas para crear y listar entrenos, llenas la colección con datos de prueba y recorres cada filtro, proyección, orden y paginación con resultados reales, incluidas sus trampas."
 ---
 
-Con la conexión lista, toca lo que harás a diario: **guardar y consultar**. MongoDB tiene un lenguaje de consultas propio que se escribe con objetos de JavaScript. En esta sección aprenderás a pedir exactamente los documentos y los campos que necesitas, ni más ni menos.
+Crear y leer documentos es el 80 % del trabajo con una base de datos. En esta sección vas a construir el **módulo de acceso a datos** de los entrenos: unas pocas funciones tipadas que el resto de la app usará sin saber nada de MongoDB. Después llenarás la colección con 30 entrenos de prueba (siempre los mismos, para que tus resultados coincidan con los de la lección) y recorrerás, uno a uno, los filtros, las proyecciones, el orden y la paginación que usarás en cualquier pantalla real, con las trampas de cada uno.
 
-## Insertar
+**Lo que tendrás al terminar:** `src/entrenos.ts` con `crearEntreno`, `crearEntrenos`, `listarEntrenos` y `contarPorTipo`, y un catálogo de consultas que funciona.
+
+**Requisitos:** el proyecto `mongo-academy` de B5.2, con `db.ts`, `tipos.ts` y `colecciones.ts`.
+
+## Paso 1: el módulo de acceso a datos
+
+La idea es que **ningún** otro archivo de la app llame a `entrenos.find(...)` directamente: todo pasa por funciones con nombre que dicen **qué** hacen. Así, si mañana cambias un índice o un campo, solo tocas este archivo. Crea `src/entrenos.ts`:
 
 ```ts
-interface Entreno {
-  _id?: ObjectId;
-  userId: string;
-  tipo: "fuerza" | "running";
-  km?: number;
-  series?: number;
-  fecha: Date;
+// Archivo: src/entrenos.ts
+// Funciones de acceso a la colección de entrenos: el resto de la app solo usa estas
+import type { ObjectId, WithId } from "mongodb";
+import { entrenos } from "./colecciones";
+import type { Entreno, TipoEntreno } from "./tipos";
+
+export type NuevoEntreno = Omit<Entreno, "_id">;
+
+export async function crearEntreno(datos: NuevoEntreno): Promise<ObjectId> {
+  const { insertedId } = await entrenos.insertOne(datos);
+  return insertedId;
 }
 
-const entrenos = db.collection<Entreno>("entrenos");
+export async function crearEntrenos(lista: NuevoEntreno[]): Promise<number> {
+  if (lista.length === 0) return 0; // insertMany con un array vacío lanza un error
+  const { insertedCount } = await entrenos.insertMany(lista);
+  return insertedCount;
+}
 
-const { insertedId } = await entrenos.insertOne({
-  userId: "u1",
-  tipo: "running",
-  km: 5.2,
-  fecha: new Date("2026-10-01T07:00:00Z"),
+/** Entrenos de un usuario entre dos fechas: desde incluida, hasta excluida. Los más recientes primero. */
+export async function listarEntrenos(userId: string, desde: Date, hasta: Date): Promise<WithId<Entreno>[]> {
+  return entrenos
+    .find({ userId, fecha: { $gte: desde, $lt: hasta } })
+    .sort({ fecha: -1 })
+    .toArray();
+}
+
+export async function contarPorTipo(userId: string, tipo: TipoEntreno): Promise<number> {
+  return entrenos.countDocuments({ userId, tipo });
+}
+```
+
+Las piezas nuevas:
+
+- **`Omit<Entreno, "_id">`** (B1.4): un entreno nuevo no lleva `_id`, porque lo genera el _driver_.
+- **`insertOne` devuelve `{ insertedId }`**: el `ObjectId` generado. Lo devuelves para que quien llama pueda, por ejemplo, redirigir a la página del entreno recién creado.
+- **`insertMany` devuelve `{ insertedCount, insertedIds }`**. Con un array vacío lanza un error (`Invalid BulkOperation, Batch cannot be empty`), por eso se comprueba antes.
+- **`WithId<Entreno>`**: el tipo de un documento **leído** de la base de datos, que siempre tiene `_id`.
+- **`find(...)` no devuelve los documentos**: devuelve un **cursor** (un puntero para recorrer resultados). `.toArray()` lo recorre entero y devuelve un array.
+- **`countDocuments(filtro)`** cuenta sin traer los documentos.
+
+<Callout type="risk">
+
+- **El intervalo de fechas, cerrado por un lado y abierto por el otro:** `$gte: desde, $lt: hasta` (desde incluida, hasta excluida) es la forma correcta de pedir "septiembre": del 1 de septiembre al 1 de octubre **sin incluir** el 1 de octubre. Con `$lte: 30 de septiembre a las 00:00`, perderías todos los entrenos del día 30 posteriores a medianoche.
+- **`insertMany` y los errores a medias:** si un documento del array falla (un `_id` repetido), por defecto se detiene ahí, y los anteriores **ya se han insertado**. Si necesitas "todo o nada", necesitas una transacción (B4.5).
+
+</Callout>
+
+## Paso 2: datos de prueba
+
+Para que tus resultados coincidan con los de esta lección, crea siempre los mismos datos. Crea `src/03-sembrar.ts`:
+
+```ts
+// Archivo: src/03-sembrar.ts
+// Crea 30 entrenos de prueba para el usuario "u_demo" (borra los anteriores)
+import { cliente } from "./db";
+import { entrenos } from "./colecciones";
+import { crearEntrenos, type NuevoEntreno } from "./entrenos";
+import type { TipoEntreno } from "./tipos";
+
+const TIPOS: TipoEntreno[] = ["running", "fuerza", "yoga"];
+const NOTAS = ["Con lluvia", "Buenas sensaciones", "Rodilla molesta"];
+
+const lista: NuevoEntreno[] = Array.from({ length: 30 }, (_, i) => {
+  const tipo = TIPOS[i % 3]!;
+  return {
+    userId: "u_demo",
+    tipo,
+    minutos: 30 + (i % 4) * 10,
+    fecha: new Date(Date.UTC(2026, 8, 1 + i * 2, 7, 30)), // desde el 1 de septiembre, cada 2 días
+    ...(tipo === "running" && { km: 4 + (i % 5) }),
+    ...(i % 7 === 0 && { notas: NOTAS[i % 3] }),
+  };
 });
-// insertedId es un ObjectId generado por el driver
 
-const { insertedCount } = await entrenos.insertMany([
-  { userId: "u1", tipo: "fuerza", series: 4, fecha: new Date("2026-10-02T07:00:00Z") },
-  { userId: "u1", tipo: "running", km: 8, fecha: new Date("2026-10-03T07:00:00Z") },
-  { userId: "u2", tipo: "running", km: 3, fecha: new Date("2026-10-03T08:00:00Z") },
-]);
-// insertedCount: 3
+const { deletedCount } = await entrenos.deleteMany({ userId: "u_demo" });
+const creados = await crearEntrenos(lista);
+console.log(`Borrados ${deletedCount} · creados ${creados} entrenos de prueba`);
+await cliente.close();
 ```
 
-## Leer uno: `findOne`
-
-```ts
-const entreno = await entrenos.findOne({ userId: "u1", tipo: "fuerza" });
-// Entreno | null
-```
-
-Devuelve el primer documento que cumple el filtro, o `null` si no hay ninguno. Comprueba siempre el `null`.
-
-## Leer muchos: `find`
-
-`find` no devuelve los documentos: devuelve un **cursor**, que los va trayendo por lotes. Con `toArray()` los cargas todos en memoria:
-
-```ts
-const lista = await entrenos.find({ userId: "u1" }).toArray();
-```
-
-Para colecciones grandes, recorre el cursor sin cargarlo entero:
-
-```ts
-for await (const e of entrenos.find({ userId: "u1" })) {
-  console.log(e.fecha);
-}
-```
-
-## Filtros
-
-Un filtro es un objeto. Varios campos se combinan con **Y**:
-
-```ts
-{ userId: "u1", tipo: "running" }   // userId = "u1" Y tipo = "running"
-```
-
-Para comparar, se usan **operadores** que empiezan por `$`:
-
-| Operador      | Significado                        | Ejemplo                                                    |
-| ------------- | ---------------------------------- | ---------------------------------------------------------- |
-| `$eq`, `$ne`  | Igual, distinto                    | `{ tipo: { $ne: "fuerza" } }`                              |
-| `$gt`, `$gte` | Mayor, mayor o igual               | `{ km: { $gte: 5 } }`                                      |
-| `$lt`, `$lte` | Menor, menor o igual               | `{ fecha: { $lt: new Date("2026-10-03") } }`               |
-| `$in`, `$nin` | Está (o no) en una lista           | `{ tipo: { $in: ["fuerza", "movilidad"] } }`               |
-| `$exists`     | El campo existe (o no)             | `{ km: { $exists: false } }`                               |
-| `$regex`      | Coincide con una expresión regular | `{ nombre: { $regex: "^da", $options: "i" } }`             |
-| `$or`         | Al menos una condición             | `{ $or: [{ km: { $gte: 10 } }, { series: { $gte: 5 } }] }` |
-
-Un rango de fechas combina dos operadores sobre el mismo campo:
-
-```ts
-{ fecha: { $gte: new Date("2026-10-01"), $lt: new Date("2026-11-01") } }  // todo octubre
-```
-
-### Buscar dentro de arrays y objetos
-
-```ts
-{ tags: "suave" }               // documentos cuyo array tags contiene "suave"
-{ "ritmo.min": { $lt: 6 } }     // campo anidado: notación con punto (entre comillas)
-```
-
-## Proyección: solo los campos que necesitas
-
-```ts
-const ligeros = await entrenos
-  .find({ userId: "u1" })
-  .project({ _id: 0, km: 1, fecha: 1 }) // 1 = incluir, 0 = excluir
-  .toArray();
-// [{ km: 8, fecha: … }, { km: 5.2, fecha: … }]
-```
-
-Traer menos campos significa menos datos por la red y menos memoria. `_id` se incluye siempre, salvo que lo excluyas.
-
-## Ordenar, limitar y paginar
-
-```ts
-const ultimos = await entrenos
-  .find({ userId: "u1", tipo: "running", km: { $gte: 5 } })
-  .project({ _id: 0, km: 1, fecha: 1 })
-  .sort({ fecha: -1 }) // 1 ascendente, -1 descendente
-  .limit(10)
-  .toArray();
+```bash
+npm start -- src/03-sembrar.ts
 ```
 
 ```text
-[{ km: 8, fecha: 2026-10-03 }, { km: 5.2, fecha: 2026-10-01 }]
+Borrados 1 · creados 30 entrenos de prueba
 ```
 
-Para contar sin traer documentos:
+(El borrado es el entreno que creaste en B5.2). El script genera 30 entrenos del usuario `u_demo`, uno cada dos días desde el 1 de septiembre de 2026: tipos en rotación (running, fuerza, yoga), duración entre 30 y 60 minutos, kilómetros solo en los de running y notas en algunos. El truco `...(condición && { campo })` añade un campo **solo si** la condición se cumple: así, los documentos de fuerza no tienen `km`, ni siquiera vacío.
+
+<Callout type="risk">
+
+- **Un script que borra antes de insertar es cómodo… y peligroso:** `deleteMany({ userId: "u_demo" })` solo borra datos de prueba porque el filtro es muy concreto. Un `deleteMany({})` (filtro vacío) borraría **toda** la colección. Nunca ejecutes un script de "sembrado" contra la base de datos de producción.
+- **Fechas en UTC:** `Date.UTC(2026, 8, 1, 7, 30)` es el 1 de septiembre a las 07:30 en UTC (los meses empiezan en 0, B1.7). Construir fechas con `new Date(2026, 8, 1)` usa la zona horaria de tu Mac, y el mismo script daría fechas distintas en Vercel (UTC). Lo verás a fondo en B5.5.
+
+</Callout>
+
+## Paso 3: filtros con operadores
+
+Un **filtro** es un objeto que describe qué documentos quieres. Crea `src/03-consultas.ts`, que recorre todos los operadores esenciales:
 
 ```ts
-await entrenos.countDocuments({ tipo: { $in: ["fuerza", "movilidad"] } }); // 1
+// Archivo: src/03-consultas.ts
+// Un recorrido por los filtros, proyecciones, orden y paginación de find()
+import { cliente } from "./db";
+import { entrenos } from "./colecciones";
+import { contarPorTipo, listarEntrenos } from "./entrenos";
+
+const dia = (fecha: Date) => fecha.toISOString().slice(0, 10);
+
+// 1. Igualdad y comparación: running de 6 km o más
+const largos = await entrenos.find({ userId: "u_demo", tipo: "running", km: { $gte: 6 } }).toArray();
+console.log(`1. Running de 6 km o más: ${largos.map((e) => `${dia(e.fecha)} (${e.km} km)`).join(", ")}`);
+
+// 2. $in: varios valores posibles para un campo
+const flexibles = await entrenos.countDocuments({ userId: "u_demo", tipo: { $in: ["yoga", "fuerza"] } });
+console.log(`2. Entrenos de yoga o fuerza: ${flexibles}`);
+
+// 3. $exists: documentos que tienen (o no) un campo
+const conNotas = await entrenos
+  .find({ userId: "u_demo", notas: { $exists: true } }, { projection: { _id: 0, fecha: 1, notas: 1 } })
+  .toArray();
+console.log(`3. Con notas: ${conNotas.map((e) => `${dia(e.fecha)} "${e.notas}"`).join(" · ")}`);
+
+// 4. $regex: buscar texto dentro de un campo (la i ignora mayúsculas)
+const molestias = await entrenos.countDocuments({ userId: "u_demo", notas: { $regex: "rodilla", $options: "i" } });
+console.log(`4. Notas que mencionan "rodilla": ${molestias}`);
+
+// 5. $or: una condición u otra
+const intensos = await entrenos.countDocuments({
+  userId: "u_demo",
+  $or: [{ km: { $gte: 8 } }, { minutos: { $gte: 60 } }],
+});
+console.log(`5. Running de 8 km o más, o sesiones de 60 min o más: ${intensos}`);
+
+// 6. Proyección, orden y límite: los 3 últimos, solo tipo y fecha
+const ultimos = await entrenos
+  .find({ userId: "u_demo" }, { projection: { _id: 0, tipo: 1, fecha: 1 } })
+  .sort({ fecha: -1 })
+  .limit(3)
+  .toArray();
+console.log(`6. Últimos 3: ${ultimos.map((e) => `${dia(e.fecha)} ${e.tipo}`).join(", ")}`);
+
+// 7. Paginación con skip y limit: página 2, de 5 en 5
+const POR_PAGINA = 5;
+const pagina = 2;
+const paginaDos = await entrenos
+  .find({ userId: "u_demo" })
+  .sort({ fecha: 1 })
+  .skip((pagina - 1) * POR_PAGINA)
+  .limit(POR_PAGINA)
+  .toArray();
+console.log(`7. Página ${pagina}: ${paginaDos.map((e) => dia(e.fecha)).join(", ")}`);
+
+// 8. Un cursor recorrido documento a documento, sin cargarlo todo en memoria
+let minutosTotales = 0;
+for await (const entreno of entrenos.find({ userId: "u_demo" }, { projection: { minutos: 1 } })) {
+  minutosTotales += entreno.minutos;
+}
+console.log(`8. Minutos totales: ${minutosTotales}`);
+
+// 9. Las funciones del módulo: septiembre de 2026 y conteo por tipo
+const septiembre = await listarEntrenos("u_demo", new Date("2026-09-01T00:00:00Z"), new Date("2026-10-01T00:00:00Z"));
+console.log(`9. Septiembre: ${septiembre.length} entrenos · running en total: ${await contarPorTipo("u_demo", "running")}`);
+
+// 10. findOne: el primero que cumpla, o null
+const ninguno = await entrenos.findOne({ userId: "u_demo", tipo: "yoga", minutos: { $gt: 100 } });
+console.log(`10. Yoga de más de 100 min: ${ninguno === null ? "ninguno (null)" : dia(ninguno.fecha)}`);
+
+await cliente.close();
 ```
 
-`skip(n)` sirve para paginar (`skip(20).limit(10)` = página 3), pero se vuelve lento con números grandes; en A2 verás la paginación por cursor.
-
-## Funciones tipadas para tu app
-
-```ts
-export async function crearEntreno(datos: Omit<Entreno, "_id">) {
-  const { insertedId } = await entrenos.insertOne(datos);
-  return insertedId.toHexString();
-}
-
-export function listarEntrenos(userId: string, desde: Date, hasta: Date) {
-  return entrenos
-    .find({ userId, fecha: { $gte: desde, $lt: hasta } })
-    .sort({ fecha: 1 })
-    .toArray();
-}
+```bash
+npm start -- src/03-consultas.ts
 ```
 
-## Errores comunes
+```text
+1. Running de 6 km o más: 2026-09-07 (7 km), 2026-09-19 (8 km), 2026-09-25 (6 km), 2026-10-07 (7 km), 2026-10-19 (8 km), 2026-10-25 (6 km)
+2. Entrenos de yoga o fuerza: 20
+3. Con notas: 2026-09-01 "Con lluvia" · 2026-09-15 "Buenas sensaciones" · 2026-09-29 "Rodilla molesta" · 2026-10-13 "Con lluvia" · 2026-10-27 "Buenas sensaciones"
+4. Notas que mencionan "rodilla": 1
+5. Running de 8 km o más, o sesiones de 60 min o más: 9
+6. Últimos 3: 2026-10-29 yoga, 2026-10-27 fuerza, 2026-10-25 running
+7. Página 2: 2026-09-11, 2026-09-13, 2026-09-15, 2026-09-17, 2026-09-19
+8. Minutos totales: 1330
+9. Septiembre: 15 entrenos · running en total: 10
+10. Yoga de más de 100 min: ninguno (null)
+```
 
-- **Olvidar `toArray()`** y trabajar con el cursor como si fuera un array.
-- **No comprobar el `null`** de `findOne`.
-- **Traer documentos enteros** cuando solo necesitas dos campos.
-- **Filtrar en JavaScript** (`(await find({})).filter(…)`) lo que debería filtrar MongoDB.
-- **Escribir el operador sin `$`** o fuera de su objeto: `{ km: $gte: 5 }` no es válido.
+Los operadores de los puntos 1 a 5, en una tabla:
+
+| Filtro                                            | Significa                                               | Equivalente SQL (B4.3)            |
+| ------------------------------------------------- | ------------------------------------------------------- | --------------------------------- |
+| `{ tipo: "running" }`                             | Igual a                                                 | `tipo = 'running'`                |
+| `{ km: { $gte: 6 } }`                             | Mayor o igual (`$gt`, `$lt`, `$lte`, `$ne`)             | `km >= 6`                         |
+| `{ tipo: { $in: ["yoga", "fuerza"] } }`           | Uno de varios valores (`$nin`: ninguno)                 | `tipo IN (…)`                     |
+| `{ notas: { $exists: true } }`                    | El campo existe                                         | `notas IS NOT NULL` (más o menos) |
+| `{ notas: { $regex: "rodilla", $options: "i" } }` | Coincide con un patrón (`i`: sin distinguir mayúsculas) | `notas LIKE '%rodilla%'`          |
+| `{ $or: [ {…}, {…} ] }`                           | Una condición u otra                                    | `… OR …`                          |
+| Varios campos en el mismo objeto                  | Todas a la vez (un `AND` implícito)                     | `… AND …`                         |
+
+Fíjate en el punto 1: `{ userId: "u_demo", tipo: "running", km: { $gte: 6 } }` combina tres condiciones con un **`AND` implícito**: basta con ponerlas en el mismo objeto. Y en el punto 5, `$or` recibe un **array** de filtros completos.
+
+<Callout type="risk">
+
+- **Dos condiciones sobre el mismo campo en un objeto se pisan:** `{ km: { $gte: 5 }, km: { $lte: 8 } }` repite la clave `km`. TypeScript lo detecta (`error TS1117: An object literal cannot have multiple properties with the same name.`), pero en `mongosh` o en JavaScript la segunda **sustituye** a la primera sin avisar. Se escriben juntas: `{ km: { $gte: 5, $lte: 8 } }`.
+- **Una `$regex` con texto del usuario es peligrosa:** el texto se interpreta como expresión regular. Un usuario que busque `rodilla (izq.)` provocará un error (paréntesis sin cerrar), y patrones como `(a+)+$` pueden hacer que el servidor tarde muchísimo en evaluarlos (un ataque llamado ReDoS). Escapa siempre el texto antes de usarlo en `$regex` (lo harás en el ejercicio).
+- **`$regex` no usa bien los índices:** una búsqueda "contiene" (`rodilla`, sin `^` al principio) recorre todos los documentos. Para buscar texto en serio, Atlas ofrece Atlas Search.
+
+</Callout>
+
+## Paso 4: proyecciones, orden, límite y paginación
+
+**Proyección** (punto 3 y 6): el segundo argumento de `find`, `{ projection: { _id: 0, tipo: 1, fecha: 1 } }`, elige qué campos devolver. `1` incluye un campo; `0` lo excluye. El `_id` se incluye siempre, salvo que pongas `_id: 0`. Ahorra red y memoria, y evita enviar al navegador campos que no deben salir del servidor (como un _hash_ de contraseña).
+
+**Orden y límite** (punto 6): `.sort({ fecha: -1 })` ordena por fecha descendente (`1`, ascendente) y `.limit(3)` se queda con los 3 primeros. Es la consulta de "los últimos entrenos" de cualquier panel.
+
+**Paginación** (punto 7): `.skip((pagina - 1) * porPagina).limit(porPagina)`. Para la página 2 de 5 en 5, salta 5 y toma 5.
+
+**Cursor** (punto 8): `for await (const entreno of entrenos.find(...))` recorre los resultados **por lotes**, sin cargarlos todos en memoria a la vez. Es la forma correcta de procesar colecciones grandes en un script.
+
+**`findOne`** (punto 10) devuelve el primer documento que cumple el filtro, o **`null`** si no hay ninguno. TypeScript te obliga a manejar el `null` (B5.2).
+
+<Callout type="risk">
+
+- **TypeScript no sabe qué has proyectado:** con `findOne({ userId: "u_demo" }, { projection: { minutos: 1 } })`, el resultado sigue teniendo el tipo `Entreno`, así que `entreno.tipo` y `entreno.fecha` compilan sin error… y valen `undefined` en ejecución. Al proyectar, usa solo los campos que pediste, o declara un tipo para el resultado (`entrenos.find<{ minutos: number }>(…)`).
+- **`skip` es lento con páginas altas:** para la página 1000, MongoDB tiene que recorrer y descartar 9990 documentos. Para listas largas (un historial infinito), se pagina por "lo que viene después del último que viste" (`fecha < últimaFecha`), que usa el índice directamente.
+- **Sin un orden único, la paginación repite o salta elementos:** si dos entrenos tienen exactamente la misma fecha, su orden relativo no está garantizado y uno puede aparecer en dos páginas. Añade `_id` como desempate: `.sort({ fecha: -1, _id: -1 })`.
+- **`toArray()` sin `limit` sobre una colección grande** carga todo en la memoria de tu función de Vercel. Limita siempre las consultas de listas.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea una colección de prueba `entrenos` e inserta 10 documentos variados con `insertMany`. 2.
-  Escribe consultas para: los entrenos de `running` con más de 5 km; los de una semana concreta; los
-  que **no** tienen el campo `km`. 3. Escribe las funciones tipadas `crearEntreno` y
-  `listarEntrenos(userId, desde, hasta)`. 4. Añade una proyección que devuelva solo la fecha y los
-  km, ordenados del más reciente al más antiguo.
+
+1. Escribe `listarPagina(userId, pagina, porPagina)`, que devuelva `{ total, paginas, pagina, elementos }`, con un orden estable y sin romperse si la página no existe.
+2. Escribe `buscarEnNotas(userId, texto)`, que busque el texto en las notas sin distinguir mayúsculas, de forma segura ante caracteres especiales y que devuelva como mucho 20 resultados.
+3. Pruébalas con la página 3 de 10 en 10, la página 99, y las búsquedas `"LLUVIA"`, `"rodilla ("` y `"a"`.
+
+</Callout>
+
+Solución completa, `src/03-ejercicio.ts`:
+
+```ts
+// Archivo: src/03-ejercicio.ts
+import type { WithId } from "mongodb";
+import { cliente } from "./db";
+import { entrenos } from "./colecciones";
+import type { Entreno } from "./tipos";
+
+interface Pagina<T> {
+  total: number;
+  paginas: number;
+  pagina: number;
+  elementos: T[];
+}
+
+export async function listarPagina(userId: string, pagina: number, porPagina = 10): Promise<Pagina<WithId<Entreno>>> {
+  const paginaSegura = Math.max(1, Math.floor(pagina));
+  const [total, elementos] = await Promise.all([
+    entrenos.countDocuments({ userId }),
+    entrenos
+      .find({ userId })
+      .sort({ fecha: -1, _id: -1 }) // _id desempata entrenos con la misma fecha
+      .skip((paginaSegura - 1) * porPagina)
+      .limit(porPagina)
+      .toArray(),
+  ]);
+  return { total, paginas: Math.ceil(total / porPagina), pagina: paginaSegura, elementos };
+}
+
+// Escapa los caracteres especiales para buscar el texto tal cual, no como expresión regular
+const escaparRegex = (texto: string) => texto.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export async function buscarEnNotas(userId: string, texto: string): Promise<WithId<Entreno>[]> {
+  if (texto.trim().length < 2) return [];
+  return entrenos
+    .find({ userId, notas: { $regex: escaparRegex(texto.trim()), $options: "i" } })
+    .sort({ fecha: -1 })
+    .limit(20)
+    .toArray();
+}
+
+const dia = (fecha: Date) => fecha.toISOString().slice(0, 10);
+
+const p = await listarPagina("u_demo", 3, 10);
+console.log(`Página ${p.pagina} de ${p.paginas} (${p.total} entrenos): ${p.elementos.map((e) => dia(e.fecha)).join(", ")}`);
+
+const vacia = await listarPagina("u_demo", 99, 10);
+console.log(`Página 99: ${vacia.elementos.length} entrenos`);
+
+for (const texto of ["LLUVIA", "rodilla (", "a"]) {
+  const r = await buscarEnNotas("u_demo", texto);
+  console.log(`Buscar "${texto}": ${r.map((e) => `${dia(e.fecha)} "${e.notas}"`).join(" · ") || "sin resultados"}`);
+}
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/03-ejercicio.ts
+```
+
+```text
+Página 3 de 3 (30 entrenos): 2026-09-19, 2026-09-17, 2026-09-15, 2026-09-13, 2026-09-11, 2026-09-09, 2026-09-07, 2026-09-05, 2026-09-03, 2026-09-01
+Página 99: 0 entrenos
+Buscar "LLUVIA": 2026-10-13 "Con lluvia" · 2026-09-01 "Con lluvia"
+Buscar "rodilla (": sin resultados
+Buscar "a": sin resultados
+```
+
+Las decisiones:
+
+- **`Promise.all`** lanza el conteo y la consulta **a la vez**: dos viajes a la base de datos en paralelo en lugar de uno detrás de otro.
+- **`Math.max(1, Math.floor(pagina))`** protege de páginas 0, negativas o con decimales (que pueden llegar de un `?pagina=` en la URL).
+- **`escaparRegex`** antepone `\` a cada carácter especial, así que `"rodilla ("` se busca **literalmente**: sin error y sin resultados, porque ninguna nota contiene "rodilla (". Sin escapar, la misma búsqueda lanzaría `Regular expression is invalid: missing closing parenthesis`.
+- **Mínimo 2 caracteres:** buscar `"a"` coincidiría con casi todo y recorrería la colección entera; no tiene sentido para el usuario.
+
+<Callout type="risk">
+
+- **`countDocuments` y `find` pueden no coincidir** si alguien inserta un entreno entre las dos consultas. Para una paginación de interfaz es irrelevante (el total se recalcula en la siguiente página); para un informe que debe cuadrar exactamente, haría falta una transacción con lectura consistente.
+- **`Pagina<T>` es un genérico** (B1.6): el mismo tipo sirve para paginar entrenos, tareas o usuarios. Defínelo una vez en el proyecto y reutilízalo.
+
 </Callout>
 
 <Callout type="mastery">
-  Escribes filtros con operadores, proyecciones y ordenaciones sin consultar la documentación.
+
+Escribes filtros con operadores sin consultar la documentación (`$gte`, `$lt`, `$in`, `$exists`, `$regex` escapado y `$or`), proyectas solo lo que necesitas sabiendo que TypeScript no lo refleja, ordenas y paginas con un orden estable, y encapsulas cada consulta en una función tipada con nombre.
+
 </Callout>
 
 ## Resumen
 
-- `insertOne` e `insertMany` crean documentos; el `_id` lo genera el driver.
-- `findOne` devuelve un documento o `null`; `find` devuelve un cursor.
-- Los filtros son objetos; los operadores (`$gte`, `$in`, `$exists`…) comparan.
-- `project` elige campos, `sort` ordena y `limit` acota.
-- Filtra en MongoDB, no en JavaScript.
+- `insertOne` devuelve `insertedId`; `insertMany`, `insertedCount` (y falla con un array vacío).
+- `find` devuelve un cursor: `.toArray()` lo carga entero; `for await` lo recorre por lotes. `findOne` devuelve un documento o `null`.
+- Filtros: igualdad, `$gt`/`$gte`/`$lt`/`$lte`, `$in`, `$exists`, `$regex` (con el texto escapado) y `$or`; varios campos en un objeto son un `AND`.
+- `projection` elige campos (y TypeScript no lo sabe), `.sort()` ordena, `.limit()` limita y `.skip()` pagina (lento en páginas altas).
+- Todo el acceso a una colección pasa por un módulo de funciones con nombre.

@@ -4,162 +4,515 @@ course: "B5"
 title: "Conexión con el driver de Node y TypeScript"
 order: 2
 minutes: 60
-summary: "Conectar con MongoDB una sola vez y reutilizar la conexión, tipar las colecciones y guardar la URI de forma segura."
+summary: "Montas un proyecto TypeScript conectado a Atlas, mides cuántas conexiones abre un cliente por petición frente a uno compartido, tipas tus colecciones con genéricos y llevas el patrón a Astro."
 ---
 
-El primer error grave con MongoDB no suele estar en las consultas, sino en **cómo te conectas**. Abrir una conexión nueva en cada petición funciona en local y tumba tu clúster en producción. En esta sección vas a montar la conexión como lo hace esta plataforma y a tipar tus colecciones para que TypeScript te avise de los errores.
+En `mongosh` la conexión la gestiona la consola. En una app, es **tu código** quien se conecta, y la forma de hacerlo decide si tu app aguanta tráfico o tumba el clúster. El error más común (y más caro) es abrir una conexión nueva en cada petición. En esta sección vas a montar un proyecto TypeScript conectado a tu clúster, vas a **medir** cuántas conexiones abre ese error frente al patrón correcto, vas a tipar tus colecciones para que TypeScript compruebe cada documento y vas a llevar todo a Astro, con el mismo módulo que usa esta plataforma.
 
-## El driver oficial
+**Lo que tendrás al terminar:** un proyecto `mongo-academy` (lo usarás hasta el final del curso) con un módulo de conexión único y colecciones tipadas, y el módulo equivalente para un proyecto Astro.
+
+**Requisitos:** la base de datos `academy_lab` de B5.1, la cadena de conexión de tu clúster y lo visto en B1 (TypeScript) y B3 (conexiones y TLS).
+
+## Paso 1: crear el proyecto
 
 ```bash
-npm i mongodb
+mkdir mongo-academy
+cd mongo-academy
+mkdir src
+npm init -y
+npm install mongodb
+npm install --save-dev typescript tsx @types/node
+code .
 ```
 
-El paquete `mongodb` incluye sus tipos de TypeScript; no necesitas `@types/mongodb`.
+Sustituye `package.json` por esta versión (deja los números de versión que haya instalado npm si son más nuevos):
+
+```json
+{
+  "name": "mongo-academy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "start": "node --env-file=.env --import tsx"
+  },
+  "dependencies": {
+    "mongodb": "^7.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
+```
+
+El _script_ `start` usa **`--env-file=.env`**: Node lee las variables de entorno del archivo `.env` antes de ejecutar (sin librerías extra), y `--import tsx` le permite ejecutar TypeScript directamente. Se usa así: `npm start -- src/archivo.ts`.
+
+Crea `tsconfig.json` (el de B1, con los tipos de Node):
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}
+```
+
+Crea `.env` con tu cadena de conexión (la de Atlas → _Connect_ → _Drivers_, con tu contraseña en lugar de `<db_password>`) y la base de datos de práctica:
+
+```bash
+MONGODB_URI="mongodb+srv://tu-usuario:tu-contraseña@tu-cluster.abc123.mongodb.net/?retryWrites=true&w=majority&appName=tu-cluster"
+MONGODB_DB="academy_lab"
+```
+
+Y `.gitignore`, **antes** de cualquier commit:
+
+```gitignore
+node_modules/
+.env
+```
+
+<Callout type="risk">
+
+- **Caracteres especiales en la contraseña:** si tu contraseña de Atlas contiene `@`, `:`, `/` o `%`, rompe la URI (el `@` se confunde con el separador entre usuario y servidor). Codifícalos (`@` → `%40`) o genera en Atlas una contraseña solo con letras y números.
+- **`.env` nunca va a Git** (B2.1). La URI contiene usuario y contraseña con acceso a tus datos.
+- **`@types/node` no es opcional:** sin él, TypeScript no conoce `process` y, peor, los tipos del _driver_ de MongoDB que dependen de Node (como las opciones TLS) se rompen con errores desconcertantes como `Type '{ appName: string; … }' is missing the following properties from type 'MongoClientOptions'`. Un proyecto Astro recién creado no lo incluye: instálalo antes de usar MongoDB.
+
+</Callout>
+
+## Paso 2: un módulo con un único cliente
+
+Crea `src/db.ts`:
 
 ```ts
+// Archivo: src/db.ts
+// Un único MongoClient para todo el proceso: se crea al importar este módulo por primera vez
+import { MongoClient, type Db } from "mongodb";
+
+const uri = process.env.MONGODB_URI;
+if (!uri) {
+  throw new Error("Falta la variable de entorno MONGODB_URI (revisa tu archivo .env)");
+}
+
+export const cliente = new MongoClient(uri, {
+  appName: "mongo-academy", // aparece en los registros de Atlas: sabrás qué app abrió cada conexión
+  maxPoolSize: 10, // como mucho 10 conexiones simultáneas desde este proceso
+  serverSelectionTimeoutMS: 5_000, // si no hay servidor en 5 s, error (en vez de esperar 30 s)
+});
+
+export const db: Db = cliente.db(process.env.MONGODB_DB ?? "academy_lab");
+```
+
+Y un primer script que lo usa, `src/02-ping.ts`:
+
+```ts
+// Archivo: src/02-ping.ts
+import { cliente, db } from "./db";
+
+const inicio = performance.now();
+const respuesta = await db.command({ ping: 1 });
+console.log(`Ping: ok = ${respuesta.ok} en ${Math.round(performance.now() - inicio)} ms`);
+
+const colecciones = await db.listCollections({}, { nameOnly: true }).toArray();
+console.log(`Colecciones en ${db.databaseName}: ${colecciones.map((c) => c.name).sort().join(", ")}`);
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/02-ping.ts
+```
+
+```text
+Ping: ok = 1 en 8 ms
+Colecciones en academy_lab: cursos, entrenos, fechas, tipos, usuarios
+```
+
+(Con Atlas, el primer _ping_ tardará bastante más, entre 100 y 500 ms: tiene que resolver el DNS del clúster, abrir la conexión TLS y autenticarse. Lo verás en el paso siguiente).
+
+Cómo funciona `db.ts`:
+
+1. **Comprueba la variable al cargar:** si falta `MONGODB_URI`, falla **en el primer momento**, con un mensaje claro, en lugar de un error confuso dentro del _driver_ más tarde. Prueba a ejecutar `node --import tsx src/02-ping.ts` (sin `--env-file`) y verás: `Error: Falta la variable de entorno MONGODB_URI (revisa tu archivo .env)`.
+2. **`new MongoClient(uri, opciones)`** crea el cliente, que **no** es una conexión: es un **gestor de un _pool_ (reserva) de conexiones**. Abre conexiones cuando hacen falta, las reutiliza entre operaciones y nunca supera `maxPoolSize`.
+3. **No hay `await cliente.connect()`:** desde la versión 4.7, el _driver_ se conecta solo en la primera operación.
+4. **El módulo se ejecuta una sola vez:** en Node, un módulo importado desde diez archivos se evalúa **la primera vez** y después se reutiliza. Así, todo el proceso comparte un único cliente. Este es el patrón.
+5. **`await cliente.close()`** al final del script. En un script que termina, sin él, el proceso se quedaría esperando con las conexiones abiertas. En un servidor, en cambio, **no** se cierra nunca: vive mientras vive el proceso.
+
+<Callout type="risk">
+
+- **`serverSelectionTimeoutMS`:** por defecto, el _driver_ espera **30 segundos** a encontrar un servidor antes de dar error. Con la IP no permitida en Atlas o el clúster pausado, cada petición de tu app se quedaría colgada medio minuto. Con 5000 ms falla rápido y con un error claro.
+- **`appName`** aparece en Atlas (_Metrics_ → _Connections_ y en los registros). Cuando tengas varias apps contra el mismo clúster, sabrás cuál abre cada conexión.
+
+</Callout>
+
+## Paso 3: medir el error de "una conexión por petición"
+
+Es tentador escribir, dentro de cada endpoint: `const cliente = new MongoClient(uri); await cliente.connect(); …`. Funciona en local. Vamos a medir qué cuesta. Crea `src/02-conexiones.ts`:
+
+```ts
+// Archivo: src/02-conexiones.ts
+// ¿Cuántas conexiones abre "un cliente por petición" frente a "un cliente para todo"?
 import { MongoClient } from "mongodb";
 
-const client = new MongoClient(process.env.MONGODB_URI!);
-const db = client.db("dani_academy");
-const users = db.collection("user");
+const uri = process.env.MONGODB_URI;
+if (!uri) throw new Error("Falta MONGODB_URI");
+const PETICIONES = 50;
 
-const count = await users.countDocuments();
+function crearCliente(contador: { conexiones: number }) {
+  const cliente = new MongoClient(uri!, { maxPoolSize: 10, serverSelectionTimeoutMS: 5_000 });
+  // El driver avisa cada vez que abre una conexión nueva hacia el servidor
+  cliente.on("connectionCreated", () => contador.conexiones++);
+  return cliente;
+}
+
+// ❌ Antipatrón: cada "petición" crea su propio cliente (y nadie lo cierra)
+const malo = { conexiones: 0 };
+const clientesSueltos: MongoClient[] = [];
+let inicio = performance.now();
+await Promise.all(
+  Array.from({ length: PETICIONES }, async () => {
+    const cliente = crearCliente(malo);
+    clientesSueltos.push(cliente);
+    await cliente.db("academy_lab").command({ ping: 1 });
+  }),
+);
+const msMalo = performance.now() - inicio;
+
+// ✅ Patrón correcto: un solo cliente compartido por todas las "peticiones"
+const bueno = { conexiones: 0 };
+const compartido = crearCliente(bueno);
+inicio = performance.now();
+await Promise.all(Array.from({ length: PETICIONES }, () => compartido.db("academy_lab").command({ ping: 1 })));
+const msBueno = performance.now() - inicio;
+
+console.log(`${PETICIONES} peticiones, un cliente por petición: ${malo.conexiones} conexiones · ${Math.round(msMalo)} ms`);
+console.log(`${PETICIONES} peticiones, un cliente compartido:   ${bueno.conexiones} conexiones · ${Math.round(msBueno)} ms`);
+
+await Promise.all([...clientesSueltos, compartido].map((c) => c.close()));
 ```
 
-No hace falta llamar a `client.connect()`: el driver conecta automáticamente en la primera operación.
+El script simula 50 peticiones simultáneas de dos formas y cuenta las conexiones con el evento **`connectionCreated`**, que el _driver_ emite cada vez que abre una conexión nueva (funciona con cualquier usuario de Atlas, sin permisos especiales).
 
-## Un pool, no una conexión
-
-Un `MongoClient` no es "una conexión": gestiona un **pool** de conexiones abiertas que se reutilizan entre consultas. Abrir conexiones es caro (DNS, TCP, TLS, autenticación), y el clúster tiene un **límite**: el plan gratuito de Atlas admite unas 500 conexiones simultáneas.
-
-```ts
-// ❌ Un MongoClient por petición: cada visita abre un pool nuevo
-export const GET: APIRoute = async () => {
-  const client = new MongoClient(MONGODB_URI);
-  const count = await client.db().collection("user").countDocuments();
-  return Response.json({ count });
-};
+```bash
+npm start -- src/02-conexiones.ts
 ```
 
-Con tráfico, esto agota las conexiones del clúster en minutos y la app empieza a fallar con _timeouts_.
+```text
+50 peticiones, un cliente por petición: 50 conexiones · 40 ms
+50 peticiones, un cliente compartido:   9 conexiones · 5 ms
+```
+
+(Medido contra un MongoDB en la misma máquina. Contra Atlas, la diferencia de tiempo es **mucho mayor**, porque cada conexión nueva negocia TLS y se autentica: ejecútalo con tu clúster y compáralo).
+
+- **Un cliente por petición:** 50 peticiones, **50 conexiones**. Cada cliente abre la suya, con su saludo TLS y su autenticación. Y como nadie los cierra, siguen abiertas.
+- **Un cliente compartido:** 50 peticiones, **9 conexiones**. El _pool_ reutiliza las conexiones y nunca pasa de `maxPoolSize` (10). Las peticiones que llegan cuando todas están ocupadas **esperan** su turno unos milisegundos, en lugar de abrir otra.
+
+¿Por qué importa tanto? Porque el plan gratuito de Atlas (M0) admite **500 conexiones** como máximo. Con una conexión por petición sin cerrar, unos cientos de visitas bastan para llegar al límite, y a partir de ahí **todas** las peticiones fallan, incluidas las de otras apps que usen el mismo clúster.
+
+<Callout type="risk">
+
+- **El cliente también abre conexiones de monitorización:** además de las que cuenta `connectionCreated`, cada `MongoClient` mantiene una o dos conexiones por servidor para vigilar el estado del _replica set_. Con tres réplicas en Atlas, cada cliente suelto suma todavía más. Otra razón para tener uno solo.
+- **"Cerrar el cliente al final de cada petición" no es la solución:** evita la fuga de conexiones, pero sigues pagando la conexión TLS y la autenticación en **cada** petición (decenas o cientos de milisegundos). La solución es reutilizar.
+
+</Callout>
+
+## Paso 4: colecciones tipadas con genéricos
+
+Hasta ahora, TypeScript no sabe nada de la forma de tus documentos: para él, un documento es `Document` (un objeto con cualquier cosa). Con un **genérico** le dices qué forma tienen. Crea `src/tipos.ts`:
 
 ```ts
-// ✅ Un único cliente por proceso, en un módulo
-// src/lib/mongo.ts
+// Archivo: src/tipos.ts
+// La forma de cada documento, tal como se guarda en MongoDB
+import type { ObjectId } from "mongodb";
+
+export type TipoEntreno = "running" | "fuerza" | "yoga";
+
+export interface Entreno {
+  _id?: ObjectId; // opcional al insertar: lo genera el driver
+  userId: string;
+  tipo: TipoEntreno;
+  km?: number;
+  minutos: number;
+  fecha: Date;
+  notas?: string;
+}
+
+export interface Usuario {
+  _id?: ObjectId;
+  nombre: string;
+  email: string;
+  creado: Date;
+}
+```
+
+Crea `src/colecciones.ts`, el único sitio donde se nombran las colecciones:
+
+```ts
+// Archivo: src/colecciones.ts
+// Colecciones tipadas: TypeScript conoce la forma de sus documentos
+import { db } from "./db";
+import type { Entreno, Usuario } from "./tipos";
+
+export const entrenos = db.collection<Entreno>("entrenos");
+export const usuarios = db.collection<Usuario>("usuarios");
+```
+
+Y un script que las usa, `src/02-tipadas.ts`:
+
+```ts
+// Archivo: src/02-tipadas.ts
+import { cliente } from "./db";
+import { entrenos } from "./colecciones";
+
+await entrenos.deleteMany({ userId: "u_demo" }); // empezamos de cero cada vez
+
+const { insertedId } = await entrenos.insertOne({
+  userId: "u_demo",
+  tipo: "running",
+  km: 5.2,
+  minutos: 28,
+  fecha: new Date("2026-10-08T07:30:00Z"),
+});
+console.log(`Insertado con _id ${insertedId.toHexString()}`);
+
+const entreno = await entrenos.findOne({ _id: insertedId });
+if (entreno) {
+  // entreno es Entreno: el editor autocompleta y TypeScript comprueba cada campo
+  const ritmo = entreno.km ? (entreno.minutos / entreno.km).toFixed(1) : "—";
+  console.log(`${entreno.tipo} del ${entreno.fecha.toISOString().slice(0, 10)}: ${ritmo} min/km`);
+}
+
+await cliente.close();
+```
+
+```bash
+npm run typecheck
+npm start -- src/02-tipadas.ts
+```
+
+```text
+Insertado con _id 6ac962d370b8da518c805e1e
+running del 2026-10-08: 5.4 min/km
+```
+
+`db.collection<Entreno>("entrenos")` hace que `insertOne` **exija** un `Entreno` y que `findOne` **devuelva** `Entreno | null` (B1.6: puede no encontrar nada). El `_id` es opcional en el tipo porque al insertar lo genera el _driver_.
+
+Para comprobar lo que gana, añade temporalmente al final de `02-tipadas.ts` (antes del `close`) estas líneas con errores y ejecuta `npm run typecheck`:
+
+```ts
+await entrenos.insertOne({ userId: "u_demo", tipo: "natacion", minutos: 30, fecha: new Date() });
+await entrenos.insertOne({ userId: "u_demo", tipo: "running", minutos: "30", fecha: new Date() });
+await entrenos.insertOne({ userId: "u_demo", tipo: "running", fecha: new Date() });
+await entrenos.insertOne({ userId: "u_demo", tipo: "running", minutos: 30, fecha: "2026-10-08" });
+const e = await entrenos.findOne({});
+console.log(e.tipo);
+await entrenos.find({ minutoss: { $gt: 20 } }).toArray();
+```
+
+```text
+error TS2322: Type '"natacion"' is not assignable to type 'TipoEntreno'.
+error TS2322: Type 'string' is not assignable to type 'number'.
+error TS2345: Argument of type '{ userId: string; tipo: "running"; fecha: Date; }' is not assignable to parameter of type 'OptionalId<Entreno>'.
+  Property 'minutos' is missing in type '{ userId: string; tipo: "running"; fecha: Date; }' but required in type 'Pick<Entreno, "fecha" | "km" | "minutos" | "notas" | "tipo" | "userId">'.
+error TS2322: Type 'string' is not assignable to type 'Date'.
+error TS18047: 'e' is possibly 'null'.
+```
+
+Cinco bugs detectados antes de ejecutar nada: un tipo de entreno que no existe, minutos como texto (el error de los formularios), un campo obligatorio olvidado, **una fecha como texto** (el error de B5.1) y un documento que podría no existir. Pero cuenta los errores: hay **cinco**, y escribiste **seis** líneas con problemas. Borra las líneas antes de continuar.
+
+<Callout type="risk">
+
+- **Los filtros no detectan erratas en los nombres de campo:** `find({ minutoss: { $gt: 20 } })` compila sin error, porque los filtros aceptan la notación de punto (`"preferencias.tema"`) y TypeScript no puede saber qué rutas son válidas. Devuelve una lista vacía, en silencio. Revisa los nombres de los campos en los filtros, o encapsula las consultas en funciones tipadas (B5.3).
+- **El tipo es una promesa, no una validación:** `collection<Entreno>` hace que TypeScript **crea** que los documentos tienen esa forma, igual que el `as` de B1.5. Si en la base de datos hay documentos antiguos con otra forma, TypeScript no lo sabrá. La validación real se hace al escribir (con Zod, curso I1) o en la propia base de datos (`$jsonSchema`).
+- **Un solo sitio para los nombres de colección:** si escribes `db.collection("entreno")` (sin s) en otro archivo, trabajarás con una colección distinta y vacía (B5.1). Exportar las colecciones desde `colecciones.ts` lo evita.
+
+</Callout>
+
+## Paso 5: el mismo patrón en Astro y en Vercel
+
+En un proyecto Astro, el módulo es el mismo con dos diferencias: las variables llegan por `astro:env` (B1.8) y hay que sobrevivir a las **recargas de desarrollo**. Este es el `src/lib/mongo.ts` que usa esta plataforma, adaptado:
+
+```ts
+// Archivo: src/lib/mongo.ts
 import { MongoClient, type Db } from "mongodb";
 import { MONGODB_DB, MONGODB_URI } from "astro:env/server";
 
-export const mongoClient = new MongoClient(MONGODB_URI, {
-  appName: "dani-academy",
-  maxPoolSize: 10,
-  serverSelectionTimeoutMS: 5_000,
-});
+declare global {
+  // eslint-disable-next-line no-var
+  var __mongoClient: MongoClient | undefined;
+}
 
+// Un único cliente por proceso. En desarrollo se guarda en globalThis para sobrevivir
+// a las recargas de Vite y no abrir un pool de conexiones nuevo con cada cambio.
+export const mongoClient: MongoClient =
+  globalThis.__mongoClient ??
+  new MongoClient(MONGODB_URI, {
+    appName: "mi-entreno",
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5_000,
+  });
+
+if (import.meta.env.DEV) globalThis.__mongoClient = mongoClient;
+
+// El driver conecta en la primera operación: no hace falta `await mongoClient.connect()`
 export const db: Db = mongoClient.db(MONGODB_DB);
 ```
 
-Un módulo de JavaScript se evalúa **una sola vez** por proceso: todos los que importan `db` comparten el mismo cliente.
+Con su esquema en `astro.config.mjs`:
 
-### En desarrollo: sobrevivir a las recargas
+```js
+// @ts-check
+import { defineConfig, envField } from "astro/config";
 
-Al guardar un archivo, Vite recarga módulos y podría crear un cliente nuevo cada vez. El truco es guardarlo en `globalThis`, que sobrevive a las recargas:
-
-```ts
-declare global {
-  var __daMongoClient: MongoClient | undefined;
-}
-
-export const mongoClient = globalThis.__daMongoClient ?? new MongoClient(MONGODB_URI, { … });
-if (import.meta.env.DEV) globalThis.__daMongoClient = mongoClient;
+export default defineConfig({
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "academy_lab" }),
+    },
+  },
+});
 ```
 
-Es exactamente el archivo `src/lib/mongo.ts` de esta plataforma.
-
-### En _serverless_ (Vercel)
-
-Cada instancia de tu función es un proceso: el módulo se evalúa al arrancar la instancia y el cliente se reutiliza en todas las peticiones que atienda. `maxPoolSize` limita cuántas conexiones abre cada instancia.
-
-## Opciones útiles
-
-| Opción                     | Para qué                                                                                              |
-| -------------------------- | ----------------------------------------------------------------------------------------------------- |
-| `appName`                  | Identifica tu app en los registros de Atlas                                                           |
-| `maxPoolSize`              | Máximo de conexiones por cliente (por defecto, 100)                                                   |
-| `serverSelectionTimeoutMS` | Cuánto esperar un servidor disponible antes de fallar (por defecto, 30 s; 5 s da errores más rápidos) |
-
-## Colecciones tipadas
-
-`collection()` acepta un genérico con la forma de tus documentos:
+Y un endpoint que lo usa, `src/pages/api/entrenos-recientes.ts`:
 
 ```ts
+// Archivo: src/pages/api/entrenos-recientes.ts
+import type { APIRoute } from "astro";
 import type { ObjectId } from "mongodb";
+import { db } from "../../lib/mongo";
 
-export interface SectionProgressDoc {
+export const prerender = false;
+
+interface Entreno {
   _id?: ObjectId;
   userId: string;
-  courseId: string;
-  sectionId: string;
-  readAt: Date;
+  tipo: "running" | "fuerza" | "yoga";
+  km?: number;
+  minutos: number;
+  fecha: Date;
 }
 
-const progress = db.collection<SectionProgressDoc>("section_progress");
+const entrenos = db.collection<Entreno>("entrenos");
 
-await progress.insertOne({ userId: "u1", courseId: "B1", sectionId: "B1.3", readAt: new Date() }); // ✅
-await progress.insertOne({ userId: "u1", sectionId: "B1.3" });
-// ❌ Property 'courseId' is missing … / Property 'readAt' is missing …
-
-const doc = await progress.findOne({ userId: "u1" });
-doc?.readAt.toISOString(); // TypeScript sabe que readAt es Date
+export const GET: APIRoute = async () => {
+  const ultimos = await entrenos
+    .find({ userId: "u_demo" }, { projection: { _id: 0, tipo: 1, minutos: 1, fecha: 1 } })
+    .sort({ fecha: -1 })
+    .limit(5)
+    .toArray();
+  return Response.json({ total: ultimos.length, entrenos: ultimos });
+};
 ```
-
-`_id?` es opcional porque al insertar lo genera el driver; al leer, siempre está.
-
-<Callout type="note">
-  Los tipos solo protegen **tu código**: no impiden que otro programa (o un `insertOne` desde
-  mongosh) guarde algo con otra forma. Para eso existe la validación en la base de datos
-  (`$jsonSchema`), que esta plataforma configura en `scripts/db-setup.ts`.
-</Callout>
-
-## La URI, fuera del código
-
-La cadena de conexión contiene usuario y contraseña. Va en `.env`, nunca en el repositorio:
 
 ```bash
-MONGODB_URI="mongodb+srv://academy_app:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority&appName=dani-academy"
-MONGODB_DB="dani_academy"
+curl http://localhost:4321/api/entrenos-recientes
 ```
 
-- `mongodb+srv://` usa el DNS para descubrir los servidores del clúster.
-- `retryWrites=true` reintenta automáticamente una escritura si cambia el primario.
-- Con `astro:env` (curso B1.8), Astro valida que existen y que la URI empieza por `mongodb`.
+```text
+{"total":1,"entrenos":[{"tipo":"running","minutos":28,"fecha":"2026-10-08T07:30:00.000Z"}]}
+```
 
-Usa un **usuario de base de datos propio para cada app**, con permisos solo sobre su base de datos, en lugar del usuario administrador del clúster.
+Por qué cada pieza:
 
-## Errores comunes
+- **`globalThis.__mongoClient`:** en `astro dev`, Vite recarga los módulos cada vez que guardas un archivo. Sin este truco, cada recarga crearía un `MongoClient` nuevo y abandonaría el anterior **con sus conexiones abiertas**: tras una tarde de trabajo, cientos de conexiones de tu propio Mac. `globalThis` sobrevive a las recargas, así que el cliente se crea una vez y se reutiliza. Solo se hace en desarrollo (`import.meta.env.DEV`).
+- **En Vercel (_serverless_):** cada función se ejecuta en un contenedor que **se reutiliza** entre peticiones mientras está "caliente". El código del módulo se ejecuta una vez por contenedor, así que todas las peticiones que atiende ese contenedor comparten el cliente. Si Vercel arranca 20 contenedores en hora punta, tendrás unos 20 _pools_: por eso `maxPoolSize: 10` (y no 100) es lo sensato con el límite de 500 de M0.
+- **La colección se define fuera del `GET`:** se crea una vez al cargar el módulo, no en cada petición (crearla es barato, pero así el patrón es coherente).
 
-- **Un `MongoClient` por petición**: agota las conexiones del clúster.
-- **Olvidar el nombre de la base de datos** y escribir en `test`.
-- **La IP no está en la lista de acceso de Atlas**: el error suele ser un _timeout_ de selección de servidor (`MongoServerSelectionError`).
-- **Usar el usuario administrador** en la app: si la URI se filtra, el daño es total.
-- **Cerrar el cliente** (`client.close()`) al final de cada petición.
+<Callout type="risk">
+
+- **Nunca crees el cliente dentro del `GET`:** es el error del Paso 3, y en Vercel es todavía peor, porque cada contenedor nuevo y cada petición abrirían conexiones TLS hacia Atlas.
+- **Network Access en Atlas para Vercel:** las funciones de Vercel no tienen IPs fijas, así que hay que permitir `0.0.0.0/0` (cualquier IP). Es seguro **solo** si la contraseña de la base de datos es fuerte y el usuario tiene los permisos justos.
+- **Las _previews_ de Vercel usan las variables del entorno _Preview_:** si ahí pones la misma `MONGODB_URI` que en producción, tus pruebas escriben en los datos reales (B2.2).
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Revisa cómo se conecta tu app de entrenamiento a MongoDB. ¿Crea un `MongoClient` por petición? Si es así, refactorízala a un módulo `src/lib/mongo.ts` como el de esta sección.
-  2. Define las interfaces de dos colecciones de tu app y usa `collection<T>()` para tiparlas.
-  3. Intenta insertar un documento al que le falte un campo obligatorio y lee el error de TypeScript.
-  4. En Atlas, crea un usuario de base de datos solo para esa app, con `readWrite` sobre su base de datos, y cambia la URI de tu `.env`.
+
+1. Busca en tu app de entrenamiento todos los sitios donde se crea un `MongoClient` (`grep -rn "new MongoClient" src`).
+2. Si hay más de uno, o si alguno está dentro de una función que se ejecuta en cada petición, refactorízalo al patrón de `src/lib/mongo.ts`.
+3. Ejecuta `npm run check` y comprueba que no hay errores (instala `@types/node` si te aparece el error de `MongoClientOptions`).
+4. Ejecuta `src/02-conexiones.ts` de `mongo-academy` contra tu clúster de Atlas y anota cuánto tarda cada estrategia.
+
+</Callout>
+
+Solución. Este es el aspecto típico del antipatrón en un endpoint de Astro:
+
+```ts
+// ❌ Antes: src/pages/api/entrenos.ts
+import type { APIRoute } from "astro";
+import { MongoClient } from "mongodb";
+
+export const prerender = false;
+
+export const GET: APIRoute = async () => {
+  const cliente = new MongoClient(import.meta.env.MONGODB_URI); // un cliente nuevo por petición
+  await cliente.connect();
+  const entrenos = await cliente.db("mi-entreno").collection("entrenos").find().limit(5).toArray();
+  await cliente.close();
+  return Response.json(entrenos);
+};
+```
+
+Y así queda con el módulo compartido de este paso (`src/lib/mongo.ts` y el esquema de `astro:env` del Paso 5):
+
+```ts
+// ✅ Después: src/pages/api/entrenos.ts
+import type { APIRoute } from "astro";
+import type { ObjectId } from "mongodb";
+import { db } from "../../lib/mongo";
+
+export const prerender = false;
+
+interface Entreno {
+  _id?: ObjectId;
+  userId: string;
+  tipo: "running" | "fuerza" | "yoga";
+  km?: number;
+  minutos: number;
+  fecha: Date;
+}
+
+const entrenos = db.collection<Entreno>("entrenos");
+
+export const GET: APIRoute = async () => {
+  const ultimos = await entrenos.find({}, { projection: { _id: 0 } }).sort({ fecha: -1 }).limit(5).toArray();
+  return Response.json(ultimos);
+};
+```
+
+Los cambios: el cliente se crea **una vez** (en el módulo), la URI viene de `astro:env` (validada y tipada, en lugar de `import.meta.env`, que no comprueba nada), la colección está tipada y la consulta tiene un orden explícito.
+
+<Callout type="risk">
+
+- **Si refactorizas un proyecto con tráfico real, despliega y vigila _Metrics_ → _Connections_ en Atlas:** deberías ver cómo el número de conexiones baja y se estabiliza. Si sigue creciendo, queda algún `new MongoClient` por ahí.
+- **Los _scripts_ de mantenimiento sí deben cerrar el cliente:** un script que crea índices o migra datos (como `scripts/db-setup.ts` en esta plataforma) termina con `await client.close()`. La regla "no cerrar nunca" es solo para el servidor de la app.
+
 </Callout>
 
 <Callout type="mastery">
-  Entiendes por qué abrir una conexión por petición agota el clúster y sabes montar un cliente único
-  y tipado.
+
+Entiendes por qué abrir una conexión por petición agota el clúster: un `MongoClient` es un _pool_ que se crea una vez por proceso y se reutiliza, en Astro sobrevive a las recargas con `globalThis`, y en Vercel cada contenedor tiene el suyo. Tus colecciones están tipadas con genéricos y sabes qué errores detecta TypeScript y cuáles no.
+
 </Callout>
 
 ## Resumen
 
-- Un `MongoClient` gestiona un pool de conexiones: crea **uno** por proceso.
-- En desarrollo, `globalThis` evita clientes duplicados con las recargas.
-- `collection<T>()` tipa los documentos que lees y escribes.
-- Los tipos protegen tu código; la validación en la base de datos protege los datos.
-- La URI va en `.env`, con un usuario propio y de permisos mínimos.
+- `MongoClient` gestiona un _pool_ de conexiones: créalo **una vez** en un módulo y reutilízalo; conecta solo en la primera operación.
+- Un cliente por petición abrió 50 conexiones para 50 peticiones; un cliente compartido, 9. M0 admite 500.
+- Opciones clave: `maxPoolSize` (límite del _pool_), `serverSelectionTimeoutMS` (fallar rápido) y `appName` (identificar la app).
+- `db.collection<Entreno>("entrenos")` tipa inserciones y lecturas; los filtros no detectan erratas en nombres de campo.
+- En Astro: variables por `astro:env`, cliente en `globalThis` en desarrollo y `@types/node` instalado.

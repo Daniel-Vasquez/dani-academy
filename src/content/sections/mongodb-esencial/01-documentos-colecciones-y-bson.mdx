@@ -4,138 +4,405 @@ course: "B5"
 title: "Documentos, colecciones y BSON"
 order: 1
 minutes: 60
-summary: "Cómo organiza MongoDB los datos, qué es BSON, qué contiene un ObjectId y cómo explorar tu clúster con mongosh y Compass."
+summary: "Te conectas a tu clúster de Atlas con mongosh, creas tus primeros documentos, desmontas un ObjectId, compruebas por qué Date y Decimal128 importan y exploras sin riesgo las colecciones de Better Auth."
 ---
 
-Llevas tiempo guardando datos en MongoDB Atlas desde tus apps, pero probablemente siempre a través de código copiado. En este curso vas a dominar la herramienta que más usas. Empezamos por lo básico de verdad: cómo están organizados tus datos y en qué se diferencian de un objeto de JavaScript.
+Llevas meses usando MongoDB a través de Better Auth y de esta plataforma sin tocarlo directamente. En este curso vas a trabajar con él "a mano", primero desde la consola y después desde código TypeScript, para entender qué guarda exactamente y por qué. En esta sección te conectas a tu clúster de Atlas con `mongosh`, creas tus primeros documentos en una base de datos de práctica, desmontas un `ObjectId` para ver la información que esconde, compruebas con datos reales por qué los tipos de BSON importan y exploras, sin tocar nada, las colecciones que Better Auth creó en tu proyecto.
 
-## La jerarquía
+**Lo que tendrás al terminar:** `mongosh` instalado y conectado a tu clúster, una base de datos de práctica `academy_lab` (la usarás en todo el curso B5) y un mapa de las colecciones reales de tu proyecto.
 
-```text
-Clúster (Atlas)
-└── Base de datos: dani_academy
-    ├── Colección: user
-    ├── Colección: section_progress
-    │   ├── Documento { userId: "…", sectionId: "B1.3", … }
-    │   └── Documento { … }
-    └── Colección: study_sessions
+**Requisitos:** tu clúster de MongoDB Atlas (el de esta plataforma o el de tu app de entrenamiento), con su usuario y contraseña, y Homebrew.
+
+## Paso 1: la jerarquía de MongoDB
+
+Antes de conectarte, el mapa de lo que vas a encontrar, de lo más grande a lo más pequeño:
+
+| Nivel             | Qué es                                       | En tu proyecto             | Equivalente en SQL (B4)      |
+| ----------------- | -------------------------------------------- | -------------------------- | ---------------------------- |
+| **Clúster**       | Los servidores (tres réplicas en Atlas)      | Tu clúster de Atlas        | El servidor de base de datos |
+| **Base de datos** | Un espacio con nombre que agrupa colecciones | `dani_academy`             | Una base de datos            |
+| **Colección**     | Un grupo de documentos del mismo tipo        | `user`, `section_progress` | Una tabla                    |
+| **Documento**     | Un registro con forma de JSON                | Un usuario, una lectura    | Una fila                     |
+| **Campo**         | Un par clave-valor dentro de un documento    | `email`, `readAt`          | Una columna                  |
+
+Un mismo clúster puede alojar varias bases de datos. Por eso puedes practicar en **`academy_lab`** sin tocar los datos reales de `dani_academy`: están en el mismo clúster, pero completamente separados.
+
+## Paso 2: instalar `mongosh` y conectarte a Atlas
+
+`mongosh` es la consola oficial de MongoDB: un intérprete de JavaScript conectado a la base de datos. Instálalo:
+
+```bash
+brew install mongosh
+mongosh --version
 ```
 
-- **Clúster**: los servidores de MongoDB (en Atlas, un _replica set_ de tres nodos).
-- **Base de datos**: un espacio con nombre dentro del clúster. Puedes tener varias (una por proyecto o por entorno).
-- **Colección**: un grupo de documentos, equivalente a una tabla.
-- **Documento**: un registro, con forma de objeto JSON.
+Para obtener la cadena de conexión, entra en Atlas → tu proyecto → _Clusters_ → **Connect** → **Shell**. Atlas te mostrará un comando del estilo:
 
-Las bases de datos y colecciones se crean solas la primera vez que insertas algo en ellas.
+```bash
+mongosh "mongodb+srv://tu-cluster.abc123.mongodb.net/" --apiVersion 1 --username tu-usuario
+```
 
-## Documentos
+Ejecútalo (con tus datos), escribe la contraseña cuando te la pida y verás el _prompt_ de `mongosh`:
+
+```text
+Atlas atlas-xxxxxx-shard-0 [primary] test>
+```
+
+La parte final (`test>`) es la base de datos actual. `[primary]` indica que estás conectado al servidor principal del _replica set_, el que acepta escrituras (B4.5). En las salidas de esta sección se omite el prefijo y se muestra solo `academy_lab>`.
+
+<Callout type="risk">
+
+- **No pongas la contraseña en el comando:** con `--username` sin `--password`, `mongosh` te la pide sin mostrarla. Si la escribes en el comando, queda guardada en el historial de tu terminal (`~/.zsh_history`).
+- **"Connection timed out" o "Server selection timed out":** casi siempre es _Network Access_. Atlas solo acepta conexiones de las IPs de su lista. Añade tu IP actual (botón _Add Current IP Address_). Si trabajas desde otra red (una cafetería, el móvil), tu IP cambia y tendrás que volver a añadirla.
+- **Usa un usuario con los permisos justos:** para practicar, crea en _Database Access_ un usuario con `readWrite` solo sobre `academy_lab`. Así, un error en una práctica no puede tocar `dani_academy`.
+
+</Callout>
+
+## Paso 3: tus primeros documentos
+
+Cámbiate a la base de datos de práctica:
 
 ```js
+use academy_lab
+```
+
+```text
+switched to db academy_lab
+```
+
+`academy_lab` **todavía no existe**, y no pasa nada: MongoDB crea bases de datos y colecciones **la primera vez que escribes en ellas**. Inserta un usuario:
+
+```js
+db.usuarios.insertOne({ nombre: "Dani", email: "dani@ejemplo.com", creado: new Date("2026-10-09T15:00:00Z") })
+```
+
+```text
 {
-  _id: ObjectId("6ac198dded8fd13366c7b66f"),
-  userId: "u1",
-  tipo: "running",
-  km: 5.2,
-  fecha: ISODate("2026-10-01T07:00:00Z"),
-  tags: ["mañana", "suave"],
-  ritmo: { min: 5, seg: 40 }
+  acknowledged: true,
+  insertedId: ObjectId('6ac9621f275ed63c4f14fc68')
 }
 ```
 
-- Cada documento tiene un **`_id`** único en su colección. Si no lo pones, se genera.
-- Pueden tener **arrays** y **objetos anidados**: un documento puede contener toda la información de un "día de entreno" sin repartirla en tablas.
-- Los documentos de una colección **no tienen por qué** tener los mismos campos. Que se pueda no significa que convenga: tu código espera una forma concreta, y por eso validamos (lo verás en I4).
+- **`db`** es la base de datos actual; **`db.usuarios`**, la colección `usuarios`, que se crea en este momento.
+- **`acknowledged: true`**: el servidor confirmó la escritura.
+- **`insertedId`**: el `_id` que MongoDB generó para el documento, porque no le diste uno (Paso 4).
 
-## BSON: más tipos que JSON
+Léelo:
 
-MongoDB no guarda JSON, sino **BSON** (_Binary JSON_): un formato binario con más tipos.
-
-| Tipo BSON                                      | En JavaScript  | Por qué importa                         |
-| ---------------------------------------------- | -------------- | --------------------------------------- |
-| `ObjectId`                                     | `ObjectId`     | Identificador único con fecha incluida  |
-| `Date`                                         | `Date`         | Fechas reales, comparables y ordenables |
-| `Int32` / `Double`                             | `number`       | Enteros y decimales                     |
-| `Decimal128`                                   | `Decimal128`   | Decimales exactos (dinero)              |
-| `Boolean`, `String`, `Array`, `Object`, `null` | los de siempre |                                         |
-
-JSON no tiene fechas: una fecha en JSON es solo un texto. En BSON es un tipo propio, y eso permite consultar "entrenos desde el 1 de octubre" correctamente (B5.5).
-
-## ObjectId por dentro
-
-Un `ObjectId` son 12 bytes que se escriben como 24 caracteres hexadecimales:
-
-```text
-6ac198dd  ed8fd13366  c7b66f
-└──┬───┘  └───┬────┘  └─┬──┘
- fecha    aleatorio   contador
-(segundos)
+```js
+db.usuarios.find()
 ```
 
-- Se genera **en tu aplicación** (en el driver), sin preguntar al servidor.
-- Incluye la **fecha de creación**: `oid.getTimestamp()` te la devuelve.
-- Los `ObjectId` creados más tarde son "mayores": ordenar por `_id` es casi ordenar por fecha de creación.
+```text
+[
+  {
+    _id: ObjectId('6ac9621f275ed63c4f14fc68'),
+    nombre: 'Dani',
+    email: 'dani@ejemplo.com',
+    creado: ISODate('2026-10-09T15:00:00.000Z')
+  }
+]
+```
 
-## Explorar: mongosh y Compass
+Y comprueba que la base de datos y la colección ya existen:
 
-**MongoDB Compass** es la aplicación gráfica oficial: conectas con tu URI y navegas por bases de datos, colecciones, documentos e índices. Es la forma más rápida de ver qué hay realmente guardado.
+```js
+show dbs
+show collections
+```
 
-**mongosh** es la consola. Se instala con `brew install mongosh`:
+```text
+academy_lab   32.00 KiB
+admin         48.00 KiB
+config        68.00 KiB
+local        236.00 KiB
+usuarios
+```
 
-```bash
-mongosh "mongodb+srv://cluster0.xxxxx.mongodb.net/" --username academy_app
+(En Atlas verás además `dani_academy` y no verás `config`; los tamaños serán otros).
+
+Ahora inserta un documento con **otra forma** en la misma colección: con un objeto anidado y un array.
+
+```js
+db.usuarios.insertOne({ nombre: "Ana", email: "ana@ejemplo.com", preferencias: { tema: "dark", objetivoVasos: 8 }, etiquetas: ["running", "yoga"] })
+db.usuarios.find({ "preferencias.tema": "dark" }, { _id: 0, nombre: 1, preferencias: 1 })
+db.usuarios.find({ etiquetas: "yoga" }, { _id: 0, nombre: 1 })
+```
+
+```text
+[ { nombre: 'Ana', preferencias: { tema: 'dark', objetivoVasos: 8 } } ]
+[ { nombre: 'Ana' } ]
+```
+
+Tres cosas nuevas:
+
+1. **Los documentos de una colección no tienen que tener la misma forma:** Dani no tiene `preferencias` y Ana sí. Nadie se ha quejado.
+2. **La notación de punto** (`"preferencias.tema"`, entre comillas) consulta dentro de un objeto anidado.
+3. **Consultar un array por un valor** (`etiquetas: "yoga"`) encuentra los documentos cuyo array **contiene** ese valor.
+
+El segundo argumento de `find` (`{ _id: 0, nombre: 1 }`) es una **proyección**: elige qué campos devolver. Lo verás a fondo en B5.3.
+
+<Callout type="risk">
+
+- **Una errata crea una colección nueva en silencio:** `db.usarios.insertOne(...)` (sin la u) no da error: crea una colección `usarios`. Después buscarás el documento en `usuarios` y no estará. Revisa `show collections` si algo "desaparece".
+- **La flexibilidad tiene un precio:** que MongoDB acepte documentos de cualquier forma no significa que tu código sepa manejarlos. Si un documento no tiene `preferencias`, `usuario.preferencias.tema` revienta en JavaScript. Los tipos de TypeScript (B5.2) y la validación (`$jsonSchema`, como hace esta plataforma) existen para controlar esa forma.
+
+</Callout>
+
+## Paso 4: el `_id` y la anatomía de un `ObjectId`
+
+Todo documento tiene un campo **`_id`**: su clave primaria. Es único dentro de la colección y no se puede cambiar. Si no lo das, el _driver_ genera un **`ObjectId`**: 12 bytes, que se muestran como 24 caracteres hexadecimales. No es un número aleatorio cualquiera; tiene estructura:
+
+```text
+6ac9621f  275ed63c4f  14fc68
+└──┬───┘  └────┬───┘  └──┬─┘
+ marca     aleatorio  contador
+ de tiempo (5 bytes)  (3 bytes)
+ (4 bytes)
+```
+
+- **Los 4 primeros bytes son la fecha de creación**, en segundos desde 1970. Compruébalo:
+
+```js
+const id = db.usuarios.findOne({ nombre: "Dani" })._id
+id.getTimestamp()
+```
+
+```text
+ISODate('2026-10-09T21:52:31.000Z')
+```
+
+Es el momento en que se generó el `ObjectId` (al hacer el `insertOne`), en UTC.
+
+- **Los 5 siguientes son aleatorios**, generados una vez por proceso: distinguen máquinas o procesos distintos.
+- **Los 3 últimos son un contador** que se incrementa con cada `ObjectId`. Genera dos seguidos:
+
+```js
+new ObjectId()
+new ObjectId()
+```
+
+```text
+ObjectId('6ac9621f275ed63c4f14fc69')
+ObjectId('6ac9621f275ed63c4f14fc6a')
+```
+
+Mismo segundo, mismo proceso: solo cambia el final (`…69`, `…6a`).
+
+Consecuencias prácticas:
+
+- **Se generan sin consultar al servidor:** el _driver_ puede crear el `_id` antes de insertar, sin riesgo de que se repita. Por eso no necesitas un contador central como el `INTEGER PRIMARY KEY` de SQLite.
+- **Se ordenan aproximadamente por fecha de creación:** ordenar por `_id` es casi ordenar por antigüedad.
+
+También puedes elegir tú el `_id`, si tienes una clave natural estable (B4.2):
+
+```js
+db.cursos.insertOne({ _id: "B1", titulo: "TypeScript desde cero" })
+db.cursos.insertOne({ _id: "B1", titulo: "Repetido" })
+```
+
+```text
+{ acknowledged: true, insertedId: 'B1' }
+MongoServerError: E11000 duplicate key error collection: academy_lab.cursos index: _id_ dup key: { _id: "B1" }
+```
+
+**`E11000`** es el error de clave duplicada, el equivalente al `UNIQUE constraint failed` de SQLite. Lo verás muchas veces, siempre con este formato: qué colección, qué índice (`_id_`, el que existe siempre) y qué valor se repitió.
+
+<Callout type="risk">
+
+- **Un `ObjectId` revela cuándo se creó algo:** si usas `_id` en URLs públicas (`/pedidos/6ac9621f…`), cualquiera puede saber la fecha y hora de creación. Normalmente no importa; en algunos contextos (cuándo se registró un usuario), sí.
+- **`ObjectId` no es un `string`:** `{ _id: "6ac9621f275ed63c4f14fc68" }` (texto) **no** encuentra el documento cuyo `_id` es `ObjectId('6ac9621f…')`. Son tipos distintos y la comparación falla en silencio, sin error. Es el error más común con MongoDB, y lo resolverás en B5.5.
+- **Los `ObjectId` no son secretos ni impredecibles:** son en parte secuenciales. Nunca los uses como token de seguridad (por ejemplo, en un enlace para restablecer una contraseña).
+
+</Callout>
+
+## Paso 5: BSON, más tipos que JSON
+
+MongoDB no guarda JSON, sino **BSON** (_Binary JSON_): un formato binario con **más tipos**. JSON solo tiene texto, número, booleano, `null`, objeto y array. BSON añade fechas, varios tipos de número, `ObjectId` y otros. Guarda el mismo dato de varias formas y pregúntale a MongoDB qué tipo tiene cada campo:
+
+```js
+db.tipos.insertOne({
+  fechaTexto: "09/10/2026",
+  fechaDate: new Date("2026-10-09T15:00:00Z"),
+  precioDouble: 0.1 + 0.2,
+  precioDecimal: Decimal128("0.30"),
+  entero: 5,
+  largo: NumberLong("9007199254740993"),
+})
+db.tipos.findOne({}, { _id: 0 })
+```
+
+```text
+{
+  fechaTexto: '09/10/2026',
+  fechaDate: ISODate('2026-10-09T15:00:00.000Z'),
+  precioDouble: 0.30000000000000004,
+  precioDecimal: Decimal128('0.30'),
+  entero: 5,
+  largo: Long('9007199254740993')
+}
 ```
 
 ```js
-use dani_academy                    // cambia de base de datos
-show collections
-db.section_progress.find().limit(3)
-db.section_progress.countDocuments({ userId: "6ac1…" })
-db.user.findOne({}, { email: 1, name: 1 })
+db.tipos.aggregate([{ $project: { _id: 0, fechaTexto: { $type: "$fechaTexto" }, fechaDate: { $type: "$fechaDate" }, precioDouble: { $type: "$precioDouble" }, precioDecimal: { $type: "$precioDecimal" }, entero: { $type: "$entero" }, largo: { $type: "$largo" } } }])
 ```
 
-<Callout type="warning">
-  En mongosh tienes acceso total a los datos reales. Antes de un `deleteMany` o un `updateMany`,
-  ejecuta un `find` con el mismo filtro y comprueba qué documentos afectará.
+```text
+[
+  {
+    fechaTexto: 'string',
+    fechaDate: 'date',
+    precioDouble: 'double',
+    precioDecimal: 'decimal',
+    entero: 'int',
+    largo: 'long'
+  }
+]
+```
+
+Por qué importa cada uno:
+
+- **`Date` frente a texto:** la fecha como texto (`'09/10/2026'`) es solo una cadena de caracteres. Ordénala:
+
+```js
+db.fechas.insertMany([{ f: "09/10/2026" }, { f: "10/01/2026" }, { f: "28/02/2026" }])
+db.fechas.find({}, { _id: 0 }).sort({ f: 1 })
+```
+
+```text
+[ { f: '09/10/2026' }, { f: '10/01/2026' }, { f: '28/02/2026' } ]
+```
+
+El 9 de octubre aparece **antes** que el 10 de enero y el 28 de febrero: se ordena alfabéticamente, carácter a carácter. Con `Date`, MongoDB guarda un instante exacto (en milisegundos, en UTC), ordena y compara correctamente, y permite operaciones de fecha (agrupar por día, sumar horas).
+
+- **`Decimal128` frente a `double`:** `0.1 + 0.2` en un `double` es `0.30000000000000004`, el mismo problema de JavaScript (B1.2). Para dinero, `Decimal128` guarda decimales exactos. (La alternativa más común es guardar céntimos como enteros).
+- **`int`, `long` y `double`:** los números de JavaScript son siempre `double`. MongoDB distingue enteros de 32 y 64 bits. `NumberLong("9007199254740993")` conserva un entero que un `double` no puede representar exactamente.
+- **`ObjectId`:** su propio tipo, como acabas de ver.
+
+<Callout type="risk">
+
+- **El tipo de un campo puede variar entre documentos.** Si un formulario guarda `km: "5"` (texto) en algunos entrenos y `km: 5` (número) en otros, la consulta `{ km: { $gte: 5 } }` solo encuentra los numéricos. Es un error silencioso y muy común cuando los datos vienen de formularios sin convertir (B1.1).
+- **`mongosh` y Node no muestran lo mismo:** `mongosh` enseña los tipos BSON (`ISODate(…)`, `Long(…)`); el _driver_ de Node los convierte a objetos de JavaScript (`Date`, `ObjectId`, `Long`). Y `JSON.stringify` los convierte a texto, perdiendo el tipo. Lo verás en B5.5.
+
 </Callout>
 
-## Las colecciones que crea Better Auth
+## Paso 6: las herramientas, y tus colecciones reales
 
-En tu app de entrenamiento (y en esta plataforma), Better Auth crea sus propias colecciones:
+Hay tres formas de trabajar con tu clúster, y las usarás todas:
 
-| Colección      | Contenido                                                                                                          |
-| -------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `user`         | Nombre, correo, `emailVerified`, fechas                                                                            |
-| `session`      | Un documento por sesión activa: `token`, `userId`, `expiresAt`                                                     |
-| `account`      | Cómo se autentica cada usuario; con correo y contraseña, `providerId: "credential"` y el **hash** de la contraseña |
-| `verification` | Códigos temporales (no se usan si no hay verificación de correo)                                                   |
+| Herramienta                       | Qué es                            | Para qué la usarás                                                                        |
+| --------------------------------- | --------------------------------- | ----------------------------------------------------------------------------------------- |
+| **Atlas** (web) → _Data Explorer_ | La interfaz web de tu clúster     | Mirar datos rápidamente, gestionar usuarios, IPs, índices y métricas                      |
+| **Compass**                       | Aplicación de escritorio gratuita | Explorar colecciones con comodidad, construir consultas visualmente, ver `explain` (B5.6) |
+| **`mongosh`**                     | Consola                           | Probar consultas exactas, scripts, tareas repetibles                                      |
 
-Fíjate en que `account.password` nunca es la contraseña: es un _hash_ con forma `sal:hash`.
+Instala Compass desde [mongodb.com/products/tools/compass](https://www.mongodb.com/products/tools/compass), pulsa _Add new connection_, pega la cadena de conexión de Atlas (_Connect_ → _Compass_) y conéctate.
 
-## Errores comunes
+Ahora explora, **sin modificar nada**, la base de datos real de tu proyecto. Con `mongosh`:
 
-- **Confundir base de datos y clúster.** Tu URI conecta con el clúster; el nombre de la base de datos se elige en el código (`MONGODB_DB`).
-- **Escribir sin querer en la base de datos equivocada** porque falta el nombre y se usa la de por defecto (`test`).
-- **Guardar fechas como texto** porque "en JSON son texto".
-- **Tratar la flexibilidad del esquema como permiso para el desorden.** Cada colección debe tener una forma clara.
+```js
+use dani_academy
+show collections
+db.user.findOne({}, { name: 1, email: 1, createdAt: 1 })
+db.session.countDocuments()
+db.account.findOne({}, { password: 0 })
+```
+
+Lo que encontrarás (en esta plataforma; en tu app de entrenamiento, las colecciones propias tendrán otros nombres):
+
+| Colección          | Quién la crea   | Campos (tipos)                                                                                                                                    |
+| ------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `user`             | Better Auth     | `_id` (ObjectId), `name`, `email`, `emailVerified` (Boolean), `createdAt`, `updatedAt` (Date)                                                     |
+| `session`          | Better Auth     | `_id`, `token`, `userId` (**ObjectId**), `expiresAt`, `ipAddress`, `userAgent`, `createdAt`, `updatedAt`                                          |
+| `account`          | Better Auth     | `_id`, `accountId`, `providerId` (`"credential"` para correo y contraseña), `userId` (ObjectId), `password` (el _hash_), `createdAt`, `updatedAt` |
+| `section_progress` | Esta plataforma | `userId` (**string**), `courseId`, `sectionId`, `readAt` (Date)                                                                                   |
+| `quiz_attempts`    | Esta plataforma | `userId`, `courseId`, `answers`, `results`, `score`, `total`, `passed`, `submittedAt`                                                             |
+| `study_sessions`   | Esta plataforma | `userId`, `startedAt`, `lastSeenAt`, `sectionIds`, `courseIds`                                                                                    |
+
+Fíjate en el detalle resaltado: **Better Auth guarda `userId` como `ObjectId`, y las colecciones de la plataforma lo guardan como texto** (el `id` que Better Auth entrega al código ya convertido a texto). Las dos opciones funcionan, pero no se pueden mezclar en una misma consulta. Es exactamente el error del Paso 4, y por eso conviene decidirlo una vez y respetarlo en todo el proyecto.
+
+<Callout type="risk">
+
+- **Explora con proyecciones que excluyan lo sensible:** `{ password: 0 }` oculta el _hash_ de la contraseña. No copies _hashes_, _tokens_ de sesión ni correos reales en capturas, chats o _issues_: un `token` de `session` es literalmente una sesión iniciada.
+- **No edites a mano las colecciones de Better Auth:** cambiar un `userId` o borrar una `account` desde Compass puede dejar usuarios sin poder entrar. Si necesitas cambiar algo, usa la API de la librería.
+- **Cuidado con `use` en producción:** `mongosh` no avisa de en qué base de datos estás antes de borrar. Mira siempre el _prompt_, y para practicar vuelve a `use academy_lab`.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Instala MongoDB Compass y conéctate a tu clúster de Atlas. 2. Explora la base de datos de tu
-  app de entrenamiento: anota qué colecciones hay, cuántos documentos tiene cada una y la forma de
-  un documento típico. 3. Localiza las colecciones de Better Auth (`user`, `session`, `account`) y
-  comprueba que `account.password` es un *hash*. 4. Instala `mongosh`, conéctate y repite tres
-  consultas de esta sección. 5. Toma un `_id` cualquiera y obtén su fecha de creación con
-  `getTimestamp()`.
+
+1. Conéctate a tu clúster con `mongosh` y con Compass.
+2. En `academy_lab`, crea una colección `entrenos` con tres documentos: uno de running (`tipo`, `km`, `minutos`, `fecha` como `Date`), uno de fuerza (`tipo`, `ejercicios` como array de objetos con `nombre`, `series` y `repeticiones`, y `fecha`) y uno de hidratación (`tipo`, `ml`, `fecha`).
+3. Comprueba con `$type` que todas las fechas son de tipo `date`.
+4. Averigua, a partir del `_id` de cada uno, en qué segundo se crearon.
+5. Explora `user`, `session` y `account` en tu proyecto (sin modificar nada) y apunta qué campo relaciona cada sesión con su usuario y de qué tipo es.
+
+</Callout>
+
+Solución de los puntos 2, 3 y 4, en `mongosh`:
+
+```js
+use academy_lab
+db.entrenos.insertMany([
+  { tipo: "running", km: 5.2, minutos: 28, fecha: new Date("2026-10-07T07:30:00Z") },
+  {
+    tipo: "fuerza",
+    ejercicios: [
+      { nombre: "sentadilla", series: 4, repeticiones: 8 },
+      { nombre: "press banca", series: 4, repeticiones: 10 },
+    ],
+    fecha: new Date("2026-10-08T18:00:00Z"),
+  },
+  { tipo: "hidratacion", ml: 500, fecha: new Date("2026-10-08T12:00:00Z") },
+])
+db.entrenos.aggregate([{ $project: { _id: 0, tipo: 1, tipoDeFecha: { $type: "$fecha" } } }])
+db.entrenos.find().toArray().map((e) => ({ tipo: e.tipo, creado: e._id.getTimestamp() }))
+```
+
+```text
+{
+  acknowledged: true,
+  insertedIds: {
+    '0': ObjectId('6ac9628d75670bffb56fbcd0'),
+    '1': ObjectId('6ac9628d75670bffb56fbcd1'),
+    '2': ObjectId('6ac9628d75670bffb56fbcd2')
+  }
+}
+[
+  { tipo: 'running', tipoDeFecha: 'date' },
+  { tipo: 'fuerza', tipoDeFecha: 'date' },
+  { tipo: 'hidratacion', tipoDeFecha: 'date' }
+]
+[
+  { tipo: 'running', creado: ISODate('2026-10-09T21:54:21.000Z') },
+  { tipo: 'fuerza', creado: ISODate('2026-10-09T21:54:21.000Z') },
+  { tipo: 'hidratacion', creado: ISODate('2026-10-09T21:54:21.000Z') }
+]
+```
+
+(Tus `ObjectId` y fechas de creación serán otros). Los tres se crearon en el mismo segundo con `insertMany`, así que solo se diferencian en el contador final. Fíjate en que la fecha de creación del documento (`_id`) y la **fecha del entreno** (`fecha`) son datos distintos: uno dice cuándo se guardó y el otro, cuándo ocurrió.
+
+Para el punto 5: el campo es **`userId`**, de tipo **`ObjectId`**, en `session` y en `account`. Para encontrar las sesiones de un usuario: `db.session.find({ userId: db.user.findOne({ email: "tu-correo" })._id }, { token: 0 })`, con la proyección `{ token: 0 }` para no mostrar los _tokens_.
+
+<Callout type="risk">
+
+- **`insertMany` es ordenado por defecto:** si el segundo documento fallara (por ejemplo, por un `_id` repetido), el tercero **no** se insertaría, pero el primero sí. Con `{ ordered: false }`, MongoDB intenta insertar todos y te informa de los que fallaron.
+- **Practica siempre en `academy_lab`:** cuando termines el curso, puedes borrarla entera con `use academy_lab` seguido de `db.dropDatabase()`. Ese comando, ejecutado por error en `dani_academy`, borraría todos los datos de la plataforma sin pedir confirmación.
+
 </Callout>
 
 <Callout type="mastery">
-  Sabes qué es un `ObjectId` y qué información contiene, y puedes explorar cualquier colección de
-  tus proyectos con Compass o mongosh.
+
+Sabes qué es un `ObjectId` y qué información contiene (fecha de creación, parte aleatoria y contador), distingues la jerarquía clúster → base de datos → colección → documento, eliges `Date` para fechas y `Decimal128` (o céntimos enteros) para dinero, y exploras las colecciones reales de tu proyecto sin modificar nada ni exponer datos sensibles.
+
 </Callout>
 
 ## Resumen
 
-- Clúster → base de datos → colección → documento.
-- Los documentos son objetos tipo JSON con `_id`, arrays y objetos anidados.
-- BSON añade tipos que JSON no tiene: `ObjectId`, `Date`, `Decimal128`…
-- Un `ObjectId` incluye su fecha de creación y lo genera el driver.
-- Compass y mongosh te permiten ver qué hay realmente guardado.
+- Clúster → base de datos → colección → documento. Bases de datos y colecciones se crean al primer `insert`.
+- Los documentos de una colección pueden tener formas distintas; la notación de punto consulta campos anidados y un valor simple encuentra arrays que lo contienen.
+- `_id` es la clave primaria: un `ObjectId` generado (fecha + aleatorio + contador) o un valor tuyo. Duplicarlo da `E11000`.
+- BSON tiene `Date`, `Decimal128`, `int`, `long` y `ObjectId`: las fechas como texto se ordenan mal y los `double` no son exactos para dinero.
+- Herramientas: Atlas, Compass y `mongosh`. Better Auth crea `user`, `session` y `account`, y guarda `userId` como `ObjectId`.

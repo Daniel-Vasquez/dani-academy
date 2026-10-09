@@ -4,158 +4,472 @@ course: "B5"
 title: "Fechas, ObjectId y errores comunes"
 order: 5
 minutes: 60
-summary: "Guardar fechas como Date y mostrarlas en tu zona horaria, trabajar con ObjectId desde las URLs y entender los errores más habituales."
+summary: "Buscas los entrenos de un día en hora de México sin perder los de la noche, conviertes ObjectId de forma segura, preparas documentos para el navegador, manejas E11000 y timeouts y migras fechas a Date."
 ---
 
-Tres fuentes de bugs que aparecen tarde o temprano en cualquier proyecto con MongoDB: fechas guardadas como texto, identificadores que llegan como string desde una URL y errores con códigos misteriosos. Esta sección los resuelve con lo que ya has visto funcionar en esta plataforma.
+Las tres fuentes de errores más frecuentes con MongoDB no son los operadores complicados, sino tres cosas aparentemente simples: **fechas**, **`ObjectId`** y **errores mal manejados**. Una fecha que se guarda bien pero se consulta en la zona horaria equivocada hace desaparecer los entrenos de la noche. Un identificador que llega de una URL como texto no encuentra nada. Un correo duplicado devuelve un error 500 en lugar de "ese correo ya está registrado". En esta sección vas a provocar cada uno, entender por qué ocurre y dejar en tu proyecto las funciones que lo resuelven. Terminarás con un script que migra a `Date` las fechas guardadas como texto.
 
-## Fechas: siempre `Date`
+**Lo que tendrás al terminar:** `src/fechas.ts` (rangos de días en hora de México), `src/ids.ts` (conversión segura de `ObjectId` y DTOs para el navegador), el manejo de los errores típicos y un script de migración idempotente.
 
-```ts
-// ❌ Texto
-await col.insertOne({ userId: "u3", fecha: "2026-10-05" });
+**Requisitos:** el proyecto `mongo-academy` de B5.4. Vuelve a crear los entrenos de prueba antes de empezar: `npm start -- src/03-sembrar.ts`.
 
-// ✅ Date
-await col.insertOne({ userId: "u3", fecha: new Date("2026-10-05T18:00:00Z") });
-```
+## Paso 1: la regla de las fechas, UTC en la base de datos
 
-Con texto, las consultas por rango **no funcionan** cuando las comparas con fechas:
+Un `Date` de JavaScript (y de BSON) no tiene zona horaria: es **un instante**, el número de milisegundos desde el 1 de enero de 1970 en UTC. La zona horaria solo aparece al **crear** una fecha a partir de un texto y al **mostrarla**. La regla es:
 
-```ts
-await col.countDocuments({ userId: "u3", fecha: { $gte: new Date("2026-01-01") } });
-// 0  ← el documento con fecha en texto no aparece
-```
+- **En la base de datos:** siempre `Date`, siempre instantes UTC.
+- **En la interfaz:** formatear en la zona del usuario (aquí, `America/Mexico_City`).
+- **Al construir fechas a partir de texto:** indicar siempre la zona.
 
-MongoDB no compara textos con fechas: son tipos distintos. Además, con `Date` puedes ordenar, agrupar por día o mes (`$dateToString`, `$dateTrunc`) y calcular duraciones.
-
-### Zonas horarias: UTC en la base de datos, local en la interfaz
-
-Un `Date` representa **un instante**; MongoDB lo guarda en UTC. La zona horaria solo importa al **mostrar** o al **agrupar por días**:
+Crea `src/fechas.ts`, con el formateador y la función que convierte un día de calendario en un intervalo de instantes:
 
 ```ts
-// Mostrar en la zona del usuario
-new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Mexico_City" })
-  .format(doc.fecha);
+// Archivo: src/fechas.ts
+// En la base de datos, instantes en UTC. En la interfaz, la hora del usuario.
+export const ZONA = "America/Mexico_City";
 
-// Agrupar por día en esa zona (en una agregación)
-{ $dateToString: { format: "%Y-%m-%d", date: "$startedAt", timezone: "America/Mexico_City" } }
-```
+const formatoFechaHora = new Intl.DateTimeFormat("es-MX", {
+  timeZone: ZONA,
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 
-<Callout type="note">
-  Así funciona la página `/progreso` de esta plataforma: una sesión a las 23:30 de Ciudad de México
-  (las 05:30 UTC del día siguiente) cuenta en **su** día gracias a `timezone` en la agregación. Sin
-  él, caería en el día siguiente.
-</Callout>
+export const mostrar = (fecha: Date) => formatoFechaHora.format(fecha);
 
-### Migrar fechas guardadas como texto
+/** Minutos de diferencia entre UTC y la zona en un instante dado (México: -360). */
+function desfaseMinutos(instante: Date, zona: string): number {
+  const partes = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: zona,
+      hourCycle: "h23",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    })
+      .formatToParts(instante)
+      .map((p) => [p.type, p.value]),
+  );
+  const comoUtc = Date.UTC(+partes.year!, +partes.month! - 1, +partes.day!, +partes.hour!, +partes.minute!, +partes.second!);
+  return Math.round((comoUtc - instante.getTime()) / 60_000);
+}
 
-```ts
-const conTexto = await col.find({ fecha: { $type: "string" } }).toArray();
-for (const doc of conTexto) {
-  await col.updateOne({ _id: doc._id }, { $set: { fecha: new Date(doc.fecha) } });
+/** El día "2026-10-09" en una zona horaria, como intervalo [inicio, fin) de instantes UTC. */
+export function rangoDelDia(dia: string, zona = ZONA): { inicio: Date; fin: Date } {
+  const medianocheUtc = new Date(`${dia}T00:00:00Z`);
+  const inicio = new Date(medianocheUtc.getTime() - desfaseMinutos(medianocheUtc, zona) * 60_000);
+  const fin = new Date(inicio.getTime() + 24 * 60 * 60 * 1000);
+  return { inicio, fin };
 }
 ```
 
-`$type: "string"` encuentra los documentos cuyo campo es texto. Pruébalo primero en una copia o con pocos documentos.
-
-## ObjectId desde una URL
-
-Una ruta como `/notas/6ac198dded8fd13366c7b66f` te da el identificador como **texto**. Para buscarlo, conviértelo:
+Y `src/05-fechas.ts`, que pone a prueba las tres formas de crear "el 9 de octubre" y busca los entrenos de un día:
 
 ```ts
-import { ObjectId } from "mongodb";
+// Archivo: src/05-fechas.ts
+import { cliente } from "./db";
+import { entrenos } from "./colecciones";
+import { mostrar, rangoDelDia } from "./fechas";
 
-export function toObjectId(id: string): ObjectId | null {
-  return ObjectId.isValid(id) ? ObjectId.createFromHexString(id) : null;
-}
+// 1. Tres formas de crear "el 9 de octubre", y lo que realmente guardan
+const comoTextoIso = new Date("2026-10-09"); // fecha sin hora: medianoche UTC
+const conHoraLocal = new Date("2026-10-09T00:00:00"); // sin zona: hora local de la máquina
+const conZona = new Date("2026-10-09T00:00:00-06:00"); // medianoche en México
+console.log(`1. "2026-10-09"           → ${comoTextoIso.toISOString()} → en México: ${mostrar(comoTextoIso)}`);
+console.log(`   "2026-10-09T00:00:00"  → ${conHoraLocal.toISOString()} (depende de la zona de la máquina)`);
+console.log(`   "…T00:00:00-06:00"     → ${conZona.toISOString()} → en México: ${mostrar(conZona)}`);
 
-const _id = toObjectId(params.id ?? "");
-if (!_id) return new Response("Identificador no válido", { status: 400 });
-const nota = await notas.findOne({ _id });
+// 2. Entrenos "del día" en México: un entreno a las 23:30 hora de México ya es el día siguiente en UTC
+await entrenos.deleteMany({ userId: "u_fechas" });
+await entrenos.insertMany([
+  { userId: "u_fechas", tipo: "running", minutos: 30, fecha: new Date("2026-10-09T13:00:00Z") }, // 07:00 en México
+  { userId: "u_fechas", tipo: "yoga", minutos: 45, fecha: new Date("2026-10-10T05:30:00Z") }, // 23:30 del día 9 en México
+  { userId: "u_fechas", tipo: "fuerza", minutos: 50, fecha: new Date("2026-10-10T07:00:00Z") }, // 01:00 del día 10 en México
+]);
+
+const ingenuo = await entrenos.countDocuments({
+  userId: "u_fechas",
+  fecha: { $gte: new Date("2026-10-09T00:00:00Z"), $lt: new Date("2026-10-10T00:00:00Z") },
+});
+const { inicio, fin } = rangoDelDia("2026-10-09");
+const correcto = await entrenos.find({ userId: "u_fechas", fecha: { $gte: inicio, $lt: fin } }).sort({ fecha: 1 }).toArray();
+console.log(`2. El 9 de octubre "en UTC": ${ingenuo} entreno(s)`);
+console.log(`   El 9 de octubre en México (${inicio.toISOString()} → ${fin.toISOString()}): ${correcto.length}`);
+for (const e of correcto) console.log(`   · ${e.tipo} a las ${mostrar(e.fecha)}`);
+
+await entrenos.deleteMany({ userId: "u_fechas" });
+await cliente.close();
 ```
 
-Si conviertes un texto inválido sin comprobar, el driver lanza:
+```bash
+npm start -- src/05-fechas.ts
+```
 
 ```text
-BSONError: input must be a 24 character hex string, 12 byte Uint8Array, or an integer
+1. "2026-10-09"           → 2026-10-09T00:00:00.000Z → en México: 8 oct 2026, 6:00 p.m.
+   "2026-10-09T00:00:00"  → 2026-10-09T06:00:00.000Z (depende de la zona de la máquina)
+   "…T00:00:00-06:00"     → 2026-10-09T06:00:00.000Z → en México: 9 oct 2026, 12:00 a.m.
+2. El 9 de octubre "en UTC": 1 entreno(s)
+   El 9 de octubre en México (2026-10-09T06:00:00.000Z → 2026-10-10T06:00:00.000Z): 2
+   · running a las 9 oct 2026, 7:00 a.m.
+   · yoga a las 9 oct 2026, 11:30 p.m.
 ```
 
-Sin la validación, eso sería un **500** en lugar de un **400**.
+El bloque 1 explica la mitad de los errores de fechas que verás en tu vida:
 
-### Comparar ObjectId
+- **`new Date("2026-10-09")`**: una fecha **sin hora** se interpreta como medianoche **UTC**. En México, eso es el **8 de octubre a las 6 de la tarde**. Si un usuario elige el 9 en un calendario y guardas `new Date(valorDelInput)`, verá el 8.
+- **`new Date("2026-10-09T00:00:00")`**: **con** hora pero **sin** zona, se interpreta en la zona de **la máquina**. En tu Mac da las 06:00 UTC; ejecútalo con `TZ=UTC npm start -- src/05-fechas.ts` (como en Vercel, que corre en UTC) y verás `2026-10-09T00:00:00.000Z`: **el mismo código da instantes distintos** según dónde se ejecute.
+- **Con la zona explícita** (`-06:00`), el resultado es el mismo en cualquier máquina.
 
-Un `ObjectId` es un objeto, así que `===` compara referencias, no valores:
+Y el bloque 2 es el error de los entrenos "perdidos": buscar "el 9 de octubre" de medianoche a medianoche **en UTC** encuentra solo 1 entreno. El de yoga de las 23:30 en México ya es día 10 en UTC (`05:30Z`), y quedó fuera. `rangoDelDia` calcula el intervalo correcto, de medianoche a medianoche **en México** (de `06:00Z` a `06:00Z` del día siguiente), y encuentra los 2.
 
-```ts
-const a = new ObjectId("6ac198dded8fd13366c7b66f");
-const b = new ObjectId("6ac198dded8fd13366c7b66f");
-a === b; // false
-a.equals(b); // true
-a.toHexString() === "6ac198dded8fd13366c7b66f"; // true
-```
+<Callout type="risk">
 
-### Enviar documentos al cliente
+- **El servidor no está en tu zona horaria:** en Vercel, `new Date().getHours()`, `toLocaleDateString()` sin `timeZone` y cualquier fecha sin zona usan **UTC**. Todo lo que funcione "por casualidad" en tu Mac (que está en la hora de México) fallará en producción. Por eso esta plataforma fija `APP_TIMEZONE=America/Mexico_City` y la usa en todos sus formateadores.
+- **`rangoDelDia` calcula el desfase de cada fecha:** México no tiene horario de verano desde 2022 (siempre UTC−6), pero otras zonas sí, y en ellas el desfase cambia según el día. Calcularlo con `Intl` para cada fecha (en lugar de restar 6 horas a mano) hace que la función sirva para cualquier zona.
+- **Los formateadores `Intl` son caros de crear:** `formatoFechaHora` se crea una vez, a nivel de módulo (B1.7), y se reutiliza.
 
-`JSON.stringify` convierte un `ObjectId` en su texto hexadecimal, pero tus tipos siguen diciendo `ObjectId`. Para APIs y componentes, es más claro **mapear** el documento a un objeto propio:
-
-```ts
-const dto = { id: doc._id.toHexString(), titulo: doc.titulo, fecha: doc.fecha.toISOString() };
-```
-
-<Callout type="tip">
-  Esta plataforma evita el problema guardando `userId` como **texto** (el `id` que da la sesión de
-  Better Auth): nunca hay que convertir ni comparar ObjectId para filtrar por usuario.
 </Callout>
 
-## Errores habituales y su causa
+## Paso 2: `ObjectId` y texto, y qué ve el navegador
 
-| Error                                                                                | Causa                                                                  | Qué hacer                                                                         |
-| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| `E11000 duplicate key error … index: userId_1_cursoId_1 dup key: …` (código `11000`) | Insertar un valor repetido en un índice único                          | Esperado con upserts simultáneos; en otro caso, es un dato duplicado real (→ 409) |
-| `MongoServerSelectionError` / _timeout_                                              | No llega al clúster: IP no permitida en Atlas, URI incorrecta, sin red | Revisar _Network Access_ en Atlas y la URI                                        |
-| `bad auth : authentication failed`                                                   | Usuario o contraseña incorrectos en la URI                             | Revisar el usuario de base de datos (no el de tu cuenta de Atlas)                 |
-| `BSONError: input must be a 24 character hex string…`                                | `new ObjectId()` con un texto inválido                                 | Validar con `ObjectId.isValid`                                                    |
-| `Document failed validation` (código `121`)                                          | El documento no cumple el `$jsonSchema` de la colección                | Corregir el dato; el validador está haciendo su trabajo                           |
-
-Para capturar un error concreto:
+Crea `src/ids.ts`:
 
 ```ts
-import { MongoServerError } from "mongodb";
+// Archivo: src/ids.ts
+import { ObjectId, type WithId } from "mongodb";
+import type { Entreno } from "./tipos";
 
-try {
-  await usuarios.insertOne(datos);
-} catch (error) {
-  if (error instanceof MongoServerError && error.code === 11000) {
-    return Response.json({ error: "Ese correo ya está registrado" }, { status: 409 });
-  }
-  throw error;
+/** Convierte un texto (de una URL, de un formulario) en ObjectId, o null si no es válido. */
+export function aObjectId(texto: string | null | undefined): ObjectId | null {
+  return texto && ObjectId.isValid(texto) ? new ObjectId(texto) : null;
+}
+
+/** Lo que se envía al navegador: tipos de JSON, sin sorpresas. */
+export interface EntrenoDTO {
+  id: string;
+  tipo: Entreno["tipo"];
+  minutos: number;
+  km: number | null;
+  fecha: string; // ISO 8601 en UTC
+}
+
+export function aDTO(doc: WithId<Entreno>): EntrenoDTO {
+  return {
+    id: doc._id.toHexString(),
+    tipo: doc.tipo,
+    minutos: doc.minutos,
+    km: doc.km ?? null,
+    fecha: doc.fecha.toISOString(),
+  };
 }
 ```
 
-## Errores comunes
+Y `src/05-ids.ts`:
 
-- **Fechas como texto** "porque vienen así del formulario": conviértelas al recibirlas.
-- **Agrupar por día sin zona horaria.**
-- **`new ObjectId(texto)` sin validar** el texto que llega de la URL.
-- **Comparar ObjectId con `===`.**
-- **Tratar todos los errores como 500**: un duplicado o un id inválido son errores del cliente.
+```ts
+// Archivo: src/05-ids.ts
+import { ObjectId } from "mongodb";
+import { cliente } from "./db";
+import { entrenos } from "./colecciones";
+import { aDTO, aObjectId } from "./ids";
+
+const doc = await entrenos.findOne({ userId: "u_demo" }, { sort: { fecha: 1 } });
+if (!doc) throw new Error("Ejecuta antes src/03-sembrar.ts");
+const idTexto = doc._id.toHexString(); // lo que llegaría en una URL: /entrenos/6ac9…
+
+// 1. Texto frente a ObjectId en un filtro
+const conTexto = await entrenos.countDocuments({ _id: idTexto as unknown as ObjectId });
+const conObjectId = await entrenos.countDocuments({ _id: new ObjectId(idTexto) });
+console.log(`1. Buscar por _id con el texto: ${conTexto} · con ObjectId: ${conObjectId}`);
+
+// 2. Validar antes de convertir: lo que llega de una URL puede ser cualquier cosa
+for (const entrada of [idTexto, "no-es-un-id", idTexto.slice(0, 23), ""]) {
+  console.log(`2. "${entrada}" → ${aObjectId(entrada) ? "ObjectId válido" : "null"}`);
+}
+
+// 3. new ObjectId con un texto inválido lanza un error
+try {
+  new ObjectId("no-es-un-id");
+} catch (error) {
+  console.log(`3. new ObjectId("no-es-un-id"): ${(error as Error).name}: ${(error as Error).message}`);
+}
+
+// 4. Lo que llega al navegador con JSON
+const comoJson = JSON.parse(JSON.stringify(doc));
+console.log(`4. Tras JSON: _id es ${typeof comoJson._id}, fecha es ${typeof comoJson.fecha} (${comoJson.fecha})`);
+console.log(`   ¿comoJson.fecha.getTime existe? ${typeof comoJson.fecha.getTime === "function"}`);
+
+// 5. Un DTO con tipos explícitos para el cliente
+console.log(`5. DTO: ${JSON.stringify(aDTO(doc))}`);
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/05-ids.ts
+```
+
+```text
+1. Buscar por _id con el texto: 0 · con ObjectId: 1
+2. "6ac9653eb2eef34c4cc8b997" → ObjectId válido
+2. "no-es-un-id" → null
+2. "6ac9653eb2eef34c4cc8b99" → null
+2. "" → null
+3. new ObjectId("no-es-un-id"): BSONError: input must be a 24 character hex string, 12 byte Uint8Array, or an integer
+4. Tras JSON: _id es string, fecha es string (2026-09-01T07:30:00.000Z)
+   ¿comoJson.fecha.getTime existe? false
+5. DTO: {"id":"6ac9653eb2eef34c4cc8b997","tipo":"running","minutos":30,"km":4,"fecha":"2026-09-01T07:30:00.000Z"}
+```
+
+(Tus identificadores serán otros). Punto por punto:
+
+1. **Un texto no es un `ObjectId`:** buscar `{ _id: "6ac9…" }` con el texto devuelve **0** documentos, sin error. Es el problema que viste en B5.1: tipos distintos no coinciden nunca. En la vida real ocurre cuando el `id` llega en la URL (`/entrenos/6ac9…`), que siempre es texto. Hay que convertirlo.
+2. **Valida antes de convertir:** `aObjectId` devuelve un `ObjectId` solo si el texto tiene exactamente 24 caracteres hexadecimales, y `null` en cualquier otro caso (un texto inventado, un identificador con un carácter de menos, una cadena vacía). Así, una URL manipulada da un 404 limpio.
+3. **Sin validar, `new ObjectId` lanza un error:** si conviertes directamente lo que llega de la URL, cualquiera que escriba `/entrenos/hola` provoca una excepción y, si no la capturas, un error 500.
+4. **JSON no conoce los tipos de BSON:** al enviar un documento al navegador con `JSON.stringify` (o `Response.json`), el `ObjectId` se convierte en texto y la `Date` en un texto ISO. En el navegador, `fecha.getTime()` ya no existe: `fecha` es un `string`. Si tu componente de React trata ese campo como `Date`, fallará en ejecución aunque TypeScript diga que todo está bien.
+5. **Un DTO** (_Data Transfer Object_) es un objeto con la forma exacta que va a recibir el cliente: `id` como texto, la fecha como texto ISO y los campos opcionales como `null` en lugar de ausentes. El tipo `EntrenoDTO` dice la verdad sobre lo que llega al navegador, y `aDTO` es el único lugar donde se hace la conversión.
+
+<Callout type="risk">
+
+- **El mismo identificador, dos tipos en dos colecciones:** en esta plataforma, Better Auth guarda `userId` como `ObjectId` y las colecciones propias como texto (B5.1). Si algún día cruzas datos entre ellas, convierte explícitamente. Mezclarlos es la causa más común de "la consulta no devuelve nada y no hay ningún error".
+- **No envíes documentos enteros al navegador:** además de los tipos, un documento puede tener campos que el cliente no debe ver (notas privadas, datos de otros usuarios, un _hash_). El DTO enumera solo lo que se envía. Es la versión de salida de "copia solo los campos permitidos" (B3.3).
+- **`ObjectId.isValid` ha cambiado con las versiones:** en versiones antiguas del paquete `bson`, aceptaba cualquier texto de 12 caracteres (como `"abcdefghijkl"`), porque lo interpretaba como 12 bytes. Con el _driver_ 7 ya no ocurre, pero si mantienes un proyecto antiguo, valida además con la expresión `/^[0-9a-f]{24}$/i`.
+
+</Callout>
+
+## Paso 3: los errores que más verás, y cómo manejarlos
+
+Crea `src/05-errores.ts`:
+
+```ts
+// Archivo: src/05-errores.ts
+// Los errores que más verás con MongoDB, provocados a propósito y manejados
+import { MongoClient, MongoServerError, MongoServerSelectionError } from "mongodb";
+import { cliente, db } from "./db";
+
+// 1. Clave duplicada (E11000): un índice único que se viola
+const usuarios = db.collection<{ nombre: string; email: string }>("usuarios_unicos");
+await usuarios.drop().catch(() => {});
+await usuarios.createIndex({ email: 1 }, { unique: true });
+await usuarios.insertOne({ nombre: "Dani", email: "dani@ejemplo.com" });
+
+async function registrar(nombre: string, email: string): Promise<string> {
+  try {
+    await usuarios.insertOne({ nombre, email });
+    return `${email} registrado`;
+  } catch (error) {
+    if (error instanceof MongoServerError && error.code === 11000) {
+      return `Ese correo ya está registrado (código ${error.code}, clave ${JSON.stringify(error.keyValue)})`;
+    }
+    throw error; // cualquier otro error no es "esperado": que suba
+  }
+}
+console.log(`1. ${await registrar("Otra Dani", "dani@ejemplo.com")}`);
+console.log(`   ${await registrar("Ana", "ana@ejemplo.com")}`);
+
+// 2. Validación de esquema ($jsonSchema): la base de datos rechaza documentos mal formados
+await db.collection("entrenos_validados").drop().catch(() => {});
+await db.createCollection("entrenos_validados", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["userId", "minutos", "fecha"],
+      properties: {
+        userId: { bsonType: "string" },
+        minutos: { bsonType: ["int", "double"], minimum: 1, maximum: 600 },
+        fecha: { bsonType: "date" },
+      },
+    },
+  },
+});
+try {
+  await db.collection("entrenos_validados").insertOne({ userId: "u_demo", minutos: 30, fecha: "2026-10-09" });
+} catch (error) {
+  if (error instanceof MongoServerError && error.code === 121) {
+    console.log(`2. ${error.message} (código ${error.code})`);
+    console.log(`   Detalle: ${JSON.stringify(error.errInfo?.details?.schemaRulesNotSatisfied)}`);
+  } else throw error;
+}
+
+// 3. Servidor inaccesible (IP no permitida en Atlas, clúster pausado, URI mal escrita)
+const inaccesible = new MongoClient("mongodb://127.0.0.1:27999/", { serverSelectionTimeoutMS: 2_000 });
+const inicio = performance.now();
+try {
+  await inaccesible.db("x").command({ ping: 1 });
+} catch (error) {
+  const segundos = ((performance.now() - inicio) / 1000).toFixed(1);
+  if (error instanceof MongoServerSelectionError) {
+    console.log(`3. ${error.name} tras ${segundos} s: ${error.message}`);
+  } else throw error;
+} finally {
+  await inaccesible.close();
+}
+
+await usuarios.drop();
+await db.collection("entrenos_validados").drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/05-errores.ts
+```
+
+```text
+1. Ese correo ya está registrado (código 11000, clave {"email":"dani@ejemplo.com"})
+   ana@ejemplo.com registrado
+2. Document failed validation (código 121)
+   Detalle: [{"operatorName":"properties","propertiesNotSatisfied":[{"propertyName":"fecha","details":[{"operatorName":"bsonType","specifiedAs":{"bsonType":"date"},"reason":"type did not match","consideredValue":"2026-10-09","consideredType":"string"}]}]}]
+3. MongoServerSelectionError tras 2.0 s: connect ECONNREFUSED 127.0.0.1:27999
+```
+
+Los tres, uno a uno:
+
+**1. Clave duplicada (`E11000`, código `11000`).** Un índice único (aquí, el del correo) rechaza el segundo documento. Es un error **esperado**: forma parte del funcionamiento normal (alguien intenta registrarse con un correo que ya existe). Se captura comprobando `error instanceof MongoServerError && error.code === 11000`, y `error.keyValue` dice qué valor chocó. Se convierte en un mensaje para el usuario (o en un `409 Conflict`, B3.3). Cualquier **otro** error se vuelve a lanzar (`throw error`), porque no es esperado y debe llegar al manejo general (un 500 y un registro).
+
+**2. Validación de esquema (código `121`).** Con un validador `$jsonSchema` en la colección, la base de datos rechaza los documentos que no cumplen las reglas: aquí, una `fecha` que llegó como texto. `error.errInfo.details` explica exactamente qué propiedad falló y por qué (`"consideredType":"string"`). Esta plataforma tiene validadores así en sus colecciones (`scripts/db-setup.ts`): son la última línea de defensa si un bug del código intenta guardar datos mal formados.
+
+**3. Servidor inaccesible (`MongoServerSelectionError`).** El _driver_ no encontró ningún servidor en el tiempo de `serverSelectionTimeoutMS` (aquí, 2 segundos). En local, el mensaje dice la causa (`ECONNREFUSED`: no hay nada escuchando en ese puerto). Con Atlas, este error aparece casi siempre por una de estas razones:
+
+| Síntoma                                             | Causa más habitual                                                                | Solución                                                 |
+| --------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| `MongoServerSelectionError` tras el _timeout_       | Tu IP no está en _Network Access_                                                 | Añádela en Atlas (o `0.0.0.0/0` para Vercel)             |
+| `MongoServerSelectionError` tras el _timeout_       | El clúster está pausado (los M0 se pausan tras semanas sin uso)                   | Reanúdalo en Atlas                                       |
+| Un error de autenticación (`authentication failed`) | Usuario o contraseña incorrectos, o caracteres especiales sin codificar en la URI | Revisa _Database Access_ y codifica la contraseña (B5.2) |
+| `querySrv ENOTFOUND`                                | El nombre del clúster en la URI está mal escrito                                  | Copia de nuevo la cadena de conexión desde Atlas         |
+
+<Callout type="risk">
+
+- **No conviertas todos los errores en "ya existe":** capturar cualquier error del `insertOne` y responder "ese correo ya está registrado" esconde caídas de la base de datos y fallos de validación. Comprueba el código concreto (`11000`) y deja pasar los demás.
+- **No envíes `error.message` de MongoDB al usuario:** el mensaje de `E11000` incluye el nombre de la colección, del índice y el valor duplicado; el de validación, la estructura de tus datos. Es información para tus registros, no para la interfaz.
+- **Un _timeout_ corto en producción también tiene riesgo:** con 2 segundos, una sobrecarga momentánea de la red hace fallar peticiones que habrían funcionado en 3. Esta plataforma usa 5 segundos: suficiente para recuperarse de un pico y lo bastante corto para no dejar al usuario esperando medio minuto.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Busca en tu Planificador 2026 campos de fecha guardados como texto con `{ campo: { $type: "string" } }` en Compass.
-  2. Escribe un script de migración que los convierta a `Date` y pruébalo primero con un documento.
-  3. Crea la función `toObjectId` y úsala en un endpoint que reciba un id por la URL; comprueba que un id inválido devuelve 400.
-  4. Provoca un error `E11000` con un índice único y captúralo para devolver un 409.
+
+1. En tu Planificador 2026, busca campos de fecha guardados como texto. En `mongosh`: `db.tareas.aggregate([{ $group: { _id: { $type: "$fechaLimite" }, total: { $sum: 1 } } }])`.
+2. Escribe un script de migración que convierta esas fechas a `Date`, que se pueda ejecutar varias veces sin estropear nada, que no invente fechas a partir de textos que no lo son (como `"mañana"` o un `31/02`) y que informe de los que no pudo convertir.
+3. Pruébalo primero con datos de ejemplo en `academy_lab`, nunca directamente en producción.
+
+</Callout>
+
+Solución completa, `src/05-migrar-fechas.ts`. Con `--sembrar`, crea antes unas tareas de ejemplo con todos los problemas típicos:
+
+```ts
+// Archivo: src/05-migrar-fechas.ts
+// Migra el campo fechaLimite de texto ("09/10/2026" o "2026-10-09") a Date. Se puede ejecutar varias veces.
+import type { AnyBulkWriteOperation, ObjectId } from "mongodb";
+import { cliente, db } from "./db";
+import { rangoDelDia } from "./fechas";
+
+interface Tarea {
+  _id?: ObjectId;
+  titulo: string;
+  fechaLimite?: string | Date;
+}
+const tareas = db.collection<Tarea>("tareas_planificador");
+
+// Datos de ejemplo con el problema (en tu Planificador, ya los tendrás)
+const SEMBRAR = process.argv.includes("--sembrar");
+if (SEMBRAR) {
+  await tareas.deleteMany({});
+  await tareas.insertMany([
+    { titulo: "Revisar pull request", fechaLimite: "09/10/2026" },
+    { titulo: "Pagar la luz", fechaLimite: "2026-10-15" },
+    { titulo: "Renovar pasaporte", fechaLimite: "31/02/2026" }, // no existe
+    { titulo: "Leer B5.5", fechaLimite: "mañana" },
+    { titulo: "Correr 10 km" }, // sin fecha
+    { titulo: "Llamar a mamá", fechaLimite: new Date("2026-10-12T06:00:00Z") }, // ya migrada
+  ]);
+}
+
+/** "09/10/2026" o "2026-10-09" → "2026-10-09", o null si no es una fecha real. */
+function normalizarDia(texto: string): string | null {
+  const dmy = texto.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  const ymd = texto.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const [anio, mes, dia] = dmy ? [dmy[3], dmy[2], dmy[1]] : ymd ? [ymd[1], ymd[2], ymd[3]] : [];
+  if (!anio || !mes || !dia) return null;
+  const iso = `${anio}-${mes}-${dia}`;
+  const comprobacion = new Date(`${iso}T00:00:00Z`);
+  // Date convierte el 31 de febrero en el 3 de marzo: si cambia, la fecha no existía
+  return comprobacion.toISOString().slice(0, 10) === iso ? iso : null;
+}
+
+const operaciones: AnyBulkWriteOperation<Tarea>[] = [];
+const fallidas: string[] = [];
+
+// Solo las que siguen siendo texto: así el script es idempotente
+for await (const tarea of tareas.find({ fechaLimite: { $type: "string" } })) {
+  const dia = normalizarDia(tarea.fechaLimite as string);
+  if (!dia) {
+    fallidas.push(`"${tarea.titulo}" (${tarea.fechaLimite})`);
+    continue;
+  }
+  // Una fecha límite sin hora = el inicio de ese día en México
+  operaciones.push({ updateOne: { filter: { _id: tarea._id }, update: { $set: { fechaLimite: rangoDelDia(dia).inicio } } } });
+}
+
+if (operaciones.length > 0) {
+  const { modifiedCount } = await tareas.bulkWrite(operaciones);
+  console.log(`Migradas: ${modifiedCount}`);
+} else {
+  console.log("Migradas: 0 (no queda nada por migrar)");
+}
+console.log(`No se pudieron convertir: ${fallidas.length ? fallidas.join(", ") : "ninguna"}`);
+
+const resumen = await tareas
+  .aggregate<{ _id: string; total: number }>([{ $group: { _id: { $type: "$fechaLimite" }, total: { $sum: 1 } } }, { $sort: { _id: 1 } }])
+  .toArray();
+console.log(`Tipos de fechaLimite ahora: ${resumen.map((r) => `${r._id}: ${r.total}`).join(" · ")}`);
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/05-migrar-fechas.ts --sembrar
+npm start -- src/05-migrar-fechas.ts
+```
+
+```text
+Migradas: 2
+No se pudieron convertir: "Renovar pasaporte" (31/02/2026), "Leer B5.5" (mañana)
+Tipos de fechaLimite ahora: date: 3 · missing: 1 · string: 2
+Migradas: 0 (no queda nada por migrar)
+No se pudieron convertir: "Renovar pasaporte" (31/02/2026), "Leer B5.5" (mañana)
+Tipos de fechaLimite ahora: date: 3 · missing: 1 · string: 2
+```
+
+Las decisiones del script:
+
+- **Idempotente:** solo procesa documentos cuyo campo **sigue siendo texto** (`$type: "string"`). La segunda ejecución no encuentra nada que migrar y no toca lo ya convertido. Así puedes repetirlo sin miedo tras corregir a mano los casos fallidos.
+- **No inventa fechas:** `new Date("2026-02-31")` no da error, da el **3 de marzo**. `normalizarDia` comprueba que la fecha resultante coincide con la escrita, y si no, la descarta. Lo mismo con `"mañana"`: mejor un informe de pendientes que una fecha falsa.
+- **Una fecha sin hora es un día en México:** "09/10/2026" se guarda como el inicio de ese día en México (`06:00Z`), con `rangoDelDia` del Paso 1. Así se muestra como 9 de octubre en la interfaz.
+- **`bulkWrite`:** envía todas las actualizaciones en un solo viaje a la base de datos, en lugar de una petición por documento.
+- **El resumen final** cuenta los tipos del campo (`date`, `string`, `missing` para los que no lo tienen) con `$type` dentro de una agregación: la comprobación objetiva de que la migración hizo lo que debía.
+
+<Callout type="risk">
+
+- **Haz una copia antes de migrar datos reales:** con `mongodump` (o exportando la colección desde Compass) guardas el estado anterior. Si la migración tiene un error, podrás volver atrás.
+- **Las fechas `DD/MM/AAAA` y `MM/DD/AAAA` son indistinguibles** cuando el día es 12 o menor: `"09/10/2026"` puede ser el 9 de octubre o el 10 de septiembre. El script asume el formato de México (día primero). Si tus datos vienen de fuentes distintas, revisa los casos ambiguos antes de migrar.
+- **Después de migrar, impide que vuelva a pasar:** cambia el código que guardaba texto para que guarde `Date`, y añade a la colección un validador `$jsonSchema` con `fecha: { bsonType: "date" }` (Paso 3). Si no, dentro de un mes tendrás que repetir la migración.
+
 </Callout>
 
 <Callout type="mastery">
-  Nunca más guardas una fecha como texto, validas los ObjectId que llegan del exterior y sabes
-  interpretar los errores habituales de MongoDB.
+
+Nunca más guardas una fecha como texto: guardas instantes UTC en `Date`, construyes las fechas con zona explícita y buscas "los entrenos de hoy" con un rango calculado en la zona del usuario. Conviertes los identificadores con validación, envías DTOs al navegador y manejas `E11000`, la validación de esquema y los _timeouts_ con el código adecuado para cada uno.
+
 </Callout>
 
 ## Resumen
 
-- Fechas siempre como `Date`: se guardan en UTC y se muestran o agrupan en la zona del usuario.
-- `$type: "string"` encuentra datos mal tipados para migrarlos.
-- Convierte los ids de la URL con `ObjectId.isValid` y `createFromHexString`.
-- Compara ObjectId con `.equals()` o por su texto, nunca con `===`.
-- Cada error común tiene una causa clara; un duplicado o un id inválido no son un 500.
+- En la base de datos, `Date` en UTC; en la interfaz, formateo con `timeZone`. Una fecha sin hora es medianoche UTC (el día anterior en México), y una con hora pero sin zona depende de la máquina.
+- Los rangos de un día se calculan en la zona del usuario: `[inicio, fin)` en instantes UTC.
+- Un texto no encuentra un `ObjectId`: valida con `ObjectId.isValid` y convierte; `new ObjectId("hola")` lanza un error.
+- JSON convierte `ObjectId` y `Date` en texto: envía DTOs con tipos honestos.
+- `E11000` (código 11000) es esperado y se traduce para el usuario; la validación es el código 121; `MongoServerSelectionError` suele ser IP, clúster pausado o URI mal escrita.
