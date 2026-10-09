@@ -24,6 +24,15 @@ Todas las secciones siguen la misma estructura, pensada para tu forma de aprende
 - **Ejercicio:** lo que debes construir o resolver tú.
 - **Lo dominas si…:** criterio concreto para saber que puedes pasar a la siguiente sección.
 
+**Cómo se escribe cada lección en la plataforma (formato "receta", obligatorio desde el 9 de octubre de 2026).** Este temario define *qué* se enseña; las lecciones MDX de `src/content/sections/` lo desarrollan así:
+
+1. **Paso a paso:** la teoría se convierte en una secuencia de acciones (*Paso 1*, *Paso 2*…) que va desde cero hasta una implementación final que funciona, sin dar saltos.
+2. **Detalle exhaustivo:** cada paso explica el *por qué* y el *cómo*, con analogías y ejemplos reales detallados.
+3. **Código literal para copiar y pegar:** archivos completos y funcionales, sin `// ... resto del código`. Los ejercicios incluyen la solución completa. Todo el código se ejecuta y se comprueba antes de publicarlo.
+4. **Complicaciones y riesgos:** después de cada bloque de código importante, un bloque `<Callout type="risk">` con errores comunes, problemas de rendimiento, de seguridad y trampas de la tecnología.
+
+Los títulos, el orden y los temas de cada sección no cambian; solo cambia la forma de explicarlos.
+
 Cada curso cierra con:
 
 - **Proyecto del curso:** integra todas sus secciones en algo real.
@@ -344,8 +353,8 @@ function resumen(a: Actividad): string {
   "include": [".astro/types.d.ts", "**/*"],
   "exclude": ["dist"],
   "compilerOptions": {
-    "baseUrl": ".",
-    "paths": { "@/*": ["src/*"] },
+    // Sin baseUrl: TypeScript 7 lo eliminó; las rutas de paths empiezan por "./"
+    "paths": { "@/*": ["./src/*"] },
     "jsx": "react-jsx",
     "jsxImportSource": "react"
   }

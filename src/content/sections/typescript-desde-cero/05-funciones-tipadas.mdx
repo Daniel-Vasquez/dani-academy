@@ -4,179 +4,461 @@ course: "B1"
 title: "Funciones tipadas"
 order: 5
 minutes: 60
-summary: "Parámetros, retornos, funciones como tipos y funciones asíncronas con Promise<T>."
+summary: "Tipas funciones paso a paso (parámetros opcionales, valores por defecto, callbacks, void) y terminas llamando a una API real con fetch y Promise<T>, entendiendo qué garantiza un as y qué no."
 ---
 
-Las funciones son los **bordes** de tu código: por ellas entran y salen los datos. Por eso es donde más rinde tipar con cuidado. En esta sección vas a tipar parámetros y retornos, describir funciones como tipos y, lo más importante para tus proyectos, trabajar con funciones asíncronas que llaman a APIs.
+Las funciones son los **contratos** de tu código: una función bien tipada dice qué necesita, qué devuelve y qué puede fallar, sin que tengas que leer su implementación. En esta sección vas a construir, paso a paso, un pequeño cliente de tareas: empiezas con funciones sencillas, pasas por parámetros opcionales y valores por defecto, aprendes a tipar funciones que reciben otras funciones (como los manejadores de eventos de React) y terminas **llamando a una API real** con `fetch`, `async/await` y `Promise<T>`.
 
-## Parámetros y retorno
+**Lo que tendrás al terminar:** `src/05-api-tareas.ts`, un archivo que descarga tareas de una API pública, las filtra con funciones tipadas y maneja los errores de red y de HTTP.
 
-```ts
-function calcularVolumen(series: number, reps: number, peso: number): number {
-  return series * reps * peso;
-}
-```
+**Requisitos:** el `ts-playground` y conexión a internet (usarás `https://jsonplaceholder.typicode.com`, una API pública de pruebas que no necesita registro).
 
-- Los **parámetros** siempre se anotan (TypeScript no puede adivinarlos).
-- El **retorno** se infiere, pero anotarlo en funciones importantes protege el contrato: si cambias la implementación y devuelves otra cosa, el error aparece en la función y no en quien la usa.
+## Paso 1: parámetros obligatorios, opcionales y con valor por defecto
 
-TypeScript también comprueba el número de argumentos, algo que JavaScript no hace:
+Una función puede tener tres clases de parámetros. Crea `src/05-parametros.ts`:
 
 ```ts
-calcularVolumen(4, 8); // ❌ Expected 3 arguments, but got 2.
-```
-
-## Parámetros opcionales, por defecto y _rest_
-
-```ts
-function formatearPeso(kg: number, decimales = 1, unidad?: string): string {
-  return `${kg.toFixed(decimales)} ${unidad ?? "kg"}`;
+// Archivo: src/05-parametros.ts
+// 1. Obligatorio: siempre hay que pasarlo
+// 2. Opcional (?): puede omitirse; dentro de la función vale undefined
+// 3. Con valor por defecto (=): puede omitirse; dentro de la función nunca es undefined
+function formatearEntreno(tipo: string, notas?: string, minutos = 30): string {
+  const base = `${tipo} · ${minutos} min`;
+  return notas ? `${base} · ${notas}` : base;
 }
 
-formatearPeso(80.456); // "80.5 kg"
-formatearPeso(80.456, 2, "kilos"); // "80.46 kilos"
-```
+console.log(formatearEntreno("running"));
+console.log(formatearEntreno("fuerza", "Pierna"));
+console.log(formatearEntreno("yoga", undefined, 45));
 
-- `decimales = 1`: tiene valor por defecto, así que es opcional y su tipo (`number`) se infiere.
-- `unidad?`: opcional sin valor por defecto; dentro de la función es `string | undefined`.
-- Los opcionales van **siempre al final**.
-
-Con _rest parameters_ recibes un número variable de argumentos como array:
-
-```ts
+// Parámetro rest: un número variable de argumentos, que llegan como array
 function sumarKm(...distancias: number[]): number {
-  return distancias.reduce((acc, km) => acc + km, 0);
+  return distancias.reduce((total, km) => total + km, 0);
 }
 
-sumarKm(5, 3.2, 10); // 18.2
+console.log(`Total: ${sumarKm(5, 3.2, 10)} km`);
+console.log(`Sin datos: ${sumarKm()} km`);
 ```
 
-## Funciones flecha y funciones como tipo
-
-Las funciones flecha se tipan igual:
-
-```ts
-const doble = (n: number): number => n * 2;
+```bash
+npm start -- src/05-parametros.ts
 ```
 
-A veces lo que quieres tipar es **la forma de una función**, por ejemplo, un _callback_:
+```text
+running · 30 min
+fuerza · 30 min · Pierna
+yoga · 45 min
+Total: 18.2 km
+Sin datos: 0 km
+```
+
+Pasa el ratón por `formatearEntreno` y verás su **firma** (lo que pide y lo que devuelve):
+
+```text
+function formatearEntreno(tipo: string, notas?: string, minutos?: number): string
+```
+
+Observa los detalles:
+
+- **`minutos = 30`** no tiene anotación: TypeScript infiere `number` del valor por defecto. Desde fuera aparece como `minutos?: number` (se puede omitir), pero **dentro** de la función su tipo es `number`, nunca `undefined`.
+- **`notas?: string`** dentro de la función es `string | undefined`. Por eso se comprueba con `notas ? ... : ...` antes de usarla.
+- **`...distancias: number[]`** recoge todos los argumentos sueltos en un array. `sumarKm()` sin argumentos recibe `[]`.
+
+<Callout type="risk">
+
+- **Los opcionales van al final:** `function f(a?: string, b: number)` da `error TS1016: A required parameter cannot follow an optional parameter.` Si necesitas saltarte un parámetro del medio (como `notas` en la tercera llamada), tienes que pasar `undefined` de forma explícita, lo que es feo y propenso a errores.
+- **Más de tres parámetros = usa un objeto.** `formatearEntreno("yoga", undefined, 45)` obliga a recordar el orden. Con un objeto, `formatearEntreno({ tipo: "yoga", minutos: 45 })` se lee solo y el orden deja de importar. Es el patrón que usan las _props_ de React.
+- **El valor por defecto solo se aplica con `undefined`:** si pasas `null`, `minutos` vale `null`. Con `strict`, TypeScript no te deja pasar `null` a un `number`, así que el compilador te protege.
+
+</Callout>
+
+## Paso 2: el patrón del objeto de opciones
+
+Aplica el consejo anterior: cuando una función tiene varios parámetros opcionales, recibe **un solo objeto** y desestructúralo en la firma. Crea `src/05-opciones.ts`:
 
 ```ts
-type Filtro = (tarea: Tarea) => boolean;
+// Archivo: src/05-opciones.ts
+interface OpcionesFormato {
+  tipo: string;
+  minutos?: number;
+  notas?: string;
+  unidad?: "min" | "h";
+}
 
+function formatearEntreno({ tipo, minutos = 30, notas, unidad = "min" }: OpcionesFormato): string {
+  const duracion = unidad === "h" ? `${(minutos / 60).toFixed(1)} h` : `${minutos} min`;
+  return notas ? `${tipo} · ${duracion} · ${notas}` : `${tipo} · ${duracion}`;
+}
+
+console.log(formatearEntreno({ tipo: "running" }));
+console.log(formatearEntreno({ tipo: "yoga", minutos: 45 }));
+console.log(formatearEntreno({ tipo: "senderismo", minutos: 150, unidad: "h", notas: "Desierto de los Leones" }));
+```
+
+```bash
+npm start -- src/05-opciones.ts
+```
+
+```text
+running · 30 min
+yoga · 45 min
+senderismo · 2.5 h · Desierto de los Leones
+```
+
+La desestructuración `{ tipo, minutos = 30, notas, unidad = "min" }` saca cada propiedad a su propia variable y aplica los valores por defecto. El tipo va **después** del patrón completo (`}: OpcionesFormato`), no al lado de cada variable.
+
+<Callout type="risk">
+
+- **Error típico de sintaxis:** `function f({ tipo: string })` **no** tipa `tipo` como `string`: en desestructuración, `tipo: string` significa "renombra `tipo` a una variable llamada `string`". Con `strict`, TypeScript lo delata con un error desconcertante: `error TS7031: Binding element 'string' implicitly has an 'any' type.` Si ves ese mensaje, ya sabes qué ha pasado. El tipo siempre va tras el patrón completo: `function f({ tipo }: { tipo: string })`.
+- **Errata en las opciones:** `formatearEntreno({ tipo: "yoga", minuto: 45 })` da error gracias al _excess property checking_ de B1.3. Si construyes el objeto en una variable antes, la errata pasaría sin aviso; anota la variable como `OpcionesFormato`.
+
+</Callout>
+
+## Paso 3: funciones como tipos
+
+En JavaScript, las funciones son valores: se guardan en variables y se pasan como argumentos (`.filter`, `.map`, `addEventListener`, el `onClick` de React). Para tipar una función **como valor**, se escribe su firma con una flecha. Crea `src/05-callbacks.ts`:
+
+```ts
+// Archivo: src/05-callbacks.ts
 interface Tarea {
-  id: string;
+  id: number;
   titulo: string;
   hecha: boolean;
 }
 
-const pendientes: Filtro = (t) => !t.hecha; // `t` ya es Tarea: no hace falta anotarlo
-const urgentes: Filtro = (t) => t.titulo.startsWith("!");
+// El tipo de una función: recibe una Tarea y devuelve boolean
+type Filtro = (tarea: Tarea) => boolean;
 
-function filtrar(tareas: Tarea[], filtro: Filtro): Tarea[] {
-  return tareas.filter(filtro);
+const pendientes: Filtro = (t) => !t.hecha; // t ya es Tarea: no hay que anotarlo
+const completadas: Filtro = (t) => t.hecha;
+const contiene =
+  (texto: string): Filtro =>
+  (t) =>
+    t.titulo.toLowerCase().includes(texto.toLowerCase());
+
+function filtrar(tareas: Tarea[], ...filtros: Filtro[]): Tarea[] {
+  return tareas.filter((tarea) => filtros.every((filtro) => filtro(tarea)));
+}
+
+const tareas: Tarea[] = [
+  { id: 1, titulo: "Correr 5 km", hecha: true },
+  { id: 2, titulo: "Correr series de 400 m", hecha: false },
+  { id: 3, titulo: "Leer sección B1.5", hecha: false },
+];
+
+console.log("Pendientes:", filtrar(tareas, pendientes).map((t) => t.titulo));
+console.log("Completadas:", filtrar(tareas, completadas).map((t) => t.titulo));
+console.log("Pendientes de correr:", filtrar(tareas, pendientes, contiene("correr")).map((t) => t.titulo));
+```
+
+```bash
+npm start -- src/05-callbacks.ts
+```
+
+```text
+Pendientes: [ 'Correr series de 400 m', 'Leer sección B1.5' ]
+Completadas: [ 'Correr 5 km' ]
+Pendientes de correr: [ 'Correr series de 400 m' ]
+```
+
+- **`type Filtro = (tarea: Tarea) => boolean`** se lee "una función que recibe una `Tarea` y devuelve un `boolean`". El nombre del parámetro (`tarea`) es solo documentación.
+- **Tipado contextual:** en `const pendientes: Filtro = (t) => !t.hecha`, no escribes el tipo de `t`. TypeScript lo deduce del tipo `Filtro` que espera la variable. Lo mismo pasa en `.filter((tarea) => ...)` o en el `onClick={(e) => ...}` de React.
+- **`contiene` es una función que devuelve una función** (una _fábrica_ de filtros). Su tipo de retorno es `Filtro`. Este patrón es habitual en React y en los _middleware_.
+
+<Callout type="risk">
+
+- **Callbacks con menos parámetros:** TypeScript permite pasar una función que usa **menos** parámetros de los declarados (`(t) => true` es un `Filtro` válido aunque no use `t`). Es intencionado: por eso `array.forEach((x) => ...)` funciona aunque `forEach` pase tres argumentos.
+- **El clásico `map(parseInt)`:** `["1", "2", "3"].map(parseInt)` devuelve `[1, NaN, NaN]`, porque `map` pasa `(valor, índice)` y `parseInt` interpreta el índice como base numérica. TypeScript no lo detecta, porque los tipos encajan. Escribe siempre la flecha: `.map((s) => Number.parseInt(s, 10))`.
+- **Rendimiento:** con varios filtros, `filtros.every` llama a cada uno para cada tarea. Con listas pequeñas es irrelevante; con miles de elementos, pon primero el filtro que descarta más elementos (`every` se detiene en el primer `false`).
+
+</Callout>
+
+## Paso 4: `void` frente a `undefined`
+
+`void` es el tipo de retorno de una función que **no devuelve nada útil**. Parece lo mismo que `undefined`, pero no lo es. Crea `src/05-void.ts`:
+
+```ts
+// Archivo: src/05-void.ts
+type AlCambiar = (valor: number) => void;
+
+function registrarCambio(valor: number): void {
+  console.log(`Nuevo valor: ${valor}`);
+}
+
+const historial: number[] = [];
+
+// push devuelve un number (la nueva longitud), pero un callback de tipo void puede devolver cualquier cosa:
+// quien lo llama promete ignorar el resultado
+const guardarEnHistorial: AlCambiar = (valor) => historial.push(valor);
+
+function crearContador(alCambiar: AlCambiar) {
+  let valor = 0;
+  return () => {
+    valor += 1;
+    alCambiar(valor);
+  };
+}
+
+const incrementar = crearContador(registrarCambio);
+incrementar();
+incrementar();
+
+const incrementarYGuardar = crearContador(guardarEnHistorial);
+incrementarYGuardar();
+incrementarYGuardar();
+incrementarYGuardar();
+console.log(`Historial: ${historial.join(", ")}`);
+```
+
+```bash
+npm start -- src/05-void.ts
+```
+
+```text
+Nuevo valor: 1
+Nuevo valor: 2
+Historial: 1, 2, 3
+```
+
+La regla:
+
+- **`void` en un tipo de función** (`(valor: number) => void`) significa "**ignoraré** lo que devuelvas". Por eso aceptas `historial.push(valor)`, que devuelve un número. Si `void` exigiera devolver `undefined`, no podrías escribir callbacks de una línea como ese.
+- **`undefined`** es un valor concreto: una función `(): undefined` **debe** devolver `undefined`.
+- **En la declaración de una función** (`function registrarCambio(): void`), `void` sí es estricto: si escribes `return 5`, error.
+
+Así se tipan los manejadores de eventos: en React, `onClick` es `(evento) => void`, y por eso puedes escribir `onClick={() => setContador(c + 1)}` sin preocuparte de lo que devuelve.
+
+<Callout type="risk">
+
+- **No uses el resultado de un callback `void`:** si dentro de `crearContador` escribieras `const r = alCambiar(valor)`, `r` sería de tipo `void` y no podrías hacer nada útil con él. Si necesitas un resultado, declara el tipo de retorno real.
+- **Funciones asíncronas en callbacks `void`:** `onClick={async () => { await guardar(); }}` compila, pero quien llama no espera la promesa. Si `guardar` falla, el error queda como una _promesa rechazada sin manejar_. Captura los errores dentro (`try/catch`) en todo callback asíncrono.
+
+</Callout>
+
+## Paso 5: funciones asíncronas y `Promise<T>`
+
+Una función `async` **siempre devuelve una promesa**. Si dentro haces `return tareas`, desde fuera recibes `Promise<Tarea[]>`: "una promesa que, cuando se resuelva, contendrá un `Tarea[]`". Ahora vas a llamar a una API real. Primero mira qué devuelve, en la terminal:
+
+```bash
+curl "https://jsonplaceholder.typicode.com/todos?userId=1&_limit=3"
+```
+
+```json
+[
+  { "userId": 1, "id": 1, "title": "delectus aut autem", "completed": false },
+  { "userId": 1, "id": 2, "title": "quis ut nam facilis et officia qui", "completed": false },
+  { "userId": 1, "id": 3, "title": "fugiat veniam minus", "completed": false }
+]
+```
+
+(La API devuelve el JSON con más saltos de línea; aquí está compactado para que se lea mejor. Los textos están en latín de relleno a propósito).
+
+Con esa forma, crea `src/05-api-tareas.ts`:
+
+```ts
+// Archivo: src/05-api-tareas.ts
+const API = "https://jsonplaceholder.typicode.com";
+
+// Forma de cada tarea tal como la devuelve la API (nombres en inglés)
+interface TareaApi {
+  userId: number;
+  id: number;
+  title: string;
+  completed: boolean;
+}
+
+// Forma que usa nuestra app
+interface Tarea {
+  id: number;
+  titulo: string;
+  hecha: boolean;
+}
+
+type Filtro = (tarea: Tarea) => boolean;
+
+function aTarea(t: TareaApi): Tarea {
+  return { id: t.id, titulo: t.title, hecha: t.completed };
+}
+
+async function obtenerTareas(usuarioId: number, limite = 5): Promise<Tarea[]> {
+  const url = `${API}/todos?userId=${usuarioId}&_limit=${limite}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} al pedir ${url}`);
+  }
+  const datos = (await res.json()) as TareaApi[]; // promesa al compilador, NO una comprobación
+  return datos.map(aTarea);
+}
+
+const pendientes: Filtro = (t) => !t.hecha;
+
+try {
+  const tareas = await obtenerTareas(1);
+  console.log(`Descargadas ${tareas.length} tareas`);
+  for (const tarea of tareas.filter(pendientes)) {
+    console.log(`[ ] #${tarea.id} ${tarea.titulo}`);
+  }
+  for (const tarea of tareas.filter((t) => t.hecha)) {
+    console.log(`[x] #${tarea.id} ${tarea.titulo}`);
+  }
+} catch (error) {
+  console.error("No se pudieron cargar las tareas:", error instanceof Error ? error.message : error);
 }
 ```
 
-Fíjate en que `t` no lleva tipo: TypeScript lo deduce del contexto (`Filtro`). Esto se llama _contextual typing_ y es lo que hace que los _callbacks_ de `map`, `filter` o los eventos de React estén tipados sin esfuerzo.
-
-## `void` y `undefined`
-
-Una función que no devuelve nada útil tiene retorno `void`:
-
-```ts
-function registrar(mensaje: string): void {
-  console.log(`[academy] ${mensaje}`);
-}
+```bash
+npm run typecheck
+npm start -- src/05-api-tareas.ts
 ```
 
-`void` significa "no te importa lo que devuelve". Es distinto de `undefined`, que es un valor concreto. En la práctica: usa `void` para funciones que solo producen efectos (registrar, guardar, pintar).
-
-Y si declaras un retorno distinto de `void`, TypeScript comprueba que todos los caminos devuelven algo:
-
-```ts
-function nivel(puntos: number): string {
-  if (puntos > 4) return "alto";
-  // ❌ Function lacks ending return statement and return type does not include 'undefined'.
-}
+```text
+Descargadas 5 tareas
+[ ] #1 delectus aut autem
+[ ] #2 quis ut nam facilis et officia qui
+[ ] #3 fugiat veniam minus
+[ ] #5 laboriosam mollitia et enim quasi adipisci quia provident illum
+[x] #4 et porro tempora
 ```
 
-## Funciones asíncronas y `Promise<T>`
+Fíjate en que la tarea #4 aparece la última, porque el código imprime primero las pendientes y después las completadas.
 
-Una función `async` **siempre** devuelve una promesa. Su tipo de retorno es `Promise<T>`, donde `T` es lo que obtienes con `await`:
+Paso a paso:
+
+1. **`async function ...: Promise<Tarea[]>`**: el retorno se anota como `Promise<...>`. Dentro, haces `return datos.map(aTarea)` (un `Tarea[]`), y TypeScript comprueba que encaja con lo que prometiste.
+2. **`await fetch(url)`** devuelve un `Response`. Pasa el ratón por `res`.
+3. **`if (!res.ok)`**: `fetch` **no lanza error** con un 404 o un 500; solo falla si no hay conexión. Tienes que comprobar `res.ok` (que es `true` para los códigos 200–299).
+4. **`await res.json()` devuelve `any`**. El `as TareaApi[]` le dice al compilador "confía en mí, tiene esta forma". **No comprueba nada.**
+5. **`aTarea`** traduce la forma de la API a la forma de tu app. Si la API cambia, solo tocas esta función.
+6. **`await` fuera de una función** (_top-level await_) funciona porque el archivo es un módulo ES (`"type": "module"` y `module: "ESNext"`).
+
+<Callout type="risk">
+
+- **`as` es una promesa que haces al compilador, no una verificación.** Cambia la URL a `` `${API}/users?_limit=${limite}` `` (que devuelve usuarios, no tareas) y ejecuta: TypeScript no se queja y el programa imprime `[ ] #1 undefined`, `[ ] #2 undefined`…, porque los usuarios no tienen `title` ni `completed`. En producción, si una API cambia su formato, tu app mostrará datos rotos sin ningún error. Lo resolverás en el curso I1 validando con Zod en lugar de usar `as`.
+- **Sin `if (!res.ok)`**, un 404 devuelve un cuerpo que no es un array, y `datos.map` explotará con `datos.map is not a function`, un error que no dice nada del problema real.
+- **Peticiones sin límite de tiempo:** si la API no responde, `fetch` puede esperar mucho tiempo. En producción, añade `signal: AbortSignal.timeout(5000)` a las opciones de `fetch` para cancelarla a los 5 segundos.
+- **Peticiones en serie:** si necesitas las tareas de 3 usuarios, `await` uno tras otro tarda la suma de los tres. Con `await Promise.all([obtenerTareas(1), obtenerTareas(2), obtenerTareas(3)])` se piden a la vez.
+
+</Callout>
+
+## Paso 6: sobrecargas (solo para reconocerlas)
+
+A veces una función devuelve **tipos distintos según los argumentos**. Las **sobrecargas** declaran varias firmas para una misma implementación. No las escribirás a menudo, pero las verás en los tipos de librerías (por ejemplo, en `document.createElement`). Crea `src/05-sobrecargas.ts`:
 
 ```ts
-interface Usuario {
+// Archivo: src/05-sobrecargas.ts
+// Firmas públicas: lo que ve quien llama a la función
+function convertir(valor: string): number;
+function convertir(valor: number): string;
+// Implementación: no se puede llamar directamente con esta firma
+function convertir(valor: string | number): string | number {
+  return typeof valor === "string" ? Number(valor) : String(valor);
+}
+
+const comoNumero = convertir("42"); // TypeScript sabe que es number
+const comoTexto = convertir(42); // TypeScript sabe que es string
+
+console.log(comoNumero + 1, comoTexto.padStart(5, "0"));
+```
+
+```text
+43 00042
+```
+
+Pasa el ratón por `comoNumero` (`number`) y por `comoTexto` (`string`). Sin sobrecargas, ambos serían `string | number` y tendrías que comprobarlos antes de usarlos.
+
+<Callout type="risk">
+
+- **La implementación no se comprueba contra cada firma:** si por error devolvieras siempre `String(valor)`, TypeScript seguiría diciendo que `convertir("42")` es `number`. Las sobrecargas son otra "promesa al compilador".
+- **Casi siempre hay algo mejor:** dos funciones con nombres claros (`aNumero`, `aTexto`) o un genérico son más fáciles de leer y de mantener. Reserva las sobrecargas para cuando no haya alternativa.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Crea `src/05-ejercicio.ts` con una función `obtenerUsuario(id: number): Promise<Usuario | null>` que llame a `https://jsonplaceholder.typicode.com/users/:id`.
+2. Debe devolver `null` si la respuesta es un 404 y lanzar un error con cualquier otro estado distinto de 200.
+3. `Usuario` solo necesita `id`, `nombre`, `email` y `ciudad` (en la API: `id`, `name`, `email` y `address.city`).
+4. Pruébala con el id `1` (existe) y el `999` (no existe).
+5. Añade un comentario explicando por qué el `as` no es una verificación.
+
+</Callout>
+
+Solución completa:
+
+```ts
+// Archivo: src/05-ejercicio.ts
+const API = "https://jsonplaceholder.typicode.com";
+
+interface UsuarioApi {
   id: number;
   name: string;
   email: string;
+  address: { city: string };
+}
+
+interface Usuario {
+  id: number;
+  nombre: string;
+  email: string;
+  ciudad: string;
 }
 
 async function obtenerUsuario(id: number): Promise<Usuario | null> {
-  const res = await fetch(`https://jsonplaceholder.typicode.com/users/${id}`);
-  if (!res.ok) return null;
-  return (await res.json()) as Usuario;
+  const res = await fetch(`${API}/users/${id}`, { signal: AbortSignal.timeout(5000) });
+
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status} al pedir el usuario ${id}`);
+
+  // El "as" solo le dice al compilador qué forma ESPERAMOS. Si la API devuelve otra cosa,
+  // TypeScript no lo sabrá: el error aparecerá más tarde, lejos de aquí. Se resuelve validando (Zod, curso I1).
+  const datos = (await res.json()) as UsuarioApi;
+
+  return { id: datos.id, nombre: datos.name, email: datos.email, ciudad: datos.address.city };
 }
 
-const usuario = await obtenerUsuario(1); // Usuario | null
-if (usuario) console.log(usuario.email);
-```
-
-Anotar `Promise<Usuario | null>` es especialmente valioso aquí: quien llama sabe sin mirar el código que debe comprobar el caso `null`.
-
-### `as`: una promesa que haces tú, no una comprobación
-
-`res.json()` devuelve `Promise<any>`: TypeScript no puede saber qué te va a mandar el servidor. El `as Usuario` le dice al compilador "confía en mí, es un `Usuario`". Pero **no comprueba nada** en ejecución:
-
-```ts
-const datos = (await res.json()) as Usuario;
-datos.email.toLowerCase(); // si la API no envía email, esto explota igualmente
-```
-
-Úsalo con conciencia: es una afirmación tuya, no una validación. En el curso I1 aprenderás a validar de verdad con Zod.
-
-<Callout type="note">
-  Cada vez que escribas `as`, pregúntate: "¿y si me equivoco?". Si la respuesta es "la app se
-  rompe", ese dato necesita validación.
-</Callout>
-
-## Sobrecargas (solo para reconocerlas)
-
-Algunas librerías declaran varias firmas para la misma función. Se llaman sobrecargas y las verás al leer tipos ajenos:
-
-```ts
-function formatear(valor: number): string;
-function formatear(valor: Date): string;
-function formatear(valor: number | Date): string {
-  return valor instanceof Date ? valor.toLocaleDateString("es") : valor.toFixed(2);
+for (const id of [1, 999]) {
+  try {
+    const usuario = await obtenerUsuario(id);
+    if (usuario === null) {
+      console.log(`Usuario ${id}: no existe`);
+    } else {
+      console.log(`Usuario ${id}: ${usuario.nombre} <${usuario.email}> de ${usuario.ciudad}`);
+    }
+  } catch (error) {
+    console.error(`Usuario ${id}: error`, error instanceof Error ? error.message : error);
+  }
 }
 ```
 
-No necesitas escribirlas por ahora: casi siempre una unión (`number | Date`) es suficiente.
+```bash
+npm start -- src/05-ejercicio.ts
+```
 
-## Errores comunes
+```text
+Usuario 1: Leanne Graham <Sincere@april.biz> de Gwenborough
+Usuario 999: no existe
+```
 
-- **Olvidar el `await`:** `const u = obtenerUsuario(1)` es una `Promise<Usuario | null>`, no un usuario. Al hacer `u.email`: `Property 'email' does not exist on type 'Promise<Usuario | null>'.`
-- **Poner `Promise<T>` sin `async`** (o al revés): una función `async` siempre devuelve `Promise`.
-- **Abusar de `as`** para silenciar errores en lugar de comprobar los datos.
-- **Parámetros opcionales antes de obligatorios:** `A required parameter cannot follow an optional parameter.`
+<Callout type="risk">
 
-<Callout type="exercise">
-  1. Escribe `obtenerUsuario(id: number): Promise<Usuario | null>` contra `https://jsonplaceholder.typicode.com/users/:id` y devuelve `null` si la respuesta no es 200.
-  2. Pruébala con `npx tsx` usando un id que exista (1) y otro que no (999).
-  3. Escribe un tipo `Filtro` para las tareas y dos filtros distintos que lo usen sin anotar el parámetro.
-  4. En un comentario, explica con tus palabras por qué el `as Usuario` es una promesa que haces al compilador y no una verificación real.
+- **`null` frente a lanzar un error:** "no existe" es un resultado **esperado** (alguien escribió mal un id), así que se devuelve `null` y el tipo `Usuario | null` obliga a quien llama a manejarlo. Un 500 o un fallo de red es **inesperado**, así que se lanza. Mezclar ambos (devolver `null` también ante un 500) esconde caídas del servidor como si fueran "usuario no encontrado".
+- **`AbortSignal.timeout`** lanza un `TimeoutError` si la API tarda más de 5 segundos. Lo captura el mismo `try/catch`.
+- **`datos.address.city`** asume que siempre existe `address`. Si la API lo omitiera, tendrías `Cannot read properties of undefined` en ejecución, aunque TypeScript diga que todo está bien. Otro motivo para validar los datos externos.
+
 </Callout>
 
 <Callout type="mastery">
-  Tipas cualquier función asíncrona de tus proyectos con su `Promise<T>` correcto y sabes qué riesgo asumes cada vez que usas `as`.
+
+Tipas cualquier función asíncrona de tus proyectos con su `Promise<T>` correcto, usas un objeto de opciones cuando hay varios parámetros opcionales, sabes por qué un callback `void` puede devolver un valor y puedes explicar por qué un `as` no protege de una API que cambia.
+
 </Callout>
 
 ## Resumen
 
-- Anota los parámetros siempre y el retorno en funciones importantes.
-- Opcionales (`?`), valores por defecto y _rest parameters_ (`...args: T[]`).
-- Las funciones también son tipos: `(t: Tarea) => boolean`.
-- `void` para funciones sin retorno útil.
-- Las funciones `async` devuelven `Promise<T>`.
-- `as` no valida: es una afirmación tuya.
+- Parámetros obligatorios, opcionales (`?`, al final) y con valor por defecto (`=`, nunca `undefined` dentro); con más de tres, usa un objeto de opciones.
+- `type Filtro = (t: Tarea) => boolean` tipa funciones como valores; el tipado contextual infiere los parámetros de los callbacks.
+- `void` en un tipo de función significa "se ignora el resultado"; `undefined` es un valor concreto.
+- `async` devuelve `Promise<T>`; `fetch` no falla con un 404 (comprueba `res.ok`), y `as` no verifica nada.
+- Las sobrecargas declaran varias firmas para una implementación: reconócelas, pero prefiere funciones separadas.

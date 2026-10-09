@@ -4,208 +4,490 @@ course: "B1"
 title: "Uniones y narrowing"
 order: 6
 minutes: 60
-summary: "Uniones, type guards y uniones discriminadas: la herramienta más útil del curso."
+summary: "Aprendes paso a paso cómo TypeScript estrecha una unión con typeof, instanceof, in y guards propios, modelas actividades con uniones discriminadas y haces que el compilador te obligue a manejar cada caso nuevo."
 ---
 
-Si de este curso te quedas con una sola idea, que sea esta. Las **uniones** y el **_narrowing_** (estrechamiento) te permiten modelar datos que pueden tener varias formas, y que el compilador te obligue a manejar cada una. Es la diferencia entre "creo que he cubierto todos los casos" y "sé que los he cubierto".
+Esta es **la sección más útil del curso**. Hasta ahora, cada valor tenía un único tipo. Pero los datos reales son "una cosa **u** otra": una fecha que llega como `Date` o como texto, una respuesta que es un éxito o un error, una actividad que es fuerza, running o nutrición. TypeScript modela eso con **uniones** (`A | B`) y te deja trabajar con ellas gracias al **_narrowing_** (estrechamiento): después de una comprobación, el compilador **sabe** cuál de las opciones tienes. Al final de la sección, el compilador te avisará cuando añadas un tipo de actividad nuevo y olvides manejarlo en algún sitio.
 
-## Uniones
+**Lo que tendrás al terminar:** `src/06-actividades.ts`, con un modelo de actividades a prueba de olvidos, y `src/06-ejercicio.ts`, con el estado de una petición a una API modelado sin campos opcionales.
 
-Una unión (`A | B`) es un valor que puede ser de **uno u otro** tipo:
+**Requisitos:** el `ts-playground` y lo visto en B1.2 (`unknown`, tipos literales) y B1.5 (`fetch`).
+
+## Paso 1: ver el problema de una unión sin estrechar
+
+Una unión `string | Date` significa "puede ser cualquiera de los dos". Con ese valor, TypeScript solo te deja hacer lo que es válido **para ambos**. Crea `src/06-union.ts`:
 
 ```ts
-function formatearId(id: string | number): string {
-  return String(id);
+// Archivo: src/06-union.ts
+function formatearFecha(fecha: string | Date): string {
+  return fecha.toLocaleDateString("es-MX", { timeZone: "America/Mexico_City" });
 }
 
-formatearId("u-1"); // ✅
-formatearId(42); // ✅
-formatearId(true); // ❌ Argument of type 'boolean' is not assignable to parameter of type 'string | number'.
+console.log(formatearFecha(new Date("2026-10-09T12:00:00Z")));
 ```
 
-El problema llega cuando quieres usar algo que solo tiene uno de los tipos:
-
-```ts
-function mayusculas(valor: string | number) {
-  return valor.toUpperCase();
-  // ❌ Property 'toUpperCase' does not exist on type 'string | number'.
-  //    Property 'toUpperCase' does not exist on type 'number'.
-}
+```bash
+npm run typecheck
 ```
 
-TypeScript tiene razón: si `valor` es un número, eso falla. Necesitas comprobar qué es.
+```text
+error TS2551: Property 'toLocaleDateString' does not exist on type 'string | Date'. Did you mean 'toLocaleString'?
+  Property 'toLocaleDateString' does not exist on type 'string'.
+```
 
-## _Narrowing_: estrechar el tipo
+Ignora la sugerencia (`toLocaleString` existe en ambos tipos, pero no es lo que quieres): la segunda línea lo explica todo: `toLocaleDateString` existe en `Date`, pero **no** en `string`. Como `fecha` podría ser texto, TypeScript no te deja llamarlo. En JavaScript, este código habría funcionado con fechas y explotado con textos.
 
-Cuando haces una comprobación, TypeScript **estrecha** el tipo dentro de cada rama. A las comprobaciones que lo provocan se les llama _type guards_.
+Una analogía: una unión es una caja cerrada que contiene "una manzana o una naranja". No puedes pelarla como una naranja hasta que **abras la caja y mires**. El _narrowing_ es mirar dentro.
 
-### `typeof`
+<Callout type="risk">
 
-Para primitivos:
+- **No lo arregles con `as`:** `(fecha as Date).toLocaleDateString()` compila y explota en ejecución si llega un texto, con `fecha.toLocaleDateString is not a function`. Es mentirle al compilador, como viste en B1.5.
+- **Lo que sí funciona sin comprobar:** las propiedades y métodos comunes a todos los miembros. Por ejemplo, `fecha.toString()` compila sin ninguna comprobación, porque tanto `string` como `Date` lo tienen.
+
+</Callout>
+
+## Paso 2: estrechar con `typeof` e `instanceof`
+
+Sustituye el contenido de `src/06-union.ts` por la versión corregida:
 
 ```ts
-function mayusculas(valor: string | number) {
-  if (typeof valor === "string") {
-    return valor.toUpperCase(); // aquí: string
+// Archivo: src/06-union.ts
+function formatearFecha(fecha: string | Date): string {
+  if (typeof fecha === "string") {
+    // Aquí dentro TypeScript sabe que fecha es string
+    return formatearFecha(new Date(fecha));
   }
-  return valor.toFixed(0); // aquí: number (solo queda esa opción)
+  // Aquí, por descarte, fecha es Date
+  return fecha.toLocaleDateString("es-MX", { timeZone: "America/Mexico_City", dateStyle: "long" });
 }
-```
 
-### `instanceof`
-
-Para clases como `Date` o `Error`:
-
-```ts
-function formatear(fecha: Date | string) {
-  if (fecha instanceof Date) return fecha.toISOString(); // Date
-  return fecha; // string
-}
-```
-
-### `in`
-
-Para comprobar si un objeto tiene una propiedad:
-
-```ts
-type Fuerza = { series: number; reps: number };
-type Running = { km: number };
-
-function resumen(a: Fuerza | Running) {
-  if ("km" in a) return `${a.km} km`; // Running
-  return `${a.series}×${a.reps}`; // Fuerza
-}
-```
-
-### Igualdad y valores "vacíos"
-
-Comparar con `null`, `undefined` o un literal también estrecha:
-
-```ts
-function saludar(nombre: string | null) {
-  if (nombre === null) return "Hola, desconocido";
-  return `Hola, ${nombre}`; // string
-}
-```
-
-## Uniones discriminadas
-
-Aquí está la herramienta estrella. Una **unión discriminada** es una unión de objetos que comparten una propiedad literal (el **discriminante**) que indica de qué variante se trata:
-
-```ts
-type Resultado = { ok: true; datos: string[] } | { ok: false; error: string };
-
-function mostrar(r: Resultado) {
-  if (r.ok) {
-    console.log(r.datos.length); // TypeScript sabe que existe `datos`
-  } else {
-    console.error(r.error); // y aquí, que existe `error`
+function describirError(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}`;
   }
-}
-```
-
-Compáralo con la alternativa habitual en JavaScript:
-
-```ts
-type ResultadoMalo = { ok: boolean; datos?: string[]; error?: string };
-```
-
-Con este tipo, nada impide un objeto con `ok: true` y sin `datos`, o con `datos` y `error` a la vez. La unión discriminada hace **imposibles los estados imposibles**.
-
-### Estados de una petición
-
-El ejemplo más útil en tus proyectos: el estado de una carga de datos.
-
-```ts
-type Estado<T> =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "success"; data: T }
-  | { status: "error"; message: string };
-
-function render(estado: Estado<string[]>): string {
-  switch (estado.status) {
-    case "idle":
-      return "Pulsa para cargar";
-    case "loading":
-      return "Cargando…";
-    case "success":
-      return `${estado.data.length} elementos`;
-    case "error":
-      return `Error: ${estado.message}`;
+  if (typeof error === "string") {
+    return error;
   }
+  return "Error desconocido";
 }
+
+console.log(formatearFecha(new Date("2026-10-09T12:00:00Z")));
+console.log(formatearFecha("2026-10-09T12:00:00Z"));
+console.log(describirError(new TypeError("fetch failed")));
+console.log(describirError("Algo salió mal"));
+console.log(describirError(42));
 ```
 
-No puedes leer `data` mientras estás en `loading`, ni olvidar el mensaje de error. Lo reutilizarás tal cual en React (curso B6).
+```bash
+npm run typecheck
+npm start -- src/06-union.ts
+```
 
-## Comprobación exhaustiva con `never`
+```text
+9 de octubre de 2026
+9 de octubre de 2026
+TypeError: fetch failed
+Algo salió mal
+Error desconocido
+```
 
-¿Y si mañana añades una variante? Puedes hacer que el compilador te avise de cada `switch` que no la maneja:
+Pasa el ratón por `fecha` en tres sitios: en la firma (`string | Date`), dentro del `if` (`string`) y en el último `return` (`Date`). **Es la misma variable con tres tipos distintos según dónde estés.** TypeScript sigue el flujo del código (el _control flow analysis_): sabe que, si el `if` hizo `return`, después solo puede quedar `Date`.
+
+- **`typeof`** sirve para los primitivos: `"string"`, `"number"`, `"boolean"`, `"undefined"`, `"bigint"`, `"symbol"`, `"function"` y `"object"`.
+- **`instanceof`** sirve para clases: `Date`, `Error`, `Map`, `URL`… Comprueba si el valor fue creado con esa clase.
+
+<Callout type="risk">
+
+- **`typeof null === "object"`** (el error histórico de B1.2). Si tu unión incluye `null`, `typeof x === "object"` no lo descarta: añade `x !== null`.
+- **Fechas inválidas:** `new Date("ayer")` no lanza ningún error: crea una fecha inválida, y `formatearFecha("ayer")` devuelve el texto `"Invalid Date"`, que acabaría en tu interfaz. (Otros métodos, como `toISOString`, sí lanzan `RangeError: Invalid time value`). El _narrowing_ comprueba el **tipo**, no la validez; para eso, `Number.isNaN(fecha.getTime())`.
+- **Zona horaria:** sin `timeZone`, las fechas se formatean con la zona del servidor. En Vercel es UTC, así que un registro de las 21:00 en México aparecería con fecha del día siguiente. Esta plataforma fija `America/Mexico_City` por esa razón.
+
+</Callout>
+
+## Paso 3: estrechar con `in`, igualdad y comprobaciones de verdad
+
+Cuando los miembros de la unión son **objetos** (no clases), `typeof` no basta, porque todos son `"object"`. Crea `src/06-in.ts`:
 
 ```ts
-type Actividad = { tipo: "fuerza"; series: number } | { tipo: "running"; km: number };
+// Archivo: src/06-in.ts
+interface Running {
+  km: number;
+  minutos: number;
+}
 
-function resumen(a: Actividad): string {
-  switch (a.tipo) {
+interface Fuerza {
+  series: number;
+  repeticiones: number;
+  pesoKg: number;
+}
+
+function resumen(actividad: Running | Fuerza): string {
+  if ("km" in actividad) {
+    const ritmo = actividad.minutos / actividad.km;
+    return `${actividad.km} km a ${ritmo.toFixed(1)} min/km`;
+  }
+  return `${actividad.series}×${actividad.repeticiones} con ${actividad.pesoKg} kg`;
+}
+
+function saludo(nombre: string | null | undefined): string {
+  if (nombre == null) {
+    // == null atrapa null y undefined a la vez
+    return "Hola, invitado";
+  }
+  return `Hola, ${nombre.trim()}`;
+}
+
+function etiquetaVasos(vasos: number | null): string {
+  if (vasos === null) return "Sin registrar";
+  if (vasos === 0) return "Nada de agua todavía";
+  return `${vasos} ${vasos === 1 ? "vaso" : "vasos"}`;
+}
+
+console.log(resumen({ km: 5, minutos: 28 }));
+console.log(resumen({ series: 4, repeticiones: 8, pesoKg: 70 }));
+console.log(saludo(null), "|", saludo(undefined), "|", saludo("  Dani "));
+console.log(etiquetaVasos(null), "|", etiquetaVasos(0), "|", etiquetaVasos(1), "|", etiquetaVasos(6));
+```
+
+```bash
+npm start -- src/06-in.ts
+```
+
+```text
+5 km a 5.6 min/km
+4×8 con 70 kg
+Hola, invitado | Hola, invitado | Hola, Dani
+Sin registrar | Nada de agua todavía | 1 vaso | 6 vasos
+```
+
+- **`"km" in actividad`**: si la propiedad existe, TypeScript estrecha a los miembros de la unión que la tienen (`Running`).
+- **`nombre == null`** (con dos `=`) es la única comparación "suelta" recomendable: es `true` para `null` **y** para `undefined`, y nada más.
+- **`vasos === null` y `vasos === 0`**: las comparaciones de igualdad también estrechan. Después de descartar `null`, `vasos` es `number`.
+
+<Callout type="risk">
+
+- **No uses `if (vasos)` para comprobar si hay dato:** `0` es "falso" en JavaScript, así que `if (vasos)` trataría "0 vasos" igual que "sin registrar". Es el mismo problema que `||` frente a `??` en B1.3. Compara con `null` de forma explícita.
+- **`in` con propiedades opcionales:** si `Fuerza` tuviera `km?: number` (para cardio en máquina), `"km" in actividad` dejaría de distinguirlas. El Paso 5 resuelve esto con un campo pensado solo para distinguir.
+
+</Callout>
+
+## Paso 4: crear tus propios _type guards_
+
+Cuando la comprobación es compleja o se repite, la conviertes en una función con un tipo de retorno especial: `valor is Tipo`. Ya lo viste en el ejercicio de B1.2. Crea `src/06-guards.ts`:
+
+```ts
+// Archivo: src/06-guards.ts
+type Categoria = "trabajo" | "personal" | "salud" | "estudio";
+
+const CATEGORIAS: readonly string[] = ["trabajo", "personal", "salud", "estudio"];
+
+function esCategoria(valor: string): valor is Categoria {
+  return CATEGORIAS.includes(valor);
+}
+
+interface Tarea {
+  titulo: string;
+  categoria: Categoria;
+}
+
+function crearTarea(titulo: string, categoriaDelFormulario: string): Tarea | null {
+  if (!esCategoria(categoriaDelFormulario)) {
+    return null;
+  }
+  // Aquí categoriaDelFormulario ya es Categoria
+  return { titulo, categoria: categoriaDelFormulario };
+}
+
+// Simula lo que llega de un <select> de un formulario: siempre string
+console.log(crearTarea("Correr 5 km", "salud"));
+console.log(crearTarea("Hackear la NASA", "ocio"));
+
+// Los guards también sirven en filter: el resultado queda estrechado
+const entradas = ["trabajo", "ocio", "salud", "SALUD"];
+const validas: Categoria[] = entradas.filter(esCategoria);
+console.log(validas);
+```
+
+```bash
+npm start -- src/06-guards.ts
+```
+
+```text
+{ titulo: 'Correr 5 km', categoria: 'salud' }
+null
+[ 'trabajo', 'salud' ]
+```
+
+- **`valor is Categoria`** le dice a TypeScript: "si esta función devuelve `true`, `valor` es una `Categoria`". Así, después del `if`, puedes asignar el texto a un campo de tipo `Categoria`.
+- **`entradas.filter(esCategoria)`** devuelve directamente `Categoria[]`, no `string[]`. Prueba a cambiar `esCategoria` por `(c) => CATEGORIAS.includes(c)` y verás que el resultado vuelve a ser `string[]`.
+
+<Callout type="risk">
+
+- **TypeScript confía en tu guard sin revisarlo.** Si `esCategoria` devolviera `true` siempre, el compilador te creería y "ocio" pasaría como `Categoria`. Un guard es otra promesa al compilador, como `as`, así que mantenlo pequeño y pruébalo.
+- **Dos fuentes de verdad:** el `type Categoria` y el array `CATEGORIAS` repiten los mismos valores. Si añades una categoría a uno y no al otro, el guard la rechazará. El truco profesional es derivar el tipo del array: `const CATEGORIAS = ["trabajo", ...] as const;` y `type Categoria = (typeof CATEGORIAS)[number];`. Lo verás en el curso I1.
+- **Mayúsculas:** `"SALUD"` se rechaza. Normaliza las entradas (`.toLowerCase()`) antes de validar si tu caso lo necesita.
+
+</Callout>
+
+## Paso 5: uniones discriminadas
+
+Esta es la herramienta estrella. Una **unión discriminada** es una unión de objetos en la que **todos comparten un campo con un valor literal distinto** (el _discriminante_, normalmente `tipo`, `kind` o `status`). Comprobando ese campo, TypeScript sabe exactamente qué objeto tienes. Crea `src/06-actividades.ts`:
+
+```ts
+// Archivo: src/06-actividades.ts
+interface Fuerza {
+  tipo: "fuerza";
+  ejercicio: string;
+  series: number;
+  repeticiones: number;
+  pesoKg: number;
+}
+
+interface Running {
+  tipo: "running";
+  km: number;
+  minutos: number;
+}
+
+interface Hidratacion {
+  tipo: "hidratacion";
+  ml: number;
+}
+
+type Actividad = Fuerza | Running | Hidratacion;
+
+function resumen(actividad: Actividad): string {
+  switch (actividad.tipo) {
     case "fuerza":
-      return `${a.series} series`;
+      return `${actividad.ejercicio}: ${actividad.series}×${actividad.repeticiones} con ${actividad.pesoKg} kg`;
     case "running":
-      return `${a.km} km`;
+      return `Running: ${actividad.km} km en ${actividad.minutos} min`;
+    case "hidratacion":
+      return `Agua: ${actividad.ml} ml`;
     default: {
-      const exhaustivo: never = a; // si llegamos aquí con algo, es un error
-      return exhaustivo;
+      const casoNoManejado: never = actividad;
+      throw new Error(`Actividad desconocida: ${JSON.stringify(casoNoManejado)}`);
     }
   }
 }
-```
 
-Si añades `{ tipo: "nutricion"; kcal: number }` a `Actividad` y no actualizas el `switch`:
+const hoy: Actividad[] = [
+  { tipo: "running", km: 5, minutos: 28 },
+  { tipo: "fuerza", ejercicio: "sentadilla", series: 4, repeticiones: 8, pesoKg: 70 },
+  { tipo: "hidratacion", ml: 500 },
+  { tipo: "hidratacion", ml: 750 },
+];
 
-```text
-Type '{ tipo: "nutricion"; kcal: number; }' is not assignable to type 'never'.
-```
-
-El compilador te lleva de la mano a cada sitio que debes actualizar.
-
-## _Type guards_ propios
-
-Cuando la comprobación es compleja, puedes encapsularla en una función que "enseña" a TypeScript a estrechar. Su retorno usa la sintaxis `valor is Tipo`:
-
-```ts
-function esRunning(a: Actividad): a is Extract<Actividad, { tipo: "running" }> {
-  return a.tipo === "running";
+for (const actividad of hoy) {
+  console.log(`- ${resumen(actividad)}`);
 }
 
-const actividades: Actividad[] = [];
-const carreras = actividades.filter(esRunning); // solo las de running, bien tipadas
+const aguaTotal = hoy
+  .filter((a): a is Hidratacion => a.tipo === "hidratacion")
+  .reduce((total, a) => total + a.ml, 0);
+console.log(`Agua total: ${aguaTotal} ml`);
 ```
 
-No abuses de ellos: si la función miente (devuelve `true` cuando no debe), el compilador la creerá.
+```bash
+npm run typecheck
+npm start -- src/06-actividades.ts
+```
 
-## Errores comunes
+```text
+- Running: 5 km en 28 min
+- sentadilla: 4×8 con 70 kg
+- Agua: 500 ml
+- Agua: 750 ml
+Agua total: 1250 ml
+```
 
-- **Usar objetos con muchos opcionales** en lugar de una unión discriminada. Es la fuente de bugs más habitual.
-- **Discriminantes que no son literales.** `tipo: string` no permite estrechar; tiene que ser `tipo: "fuerza"`.
-- **Olvidar el `default` con `never`.** Sin él, una variante nueva pasa desapercibida.
-- **Comprobar con `typeof` un objeto concreto.** `typeof` solo distingue primitivos, `"object"` y `"function"`; para objetos usa un discriminante, `in` o `instanceof`.
+Por qué funciona:
+
+1. **`tipo: "fuerza"`** no es un `string` cualquiera: es el **literal** `"fuerza"`. Cada miembro de la unión tiene un literal distinto.
+2. **`switch (actividad.tipo)`**: en cada `case`, TypeScript estrecha `actividad` al miembro con ese literal. Dentro de `case "running"`, escribe `actividad.` y el autocompletado solo ofrece `tipo`, `km` y `minutos`.
+3. **El `default` con `never`**: si has manejado **todos** los casos, en el `default` no queda ninguna opción posible, así que `actividad` es `never` y la asignación compila. Ahora verás para qué sirve.
+
+<Callout type="risk">
+
+- **El discriminante debe ser un literal en todos los miembros.** Si uno tuviera `tipo: string`, TypeScript ya no podría distinguirlo y el estrechamiento dejaría de funcionar.
+- **Los datos de la base de datos o de una API no son literales:** un documento de MongoDB con `tipo: "natacion"` (un tipo que tu código no conoce) llegaría al `default` en ejecución. Por eso el `default` **lanza un error** con el valor recibido, en lugar de no hacer nada: así te enteras.
+- **`JSON.stringify`** de objetos grandes en mensajes de error puede llenar los logs o filtrar datos personales. En producción, registra solo el campo `tipo`.
+
+</Callout>
+
+## Paso 6: hacer que el compilador te obligue a manejar casos nuevos
+
+Imagina que, dentro de tres meses, añades el registro de comidas a la app. Abre `src/06-actividades.ts` y añade un miembro nuevo a la unión, **sin tocar nada más**:
+
+```ts
+interface Nutricion {
+  tipo: "nutricion";
+  comida: string;
+  kcal: number;
+}
+
+type Actividad = Fuerza | Running | Hidratacion | Nutricion;
+```
+
+(Sustituye la línea `type Actividad = ...` existente y pega la interfaz justo encima).
+
+```bash
+npm run typecheck
+```
+
+```text
+error TS2322: Type 'Nutricion' is not assignable to type 'never'.
+```
+
+**Eso es la comprobación exhaustiva.** El compilador te lleva directamente a la línea del `default`, en la función que olvidaste actualizar. En una app real, con `resumen`, `icono`, `color` y `calorias` repartidas en diez archivos, cada `switch` con este `default` te avisará. Sin él, la actividad nueva caería en silencio en un caso por defecto y verías textos vacíos en la interfaz.
+
+Ahora añade el caso que falta, antes del `default`:
+
+```ts
+    case "nutricion":
+      return `${actividad.comida}: ${actividad.kcal} kcal`;
+```
+
+Añade también una comida a la lista `hoy`:
+
+```ts
+  { tipo: "nutricion", comida: "Avena con plátano", kcal: 420 },
+```
+
+Ejecuta de nuevo `npm run typecheck` (sin errores) y `npm start -- src/06-actividades.ts`:
+
+```text
+- Running: 5 km en 28 min
+- sentadilla: 4×8 con 70 kg
+- Agua: 500 ml
+- Agua: 750 ml
+- Avena con plátano: 420 kcal
+Agua total: 1250 ml
+```
+
+<Callout type="risk">
+
+- **`if/else` no te protege igual:** si escribes la lógica con `if (a.tipo === "fuerza") ... else ...`, el último `else` se traga cualquier tipo nuevo sin avisar. Usa `switch` con `default: never` en toda función que deba tratar cada caso.
+- **No pongas `default` "por si acaso" con un valor de retorno genérico** (como `default: return ""`): desactiva la comprobación exhaustiva, que es justo lo que querías.
+- **Mantén un solo `switch` por decisión:** si la lógica de "cómo se muestra cada actividad" está repartida en muchos `switch`, valora agruparla en un objeto con una función por tipo. Los `switch` exhaustivos te avisarán igual, pero habrá menos sitios que tocar.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Copia el tipo `Actividad` y la función `resumen` con el `default` exhaustivo.
-  2. Añade la variante `{ tipo: "nutricion"; kcal: number }` y observa cómo el compilador te obliga a manejarla.
-  3. Modela el estado de una petición (`idle`, `loading`, `success` y `error`) con una unión discriminada y escribe una función que devuelva el texto a mostrar en cada caso.
-  4. Busca en uno de tus proyectos un objeto con varias propiedades opcionales que en realidad represente estados distintos y reescríbelo como unión discriminada.
+
+1. Crea `src/06-ejercicio.ts` y modela el estado de una petición a una API como una unión discriminada por `estado`: `"idle"`, `"loading"`, `"success"` (con `datos`) y `"error"` (con `mensaje`).
+2. Escribe `renderizar(estado)`, que devuelva un texto distinto para cada estado, con comprobación exhaustiva.
+3. Escribe `cargarUsuario(id)`, que llame a `https://jsonplaceholder.typicode.com/users/:id` y devuelva el estado final (`success` o `error`), sin lanzar nunca errores.
+4. Simula el ciclo completo para el id `1` y para el `999`, imprimiendo cada estado por el que pasa.
+
+</Callout>
+
+Solución completa:
+
+```ts
+// Archivo: src/06-ejercicio.ts
+interface Usuario {
+  id: number;
+  name: string;
+  email: string;
+}
+
+type EstadoPeticion<T> =
+  | { estado: "idle" }
+  | { estado: "loading" }
+  | { estado: "success"; datos: T }
+  | { estado: "error"; mensaje: string };
+
+function renderizar(e: EstadoPeticion<Usuario>): string {
+  switch (e.estado) {
+    case "idle":
+      return "Pulsa el botón para cargar el usuario";
+    case "loading":
+      return "Cargando…";
+    case "success":
+      return `${e.datos.name} <${e.datos.email}>`;
+    case "error":
+      return `Error: ${e.mensaje}`;
+    default: {
+      const casoNoManejado: never = e;
+      throw new Error(`Estado desconocido: ${JSON.stringify(casoNoManejado)}`);
+    }
+  }
+}
+
+async function cargarUsuario(id: number): Promise<EstadoPeticion<Usuario>> {
+  try {
+    const res = await fetch(`https://jsonplaceholder.typicode.com/users/${id}`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      return { estado: "error", mensaje: `HTTP ${res.status}` };
+    }
+    const datos = (await res.json()) as Usuario;
+    return { estado: "success", datos };
+  } catch (error) {
+    return { estado: "error", mensaje: error instanceof Error ? error.message : "Error de red" };
+  }
+}
+
+for (const id of [1, 999]) {
+  let estado: EstadoPeticion<Usuario> = { estado: "idle" };
+  console.log(`[${id}] ${renderizar(estado)}`);
+
+  estado = { estado: "loading" };
+  console.log(`[${id}] ${renderizar(estado)}`);
+
+  estado = await cargarUsuario(id);
+  console.log(`[${id}] ${renderizar(estado)}`);
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/06-ejercicio.ts
+```
+
+```text
+[1] Pulsa el botón para cargar el usuario
+[1] Cargando…
+[1] Leanne Graham <Sincere@april.biz>
+[999] Pulsa el botón para cargar el usuario
+[999] Cargando…
+[999] Error: HTTP 404
+```
+
+Compara este modelo con la alternativa ingenua, que verás en muchos proyectos:
+
+```ts
+interface EstadoIngenuo {
+  cargando: boolean;
+  datos?: Usuario;
+  error?: string;
+}
+```
+
+Con ese tipo, `{ cargando: true, datos: usuario, error: "falló" }` es válido para el compilador, aunque no tenga sentido: ¿está cargando, tiene datos o ha fallado? La unión discriminada hace **imposible representar estados imposibles**. Además, dentro de `case "success"`, `e.datos` existe con seguridad, sin `?.` ni comprobaciones.
+
+<Callout type="risk">
+
+- **`EstadoPeticion<T>` es un genérico:** la `T` es un "hueco" que rellenas al usarlo (`EstadoPeticion<Usuario>`). Así el mismo tipo sirve para tareas, cursos o cualquier otra petición. Los genéricos se tratan a fondo en el curso I1; por ahora, léelo como "estado de una petición **de** usuarios".
+- **Peticiones que se pisan:** en una interfaz real, si el usuario pulsa dos veces, la respuesta más lenta puede llegar la última y sobrescribir a la más reciente. En React lo resolverás con `AbortController` (curso B6).
+- **`cargarUsuario` nunca lanza:** convierte cada error en un estado. Es cómodo para la interfaz, pero significa que quien la llama **debe** mirar el estado: si lo ignora, el error desaparece en silencio.
+
 </Callout>
 
 <Callout type="mastery">
-  Usas uniones discriminadas en lugar de objetos con muchos campos opcionales, y el compilador te
-  avisa cuando olvidas un caso.
+
+Usas uniones discriminadas en lugar de objetos con muchos campos opcionales, sabes qué comprobación estrecha cada tipo de unión (`typeof`, `instanceof`, `in`, igualdad o un guard propio) y cada `switch` sobre un discriminante tiene un `default` con `never` que te avisa cuando aparece un caso nuevo.
+
 </Callout>
 
 ## Resumen
 
-- Una unión (`A | B`) admite cualquiera de sus tipos.
-- El _narrowing_ estrecha el tipo tras una comprobación: `typeof`, `instanceof`, `in` o igualdad.
-- Las uniones discriminadas usan una propiedad literal común para distinguir variantes.
-- `never` en el `default` convierte un caso olvidado en un error de compilación.
-- Los _type guards_ propios (`valor is Tipo`) encapsulan comprobaciones complejas.
+- Una unión `A | B` solo permite lo común a ambos hasta que la estrechas.
+- `typeof` para primitivos, `instanceof` para clases, `in` para objetos, `=== null` o `== null` para valores vacíos.
+- Un guard `valor is Tipo` encapsula comprobaciones y sirve en `filter`, pero el compilador confía en él sin revisarlo.
+- Las uniones discriminadas comparten un campo literal (`tipo`, `estado`) y hacen imposibles los estados imposibles.
+- `default: { const x: never = valor; }` convierte cada caso olvidado en un error de compilación.

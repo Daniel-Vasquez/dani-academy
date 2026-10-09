@@ -4,76 +4,329 @@ course: "B1"
 title: "Módulos, tipos de librerías y tsconfig.json"
 order: 7
 minutes: 60
-summary: "De dónde salen los tipos de las librerías y qué hace cada opción de tsconfig.json."
+summary: "Mueves tus tipos a un módulo propio con import type, instalas librerías con y sin tipos incluidos, lees sus archivos .d.ts, configuras el alias @/ y recorres línea a línea el tsconfig.json de un proyecto Astro real."
 ---
 
-Hasta ahora has escrito tipos en tus propios archivos. Pero tus proyectos usan Astro, React, MongoDB y Better Auth: ¿de dónde saca el editor sus tipos? ¿Y qué hace ese `tsconfig.json` que nunca te has atrevido a tocar? En esta sección vas a abrir esas dos cajas negras.
+Hasta ahora cada archivo de tu `ts-playground` era una isla: si necesitabas `Ejercicio` en dos archivos, lo copiabas. En un proyecto real, los tipos viven en **un solo lugar** y se importan. En esta sección vas a reorganizar el playground como un proyecto profesional: tipos en `src/tipos/`, imports con `import type`, librerías de npm con sus tipos, un alias `@/` para no escribir `../../..` y, al final, el `tsconfig.json` de un proyecto Astro explicado línea a línea, con el de esta misma plataforma como ejemplo.
 
-## Importar y exportar tipos
+**Lo que tendrás al terminar:** un módulo `src/tipos/entreno.ts` importado desde otros archivos con `@/tipos/entreno`, dos librerías instaladas (una con tipos incluidos y otra con `@types`) y la capacidad de explicar cada línea de un `tsconfig.json`.
 
-Los tipos se exportan e importan como cualquier otra cosa:
+**Requisitos:** el `ts-playground` con el `tsconfig.json` de B1.1 (`verbatimModuleSyntax` activado).
+
+## Paso 1: mover los tipos a un módulo propio
+
+Un **módulo** es simplemente un archivo que exporta cosas (`export`) para que otros las importen (`import`). Crea la carpeta `src/tipos/` y dentro el archivo `src/tipos/entreno.ts`:
 
 ```ts
-// src/types/usuario.ts
-export interface Usuario {
-  id: string;
-  nombre: string;
+// Archivo: src/tipos/entreno.ts
+// Tipos (desaparecen al compilar)
+export type Momento = "desayuno" | "comida" | "cena" | "snack";
+
+export interface Ejercicio {
+  readonly nombre: string;
+  series: number;
+  repeticiones: number;
+  pesoKg: number;
 }
 
-export type Rol = "user" | "admin";
+export interface DiaEntreno {
+  readonly fecha: string; // formato AAAA-MM-DD
+  ejercicios: Ejercicio[];
+  aguaMl: number;
+}
+
+// Valores (existen en ejecución)
+export const OBJETIVO_AGUA_ML = 2000;
+
+export function volumenTotal(dia: DiaEntreno): number {
+  return dia.ejercicios.reduce((total, e) => total + e.series * e.repeticiones * e.pesoKg, 0);
+}
 ```
+
+Fíjate en la diferencia entre las dos mitades del archivo:
+
+- **Tipos** (`type`, `interface`): solo existen para el compilador. Al compilar, desaparecen.
+- **Valores** (`const`, `function`): existen en ejecución. Al compilar, siguen ahí.
+
+Esa diferencia es la clave del siguiente paso.
+
+<Callout type="risk">
+
+- **Un archivo de tipos por dominio**, no uno gigante: `tipos/entreno.ts`, `tipos/usuario.ts`, `tipos/nutricion.ts`. Un único `tipos.ts` con todo acaba con cientos de líneas y conflictos constantes en Git.
+- **No mezcles lógica pesada con tipos:** `volumenTotal` es pequeña y está muy ligada al tipo, así que tiene sentido aquí. Si el archivo empieza a importar librerías o a hablar con la base de datos, separa la lógica en otro módulo (lo harás en el curso I3 con la capa de servicios).
+
+</Callout>
+
+## Paso 2: importar con `import type`
+
+Crea `src/07-app.ts`, que usa el módulo anterior. Escríbelo **primero así, con un error a propósito**:
 
 ```ts
-// otro archivo
-import type { Usuario, Rol } from "@/types/usuario";
+// Archivo: src/07-app.ts
+import { DiaEntreno, OBJETIVO_AGUA_ML, volumenTotal } from "./tipos/entreno";
+
+const hoy: DiaEntreno = {
+  fecha: "2026-10-09",
+  ejercicios: [
+    { nombre: "peso muerto", series: 3, repeticiones: 5, pesoKg: 100 },
+    { nombre: "dominadas", series: 4, repeticiones: 8, pesoKg: 0 },
+  ],
+  aguaMl: 1500,
+};
+
+console.log(`Volumen: ${volumenTotal(hoy)} kg`);
+console.log(`Agua: ${hoy.aguaMl}/${OBJETIVO_AGUA_ML} ml`);
 ```
-
-`import type` indica que **solo** importas tipos. Como los tipos desaparecen al compilar, esa línea se elimina por completo del JavaScript final. En los proyectos de Astro es obligatorio usarlo para importar tipos, porque su configuración activa `verbatimModuleSyntax` (lo verás más abajo). Si lo olvidas:
-
-```text
-'Usuario' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
-```
-
-También puedes mezclar valores y tipos en el mismo `import`:
-
-```ts
-import { getCollection, type CollectionEntry } from "astro:content";
-```
-
-## ¿De dónde salen los tipos de las librerías?
-
-Hay dos casos:
-
-1. **La librería trae sus propios tipos.** Es lo habitual hoy: `astro`, `mongodb`, `better-auth` o `zod` incluyen archivos `.d.ts` en su paquete.
-2. **Los tipos están en un paquete aparte** de la comunidad, bajo el nombre `@types/…`. Por ejemplo, React publica sus tipos en `@types/react` y Node en `@types/node`.
 
 ```bash
-npm i -D @types/node   # tipos de las APIs de Node (process, fs, path…)
+npm run typecheck
 ```
-
-Si importas una librería sin tipos, verás algo como:
 
 ```text
-Could not find a declaration file for module 'libreria-antigua'.
+error TS1484: 'DiaEntreno' is a type and must be imported using a type-only import when 'verbatimModuleSyntax' is enabled.
 ```
 
-La solución suele ser instalar su `@types/…`, si existe.
-
-## Archivos `.d.ts`: leer los tipos ajenos
-
-Un `.d.ts` contiene **solo declaraciones de tipos**, sin código. Es la documentación más fiable de una librería, porque es exactamente lo que el compilador usa.
-
-Prueba esto en VS Code: escribe `fetch` en un archivo `.ts`, haz `Cmd` + clic sobre él (o pulsa `F12`). Saltarás a `lib.dom.d.ts`, donde verás algo así:
+Por qué pasa: con `verbatimModuleSyntax`, TypeScript compila los `import` **tal cual los escribes**, solo quitando los que marcas como tipos. Si `DiaEntreno` va en un `import` normal, en el JavaScript final aparecería `import { DiaEntreno } from ...`, y en ejecución **fallaría**, porque `DiaEntreno` no existe en ejecución. La opción te obliga a ser explícito. Corrige la primera línea de una de estas dos formas:
 
 ```ts
-declare function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
+// Opción A: dos imports separados
+import type { DiaEntreno } from "./tipos/entreno";
+import { OBJETIVO_AGUA_ML, volumenTotal } from "./tipos/entreno";
 ```
 
-Ahora sabes, sin buscar en internet, qué acepta `fetch` y qué devuelve. Acostúmbrate a hacer esto con cada librería que uses: es una habilidad que te hará mucho más independiente.
+```ts
+// Opción B: un solo import, marcando el tipo con "type" en línea
+import { type DiaEntreno, OBJETIVO_AGUA_ML, volumenTotal } from "./tipos/entreno";
+```
 
-## `tsconfig.json` línea por línea
+El archivo completo, con la opción B:
 
-`tsconfig.json` le dice al compilador **qué archivos** revisar y **con qué reglas**. Este es el de Dani Academy:
+```ts
+// Archivo: src/07-app.ts
+import { type DiaEntreno, OBJETIVO_AGUA_ML, volumenTotal } from "./tipos/entreno";
+
+const hoy: DiaEntreno = {
+  fecha: "2026-10-09",
+  ejercicios: [
+    { nombre: "peso muerto", series: 3, repeticiones: 5, pesoKg: 100 },
+    { nombre: "dominadas", series: 4, repeticiones: 8, pesoKg: 0 },
+  ],
+  aguaMl: 1500,
+};
+
+console.log(`Volumen: ${volumenTotal(hoy)} kg`);
+console.log(`Agua: ${hoy.aguaMl}/${OBJETIVO_AGUA_ML} ml`);
+```
+
+```bash
+npm run typecheck
+npm start -- src/07-app.ts
+```
+
+```text
+Volumen: 1500 kg
+Agua: 1500/2000 ml
+```
+
+Ejecuta `npm run build` y abre `dist/07-app.js`: verás `import { OBJETIVO_AGUA_ML, volumenTotal } from "./tipos/entreno";`. El tipo ha desaparecido del import, y solo quedan los valores.
+
+<Callout type="risk">
+
+- **`dist/` no se ejecuta con Node tal cual:** prueba `node dist/07-app.js` y obtendrás `ERR_MODULE_NOT_FOUND`, porque Node exige la extensión `.js` en los imports y aquí no la hay. Es correcto: la configuración `moduleResolution: "Bundler"` asume que un empaquetador (Vite, el que usa Astro) resolverá los imports. Este playground usa `tsx` para ejecutar y `dist/` solo para **inspeccionar** el resultado. Un proyecto de Node puro sin empaquetador usaría `"module": "NodeNext"` y extensiones `.js` en los imports.
+- **Dependencias circulares:** si `tipos/entreno.ts` importa de `07-app.ts` y viceversa, puedes encontrarte valores `undefined` en ejecución, según el orden de carga. Los imports **solo de tipos** no causan este problema, porque desaparecen: otra razón para usar `import type`.
+- **Exporta solo lo necesario:** todo lo que exportas es una promesa pública. Si exportas una función auxiliar "por si acaso", otros archivos empezarán a depender de ella.
+
+</Callout>
+
+## Paso 3: librerías con tipos incluidos
+
+Las librerías de npm están escritas en JavaScript (o compiladas a JavaScript). TypeScript conoce sus tipos gracias a los archivos **`.d.ts`** (_declaration files_): archivos que solo contienen tipos, sin código. Las librerías modernas los **incluyen**. Instala `date-fns`, una librería de fechas:
+
+```bash
+npm install date-fns
+```
+
+Crea `src/07-fechas.ts`:
+
+```ts
+// Archivo: src/07-fechas.ts
+import { addDays, differenceInCalendarDays, format } from "date-fns";
+import { es } from "date-fns/locale";
+
+const inicioPlan = new Date(2026, 9, 1); // 1 de octubre de 2026 (los meses empiezan en 0)
+const finPlan = addDays(inicioPlan, 56); // 8 semanas
+
+console.log(`Plan de entrenamiento: ${format(inicioPlan, "d 'de' MMMM", { locale: es })} → ${format(finPlan, "d 'de' MMMM", { locale: es })}`);
+console.log(`Duración: ${differenceInCalendarDays(finPlan, inicioPlan)} días`);
+```
+
+```bash
+npm run typecheck
+npm start -- src/07-fechas.ts
+```
+
+```text
+Plan de entrenamiento: 1 de octubre → 26 de noviembre
+Duración: 56 días
+```
+
+Ahora **lee los tipos de la librería**: pon el cursor sobre `addDays` y pulsa `F12` (o `Cmd` + clic). VS Code abre un archivo `.d.ts` dentro de `node_modules/date-fns/` con algo parecido a esto:
+
+```ts
+export declare function addDays<DateType extends Date, ResultDate extends Date = DateType>(
+  date: DateArg<DateType>,
+  amount: number,
+  options?: AddDaysOptions<ResultDate> | undefined,
+): ResultDate;
+```
+
+No hace falta entenderlo todo (los `<...>` son genéricos, del curso I1). Lo importante es lo que puedes leer ya: recibe una fecha, una cantidad `number` y unas opciones opcionales, y devuelve una fecha. **Esa es la documentación más fiable que existe**, porque es la que usa el compilador.
+
+<Callout type="risk">
+
+- **Meses desde 0:** `new Date(2026, 9, 1)` es **octubre**, no septiembre. Es una de las trampas más famosas de JavaScript, y los tipos no la detectan (ambos son `number`). Las librerías como `date-fns` no la eliminan, porque reciben objetos `Date`.
+- **`format` usa la zona horaria del proceso:** en tu Mac verás la hora de México; en un servidor de Vercel, UTC. Para mostrar fechas a usuarios, fija la zona (con `Intl.DateTimeFormat` y `timeZone`, o con `@date-fns/tz`).
+- **Peso de las librerías:** `date-fns` permite importar solo las funciones que usas (como aquí). Evita librerías que te obliguen a importarlo todo para usar una función: en el navegador, cada kilobyte cuenta.
+
+</Callout>
+
+## Paso 4: librerías sin tipos y los paquetes `@types`
+
+Algunas librerías antiguas no incluyen `.d.ts`. La comunidad mantiene sus tipos por separado en el proyecto **DefinitelyTyped**, publicados en npm como `@types/nombre-de-la-libreria`. Instala `lodash`, una librería de utilidades muy usada que no incluye tipos:
+
+```bash
+npm install lodash
+```
+
+Crea `src/07-lodash.ts`:
+
+```ts
+// Archivo: src/07-lodash.ts
+import groupBy from "lodash/groupBy.js";
+
+interface Tarea {
+  titulo: string;
+  categoria: "trabajo" | "personal" | "salud";
+}
+
+const tareas: Tarea[] = [
+  { titulo: "Revisar pull request", categoria: "trabajo" },
+  { titulo: "Correr 5 km", categoria: "salud" },
+  { titulo: "Preparar demo", categoria: "trabajo" },
+  { titulo: "Llamar a mamá", categoria: "personal" },
+];
+
+const porCategoria = groupBy(tareas, (t) => t.categoria);
+for (const [categoria, lista] of Object.entries(porCategoria)) {
+  console.log(`${categoria}: ${lista.map((t) => t.titulo).join(", ")}`);
+}
+```
+
+```bash
+npm run typecheck
+```
+
+```text
+error TS7016: Could not find a declaration file for module 'lodash/groupBy.js'. '…/node_modules/lodash/groupBy.js' implicitly has an 'any' type.
+  Try `npm i --save-dev @types/lodash` if it exists or add a new declaration (.d.ts) file containing `declare module 'lodash/groupBy.js';`
+```
+
+Debajo verás dos errores más (`Parameter 't' implicitly has an 'any' type` y `'lista' is of type 'unknown'`): son consecuencia del primero, porque sin tipos TypeScript no sabe qué recibe ni qué devuelve `groupBy`. El propio mensaje del primer error te da la solución. Instala los tipos **como dependencia de desarrollo** (solo los necesita el compilador):
+
+```bash
+npm install --save-dev @types/lodash
+npm run typecheck
+npm start -- src/07-lodash.ts
+```
+
+```text
+trabajo: Revisar pull request, Preparar demo
+salud: Correr 5 km
+personal: Llamar a mamá
+```
+
+Ahora `t` dentro de `groupBy` es `Tarea` y `lista` es `Tarea[]`: los tipos de `@types/lodash` lo saben. Pulsa `F12` sobre `groupBy` y llegarás a `node_modules/@types/lodash/`.
+
+¿Cómo saber si una librería trae tipos? Mira su página en npmjs.com: junto al nombre aparece un icono **TS** azul si los incluye, o un icono **DT** blanco si hay que instalar `@types/...`.
+
+<Callout type="risk">
+
+- **Versiones desalineadas:** `@types/lodash` lo mantienen otras personas y puede ir por detrás de la librería. Si los tipos dicen que una función no existe y la documentación dice que sí, revisa que la versión de `@types` coincida con la de la librería.
+- **`@types` en `dependencies`:** van en `devDependencies` (con `--save-dev`). En `dependencies` se instalarían en producción sin ninguna utilidad.
+- **No silencies el error con `declare module 'lodash/groupBy.js';`:** funciona, pero convierte todo el módulo en `any` y pierdes la protección. Úsalo solo para librerías que no tengan `@types`, y en ese caso escribe al menos los tipos de las funciones que uses.
+- **Prefiere alternativas modernas:** hoy JavaScript incluye `Object.groupBy` (ES2024), que hace lo mismo sin dependencias. Antes de instalar una librería, comprueba si el lenguaje ya lo resuelve.
+
+</Callout>
+
+## Paso 5: alias de rutas con `paths`
+
+Cuando los archivos están en carpetas profundas, los imports relativos se vuelven ilegibles y frágiles: `import { volumenTotal } from "../../../tipos/entreno"`. Si mueves el archivo, el import se rompe. La solución es un **alias**: `@/` significa "desde `src/`", estés donde estés.
+
+Añade `paths` a `compilerOptions` en tu `tsconfig.json`. El archivo completo queda así:
+
+```jsonc
+// Archivo: tsconfig.json
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "moduleDetection": "force",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    // "@/algo" se resuelve como "./src/algo", relativo a este tsconfig.json
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
+}
+```
+
+Ahora crea un archivo en una carpeta profunda para comprobarlo, `src/informes/semanal/resumen.ts`:
+
+```ts
+// Archivo: src/informes/semanal/resumen.ts
+import { type DiaEntreno, volumenTotal } from "@/tipos/entreno";
+
+const semana: DiaEntreno[] = [
+  { fecha: "2026-10-05", ejercicios: [{ nombre: "sentadilla", series: 4, repeticiones: 8, pesoKg: 70 }], aguaMl: 2000 },
+  { fecha: "2026-10-07", ejercicios: [{ nombre: "press banca", series: 4, repeticiones: 10, pesoKg: 50 }], aguaMl: 1800 },
+  { fecha: "2026-10-09", ejercicios: [], aguaMl: 2200 },
+];
+
+const volumenSemana = semana.reduce((total, dia) => total + volumenTotal(dia), 0);
+const diasConEntreno = semana.filter((dia) => dia.ejercicios.length > 0).length;
+
+console.log(`Volumen de la semana: ${volumenSemana} kg en ${diasConEntreno} días`);
+```
+
+```bash
+npm run typecheck
+npm start -- src/informes/semanal/resumen.ts
+```
+
+```text
+Volumen de la semana: 4240 kg en 2 días
+```
+
+Sin alias, ese import habría sido `"../../tipos/entreno"`. Con el alias, es el mismo desde cualquier carpeta. `tsx` lee `paths` del `tsconfig.json`, así que también funciona al ejecutar. En Astro funciona igual, porque Vite también lee esta configuración.
+
+<Callout type="risk">
+
+- **`baseUrl` ya no existe en TypeScript 7.** Muchos tutoriales (y proyectos creados hace tiempo) configuran `"baseUrl": "."` con `"paths": { "@/*": ["src/*"] }`. En TypeScript 7 eso da `error TS5102: Option 'baseUrl' has been removed` y, sin `baseUrl`, rutas como `"src/*"` dan `error TS5090: Non-relative paths are not allowed`. La forma actual es la de arriba: sin `baseUrl` y con rutas que empiezan por `./`. (TypeScript 6 todavía acepta `baseUrl` con un aviso de obsoleto).
+- **`paths` no reescribe los imports al compilar:** en `dist/`, el import sigue siendo `"@/tipos/entreno"`. Funciona porque un empaquetador (Vite, `tsx`) lo resuelve. Con `tsc` a solas para publicar una librería, `paths` no sirve.
+- **Alias que chocan con paquetes:** no uses un alias como `utils/*`, que podría confundirse con un paquete de npm llamado `utils`. Por eso la convención es empezar por `@/` o `~/`.
+
+</Callout>
+
+## Paso 6: el `tsconfig.json` de un proyecto Astro, línea a línea
+
+Ahora que conoces cada pieza, lee el `tsconfig.json` de un proyecto Astro real. Este es el de **esta plataforma**, tal cual:
 
 ```json
 {
@@ -89,87 +342,140 @@ Ahora sabes, sin buscar en internet, qué acepta `fetch` y qué devuelve. Acost�
 }
 ```
 
-- **`extends`**: hereda otra configuración. Astro publica tres: `base`, `strict` y `strictest`.
-- **`include` / `exclude`**: qué archivos entran. `.astro/types.d.ts` contiene los tipos que Astro genera (colecciones de contenido, variables de entorno…).
-- **`paths`**: alias de importación. `@/lib/cn` equivale a `./src/lib/cn`.
-- **`jsx` / `jsxImportSource`**: cómo se interpreta el JSX de los componentes React.
-- **`noUncheckedIndexedAccess`**: `lista[0]` es `T | undefined` (lo viste en la sección B1.3).
+Es corto porque **hereda** casi todo con `extends`. Para saber qué hereda, sigue la cadena: `astro/tsconfigs/strict` apunta a `node_modules/astro/tsconfigs/strict.json`, que solo añade `"strict": true` y a su vez hereda de `base.json` en la misma carpeta. Lo que activa `base.json` en Astro 7, opción por opción:
 
-### Lo que hereda de `astro/tsconfigs/strict`
+| Opción                             | Valor      | Para qué sirve                                                                   |
+| ---------------------------------- | ---------- | -------------------------------------------------------------------------------- |
+| `target`                           | `ESNext`   | Permite toda la sintaxis moderna; Vite se encarga de adaptarla a los navegadores |
+| `module`                           | `ESNext`   | Imports y exports estándar, _top-level await_                                    |
+| `moduleResolution`                 | `Bundler`  | Resuelve imports como Vite: sin extensiones obligatorias                         |
+| `allowImportingTsExtensions`       | `true`     | Permite `import x from "./a.ts"` con la extensión                                |
+| `resolveJsonModule`                | `true`     | Permite importar archivos `.json` con tipos                                      |
+| `verbatimModuleSyntax`             | `true`     | Obliga a usar `import type` (Paso 2)                                             |
+| `isolatedModules`                  | `true`     | Cada archivo se puede compilar por separado, como hace Vite                      |
+| `noEmit`                           | `true`     | `tsc` no genera archivos: Astro compila, TypeScript solo comprueba               |
+| `forceConsistentCasingInFileNames` | `true`     | Error si importas `./Tarjeta` y el archivo es `tarjeta.astro`                    |
+| `esModuleInterop`                  | `true`     | Permite importar librerías antiguas (CommonJS) con `import x from`               |
+| `skipLibCheck`                     | `true`     | No revisa los `.d.ts` de `node_modules` (más rápido)                             |
+| `allowJs`                          | `true`     | Permite importar archivos `.js`                                                  |
+| `jsx`                              | `preserve` | Deja el JSX para que lo transforme otro (aquí se sustituye por `react-jsx`)      |
 
-Si sigues el `extends` hasta `node_modules/astro/tsconfigs/`, encontrarás estas opciones clave:
+Y lo que añade el proyecto encima:
 
-| Opción                        | Qué hace                                                                                         |
-| ----------------------------- | ------------------------------------------------------------------------------------------------ |
-| `strict: true`                | Activa un conjunto de comprobaciones estrictas, entre ellas `strictNullChecks` y `noImplicitAny` |
-| `target: "ESNext"`            | Permite la sintaxis moderna de JavaScript sin transformarla                                      |
-| `module: "ESNext"`            | Usa módulos ES (`import`/`export`)                                                               |
-| `moduleResolution: "Bundler"` | Resuelve los imports como lo hace Vite (sin extensiones obligatorias)                            |
-| `verbatimModuleSyntax: true`  | Obliga a usar `import type` para los tipos                                                       |
-| `noEmit: true`                | `tsc` solo comprueba; no genera archivos (Astro y Vite se encargan de compilar)                  |
-| `skipLibCheck: true`          | No revisa los `.d.ts` de las librerías (más rápido)                                              |
+- **`include`** con `.astro/types.d.ts`: los tipos que Astro **genera** a partir de tu proyecto (colecciones de contenido, variables de entorno, _actions_). Si no está, `astro:content` o `astro:env` aparecen como módulos desconocidos.
+- **`exclude`**: no revisa la carpeta de compilación ni las dependencias.
+- **`paths`**: el alias `@/` del Paso 5.
+- **`jsx: "react-jsx"` y `jsxImportSource: "react"`**: los componentes `.tsx` usan React (curso B6).
+- **`noUncheckedIndexedAccess`**: la protección de índices de B1.3, que `strict` no activa por sí sola.
 
-### `strict`, la opción más importante
+¿Y qué activa `strict`? Es un interruptor que enciende a la vez varias comprobaciones, entre ellas: `noImplicitAny` (B1.2), `strictNullChecks` (sin ella, `null` y `undefined` encajarían en cualquier tipo), `strictFunctionTypes`, `strictPropertyInitialization` y `useUnknownInCatchVariables` (el `catch (error)` de tipo `unknown`). Por eso es **la opción más importante** del archivo.
 
-`strict` no es una opción, sino un interruptor que activa varias. Las dos que más notarás:
+<Callout type="risk">
 
-- **`strictNullChecks`**: `null` y `undefined` no se cuelan en cualquier tipo. Sin ella, `let n: string = null` sería válido.
-- **`noImplicitAny`**: un parámetro sin tipo es un error, en lugar de convertirse en `any` en silencio.
+- **Cambios en `tsconfig.json` y el editor:** VS Code no siempre recarga la configuración. Si los errores no cambian, `Cmd` + `Shift` + `P` → _TypeScript: Restart TS Server_.
+- **`include` sin `.astro/types.d.ts`:** es un error típico al copiar un `tsconfig.json` de otro proyecto. Los síntomas son `Cannot find module 'astro:content'` en todos los archivos que usan colecciones. Ejecuta `npx astro sync` para generar los tipos y revisa `include`.
+- **Desactivar opciones para "quitar errores":** poner `"strict": false` para silenciar 200 errores no los arregla, solo los esconde. Si heredas un proyecto así, activa las comprobaciones una a una y corrige por partes.
 
-```ts
-function saludar(nombre) {
-  // ❌ Parameter 'nombre' implicitly has an 'any' type.
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. En tu app de entrenamiento (el proyecto Astro), abre `node_modules/astro/tsconfigs/strict.json` y `base.json`, y compara su contenido con la tabla del Paso 6 (puede variar ligeramente según tu versión de Astro).
+2. Copia el `tsconfig.json` de abajo, adaptado a tu proyecto, con un comentario en cada opción. Si tu proyecto usa `baseUrl`, elimínalo y añade `./` a las rutas de `paths`.
+3. Busca en tu proyecto tres imports con `../../` y cámbialos por `@/`.
+4. Ejecuta `npx astro check` y comprueba que no hay errores nuevos.
+
+</Callout>
+
+Solución: un `tsconfig.json` para un proyecto Astro con React, comentado línea a línea (`tsconfig.json` admite comentarios):
+
+```jsonc
+// Archivo: tsconfig.json (proyecto Astro, no el playground)
+{
+  // Hereda base.json (módulos, Bundler, noEmit, verbatimModuleSyntax…) más "strict": true
+  "extends": "astro/tsconfigs/strict",
+  // Revisa todo el proyecto más los tipos que genera Astro (astro:content, astro:env…)
+  "include": [".astro/types.d.ts", "**/*"],
+  // No revisa la carpeta de compilación ni las dependencias
+  "exclude": ["dist", "node_modules"],
+  "compilerOptions": {
+    // Alias: "@/components/Tarjeta.astro" → "./src/components/Tarjeta.astro"
+    "paths": { "@/*": ["./src/*"] },
+    // Los .tsx usan el runtime JSX automático de React (sin import React en cada archivo)
+    "jsx": "react-jsx",
+    // De dónde salen las funciones de JSX: del paquete react
+    "jsxImportSource": "react",
+    // array[i] y objeto[clave] devuelven "T | undefined": obliga a comprobar antes de usar
+    "noUncheckedIndexedAccess": true
+  }
 }
 ```
 
-Desactivar `strict` hace desaparecer muchos errores, pero no los bugs que esos errores señalan.
+Y así queda una migración de imports típica en un componente:
 
-<Callout type="note">
-  TypeScript 6 marca `baseUrl` como obsoleto. Muchos tutoriales todavía lo usan junto a `paths`; hoy
-  basta con `paths` y rutas relativas al `tsconfig.json` (`./src/*`). Lo comprobamos al configurar
-  este mismo proyecto.
-</Callout>
+```astro
+---
+// Archivo: src/components/entrenos/detalle/TarjetaEjercicio.astro
+// Antes:
+// import type { Ejercicio } from "../../../tipos/entreno";
+// import { formatearPeso } from "../../../lib/formato";
+// Después:
+import type { Ejercicio } from "@/tipos/entreno";
+import { formatearPeso } from "@/lib/formato";
 
-## Alias de rutas
+interface Props {
+  ejercicio: Ejercicio;
+}
+const { ejercicio } = Astro.props;
+---
 
-Sin alias, los imports profundos se vuelven frágiles:
-
-```ts
-import { cn } from "../../../lib/cn"; // ¿cuántos ../ eran?
+<article>
+  <h3>{ejercicio.nombre}</h3>
+  <p>{ejercicio.series}×{ejercicio.repeticiones} · {formatearPeso(ejercicio.pesoKg)}</p>
+</article>
 ```
 
-Con `paths`:
+Para que este componente funcione, necesitas los dos archivos que importa. Si tu proyecto no los tiene, créalos:
 
 ```ts
-import { cn } from "@/lib/cn"; // igual desde cualquier archivo
+// Archivo: src/tipos/entreno.ts (proyecto Astro)
+export interface Ejercicio {
+  readonly nombre: string;
+  series: number;
+  repeticiones: number;
+  pesoKg: number;
+}
 ```
 
-Astro lee los `paths` del `tsconfig.json` y configura Vite por ti, así que el alias funciona tanto en el editor como al compilar.
+```ts
+// Archivo: src/lib/formato.ts (proyecto Astro)
+const formatoKg = new Intl.NumberFormat("es-MX", { style: "unit", unit: "kilogram", maximumFractionDigits: 1 });
 
-## Errores comunes
+export function formatearPeso(kg: number): string {
+  return kg === 0 ? "peso corporal" : formatoKg.format(kg);
+}
+```
 
-- **Importar un tipo sin `type`** con `verbatimModuleSyntax` activo.
-- **Instalar `@types/x` de una librería que ya trae tipos.** Puede provocar conflictos; revisa primero si el paquete incluye sus `.d.ts`.
-- **Desactivar `strict` para "arreglar" errores.** Arregla el código, no la configuración.
-- **Usar alias sin declararlos en `paths`:** `Cannot find module '@/lib/cn' or its corresponding type declarations.`
+<Callout type="risk">
 
-<Callout type="exercise">
-  1. Abre el `tsconfig.json` de tu app de entrenamiento y escribe al lado de cada opción, en un
-  comentario, lo que hace. 2. Sigue el `extends` hasta el archivo real dentro de
-  `node_modules/astro/tsconfigs/` y lista qué opciones activa. 3. Añade el alias `@/*` (sin
-  `baseUrl`) y migra tres imports relativos con `../../`. 4. Haz `Cmd` + clic sobre una función de
-  MongoDB o de Better Auth y anota su firma: parámetros y retorno.
+- **Migraciones de imports masivas:** si cambias muchos imports a la vez, hazlo en un commit separado y sin otros cambios. Así la revisión es trivial y, si algo falla, es fácil de deshacer.
+- **Mayúsculas en nombres de archivo:** macOS no distingue `Tarjeta.astro` de `tarjeta.astro`, pero Linux (el servidor de Vercel) sí. Un import con mayúsculas incorrectas funciona en tu Mac y falla en el despliegue. `forceConsistentCasingInFileNames` lo detecta cuando el mismo archivo se importa con dos formas distintas, pero no en todos los casos: copia los nombres exactos.
+- **`Intl.NumberFormat` fuera de la función:** crear el formateador una sola vez (a nivel de módulo) es mucho más rápido que crearlo en cada llamada, algo que se nota al pintar listas largas.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes crear un `tsconfig.json` para un proyecto Astro desde cero y explicar cada línea, y lees el
-  `.d.ts` de una librería para saber cómo usarla.
+
+Puedes crear un `tsconfig.json` desde cero y explicar cada línea, sabes cuándo usar `import type`, instalas `@types/...` solo cuando una librería no trae sus tipos y lees un `.d.ts` con `F12` en lugar de buscar en internet.
+
 </Callout>
 
 ## Resumen
 
-- `import type` importa solo tipos y desaparece al compilar; Astro lo exige con `verbatimModuleSyntax`.
-- Las librerías traen sus tipos (`.d.ts`) o los publican en `@types/…`.
-- `Cmd` + clic (o `F12`) te lleva a la definición: la mejor documentación.
-- `tsconfig.json` define qué archivos se revisan y con qué reglas; `strict` es la más importante.
-- `paths` crea alias como `@/`; en TypeScript 6 ya no hace falta `baseUrl`.
+- Los tipos viven en módulos propios (`src/tipos/`); los tipos desaparecen al compilar y los valores no.
+- Con `verbatimModuleSyntax`, los tipos se importan con `import type` o con `type` en línea.
+- Las librerías modernas incluyen sus `.d.ts`; las antiguas necesitan `@types/...` en `devDependencies`.
+- `paths` con `"@/*": ["./src/*"]` crea el alias `@/`; en TypeScript 7 no hay `baseUrl` y las rutas empiezan por `./`.
+- En Astro, `extends: "astro/tsconfigs/strict"` hereda casi todo; `strict` y `.astro/types.d.ts` en `include` son imprescindibles.

@@ -4,190 +4,511 @@ course: "B1"
 title: "type vs interface"
 order: 4
 minutes: 60
-summary: "Las dos formas de nombrar tipos, sus diferencias reales y una convención para elegir."
+summary: "Conviertes los tipos en línea en tipos con nombre, comparas type e interface con experimentos reales (extensión, fusión, uniones) y fijas una convención que podrás justificar."
 ---
 
-En la sección anterior escribiste tipos de objetos en línea. Funciona, pero en cuanto el mismo tipo aparece en dos sitios lo estás duplicando. TypeScript ofrece dos formas de darle **nombre** a un tipo: `type` e `interface`. Internet está lleno de debates sobre cuál es mejor; aquí vas a ver las diferencias que de verdad importan y una convención sencilla para no tener que pensarlo cada vez.
+En B1.3 escribiste la forma de `EjercicioDelDia` **dos veces**, en dos archivos. Si mañana añades un campo, tendrás que recordar cambiarlo en todas partes. La solución es **darle un nombre al tipo** y reutilizarlo. TypeScript ofrece dos formas de hacerlo, `type` e `interface`, y en internet encontrarás discusiones eternas sobre cuál es mejor. En esta sección vas a dejar de lado las opiniones: harás **experimentos** que muestran las diferencias reales y, con esos resultados, fijarás una convención que podrás defender en una revisión de código.
 
-## Alias de tipo: `type`
+**Lo que tendrás al terminar:** el archivo `src/04-modelo.ts` con el modelo de tu app de entrenamiento (`Usuario`, `Ejercicio`, `DiaEntreno`, `Categoria`) y una regla clara para elegir entre `type` e `interface`.
 
-`type` le pone un nombre a **cualquier** tipo:
+**Requisitos:** el `ts-playground` con los archivos de B1.3.
+
+## Paso 1: dar nombre a un tipo con `type`
+
+Un **alias de tipo** es exactamente eso: un nombre para un tipo. No crea nada nuevo; es como guardar una dirección larga en los contactos del móvil con un nombre corto. Crea `src/04-alias.ts`:
 
 ```ts
-type Usuario = {
-  id: string;
+// Archivo: src/04-alias.ts
+type Kilos = number;
+type Fecha = string; // formato AAAA-MM-DD
+type Tema = "light" | "dark";
+
+type Ejercicio = {
   nombre: string;
-  email: string;
+  series: number;
+  repeticiones: number;
+  pesoKg: Kilos;
 };
 
-type Tema = "light" | "dark"; // unión de literales
-type Coordenada = [number, number]; // tupla
-type Id = string; // alias de un primitivo
+const sentadilla: Ejercicio = { nombre: "sentadilla", series: 4, repeticiones: 8, pesoKg: 70 };
+const hoy: Fecha = "2026-10-09";
+const tema: Tema = "dark";
+
+const pesoComoNumero: number = sentadilla.pesoKg; // Kilos y number son el mismo tipo
+console.log(`${hoy} · ${sentadilla.nombre}: ${pesoComoNumero} kg · tema ${tema}`);
 ```
 
-## Interfaces: `interface`
+```bash
+npm start -- src/04-alias.ts
+```
 
-`interface` describe solo **formas de objeto**:
+```text
+2026-10-09 · sentadilla: 70 kg · tema dark
+```
+
+- Por convención, los tipos se nombran en **PascalCase** (`Ejercicio`, `DiaEntreno`), como las clases y los componentes de React.
+- `type Kilos = number` **no crea un tipo nuevo**: `Kilos` y `number` son intercambiables. Lo demuestra la línea `const pesoComoNumero: number = sentadilla.pesoKg`, que compila sin problemas. El alias solo documenta la intención.
+- Pasa el ratón por `sentadilla`: VS Code muestra `const sentadilla: Ejercicio`. Un nombre corto es mucho más fácil de leer que la forma completa del objeto.
+
+<Callout type="risk">
+
+- **Los alias no protegen de mezclas:** como `Kilos` es `number`, puedes asignar unos minutos a un campo `Kilos` sin error. Si necesitas que el compilador distinga unidades, existe una técnica avanzada llamada _branded types_; para este curso basta con poner la unidad en el nombre del campo (`pesoKg`, `aguaMl`).
+- **No crees alias para todo:** `type Texto = string` no aporta nada y obliga a quien lee a buscar su definición. Crea alias cuando el nombre explique algo que el tipo no dice.
+
+</Callout>
+
+## Paso 2: describir objetos con `interface`
+
+Una **interfaz** describe la forma de un objeto. Para objetos sencillos, el resultado es el mismo que con `type`. Crea `src/04-interfaces.ts`:
 
 ```ts
+// Archivo: src/04-interfaces.ts
 interface Usuario {
-  id: string;
+  readonly id: string;
+  nombre: string;
+  email: string;
+  pesoObjetivoKg?: number;
+}
+
+type UsuarioComoType = {
+  readonly id: string;
+  nombre: string;
+  email: string;
+  pesoObjetivoKg?: number;
+};
+
+const dani: Usuario = { id: "u_1", nombre: "Dani", email: "dani@example.com" };
+const mismoDani: UsuarioComoType = dani; // misma forma = mismo tipo, aunque los nombres sean distintos
+const deVuelta: Usuario = mismoDani;
+
+console.log(`${deVuelta.nombre} <${deVuelta.email}>`);
+console.log(`Peso objetivo: ${deVuelta.pesoObjetivoKg ?? "sin definir"}`);
+```
+
+```bash
+npm start -- src/04-interfaces.ts
+```
+
+```text
+Dani <dani@example.com>
+Peso objetivo: sin definir
+```
+
+Diferencias de sintaxis:
+
+- `interface Usuario { ... }`: **sin `=`**.
+- `type Usuario = { ... };`: **con `=`** (es una asignación de un nombre a un tipo).
+
+Y la conclusión importante: `Usuario` y `UsuarioComoType` son **intercambiables**. Es el **tipado estructural** que viste en B1.3: a TypeScript no le importa el nombre, sino la forma. Para un objeto simple, da igual cuál uses.
+
+<Callout type="risk">
+
+- **Las interfaces no existen en ejecución**, igual que los `type`. No puedes hacer `if (valor instanceof Usuario)`: da `error TS2693: 'Usuario' only refers to a type, but is being used as a value here.` Para comprobar en ejecución necesitas una validación (B1.6 y curso I1).
+- **Tipado estructural con datos parecidos:** si `Entreno` y `Comida` tuvieran exactamente las mismas propiedades, podrías pasar una comida donde se espera un entreno sin error. Es raro en la práctica, pero es la razón por la que los nombres de campos deben ser específicos.
+
+</Callout>
+
+## Paso 3: extender tipos con `extends` y `&`
+
+Un administrador **es** un usuario con algo más. No quieres repetir los campos de `Usuario`; quieres **reutilizarlos**. Cada herramienta tiene su forma de hacerlo. Crea `src/04-extender.ts`:
+
+```ts
+// Archivo: src/04-extender.ts
+interface Usuario {
+  readonly id: string;
   nombre: string;
   email: string;
 }
-```
 
-Para un objeto como este, `type` e `interface` son prácticamente intercambiables: se usan igual y el editor los muestra igual.
-
-```ts
-function saludar(u: Usuario) {
-  return `Hola, ${u.nombre}`;
-}
-```
-
-## Extender tipos
-
-Las interfaces se extienden con `extends`:
-
-```ts
-interface Usuario {
-  id: string;
-  nombre: string;
-}
-
+// Con interface: extends
 interface Admin extends Usuario {
   permisos: string[];
 }
 
-const admin: Admin = { id: "1", nombre: "Dani", permisos: ["editar"] };
-```
+// Con type: intersección (&) = "todo lo de A y todo lo de B"
+type Tema = "light" | "dark";
+type UsuarioConTema = Usuario & { tema: Tema };
 
-Con `type`, el equivalente es la **intersección** (`&`): un valor que cumple los dos tipos a la vez.
+const admin: Admin = {
+  id: "u_0",
+  nombre: "Dani",
+  email: "dani@example.com",
+  permisos: ["publicar-cursos", "ver-estadisticas"],
+};
 
-```ts
-type Usuario = { id: string; nombre: string };
-type Admin = Usuario & { permisos: string[] };
-```
+const conTema: UsuarioConTema = {
+  id: "u_1",
+  nombre: "Ana",
+  email: "ana@example.com",
+  tema: "dark",
+};
 
-Una diferencia sutil: si `extends` produce un conflicto, la interfaz da un error claro en la declaración, mientras que una intersección conflictiva puede producir un tipo imposible (`never`) sin avisar hasta que lo usas.
-
-```ts
-interface Base {
-  id: string;
-}
-interface Malo extends Base {
-  id: number;
-}
-// ❌ Interface 'Malo' incorrectly extends interface 'Base'.
-//    Types of property 'id' are incompatible.
-```
-
-## Lo que solo puede hacer `type`
-
-`type` puede nombrar cosas que no son formas de objeto:
-
-```ts
-type Nivel = "basico" | "intermedio" | "avanzado"; // uniones
-type Par = [string, number]; // tuplas
-type Handler = (evento: string) => void; // tipos de función
-type Resultado = { ok: true; datos: string[] } | { ok: false; error: string }; // uniones de objetos
-```
-
-Las uniones, sobre todo, son imprescindibles: las usarás constantemente desde la sección B1.6.
-
-## Lo que solo puede hacer `interface`
-
-Una interfaz declarada dos veces se **fusiona** (_declaration merging_):
-
-```ts
-interface Config {
-  tema: string;
-}
-interface Config {
-  idioma: string;
+function saludar(usuario: Usuario): string {
+  return `Hola, ${usuario.nombre}`;
 }
 
-const c: Config = { tema: "dark", idioma: "es" }; // tiene las dos propiedades
+console.log(saludar(admin)); // un Admin es un Usuario
+console.log(saludar(conTema)); // un UsuarioConTema también
+console.log(`Permisos de ${admin.nombre}: ${admin.permisos.join(", ")}`);
 ```
 
-Con `type`, declarar dos veces el mismo nombre es un error: `Duplicate identifier 'Config'.`
+```bash
+npm start -- src/04-extender.ts
+```
 
-La fusión parece rara, pero tiene un uso real: **ampliar tipos de librerías**. Es como Astro te deja añadir tus propios datos a `Astro.locals` (lo harás en la Tanda de autenticación):
+```text
+Hola, Dani
+Hola, Ana
+Permisos de Dani: publicar-cursos, ver-estadisticas
+```
+
+- `interface Admin extends Usuario` se lee "Admin tiene todo lo de Usuario, más `permisos`".
+- `Usuario & { tema: Tema }` se lee "un objeto que cumple **a la vez** con `Usuario` y con `{ tema: Tema }`".
+- En los dos casos, `saludar` acepta el tipo extendido, porque tiene todo lo que un `Usuario` necesita.
+
+Ahora la diferencia real. Añade al final del archivo este intento de redefinir `email` con un tipo incompatible y ejecuta `npm run typecheck`:
 
 ```ts
-declare namespace App {
-  interface Locals {
-    user: { id: string; name: string } | null;
-  }
+interface AdminRoto extends Usuario {
+  email: number;
 }
+
+type AdminRotoType = Usuario & { email: number };
+const imposible: AdminRotoType = { id: "x", nombre: "x", email: "x" };
 ```
 
-## Una convención para elegir
+```text
+error TS2430: Interface 'AdminRoto' incorrectly extends interface 'Usuario'.
+  Types of property 'email' are incompatible.
+    Type 'number' is not assignable to type 'string'.
+error TS2322: Type 'string' is not assignable to type 'never'.
+```
 
-No hay una respuesta única, pero sí una convención clara y muy extendida:
+- **`extends` avisa en la declaración**: te dice inmediatamente, y con un mensaje claro, que `AdminRoto` no puede redefinir `email` así.
+- **`&` no avisa al declarar**: crea un tipo en el que `email` tiene que ser `string` **y** `number` a la vez, cosa imposible, así que su tipo es `never`. El error solo aparece cuando intentas crear un objeto, y el mensaje (`not assignable to type 'never'`) es mucho más confuso.
 
-- **`interface`** para formas de objeto que representan entidades: `Usuario`, `Entreno`, `Props` de componentes.
-- **`type`** para todo lo demás: uniones, tuplas, funciones y tipos calculados.
+Borra esas líneas antes de continuar.
 
-Lo importante no es la regla elegida, sino **aplicarla siempre igual** en el proyecto. Si un día dudas, usa `type`: puede hacer casi todo.
+<Callout type="risk">
 
-<Callout type="tip">
-  En los componentes de Astro verás siempre `interface Props { … }`. Es la convención de la documentación oficial y la que sigue este proyecto.
+- **Intersecciones con conflictos:** como acabas de ver, `&` puede producir propiedades `never` sin avisar. Es una de las razones para preferir `extends` cuando modelas objetos.
+- **Rendimiento del compilador:** en proyectos muy grandes, TypeScript guarda en caché las relaciones entre interfaces con `extends`, mientras que las intersecciones se recalculan. En un proyecto personal no lo notarás; en monorepos con miles de tipos, el equipo de TypeScript recomienda `extends`.
+- **Herencia profunda:** `A extends B extends C extends D` se vuelve difícil de seguir. Si necesitas más de dos niveles, revisa el diseño.
+
 </Callout>
 
-## Organizar los tipos
+## Paso 4: lo que solo puede hacer `type`
 
-Cuando un tipo se usa en varios archivos, expórtalo desde un sitio común:
+Hay cosas que **una interfaz no puede expresar**, porque una interfaz siempre describe un objeto. Crea `src/04-solo-type.ts`:
 
 ```ts
-// src/types/entreno.ts
-export interface Ejercicio {
+// Archivo: src/04-solo-type.ts
+// 1. Uniones de valores literales
+type Categoria = "trabajo" | "personal" | "salud" | "estudio";
+
+// 2. Uniones de objetos (las verás a fondo en B1.6)
+type Resultado = { ok: true; datos: string[] } | { ok: false; error: string };
+
+// 3. Tuplas con nombre
+type Coordenada = [latitud: number, longitud: number];
+
+// 4. Tipos calculados a partir de otros
+interface Ejercicio {
   nombre: string;
   series: number;
-  reps: number;
-  peso: number;
+  repeticiones: number;
+  pesoKg: number;
 }
+type CampoDeEjercicio = keyof Ejercicio; // "nombre" | "series" | "repeticiones" | "pesoKg"
+type EjercicioSinPeso = Omit<Ejercicio, "pesoKg">;
 
-export interface DiaEntreno {
-  fecha: string;
-  ejercicios: Ejercicio[];
-  aguaMl?: number;
-}
+const categoria: Categoria = "salud";
+const respuesta: Resultado = { ok: false, error: "Sin conexión" };
+const parque: Coordenada = [19.42, -99.18];
+const campo: CampoDeEjercicio = "series";
+const flexiones: EjercicioSinPeso = { nombre: "flexiones", series: 3, repeticiones: 15 };
 
-export type TipoActividad = "fuerza" | "running" | "movilidad";
+console.log(categoria, respuesta.ok, parque[0], campo, flexiones.nombre);
 ```
+
+```bash
+npm start -- src/04-solo-type.ts
+```
+
+```text
+salud false 19.42 series flexiones
+```
+
+- **`keyof Ejercicio`** produce la unión de los nombres de sus propiedades. Útil, por ejemplo, para una función que ordena por un campo: `ordenarPor(lista, "pesoKg")` y que el editor te sugiera solo campos válidos.
+- **`Omit<Ejercicio, "pesoKg">`** crea un tipo nuevo sin esa propiedad, ideal para ejercicios con peso corporal. Hay más utilidades de este tipo (`Pick`, `Partial`, `Required`); las usarás en el curso I1.
+
+Intenta escribir `interface Categoria = "trabajo" | "personal"`: es un error de sintaxis. Una interfaz no puede ser una unión.
+
+<Callout type="risk">
+
+- **`Omit` no comprueba que la propiedad exista:** `Omit<Ejercicio, "pesoKgg">` (con errata) compila sin aviso y no quita nada. Revisa con el hover que el tipo resultante es el que esperabas.
+- **Tipos calculados ilegibles:** encadenar `Omit<Partial<Pick<...>>>` produce tipos que nadie entiende en el hover. Si un tipo calculado necesita más de una utilidad, dale un nombre intermedio.
+
+</Callout>
+
+## Paso 5: lo que solo puede hacer `interface`: la fusión de declaraciones
+
+Si declaras **dos interfaces con el mismo nombre**, TypeScript **las fusiona** en una sola. Con `type`, es un error. Crea `src/04-fusion.ts`:
 
 ```ts
-// en cualquier otro archivo
-import type { DiaEntreno } from "@/types/entreno";
+// Archivo: src/04-fusion.ts
+interface Preferencias {
+  tema: "light" | "dark";
+}
+
+interface Preferencias {
+  objetivoVasos: number;
+}
+
+// Las dos declaraciones se han fusionado: ahora Preferencias exige ambos campos
+const misPreferencias: Preferencias = { tema: "dark", objetivoVasos: 8 };
+console.log(misPreferencias);
 ```
 
-`import type` deja claro que solo importas tipos (no código que se ejecute). Lo verás en detalle en la sección B1.7.
+```bash
+npm start -- src/04-fusion.ts
+```
 
-## Errores comunes
+```text
+{ tema: 'dark', objetivoVasos: 8 }
+```
 
-- **Mezclar `type` e `interface` sin criterio** en el mismo proyecto. Elige la convención y síguela.
-- **Intentar hacer una unión con `interface`.** No se puede: `interface Tema = "light" | "dark"` es un error de sintaxis.
-- **Redeclarar un `type`:** `Duplicate identifier`. Si necesitas ampliar, usa `&` o una interfaz.
-- **Duplicar tipos casi iguales** en varios archivos. Si dos tipos comparten la mitad de las propiedades, extiende uno del otro.
+Para qué sirve esto en la vida real: **ampliar tipos de otros**. Las librerías declaran interfaces y tú puedes añadirles campos sin tocar su código. Lo vas a ver en esta misma plataforma: Astro declara `App.Locals` (los datos que el _middleware_ comparte con las páginas) como una interfaz vacía, y en `src/env.d.ts` se añaden `user` y `session` declarando de nuevo `interface Locals` dentro de `namespace App`. Lo verás en B1.8 y en el curso I5.
+
+Ahora comprueba qué pasa con `type`. Añade al final:
+
+```ts
+type Tema = "light";
+type Tema = "dark";
+```
+
+```text
+src/04-fusion.ts:14:6 - error TS2300: Duplicate identifier 'Tema'.
+src/04-fusion.ts:15:6 - error TS2300: Duplicate identifier 'Tema'.
+```
+
+TypeScript marca las dos declaraciones, porque no puede saber cuál de ellas sobra.
+
+Borra esas dos líneas antes de continuar.
+
+<Callout type="risk">
+
+- **La fusión puede ser accidental:** si en un proyecto grande dos archivos _globales_ declaran `interface Config` sin saberlo, se fusionan en silencio y aparecen campos obligatorios inesperados. Con `moduleDetection: "force"` (o con un `import`/`export` en el archivo) cada interfaz vive en su módulo y no se fusiona con la de otro archivo.
+- **Conflictos al fusionar:** si las dos declaraciones definen la misma propiedad con tipos distintos, obtienes `error TS2717: Subsequent property declarations must have the same type.`
+
+</Callout>
+
+## Paso 6: fijar una convención y aplicarla
+
+Resumen de los experimentos:
+
+| Necesitas…                                  | `interface`                       | `type`                        |
+| ------------------------------------------- | --------------------------------- | ----------------------------- |
+| Describir la forma de un objeto             | ✅                                | ✅                            |
+| Extender otro tipo de objeto                | ✅ `extends` (con errores claros) | ✅ `&` (con errores confusos) |
+| Uniones de literales y de objetos           | ❌                                | ✅                            |
+| Tuplas y tipos calculados (`keyof`, `Omit`) | ❌                                | ✅                            |
+| Ampliar tipos de una librería (fusión)      | ✅                                | ❌                            |
+
+De ahí sale la convención de este curso (y la de muchos equipos):
+
+1. **`interface` para formas de objetos** (entidades: usuarios, entrenos, cursos), porque `extends` da mejores errores y permite ampliar tipos de librerías.
+2. **`type` para todo lo demás**: uniones, tuplas, tipos calculados y alias de primitivos.
+
+La alternativa válida es usar `type` para todo. Lo que **no** es válido es mezclarlos sin criterio: el código del equipo debe ser predecible.
+
+Con esa regla, crea el modelo de tu app de entrenamiento en `src/04-modelo.ts`:
+
+```ts
+// Archivo: src/04-modelo.ts
+type Momento = "desayuno" | "comida" | "cena" | "snack";
+
+interface Usuario {
+  readonly id: string;
+  nombre: string;
+  email: string;
+}
+
+interface Ejercicio {
+  readonly nombre: string;
+  series: number;
+  repeticiones: number;
+  pesoKg: number;
+  notas?: string;
+}
+
+interface Comida {
+  nombre: string;
+  kcal: number;
+  momento: Momento;
+}
+
+interface DiaEntreno {
+  readonly fecha: string; // formato AAAA-MM-DD
+  readonly usuarioId: Usuario["id"];
+  ejercicios: Ejercicio[];
+  comidas?: Comida[];
+  aguaMl: number;
+}
+
+function volumenTotal(dia: DiaEntreno): number {
+  return dia.ejercicios.reduce((total, e) => total + e.series * e.repeticiones * e.pesoKg, 0);
+}
+
+function kcalPorMomento(dia: DiaEntreno, momento: Momento): number {
+  return (dia.comidas ?? [])
+    .filter((comida) => comida.momento === momento)
+    .reduce((total, comida) => total + comida.kcal, 0);
+}
+
+const usuario: Usuario = { id: "u_1", nombre: "Dani", email: "dani@example.com" };
+
+const jueves: DiaEntreno = {
+  fecha: "2026-10-08",
+  usuarioId: usuario.id,
+  ejercicios: [
+    { nombre: "sentadilla", series: 4, repeticiones: 8, pesoKg: 70 },
+    { nombre: "press banca", series: 4, repeticiones: 10, pesoKg: 50 },
+  ],
+  comidas: [
+    { nombre: "Avena con plátano", kcal: 420, momento: "desayuno" },
+    { nombre: "Pollo con arroz", kcal: 650, momento: "comida" },
+    { nombre: "Fruta", kcal: 120, momento: "snack" },
+    { nombre: "Frutos secos", kcal: 180, momento: "snack" },
+  ],
+  aguaMl: 2250,
+};
+
+console.log(`${usuario.nombre} · ${jueves.fecha}`);
+console.log(`Volumen: ${volumenTotal(jueves)} kg`);
+console.log(`Snacks: ${kcalPorMomento(jueves, "snack")} kcal`);
+console.log(`Cena: ${kcalPorMomento(jueves, "cena")} kcal`);
+```
+
+```bash
+npm run typecheck
+npm start -- src/04-modelo.ts
+```
+
+```text
+Dani · 2026-10-08
+Volumen: 4240 kg
+Snacks: 300 kcal
+Cena: 0 kcal
+```
+
+Fíjate en **`usuarioId: Usuario["id"]`**: es un _tipo de acceso indexado_, que significa "el tipo que tenga la propiedad `id` de `Usuario`". Si mañana los identificadores pasan de `string` a otro tipo, `DiaEntreno` se actualiza solo.
+
+<Callout type="risk">
+
+- **Un solo lugar para cada tipo:** si vuelves a copiar `Ejercicio` en otro archivo, perderás lo que acabas de ganar. En B1.7 moverás este modelo a `src/tipos/` y lo importarás desde donde lo necesites.
+- **Modelo de la app y modelo de la base de datos no siempre coinciden:** en MongoDB, `id` será un `ObjectId` llamado `_id` y las fechas pueden ser `Date`. En el curso B5 aprenderás a separar el tipo del documento guardado del tipo que usa la interfaz.
+- **No anticipes campos "por si acaso":** cada campo opcional que añades es un caso más que manejar en todo el código. Añade campos cuando los necesites.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Convierte los tipos en línea que escribiste en la sección B1.3 en interfaces reutilizables:
-  `Ejercicio` y `DiaEntreno`. 2. Muévelos a un archivo `src/types/entreno.ts` y úsalos desde otro
-  archivo con `import type`. 3. Crea un `type Categoria` con las categorías de color de tu
-  Planificador 2026. 4. Crea una interfaz `DiaPlanificador` que use `Categoria` y añade un
-  comentario explicando por qué elegiste `type` o `interface` en cada caso.
+
+1. Crea `src/04-ejercicio.ts` con un `type Categoria` para las categorías de color de tu Planificador 2026: `"trabajo" | "personal" | "salud" | "estudio"`.
+2. Crea una `interface Tarea` con `id` (solo lectura), `titulo`, `categoria`, `hecha` y `fechaLimite` opcional.
+3. Crea una `interface TareaRecurrente extends Tarea` con `cadaDias: number`.
+4. Escribe `contarPorCategoria(tareas)` que devuelva un objeto con el número de tareas pendientes de cada categoría (todas las categorías deben aparecer, aunque sea con 0).
+5. Usa un array que mezcle tareas normales y recurrentes, y ejecuta `npm run typecheck`.
+
+</Callout>
+
+Solución completa:
+
+```ts
+// Archivo: src/04-ejercicio.ts
+type Categoria = "trabajo" | "personal" | "salud" | "estudio";
+
+const CATEGORIAS: readonly Categoria[] = ["trabajo", "personal", "salud", "estudio"];
+
+interface Tarea {
+  readonly id: string;
+  titulo: string;
+  categoria: Categoria;
+  hecha: boolean;
+  fechaLimite?: string;
+}
+
+interface TareaRecurrente extends Tarea {
+  cadaDias: number;
+}
+
+type ConteoPorCategoria = Record<Categoria, number>;
+
+function contarPorCategoria(tareas: Tarea[]): ConteoPorCategoria {
+  const conteo: ConteoPorCategoria = { trabajo: 0, personal: 0, salud: 0, estudio: 0 };
+  for (const tarea of tareas) {
+    if (!tarea.hecha) {
+      conteo[tarea.categoria] += 1;
+    }
+  }
+  return conteo;
+}
+
+const regarPlantas: TareaRecurrente = {
+  id: "t_3",
+  titulo: "Regar plantas",
+  categoria: "personal",
+  hecha: false,
+  cadaDias: 3,
+};
+
+const tareas: Tarea[] = [
+  { id: "t_1", titulo: "Revisar pull request", categoria: "trabajo", hecha: false, fechaLimite: "2026-10-10" },
+  { id: "t_2", titulo: "Leer sección B1.4", categoria: "estudio", hecha: true },
+  regarPlantas,
+  { id: "t_4", titulo: "Correr 5 km", categoria: "salud", hecha: false },
+  { id: "t_5", titulo: "Preparar demo", categoria: "trabajo", hecha: false },
+];
+
+const conteo = contarPorCategoria(tareas);
+for (const categoria of CATEGORIAS) {
+  console.log(`${categoria}: ${conteo[categoria]} pendientes`);
+}
+```
+
+```text
+trabajo: 2 pendientes
+personal: 1 pendientes
+salud: 1 pendientes
+estudio: 0 pendientes
+```
+
+Por qué cada decisión:
+
+- **`Categoria` es `type`** (es una unión) y **`Tarea` es `interface`** (es una forma de objeto): la convención del Paso 6.
+- **`Record<Categoria, number>`** obliga a que el objeto tenga **las cuatro** categorías. Si quitas `estudio: 0` del objeto inicial, `npm run typecheck` dará `Property 'estudio' is missing`. Así es imposible olvidar una categoría.
+- **`regarPlantas` en un `Tarea[]`**: una `TareaRecurrente` es una `Tarea` (tiene todo lo que pide), así que entra en el array sin problema.
+
+<Callout type="risk">
+
+- **`regarPlantas` se declara aparte a propósito:** si escribes el objeto con `cadaDias` directamente dentro del array `Tarea[]`, el _excess property checking_ de B1.3 dirá que `cadaDias` no existe en `Tarea`. Una alternativa es tipar el array como `(Tarea | TareaRecurrente)[]`.
+- **Dentro del array pierdes `cadaDias`:** al recorrer `tareas`, cada elemento es `Tarea`, así que `tarea.cadaDias` no compila. Para distinguir tipos dentro de una lista necesitas _narrowing_ (B1.6).
+- **"1 pendientes":** el plural está mal a propósito para que lo arregles: `${n} ${n === 1 ? "pendiente" : "pendientes"}`. Los textos que dependen de un número aparecen en cualquier interfaz real; `Intl.PluralRules` resuelve los casos más complejos.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes justificar por qué elegiste `type` o `interface` en cada caso y sabes qué puede hacer cada
-  uno que el otro no.
+
+Puedes justificar por qué elegiste `type` o `interface` en cada caso: `interface` para formas de objetos (con `extends` y fusión), `type` para uniones, tuplas y tipos calculados, y sabes por qué una intersección con propiedades incompatibles acaba en `never`.
+
 </Callout>
 
 ## Resumen
 
-- `type` nombra cualquier tipo; `interface`, solo formas de objeto.
-- Para objetos simples, son casi intercambiables.
-- `interface` se extiende con `extends` y se fusiona si se declara dos veces.
-- `type` puede expresar uniones, tuplas y tipos de función, y se combina con `&`.
-- Convención: `interface` para entidades y `Props`; `type` para lo demás.
+- `type` da un nombre a cualquier tipo; `interface` describe la forma de un objeto. Para objetos simples son intercambiables.
+- `extends` avisa de conflictos al declarar; `&` los convierte en `never` sin avisar.
+- Solo `type` puede expresar uniones, tuplas y tipos calculados (`keyof`, `Omit`, `Record`).
+- Solo `interface` se fusiona al declararse dos veces, la técnica para ampliar tipos de librerías como `App.Locals` en Astro.
+- Convención: `interface` para entidades, `type` para lo demás, y consistencia por encima de todo.

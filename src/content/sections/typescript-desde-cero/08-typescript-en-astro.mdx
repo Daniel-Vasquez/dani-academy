@@ -4,186 +4,613 @@ course: "B1"
 title: "TypeScript en Astro"
 order: 8
 minutes: 60
-summary: "Props tipadas, endpoints con APIRoute, variables de entorno y astro check."
+summary: "Creas un proyecto Astro desde cero y lo tipas de punta a punta: props de layouts y componentes, astro check, tipos generados, endpoints con APIRoute que validan su entrada y variables de entorno con astro:env."
 ---
 
-Llegas al final del curso con todas las piezas: tipos primitivos, objetos, funciones, uniones y configuración. Ahora toca aplicarlas donde más las vas a usar: en tus proyectos de Astro. Al terminar esta sección, ningún archivo `.astro` ni endpoint de tus apps debería tener tipos implícitos.
+Todo lo que has aprendido en el curso se junta aquí. Vas a crear un proyecto **Astro** desde cero y tiparlo de punta a punta: un layout y un componente con _props_ tipadas, una página que los usa, dos endpoints de API (uno de ellos valida datos de entrada con lo que aprendiste en B1.2 y B1.6) y variables de entorno con tipos. Por el camino provocarás a propósito los errores más habituales para aprender a leerlos, entre ellos **el mismo `EnvInvalidVariables` que aparece cuando despliegas en Vercel sin configurar una variable**.
 
-## Props tipadas en componentes `.astro`
+**Lo que tendrás al terminar:** un proyecto `mi-entreno` donde `npm run check` pasa sin errores, con una página de entrenos y una API `GET`/`POST` protegida con un token.
 
-En un componente de Astro, las props se tipan declarando una interfaz llamada exactamente `Props` en el _frontmatter_:
+**Requisitos:** Node.js 22.12 o superior, y lo visto en las secciones B1.1–B1.7.
+
+## Paso 1: crear el proyecto y activar la comprobación de tipos
+
+Sal de `ts-playground` y, en tu carpeta de proyectos, ejecuta:
+
+```bash
+npm create astro@latest mi-entreno -- --template minimal --install --no-git --yes
+cd mi-entreno
+npm install --save-dev @astrojs/check typescript
+code .
+```
+
+- `--template minimal`: un proyecto vacío, con una sola página.
+- `--install --no-git --yes`: instala dependencias, no crea repositorio y acepta las opciones por defecto (sin preguntas).
+- `@astrojs/check` y `typescript`: las herramientas que usa el comando `astro check`. Sin ellas, Astro te preguntará si quieres instalarlas la primera vez que lo ejecutes.
+
+Abre `package.json` y añade el script `check`. El archivo completo queda así (los números de versión pueden ser más nuevos en tu caso):
+
+```json
+{
+  "name": "mi-entreno",
+  "type": "module",
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "check": "astro check"
+  },
+  "dependencies": {
+    "astro": "^7.3.8"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.10",
+    "typescript": "^6.0.3"
+  }
+}
+```
+
+Mira el `tsconfig.json` que ha creado Astro:
+
+```json
+{
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "**/*"],
+  "exclude": ["dist"]
+}
+```
+
+Ya lo conoces de B1.7: hereda `strict` y todo `base.json`, e incluye los tipos que genera Astro. Añade la protección de índices de B1.3, de modo que el archivo completo quede así:
+
+```json
+{
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "**/*"],
+  "exclude": ["dist"],
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": true
+  }
+}
+```
+
+<Callout type="risk">
+
+- **`astro dev` no comprueba tipos.** Igual que `tsx` en B1.1, Astro (con Vite) borra los tipos y ejecuta. Una página con errores de tipos **se ve perfectamente** en el navegador. La única red de seguridad es `npm run check`: ejecútalo antes de cada commit y en la integración continua (curso A5).
+- **TypeScript 6 aquí, TypeScript 7 en el playground:** `@astrojs/check` todavía requiere TypeScript 6, así que npm instala esa versión en este proyecto. Es normal que cada proyecto tenga la suya; las diferencias que te afectan (como `baseUrl`) están en B1.7.
+- **`npm create astro@latest`** descarga siempre la última versión. Si un tutorial se escribió con otra versión mayor, puede haber cambios. Revisa el _changelog_ si algo no cuadra.
+
+</Callout>
+
+## Paso 2: un layout con `Props` tipadas
+
+En un componente `.astro`, todo lo que va entre las dos líneas `---` (el _frontmatter_) es **TypeScript que se ejecuta en el servidor**. Para tipar lo que recibe el componente, declaras una `interface Props`: Astro la detecta por su nombre y la usa para tipar `Astro.props`.
+
+Primero, los tipos del dominio. Crea `src/tipos/entreno.ts`:
+
+```ts
+// Archivo: src/tipos/entreno.ts
+export type Nivel = "basico" | "intermedio" | "avanzado";
+
+export interface Entreno {
+  id: number;
+  titulo: string;
+  minutos: number;
+  nivel: Nivel;
+}
+```
+
+Después, el layout que envuelve todas las páginas. Crea `src/layouts/Base.astro`:
 
 ```astro
 ---
-// src/components/Tarjeta.astro
+// Archivo: src/layouts/Base.astro
+import { APP_NOMBRE } from "astro:env/client";
+
 interface Props {
   titulo: string;
   descripcion?: string;
-  nivel: "basico" | "intermedio" | "avanzado";
 }
 
-const { titulo, descripcion = "", nivel } = Astro.props;
+const { titulo, descripcion = "Registro de entrenamientos" } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={descripcion} />
+    <title>{`${titulo} · ${APP_NOMBRE}`}</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+```
+
+- **`interface Props`**: `titulo` es obligatorio y `descripcion` opcional, con un valor por defecto en la desestructuración (como en B1.5).
+- **`<slot />`**: aquí se inserta el contenido que pongas entre `<Base>` y `</Base>`.
+- **`APP_NOMBRE`** viene de `astro:env/client`, un módulo que aún no existe: lo configurarás en el Paso 6. Hasta entonces, el editor lo subrayará en rojo; es esperado.
+
+<Callout type="risk">
+
+- **El nombre `Props` es obligatorio.** Si la llamas `interface PropsTarjeta`, Astro no la asocia a `Astro.props`, que pasa a ser `Record<string, any>`, y todo compila sin comprobar nada. (También puedes tipar con `type Props = {...}`, que funciona igual).
+- **Sin `interface Props`, nada te avisa:** `const { titulo } = Astro.props` sin declarar `Props` pasa `astro check` sin errores, porque `titulo` es `any`. Revisa que **todos** tus componentes la declaren.
+- **El frontmatter se ejecuta en el servidor:** no uses `window` ni `document` ahí; no existen. El código del navegador va en etiquetas `<script>`.
+
+</Callout>
+
+## Paso 3: un componente tipado y la página que lo usa
+
+Crea `src/components/Tarjeta.astro`:
+
+```astro
+---
+// Archivo: src/components/Tarjeta.astro
+import type { Nivel } from "../tipos/entreno";
+
+interface Props {
+  titulo: string;
+  minutos: number;
+  nivel: Nivel;
+  descripcion?: string;
+}
+
+const { titulo, minutos, nivel, descripcion } = Astro.props;
+
+const ETIQUETAS: Record<Nivel, string> = {
+  basico: "Básico",
+  intermedio: "Intermedio",
+  avanzado: "Avanzado",
+};
 ---
 
 <article data-nivel={nivel}>
   <h2>{titulo}</h2>
+  <p>{minutos} min · {ETIQUETAS[nivel]}</p>
   {descripcion && <p>{descripcion}</p>}
 </article>
 ```
 
-Con esto:
-
-- `Astro.props` queda tipado automáticamente.
-- Quien use `<Tarjeta />` recibe autocompletado y errores si falta `titulo` o si `nivel` no es uno de los tres valores.
-
-```astro
-<Tarjeta titulo="TypeScript" nivel="experto" />
-<!-- ❌ Type '"experto"' is not assignable to type '"basico" | "intermedio" | "avanzado"'. -->
-```
-
-### Props que heredan de HTML
-
-Si tu componente envuelve un elemento HTML, puedes heredar todos sus atributos con `HTMLAttributes`:
+Sustituye `src/pages/index.astro` por esta página:
 
 ```astro
 ---
-import type { HTMLAttributes } from "astro/types";
+// Archivo: src/pages/index.astro
+import Base from "../layouts/Base.astro";
+import Tarjeta from "../components/Tarjeta.astro";
+import type { Entreno } from "../tipos/entreno";
 
-interface Props extends HTMLAttributes<"a"> {
-  variante?: "primario" | "secundario";
-}
-
-const { variante = "primario", ...resto } = Astro.props;
+const entrenos: Entreno[] = [
+  { id: 1, titulo: "Rodaje suave", minutos: 30, nivel: "basico" },
+  { id: 2, titulo: "Fuerza de pierna", minutos: 50, nivel: "intermedio" },
+  { id: 3, titulo: "Series de 400 m", minutos: 45, nivel: "avanzado" },
+];
 ---
 
-<a {...resto} data-variante={variante}>
-  <slot />
-</a>
+<Base titulo="Entrenos">
+  <h1>Mis entrenos</h1>
+  {entrenos.map((e) => (
+    <Tarjeta titulo={e.titulo} minutos={e.minutos} nivel={e.nivel} />
+  ))}
+</Base>
 ```
 
-Ahora el componente acepta `href`, `target`, `aria-label` y cualquier otro atributo válido de `<a>`, con sus tipos.
+- **`Record<Nivel, string>`** (B1.4) garantiza que hay una etiqueta para cada nivel. Si añades `"elite"` a `Nivel`, el objeto `ETIQUETAS` dará error hasta que añadas su etiqueta.
+- **`ETIQUETAS[nivel]`** es `string` (no `string | undefined`) a pesar de `noUncheckedIndexedAccess`: como la clave es un `Nivel` y el `Record` tiene todas, TypeScript sabe que existe.
+- **`import type`** para los tipos, como en B1.7 (`verbatimModuleSyntax` viene activado en Astro).
 
-## Los tipos que genera Astro
+Ahora provoca tres errores a propósito. Cambia el contenido entre `<Base>` y `</Base>` por estas tres tarjetas mal escritas:
 
-Astro genera tipos a partir de tu proyecto en la carpeta `.astro/` (por eso aparece en el `include` del `tsconfig.json`). Por ejemplo, de tus colecciones de contenido:
-
-```ts
-import { getCollection, type CollectionEntry } from "astro:content";
-
-type Seccion = CollectionEntry<"sections">;
-
-const secciones = await getCollection("sections");
-// secciones[0]?.data.title → string, sacado del esquema de content.config.ts
+```astro
+<Base titulo="Entrenos">
+  <Tarjeta titulo="Rodaje suave" minutos={30} />
+  <Tarjeta titulo="Fuerza" minutos="50" nivel="intermedio" />
+  <Tarjeta titulo="Series" minutos={45} nivel="experto" />
+</Base>
 ```
 
-Si cambias el esquema de una colección, los tipos se regeneran al arrancar `astro dev` o al ejecutar `astro sync`.
+```bash
+npm run check
+```
 
-## Endpoints tipados con `APIRoute`
+```text
+src/pages/index.astro:10:41 - error ts(2322): Type '"experto"' is not assignable to type 'Nivel'.
+src/pages/index.astro:9:28 - error ts(2322): Type 'string' is not assignable to type 'number'.
+src/pages/index.astro:8:4 - error ts(2322): Type '{ titulo: string; minutos: number; }' is not assignable to type 'IntrinsicAttributes & Props'.
+  Property 'nivel' is missing in type '{ titulo: string; minutos: number; }' but required in type 'Props'.
 
-Los endpoints son archivos `.ts` en `src/pages/` que exportan funciones con el nombre del método HTTP. El tipo `APIRoute` tipa todo el contexto que reciben:
+Result (8 files):
+- 3 errors
+```
+
+(Los números de línea dependen de cómo hayas dejado el frontmatter; lo importante son los mensajes).
+
+Cómo leer cada uno:
+
+1. **`'"experto"' is not assignable to type 'Nivel'`**: un valor fuera de la unión.
+2. **`'string' is not assignable to type 'number'`**: `minutos="50"` pasa **texto**. En Astro (y en JSX), las comillas siempre son texto; para pasar un número, usa llaves: `minutos={50}`.
+3. **`Property 'nivel' is missing`**: falta una prop obligatoria. `IntrinsicAttributes & Props` es la forma interna en que Astro combina tus props con las que acepta cualquier componente; lee siempre la **segunda línea** del mensaje, que es la que dice qué falta.
+
+Ejecuta `npm run dev` y abre `http://localhost:4321`: **la página se ve**, con los errores incluidos. Por eso `npm run check` es imprescindible. Restaura la versión correcta de `index.astro` antes de seguir.
+
+<Callout type="risk">
+
+- **`minutos="50"` es el error más común** cuando se viene de HTML, donde todo atributo es texto. Con props tipadas, el compilador lo detecta; sin ellas, `minutos + 10` daría `"5010"` (el bug de B1.1).
+- **Pasar objetos enteros frente a props sueltas:** podrías escribir `<Tarjeta entreno={e} />` con `Props { entreno: Entreno }`. Es más corto, pero acopla el componente a la forma completa de `Entreno`. Props sueltas hacen el componente reutilizable con datos de otras fuentes.
+- **`.map()` sin `key`:** a diferencia de React, Astro no necesita `key`, porque genera HTML una sola vez en el servidor. Si conviertes el componente en una isla de React (curso B6), sí la necesitarás.
+
+</Callout>
+
+## Paso 4: los tipos que genera Astro
+
+Ejecuta `npm run check` o `npm run dev` y mira la carpeta `.astro/` en la raíz del proyecto. Astro la **genera** a partir de tu configuración:
+
+```text
+.astro/
+├── types.d.ts       → punto de entrada: incluye los tipos de astro/client y los demás
+├── env.d.ts         → tipos de tus variables de entorno (Paso 6)
+├── content.d.ts     → tipos de las colecciones de contenido
+└── …
+```
+
+Por eso `tsconfig.json` incluye `.astro/types.d.ts`: es lo que hace que `import { APP_NOMBRE } from "astro:env/client"` tenga tipos. Si cambias la configuración y el editor no se entera, regenera los tipos a mano:
+
+```bash
+npx astro sync
+```
+
+Esta misma plataforma usa este mecanismo con las colecciones de contenido: cada lección que lees es un archivo `.mdx` cuyo _frontmatter_ (`sectionId`, `title`, `minutes`…) está tipado y validado gracias a los tipos que Astro genera en `.astro/`.
+
+<Callout type="risk">
+
+- **No edites ni subas `.astro/` a Git:** se regenera en cada `dev`, `build`, `check` o `sync`. El `.gitignore` de la plantilla ya lo excluye.
+- **"Cannot find module 'astro:env/client'"** casi siempre significa que los tipos no se han generado todavía (proyecto recién clonado) o que `tsconfig.json` no incluye `.astro/types.d.ts`. Solución: `npx astro sync` y, si persiste, _TypeScript: Restart TS Server_.
+
+</Callout>
+
+## Paso 5: endpoints tipados con `APIRoute`
+
+Un archivo `.ts` dentro de `src/pages/` es un **endpoint**: en lugar de HTML, devuelve datos. Cada método HTTP (`GET`, `POST`…) se exporta como una función de tipo `APIRoute`. Empieza por el más sencillo, `src/pages/api/hola.ts`:
 
 ```ts
-// src/pages/api/hola.ts
+// Archivo: src/pages/api/hola.ts
 import type { APIRoute } from "astro";
 
+// Esta ruta se ejecuta en cada petición (no se genera al compilar)
+export const prerender = false;
+
 export const GET: APIRoute = ({ url }) => {
-  const nombre = url.searchParams.get("nombre") ?? "mundo"; // string | null → string
+  const nombre = url.searchParams.get("nombre") ?? "mundo";
   return Response.json({ mensaje: `Hola, ${nombre}` });
 };
 ```
 
-Fíjate en el `?? "mundo"`: `searchParams.get` devuelve `string | null` y TypeScript te obliga a decidir qué hacer si falta el parámetro.
+- **`APIRoute`** tipa la función completa: el parámetro (el _contexto_ de la petición, con `url`, `request`, `params`, `cookies`…) y el retorno (`Response`). Gracias al tipado contextual de B1.5, no anotas `{ url }`: pasa el ratón y verás que es un `URL`.
+- **`url.searchParams.get("nombre")`** devuelve `string | null`: el parámetro puede no venir. El `?? "mundo"` lo resuelve.
+- **`export const prerender = false`**: por defecto, Astro genera las páginas **al compilar** (estáticas). Un endpoint que lee la URL de cada petición tiene que ejecutarse **en cada petición**.
 
-Con rutas dinámicas, los parámetros también están tipados:
+Ahora un endpoint real, que recibe datos del exterior. Todo lo que llega en una petición es `unknown` hasta que lo compruebas (B1.2), así que aquí aplicas los _guards_ de B1.6. Crea `src/pages/api/entrenos.ts`:
 
 ```ts
-// src/pages/api/entrenos/[id].ts
+// Archivo: src/pages/api/entrenos.ts
 import type { APIRoute } from "astro";
+import { API_TOKEN, LIMITE_ENTRENOS } from "astro:env/server";
+import type { Entreno, Nivel } from "../../tipos/entreno";
 
-export const GET: APIRoute = async ({ params }) => {
-  const id = params.id; // string | undefined
-  if (!id) return new Response("Falta el id", { status: 400 });
-  return Response.json({ id });
+export const prerender = false;
+
+const NIVELES: readonly string[] = ["basico", "intermedio", "avanzado"];
+
+// En memoria para el ejemplo: se pierde al reiniciar el servidor
+const entrenos: Entreno[] = [{ id: 1, titulo: "Rodaje suave", minutos: 30, nivel: "basico" }];
+
+type EntradaEntreno = Omit<Entreno, "id">;
+
+function esNivel(valor: unknown): valor is Nivel {
+  return typeof valor === "string" && NIVELES.includes(valor);
+}
+
+function leerEntrada(cuerpo: unknown): EntradaEntreno | null {
+  if (typeof cuerpo !== "object" || cuerpo === null) return null;
+  const titulo = "titulo" in cuerpo ? cuerpo.titulo : undefined;
+  const minutos = "minutos" in cuerpo ? cuerpo.minutos : undefined;
+  const nivel = "nivel" in cuerpo ? cuerpo.nivel : undefined;
+
+  if (typeof titulo !== "string" || titulo.trim().length < 3) return null;
+  if (typeof minutos !== "number" || !Number.isInteger(minutos) || minutos <= 0 || minutos > 600) return null;
+  if (!esNivel(nivel)) return null;
+
+  return { titulo: titulo.trim(), minutos, nivel };
+}
+
+export const GET: APIRoute = () => {
+  return Response.json({ entrenos: entrenos.slice(0, LIMITE_ENTRENOS) });
+};
+
+export const POST: APIRoute = async ({ request }) => {
+  if (request.headers.get("authorization") !== `Bearer ${API_TOKEN}`) {
+    return Response.json({ error: "No autorizado" }, { status: 401 });
+  }
+
+  let cuerpo: unknown;
+  try {
+    cuerpo = await request.json();
+  } catch {
+    return Response.json({ error: "El cuerpo debe ser JSON" }, { status: 400 });
+  }
+
+  const entrada = leerEntrada(cuerpo);
+  if (entrada === null) {
+    return Response.json({ error: "Datos inválidos" }, { status: 400 });
+  }
+
+  const nuevo: Entreno = { id: entrenos.length + 1, ...entrada };
+  entrenos.push(nuevo);
+  return Response.json(nuevo, { status: 201 });
 };
 ```
 
-## Variables de entorno tipadas
+El orden de las comprobaciones en `POST` no es casual:
 
-`import.meta.env` funciona, pero todo lo que contiene es `string | undefined` y nada impide un error de escritura en el nombre. Astro ofrece `astro:env`, donde declaras un esquema en `astro.config.mjs`:
+1. **Autorización primero**: si no hay permiso, no gastas recursos leyendo el cuerpo. Respuesta `401`.
+2. **Leer el JSON con `try/catch`**: `request.json()` lanza un error si el cuerpo no es JSON válido. Lo conviertes en un `400` claro, en lugar de un `500`.
+3. **Validar con `leerEntrada`**: convierte `unknown` en `EntradaEntreno` o devuelve `null`. Comprueba el tipo **y** el rango de cada campo (título de al menos 3 caracteres, minutos enteros entre 1 y 600).
+4. **Crear con `Omit<Entreno, "id">` + `id`**: el cliente no elige el `id`; lo asigna el servidor. `Omit` (B1.4) lo expresa en el tipo.
+
+Este archivo importa `API_TOKEN` y `LIMITE_ENTRENOS`, que configurarás en el paso siguiente. Hasta entonces, no lo pruebes.
+
+<Callout type="risk">
+
+- **`npm run build` falla con `prerender = false` si no hay adaptador:** `[NoAdapterInstalled] Cannot use server-rendered pages without an adapter.` En desarrollo funciona, pero para desplegar necesitas instalar el adaptador de tu plataforma (`npx astro add vercel`, curso A4). Esta plataforma usa `@astrojs/vercel`.
+- **Comparar tokens con `!==`** es suficiente para aprender, pero en seguridad real se usa una comparación de tiempo constante (`crypto.timingSafeEqual`) para no filtrar información por el tiempo de respuesta. Y la autenticación de usuarios de verdad se hace con sesiones (Better Auth, curso I5), no con un token compartido.
+- **Datos en memoria:** el array `entrenos` se pierde al reiniciar el servidor, y en Vercel cada función puede ejecutarse en una instancia distinta, con su propio array. Los datos persistentes van en una base de datos (curso B5).
+- **El `id` con `entrenos.length + 1`** se repite si algún día borras elementos. MongoDB genera identificadores únicos (`ObjectId`) por ti.
+
+</Callout>
+
+## Paso 6: variables de entorno tipadas con `astro:env`
+
+Las variables de entorno guardan configuración que cambia entre tu Mac y producción, o que es secreta (contraseñas, tokens). Llegan siempre **como texto**, y pueden faltar. `astro:env` resuelve ambas cosas: declaras un **esquema** con el tipo de cada variable y Astro las valida y las tipa. Sustituye `astro.config.mjs` por:
 
 ```js
-// astro.config.mjs
+// Archivo: astro.config.mjs
+// @ts-check
 import { defineConfig, envField } from "astro/config";
 
 export default defineConfig({
   env: {
     schema: {
-      MONGODB_URI: envField.string({ context: "server", access: "secret" }),
-      APP_TIMEZONE: envField.string({
-        context: "server",
-        access: "public",
-        default: "America/Mexico_City",
-      }),
+      // Pública: se puede usar también en el navegador
+      APP_NOMBRE: envField.string({ context: "client", access: "public", default: "Mi Entreno" }),
+      // Secreta: solo existe en el servidor, nunca llega al navegador
+      API_TOKEN: envField.string({ context: "server", access: "secret", min: 16 }),
+      // Numérica: Astro la convierte de texto a number por ti
+      LIMITE_ENTRENOS: envField.number({ context: "server", access: "public", default: 50 }),
     },
   },
 });
 ```
 
-```ts
-import { MONGODB_URI } from "astro:env/server"; // string, garantizado
-```
-
-Ventajas: el nombre se autocompleta, el tipo es correcto y, si falta una variable obligatoria, Astro falla con un mensaje claro en lugar de dejar que la app se rompa más tarde. Además, es imposible importar un secreto desde código que se ejecute en el navegador.
-
-## `astro check`: el compilador de todo el proyecto
-
-`tsc` no entiende los archivos `.astro`. Para comprobar **todo** el proyecto, Astro ofrece:
+Crea el archivo `.env` en la raíz del proyecto (Astro lo lee automáticamente en desarrollo):
 
 ```bash
-npx astro check
+API_TOKEN="token-de-desarrollo-1234567890"
 ```
 
-Revisa los `.astro`, `.ts` y `.tsx` y muestra los errores con su archivo y su línea:
+Reinicia `npm run dev` (los cambios en `astro.config.mjs` requieren reiniciar) y abre `.astro/env.d.ts`, que Astro acaba de generar:
+
+```ts
+declare module 'astro:env/client' {
+	export const APP_NOMBRE: string;
+}
+declare module 'astro:env/server' {
+	export const API_TOKEN: string;
+	export const LIMITE_ENTRENOS: number;
+}
+```
+
+`LIMITE_ENTRENOS` es `number`, no `string`: Astro hace la conversión y la validación. Ahora prueba la API completa desde otra terminal:
+
+```bash
+curl "http://localhost:4321/api/hola?nombre=Dani"
+curl http://localhost:4321/api/entrenos
+curl -i -X POST http://localhost:4321/api/entrenos \
+  -H "content-type: application/json" \
+  -d '{"titulo":"Remo","minutos":20,"nivel":"basico"}'
+curl -i -X POST http://localhost:4321/api/entrenos \
+  -H "authorization: Bearer token-de-desarrollo-1234567890" \
+  -H "content-type: application/json" \
+  -d '{"titulo":"  Remo ","minutos":20,"nivel":"basico"}'
+curl -i -X POST http://localhost:4321/api/entrenos \
+  -H "authorization: Bearer token-de-desarrollo-1234567890" \
+  -H "content-type: application/json" \
+  -d '{"titulo":"Remo","minutos":"20","nivel":"experto"}'
+```
+
+Respuestas (de `curl -i` se muestran solo la línea de estado y el cuerpo):
 
 ```text
-src/components/Tarjeta.astro:12:5 - error ts(2322): Type 'number' is not assignable to type 'string'.
-Result (21 files):
-- 1 error
+{"mensaje":"Hola, Dani"}
+{"entrenos":[{"id":1,"titulo":"Rodaje suave","minutos":30,"nivel":"basico"}]}
+HTTP/1.1 401 Unauthorized
+{"error":"No autorizado"}
+HTTP/1.1 201 Created
+{"id":2,"titulo":"Remo","minutos":20,"nivel":"basico"}
+HTTP/1.1 400 Bad Request
+{"error":"Datos inválidos"}
 ```
 
-En este proyecto está como script: `npm run check`. Ejecútalo antes de cada commit; en la Tanda de calidad lo automatizarás en el CI.
+Fíjate en la cuarta petición: el título llegó con espacios (`"  Remo "`) y se guardó limpio (`"Remo"`). Y en la quinta, `minutos` llegó como texto (`"20"`), un error típico de los formularios, y se rechazó.
 
-<Callout type="tip">
-  Los errores más habituales en `.astro` vienen de props sin `interface Props`, de `Astro.params`
-  usados sin comprobar `undefined` y de `import` de tipos sin `type`.
+Ahora el experimento más importante. Para el servidor, **renombra `.env` a `.env.bak`** (así la variable "desaparece") y arráncalo de nuevo con `npm run dev`. Abre `http://localhost:4321/`: **la portada funciona**. Ahora abre `http://localhost:4321/api/entrenos`: error 500, y en la terminal:
+
+```text
+[EnvInvalidVariables] The following environment variables defined in `env.schema` are invalid:
+
+- API_TOKEN is missing
+```
+
+Es exactamente el error que aparece al desplegar en Vercel sin configurar las variables en el panel del proyecto: el `.env` de tu ordenador no se sube (y no debe subirse), así que en producción la variable no existe. Fíjate en que **solo falla la ruta que usa la variable**: la portada no la importa y funciona. Por eso este error suele descubrirse tarde, cuando alguien usa por primera vez la parte de la app que la necesita. Vuelve a renombrar `.env.bak` a `.env`.
+
+<Callout type="risk">
+
+- **Nunca subas `.env` a Git.** La plantilla ya lo incluye en `.gitignore`; compruébalo con `git status` antes de tu primer commit. Si un secreto llega a GitHub, considéralo comprometido: genera uno nuevo, porque borrar el commit no basta.
+- **Documenta las variables en `.env.example`** (con valores vacíos o de ejemplo, nunca reales). Es lo que permite a otra persona, o a ti en otro ordenador, saber qué configurar. Esta plataforma tiene uno.
+- **En Vercel, las variables se configuran en _Settings_ → _Environment Variables_,** y solo se aplican a los **nuevos** despliegues: después de añadirlas, hay que volver a desplegar.
+- **`import.meta.env` no valida nada:** Astro también expone variables con `import.meta.env.NOMBRE`, pero las que tú defines ahí son de tipo `any` (por ejemplo, `import.meta.env.PUBLIC_ALGO`) y no se comprueba que existan. Solo las integradas (`import.meta.env.DEV`, `MODE`…) tienen tipo. Para tus variables, usa siempre `astro:env`.
+- **`context: "client"` publica el valor:** cualquier variable de cliente acaba en el JavaScript que descarga el navegador. Nunca declares un secreto como `client`; Astro, de hecho, no permite `access: "secret"` con `context: "client"`.
+
 </Callout>
 
-## Errores comunes
+## Paso 7: errores comunes en `.astro` y cómo leerlos
 
-- **Llamar a la interfaz de otra forma.** Astro solo tipa `Astro.props` automáticamente si la interfaz se llama `Props`.
-- **Usar `params.id` sin comprobar** que existe: es `string | undefined`.
-- **Leer secretos con `import.meta.env` en componentes de cliente.** Con `astro:env`, ese error es imposible.
-- **No ejecutar `astro check`** y descubrir los errores en producción.
+Una tabla de referencia con los errores que más verás, todos de `npm run check` salvo los dos que aparecen en `dev` o en `build`:
+
+| Mensaje (resumido)                                               | Causa habitual                           | Solución                                 |
+| ---------------------------------------------------------------- | ---------------------------------------- | ---------------------------------------- |
+| `Property 'x' is missing in type … but required in type 'Props'` | Falta una prop obligatoria               | Pásala, o hazla opcional con `?`         |
+| `Type 'string' is not assignable to type 'number'` en una prop   | `prop="50"` en lugar de `prop={50}`      | Usa llaves para todo lo que no sea texto |
+| `Type '"x"' is not assignable to type 'Nivel'`                   | Valor fuera de una unión                 | Corrige el valor o amplía la unión       |
+| `Cannot find module 'astro:env/server'`                          | Tipos sin generar o `include` incompleto | `npx astro sync`; revisa `tsconfig.json` |
+| `'X' is a type and must be imported using a type-only import`    | Falta `import type`                      | `import type { X }` (B1.7)               |
+| `[EnvInvalidVariables] … is missing` (en `dev` o en producción)  | Variable de entorno no definida          | Añádela a `.env` o al panel de Vercel    |
+| `[NoAdapterInstalled]` (en `build`)                              | `prerender = false` sin adaptador        | `npx astro add vercel`                   |
+
+El método para cualquier error nuevo es siempre el mismo: **archivo y línea** (dónde), **código** `ts(XXXX)` (qué clase de error) y **la última línea del mensaje** (qué falta o qué sobra exactamente).
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Ejecuta `npx astro check` en tu app de entrenamiento y corrige todos los errores. 2. Tipa las
-  `Props` de todos los componentes `.astro` de una página completa. 3. Tipa uno de tus endpoints con
-  `APIRoute` y maneja el caso en que falte un parámetro. 4. Proyecto del curso: crea `src/types/`
-  con los tipos de dominio (usuario, entreno, comida, hidratación), comprueba que `strict` está
-  activo, elimina todos los `any` y consigue que `astro check` pase limpio.
+
+1. En tu app de entrenamiento, ejecuta `npx astro check` y corrige todos los errores, empezando por el primero de la lista.
+2. En este proyecto `mi-entreno`, crea una página `src/pages/semana.astro` con dos componentes nuevos: `Insignia.astro` (muestra el nivel con un texto y un color, según una prop de tipo `Nivel`) y `ResumenSemana.astro` (recibe un `Entreno[]` y un objetivo de minutos opcional, y muestra el total y el porcentaje del objetivo).
+3. Todas las props deben estar tipadas con `interface Props`, sin ningún `any`.
+4. Ejecuta `npm run check` y abre `http://localhost:4321/semana`.
+
+</Callout>
+
+Solución completa. Primero, `src/components/Insignia.astro`:
+
+```astro
+---
+// Archivo: src/components/Insignia.astro
+import type { Nivel } from "../tipos/entreno";
+
+interface Props {
+  nivel: Nivel;
+}
+
+const { nivel } = Astro.props;
+
+const ESTILOS: Record<Nivel, { texto: string; color: string }> = {
+  basico: { texto: "Básico", color: "#0d9488" },
+  intermedio: { texto: "Intermedio", color: "#0284c7" },
+  avanzado: { texto: "Avanzado", color: "#d97706" },
+};
+
+const { texto, color } = ESTILOS[nivel];
+---
+
+<span style={`color: ${color}; border: 1px solid ${color}; padding: 0 0.5rem; border-radius: 999px;`}>
+  {texto}
+</span>
+```
+
+Después, `src/components/ResumenSemana.astro`:
+
+```astro
+---
+// Archivo: src/components/ResumenSemana.astro
+import type { Entreno } from "../tipos/entreno";
+import Insignia from "./Insignia.astro";
+
+interface Props {
+  entrenos: Entreno[];
+  objetivoMinutos?: number;
+}
+
+const { entrenos, objetivoMinutos = 150 } = Astro.props;
+
+const totalMinutos = entrenos.reduce((total, e) => total + e.minutos, 0);
+const porcentaje = objetivoMinutos > 0 ? Math.min(100, Math.round((totalMinutos / objetivoMinutos) * 100)) : 0;
+---
+
+<section>
+  <h2>Resumen de la semana</h2>
+  <p>{totalMinutos} de {objetivoMinutos} min ({porcentaje} %)</p>
+  {entrenos.length === 0 ? (
+    <p>Todavía no hay entrenos esta semana.</p>
+  ) : (
+    <ul>
+      {entrenos.map((e) => (
+        <li>
+          {e.titulo} · {e.minutos} min <Insignia nivel={e.nivel} />
+        </li>
+      ))}
+    </ul>
+  )}
+</section>
+```
+
+Y la página `src/pages/semana.astro`:
+
+```astro
+---
+// Archivo: src/pages/semana.astro
+import Base from "../layouts/Base.astro";
+import ResumenSemana from "../components/ResumenSemana.astro";
+import type { Entreno } from "../tipos/entreno";
+
+const semana: Entreno[] = [
+  { id: 1, titulo: "Rodaje suave", minutos: 30, nivel: "basico" },
+  { id: 2, titulo: "Fuerza de pierna", minutos: 50, nivel: "intermedio" },
+  { id: 3, titulo: "Series de 400 m", minutos: 45, nivel: "avanzado" },
+];
+---
+
+<Base titulo="Semana" descripcion="Resumen de los entrenos de la semana">
+  <h1>Mi semana</h1>
+  <ResumenSemana entrenos={semana} objetivoMinutos={150} />
+  <ResumenSemana entrenos={[]} />
+</Base>
+```
+
+```bash
+npm run check
+```
+
+```text
+Result (11 files):
+- 0 errors
+- 0 warnings
+- 0 hints
+```
+
+En `http://localhost:4321/semana` verás dos resúmenes: el primero con `125 de 150 min (83 %)` y la lista con las insignias de colores; el segundo, con el objetivo por defecto, `0 de 150 min (0 %)` y el mensaje de semana vacía.
+
+<Callout type="risk">
+
+- **División por cero:** si alguien pasa `objetivoMinutos={0}`, `totalMinutos / 0` sería `Infinity`. La comprobación `objetivoMinutos > 0` lo evita. Los tipos dicen que es un `number`, no que sea un número **razonable**.
+- **Estilos en línea con datos:** construir `style` a partir de un objeto controlado por ti (como `ESTILOS`) es seguro. Nunca construyas estilos, HTML o URLs a partir de texto que escriba un usuario sin validarlo.
+- **Colores fijos en el componente:** para un ejercicio está bien; en un proyecto real, los colores van en variables CSS o en el tema de Tailwind (curso B7) para soportar el modo oscuro.
+
 </Callout>
 
 <Callout type="mastery">
-  `astro check` pasa sin errores en uno de tus proyectos y no queda ningún `any` implícito.
+
+`astro check` pasa sin errores en uno de tus proyectos, todos tus componentes declaran `interface Props`, tus endpoints tratan el cuerpo de la petición como `unknown` hasta validarlo y tus variables de entorno están declaradas en `astro:env`, de modo que sabes leer un `EnvInvalidVariables` y arreglarlo en Vercel.
+
 </Callout>
 
 ## Resumen
 
-- `interface Props` tipa `Astro.props` y da autocompletado a quien usa el componente.
-- `HTMLAttributes<"a">` hereda los atributos de un elemento HTML.
-- Astro genera tipos para tus colecciones en `.astro/`.
-- `APIRoute` tipa el contexto de los endpoints: `params`, `url`, `request`…
-- `astro:env` da variables de entorno tipadas, validadas y seguras.
-- `astro check` comprueba todo el proyecto, incluidos los `.astro`.
-
-Has terminado las secciones del curso. Cuando las marques todas como leídas, podrás hacer la **evaluación final**.
+- `astro dev` no comprueba tipos; `npm run check` (`astro check`) sí: ejecútalo siempre antes de un commit.
+- `interface Props` tipa `Astro.props`; sin ella, todo es `any` y nada te avisa.
+- Astro genera tipos en `.astro/` (colecciones, variables de entorno); `npx astro sync` los regenera.
+- `APIRoute` tipa endpoints; el cuerpo de una petición es `unknown` hasta que lo validas; `prerender = false` necesita un adaptador para desplegar.
+- `astro:env` valida y tipa las variables de entorno; si falta una, verás `EnvInvalidVariables`, solo en las rutas que la usan.
