@@ -4,106 +4,49 @@ course: "B3"
 title: "HTTP a fondo"
 order: 3
 minutes: 60
-summary: "La anatomía de peticiones y respuestas, los métodos, los códigos de estado que de verdad usarás y las cabeceras clave."
+summary: "Diseccionas peticiones y respuestas reales, construyes una API REST de tareas que usa cada método y cada código de estado como se debe, y la consumes con fetch manejando 201, 204, 4xx y 5xx."
 ---
 
-HTTP es el idioma en el que hablan el navegador y tu servidor. Cada `fetch`, cada formulario y cada página es un intercambio HTTP. Cuando diseñes tus propias APIs (curso I3), elegirás métodos, códigos de estado y cabeceras; si los eliges bien, tu API se explica sola. Esta sección te da el vocabulario.
+HTTP es el idioma en que hablan el navegador, tus endpoints de Astro, Vercel, MongoDB Atlas cuando usas su API y cualquier servicio externo. Lo usas a diario, pero probablemente con dos códigos de estado (200 y "error") y dos métodos (GET y POST). En esta sección vas a diseccionar peticiones reales y después vas a **construir una API REST completa**, sin frameworks, que usa cada método y cada código de estado con su significado exacto. Al final la consumirás desde un cliente con `fetch`, como harás en React y en tus endpoints de Astro.
 
-## Anatomía de una petición y una respuesta
+**Lo que tendrás al terminar:** `api.js`, una API de tareas en `http://localhost:3001` con `GET`, `POST`, `PUT`, `PATCH` y `DELETE`, validación y once códigos de estado distintos, y `cliente.js`, que recorre el ciclo de vida de una tarea con `fetch`.
 
-HTTP es texto con una estructura fija:
+**Requisitos:** el proyecto `web-lab` de B3.1 y B3.2, y conexión a internet para el Paso 1.
 
-```http
-PUT /api/progress/B1.3 HTTP/1.1
-Host: academy.tudominio.com
-Origin: https://academy.tudominio.com
-Cookie: better-auth.session_token=…
-Content-Type: application/json
+## Paso 1: la anatomía de una petición y una respuesta
 
-{"read": true}
-```
-
-- **Línea inicial**: método (`PUT`), ruta (`/api/progress/B1.3`) y versión.
-- **Cabeceras**: pares `Nombre: valor` con información extra.
-- **Línea vacía**.
-- **Cuerpo** (opcional): los datos que envías.
-
-La respuesta tiene la misma forma, con un **código de estado** en la primera línea:
-
-```http
-HTTP/1.1 204 No Content
-Cache-Control: private, no-store
-```
-
-## Métodos
-
-| Método   | Intención                          | ¿Cuerpo? | ¿Idempotente?     |
-| -------- | ---------------------------------- | -------- | ----------------- |
-| `GET`    | Leer un recurso                    | No       | Sí                |
-| `POST`   | Crear o ejecutar una acción        | Sí       | **No**            |
-| `PUT`    | Reemplazar o establecer un recurso | Sí       | Sí                |
-| `PATCH`  | Modificar parte de un recurso      | Sí       | No necesariamente |
-| `DELETE` | Borrar un recurso                  | No       | Sí                |
-
-**Idempotente** significa que repetir la misma petición deja el servidor en el mismo estado que hacerla una vez. En esta plataforma, "marcar como leído" es `PUT /api/progress/B1.3`: marcarlo dos veces deja una sola marca. Enviar una evaluación es `POST`: cada envío crea un intento nuevo.
-
-`GET` debe ser **seguro**: nunca debería modificar nada. Los navegadores, buscadores y _prefetchers_ lo repiten libremente.
-
-## Códigos de estado
-
-El primer dígito indica la familia: **2xx** todo bien, **3xx** ve a otro sitio, **4xx** el cliente se equivocó, **5xx** falló el servidor.
-
-| Código                    | Significado                    | Ejemplo real                                     |
-| ------------------------- | ------------------------------ | ------------------------------------------------ |
-| 200 OK                    | Éxito con contenido            | `GET /temario`                                   |
-| 201 Created               | Recurso creado                 | `POST` que crea un usuario                       |
-| 204 No Content            | Éxito sin cuerpo               | `PUT /api/progress/B1.3`                         |
-| 301 / 308                 | Movido para siempre            | `http://` → `https://`                           |
-| 302 / 307                 | Redirección temporal           | Sin sesión → `/login?redirect=…`                 |
-| 304 Not Modified          | Usa tu copia en caché          | Revalidación con `ETag`                          |
-| 400 Bad Request           | Petición mal formada           | `PUT /api/progress/Z9.9`                         |
-| 401 Unauthorized          | No autenticado                 | Llamar a la API sin sesión                       |
-| 403 Forbidden             | Autenticado, pero no permitido | Evaluación bloqueada                             |
-| 404 Not Found             | No existe                      | `/cursos/xyz`                                    |
-| 409 Conflict              | Choca con el estado actual     | Guardar una versión que otro ya modificó         |
-| 422 Unprocessable         | Bien formada pero inválida     | Registrarse con un correo ya usado (Better Auth) |
-| 429 Too Many Requests     | Demasiadas peticiones          | Muchos logins fallidos seguidos                  |
-| 500 Internal Server Error | Error no controlado            | Una excepción sin capturar                       |
-| 503 Service Unavailable   | Servicio caído temporalmente   | `/api/health` sin MongoDB                        |
-
-La diferencia entre **401** y **403** es la más confundida: 401 = "no sé quién eres", 403 = "sé quién eres y no puedes".
-
-## Cabeceras clave
-
-| Cabecera                | Para qué                                                     |
-| ----------------------- | ------------------------------------------------------------ |
-| `Content-Type`          | Qué formato tiene el cuerpo: `application/json`, `text/html` |
-| `Accept`                | Qué formatos acepta el cliente                               |
-| `Authorization`         | Credenciales (por ejemplo, `Bearer <token>`)                 |
-| `Cookie` / `Set-Cookie` | Enviar y establecer cookies (sección B3.4)                   |
-| `Location`              | A dónde redirigir (con 3xx)                                  |
-| `Cache-Control`         | Cómo cachear la respuesta (sección B3.5)                     |
-| `Origin`                | Desde qué sitio se hace la petición                          |
-
-## JSON
-
-JSON es el formato estándar para intercambiar datos entre cliente y servidor:
-
-```ts
-// Cliente
-const res = await fetch("/api/progress/B1.3", { method: "PUT" });
-if (!res.ok) console.error(res.status); // res.ok es true para 200–299
-
-// Servidor (Astro)
-return Response.json({ error: "No autenticado" }, { status: 401 });
-```
-
-`Response.json()` serializa el objeto y pone `Content-Type: application/json` por ti.
-
-## Probar con `curl`
+Haz una petición a una API pública y mira el mensaje completo:
 
 ```bash
-curl -i https://jsonplaceholder.typicode.com/posts/1                 # -i muestra las cabeceras
+curl -i https://jsonplaceholder.typicode.com/posts/1
+```
+
+```text
+HTTP/2 200
+content-type: application/json; charset=utf-8
+cache-control: max-age=43200
+etag: W/"124-yiKdLzqO5gfBrJFrcdJ8Yq0LGnU"
+age: 27334
+
+{
+  "userId": 1,
+  "id": 1,
+  "title": "sunt aut facere repellat provident occaecati excepturi optio reprehenderit",
+  "body": "quia et suscipit\nsuscipit recusandae consequuntur expedita et cum\nreprehenderit molestiae ut ut quas totam\nnostrum rerum est autem sunt rem eveniet architecto"
+}
+```
+
+(Se muestran solo algunas cabeceras; la respuesta real trae más). `-i` incluye las cabeceras de la respuesta. Todo mensaje HTTP tiene la misma estructura de tres partes:
+
+| Parte                 | En la petición                                       | En la respuesta                                            |
+| --------------------- | ---------------------------------------------------- | ---------------------------------------------------------- |
+| **Primera línea**     | Método + ruta + versión: `GET /posts/1 HTTP/2`       | Versión + código de estado: `HTTP/2 200`                   |
+| **Cabeceras**         | `Host`, `Content-Type`, `Authorization`, `Cookie`…   | `Content-Type`, `Cache-Control`, `Location`, `Set-Cookie`… |
+| **Cuerpo** (opcional) | Los datos que envías (en un `POST`, `PUT` o `PATCH`) | Los datos que recibes (HTML, JSON, una imagen…)            |
+
+Ahora una petición **con cuerpo**, que crea un recurso:
+
+```bash
 curl -i -X POST https://jsonplaceholder.typicode.com/posts \
   -H "Content-Type: application/json" \
   -d '{"title":"Hola","body":"Mundo","userId":1}'
@@ -112,38 +55,637 @@ curl -i -X POST https://jsonplaceholder.typicode.com/posts \
 ```text
 HTTP/2 201
 content-type: application/json; charset=utf-8
-{ "title": "Hola", "body": "Mundo", "userId": 1, "id": 101 }
+location: https://jsonplaceholder.typicode.com/posts/101
+
+{
+  "title": "Hola",
+  "body": "Mundo",
+  "userId": 1,
+  "id": 101
+}
 ```
 
-<Callout type="tip">
-  En la pestaña Network, clic derecho sobre una petición → *Copy* → *Copy as cURL* te da el comando
-  exacto para repetirla en la terminal.
+- **`-X POST`** elige el método.
+- **`-H "Content-Type: application/json"`** avisa al servidor de que el cuerpo es JSON. Sin esta cabecera, el servidor no sabe cómo interpretarlo.
+- **`-d '…'`** es el cuerpo. **JSON** (_JavaScript Object Notation_) es el formato estándar de intercambio: texto con la sintaxis de los objetos de JavaScript, pero más estricto (claves siempre entre comillas dobles, sin comas finales, sin comentarios).
+- La respuesta es **`201 Created`** (no un simple 200) y trae la cabecera **`location`** con la URL del recurso nuevo. Es exactamente lo que hará tu API.
+
+<Callout type="risk">
+
+- **JSONPlaceholder no guarda nada:** responde como si hubiera creado el post 101, pero si pides `/posts/101` obtendrás un 404. Es una API para pruebas. Tu API sí guardará los datos (en memoria).
+- **Comillas en la terminal:** el cuerpo va entre comillas **simples** para que la terminal no interprete las dobles del JSON. Si el texto contiene una comilla simple (`"l'agua"`), la terminal se confunde; en ese caso, guarda el JSON en un archivo y envíalo con `-d @cuerpo.json`.
+
 </Callout>
 
-## Errores comunes
+## Paso 2: construir una API REST de tareas
 
-- **Devolver 200 con `{ "error": … }`.** El cliente cree que todo fue bien. Usa el código adecuado.
-- **Usar `GET` para acciones que modifican datos.** Un _prefetch_ puede ejecutarlas sin que nadie haga clic.
-- **Confundir 401 y 403.**
-- **Olvidar `Content-Type: application/json`** al enviar JSON: muchos servidores no sabrán leer el cuerpo.
-- **Responder 500 a errores del usuario.** Un dato inválido es un 400 o 422, no un fallo del servidor.
+**REST** es una forma de organizar una API alrededor de **recursos** (aquí, tareas), cada uno con su URL, y de usar los **métodos HTTP** como verbos:
+
+| Método y ruta            | Significa                            | Respuesta correcta         |
+| ------------------------ | ------------------------------------ | -------------------------- |
+| `GET /api/tareas`        | Listar tareas (admite `?categoria=`) | `200` + lista              |
+| `POST /api/tareas`       | Crear una tarea                      | `201` + tarea + `Location` |
+| `GET /api/tareas/:id`    | Leer una tarea                       | `200` + tarea, o `404`     |
+| `PUT /api/tareas/:id`    | **Reemplazar** la tarea entera       | `200` + tarea              |
+| `PATCH /api/tareas/:id`  | **Modificar** algunos campos         | `200` + tarea              |
+| `DELETE /api/tareas/:id` | Borrar la tarea                      | `204` (sin cuerpo)         |
+
+Crea `api.js` en `web-lab`. Es largo porque hace todo lo que haría una API real (validar, distinguir cada error y responder con el código adecuado), sin ninguna librería:
+
+```js
+// Archivo: api.js
+// API REST de tareas en http://localhost:3001 (los datos viven en memoria)
+import { createServer } from "node:http";
+
+const PUERTO = 3001;
+const CATEGORIAS = ["trabajo", "personal", "salud", "estudio"];
+const LIMITE_CUERPO = 10_000; // bytes
+
+let siguienteId = 3;
+const tareas = new Map([
+  [1, { id: 1, titulo: "Revisar pull request", categoria: "trabajo", hecha: false }],
+  [2, { id: 2, titulo: "Correr 5 km", categoria: "salud", hecha: true }],
+]);
+
+// ─── Utilidades de respuesta ───────────────────────────────────────
+function json(respuesta, estado, datos, cabeceras = {}) {
+  respuesta.writeHead(estado, { "Content-Type": "application/json; charset=utf-8", ...cabeceras });
+  respuesta.end(JSON.stringify(datos));
+}
+
+function sinContenido(respuesta) {
+  respuesta.writeHead(204);
+  respuesta.end();
+}
+
+class ErrorHttp extends Error {
+  constructor(estado, mensaje, cabeceras = {}) {
+    super(mensaje);
+    this.estado = estado;
+    this.cabeceras = cabeceras;
+  }
+}
+
+// ─── Lectura y validación del cuerpo ───────────────────────────────
+async function leerJson(peticion) {
+  const tipo = peticion.headers["content-type"] ?? "";
+  if (!tipo.startsWith("application/json")) {
+    throw new ErrorHttp(415, "El cuerpo debe enviarse con Content-Type: application/json");
+  }
+  let texto = "";
+  for await (const trozo of peticion) {
+    texto += trozo;
+    if (texto.length > LIMITE_CUERPO) throw new ErrorHttp(413, "El cuerpo es demasiado grande");
+  }
+  try {
+    return JSON.parse(texto);
+  } catch {
+    throw new ErrorHttp(400, "El cuerpo no es JSON válido");
+  }
+}
+
+// Devuelve los errores de validación (vacío si todo está bien)
+function validarTarea(datos, { parcial }) {
+  const errores = [];
+  if (typeof datos !== "object" || datos === null || Array.isArray(datos)) {
+    return ["Se esperaba un objeto JSON"];
+  }
+  if (!parcial || "titulo" in datos) {
+    if (typeof datos.titulo !== "string" || datos.titulo.trim().length < 3) {
+      errores.push("titulo: texto de al menos 3 caracteres");
+    }
+  }
+  if (!parcial || "categoria" in datos) {
+    if (!CATEGORIAS.includes(datos.categoria)) errores.push(`categoria: una de ${CATEGORIAS.join(", ")}`);
+  }
+  if ("hecha" in datos && typeof datos.hecha !== "boolean") errores.push("hecha: true o false");
+  return errores;
+}
+
+function comprobarTituloLibre(titulo, idPropio) {
+  for (const tarea of tareas.values()) {
+    if (tarea.id !== idPropio && tarea.titulo.toLowerCase() === titulo.trim().toLowerCase()) {
+      throw new ErrorHttp(409, `Ya existe una tarea con el título "${tarea.titulo}"`);
+    }
+  }
+}
+
+function buscarTarea(id) {
+  const tarea = tareas.get(id);
+  if (!tarea) throw new ErrorHttp(404, `No existe la tarea ${id}`);
+  return tarea;
+}
+
+// ─── Rutas ──────────────────────────────────────────────────────────
+async function manejar(peticion, respuesta) {
+  const url = new URL(peticion.url ?? "/", `http://${peticion.headers.host}`);
+  const metodo = peticion.method;
+
+  // Redirección permanente de la ruta antigua a la nueva
+  if (url.pathname === "/tareas") {
+    respuesta.writeHead(301, { Location: "/api/tareas" });
+    return respuesta.end();
+  }
+
+  // Colección: /api/tareas
+  if (url.pathname === "/api/tareas") {
+    if (metodo === "GET" || metodo === "HEAD") {
+      const filtro = url.searchParams.get("categoria");
+      const lista = [...tareas.values()].filter((t) => !filtro || t.categoria === filtro);
+      return json(respuesta, 200, lista);
+    }
+    if (metodo === "POST") {
+      const datos = await leerJson(peticion);
+      const errores = validarTarea(datos, { parcial: false });
+      if (errores.length > 0) return json(respuesta, 422, { error: "Datos inválidos", detalles: errores });
+      comprobarTituloLibre(datos.titulo);
+      const tarea = { id: siguienteId++, titulo: datos.titulo.trim(), categoria: datos.categoria, hecha: datos.hecha ?? false };
+      tareas.set(tarea.id, tarea);
+      return json(respuesta, 201, tarea, { Location: `/api/tareas/${tarea.id}` });
+    }
+    throw new ErrorHttp(405, `Método ${metodo} no permitido`, { Allow: "GET, HEAD, POST" });
+  }
+
+  // Elemento: /api/tareas/:id
+  const coincidencia = url.pathname.match(/^\/api\/tareas\/(\d+)$/);
+  if (coincidencia) {
+    const id = Number(coincidencia[1]);
+    if (metodo === "GET" || metodo === "HEAD") return json(respuesta, 200, buscarTarea(id));
+    if (metodo === "PUT") {
+      buscarTarea(id);
+      const datos = await leerJson(peticion);
+      const errores = validarTarea(datos, { parcial: false });
+      if (errores.length > 0) return json(respuesta, 422, { error: "Datos inválidos", detalles: errores });
+      comprobarTituloLibre(datos.titulo, id);
+      const tarea = { id, titulo: datos.titulo.trim(), categoria: datos.categoria, hecha: datos.hecha ?? false };
+      tareas.set(id, tarea);
+      return json(respuesta, 200, tarea);
+    }
+    if (metodo === "PATCH") {
+      const actual = buscarTarea(id);
+      const datos = await leerJson(peticion);
+      const errores = validarTarea(datos, { parcial: true });
+      if (errores.length > 0) return json(respuesta, 422, { error: "Datos inválidos", detalles: errores });
+      if ("titulo" in datos) comprobarTituloLibre(datos.titulo, id);
+      // Solo se copian los campos permitidos: nunca todo lo que mande el cliente
+      const tarea = {
+        ...actual,
+        ...("titulo" in datos && { titulo: datos.titulo.trim() }),
+        ...("categoria" in datos && { categoria: datos.categoria }),
+        ...("hecha" in datos && { hecha: datos.hecha }),
+      };
+      tareas.set(id, tarea);
+      return json(respuesta, 200, tarea);
+    }
+    if (metodo === "DELETE") {
+      buscarTarea(id);
+      tareas.delete(id);
+      return sinContenido(respuesta);
+    }
+    throw new ErrorHttp(405, `Método ${metodo} no permitido`, { Allow: "GET, HEAD, PUT, PATCH, DELETE" });
+  }
+
+  // Ruta para provocar un error inesperado y ver un 500
+  if (url.pathname === "/api/fallo") {
+    throw new Error("Algo se ha roto dentro del servidor");
+  }
+
+  throw new ErrorHttp(404, `No existe la ruta ${url.pathname}`);
+}
+
+const servidor = createServer(async (peticion, respuesta) => {
+  const inicio = performance.now();
+  try {
+    await manejar(peticion, respuesta);
+  } catch (error) {
+    if (error instanceof ErrorHttp) {
+      json(respuesta, error.estado, { error: error.message }, error.cabeceras);
+    } else {
+      console.error(error); // el detalle se queda en el servidor
+      json(respuesta, 500, { error: "Error interno del servidor" });
+    }
+  } finally {
+    const ms = (performance.now() - inicio).toFixed(1);
+    console.log(`${peticion.method} ${peticion.url} → ${respuesta.statusCode} (${ms} ms)`);
+  }
+});
+
+servidor.listen(PUERTO, "127.0.0.1", () => {
+  console.log(`API escuchando en http://localhost:${PUERTO}/api/tareas`);
+});
+```
+
+Antes de probarlo, entiende las cuatro piezas clave:
+
+1. **`ErrorHttp`**: una clase de error que lleva un código de estado. Cualquier función puede hacer `throw new ErrorHttp(404, "…")`, y el bloque `catch` del final lo convierte en una respuesta JSON con ese código. Así, las rutas se leen de arriba abajo sin un `if` de error en cada paso. (Esta plataforma usa exactamente este patrón en `src/lib/errors.ts`).
+2. **`leerJson`**: lee el cuerpo **por trozos** (`for await`), porque en HTTP el cuerpo llega como un flujo de datos, no de golpe. Comprueba el `Content-Type`, corta si el cuerpo supera 10 000 bytes y convierte el texto en objeto.
+3. **`validarTarea`**: devuelve la **lista** de errores, no solo el primero, para que el cliente pueda mostrarlos todos a la vez. Con `parcial: true` (para `PATCH`) solo valida los campos que vienen.
+4. **El bloque `catch` final**: si el error es un `ErrorHttp`, responde con su código; si es cualquier otra cosa (un fallo inesperado), registra el detalle **en la consola del servidor** y responde un 500 genérico al cliente.
+
+Arranca la API en una terminal propia (el `servidor.js` de B3.1 puede seguir en otra; usan puertos distintos):
+
+```bash
+node api.js
+```
+
+```text
+API escuchando en http://localhost:3001/api/tareas
+```
+
+<Callout type="risk">
+
+- **Los datos viven en memoria:** el `Map` se vacía cada vez que reinicias el proceso. Es intencionado, para centrarnos en HTTP. En el curso B5 guardarás las tareas en MongoDB.
+- **Sin límite de tamaño, cualquiera tumba tu servidor:** si `leerJson` aceptara cuerpos de cualquier tamaño, bastaría con enviar 2 GB de texto para agotar la memoria. Los frameworks ponen un límite por defecto; con Node a pelo, es responsabilidad tuya.
+- **Nunca envíes al cliente el detalle de un error interno:** un _stack trace_ revela rutas de archivos, versiones y la estructura de tu código, información valiosa para un atacante. El detalle va al registro del servidor (`console.error`); al cliente, un mensaje genérico.
+
+</Callout>
+
+## Paso 3: métodos e idempotencia
+
+Con la API en marcha, abre otra terminal y recorre el ciclo de vida de una tarea:
+
+```bash
+curl -i http://localhost:3001/api/tareas
+```
+
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+[{"id":1,"titulo":"Revisar pull request","categoria":"trabajo","hecha":false},{"id":2,"titulo":"Correr 5 km","categoria":"salud","hecha":true}]
+```
+
+(En este paso y en el siguiente se omiten las cabeceras que añade Node automáticamente: `Date`, `Connection`, `Keep-Alive` y `Transfer-Encoding`).
+
+Crea una tarea:
+
+```bash
+curl -i -X POST http://localhost:3001/api/tareas \
+  -H "Content-Type: application/json" \
+  -d '{"titulo":"Leer sección B3.3","categoria":"estudio"}'
+```
+
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json; charset=utf-8
+Location: /api/tareas/3
+
+{"id":3,"titulo":"Leer sección B3.3","categoria":"estudio","hecha":false}
+```
+
+Modifica **un campo** con `PATCH` y después **reemplaza la tarea entera** con `PUT`:
+
+```bash
+curl -i -X PATCH http://localhost:3001/api/tareas/1 \
+  -H "Content-Type: application/json" -d '{"hecha":true}'
+curl -i -X PUT http://localhost:3001/api/tareas/1 \
+  -H "Content-Type: application/json" -d '{"titulo":"Revisar pull request","categoria":"trabajo"}'
+```
+
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"id":1,"titulo":"Revisar pull request","categoria":"trabajo","hecha":true}
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"id":1,"titulo":"Revisar pull request","categoria":"trabajo","hecha":false}
+```
+
+Fíjate en el detalle: después del `PUT`, **`hecha` vuelve a `false`**. `PUT` reemplaza el recurso **completo** con lo que envías; como no enviaste `hecha`, se aplicó el valor por defecto. `PATCH` solo toca lo que envías.
+
+Borra una tarea dos veces:
+
+```bash
+curl -i -X DELETE http://localhost:3001/api/tareas/2
+curl -i -X DELETE http://localhost:3001/api/tareas/2
+```
+
+```text
+HTTP/1.1 204 No Content
+
+HTTP/1.1 404 Not Found
+Content-Type: application/json; charset=utf-8
+
+{"error":"No existe la tarea 2"}
+```
+
+Ahora el concepto clave: un método es **idempotente** si **repetir la misma petición deja el servidor en el mismo estado** que hacerla una vez. Ejecuta el mismo `PUT` dos veces: la tarea queda igual. Ejecuta el mismo `DELETE` dos veces: la tarea sigue borrada (aunque la respuesta cambie de 204 a 404, **el estado del servidor** es el mismo). En cambio, sin la comprobación de títulos repetidos, dos `POST` iguales crearían **dos** tareas.
+
+| Método          | ¿Idempotente?                                          | ¿Seguro (no cambia nada)? |
+| --------------- | ------------------------------------------------------ | ------------------------- |
+| `GET`, `HEAD`   | Sí                                                     | Sí                        |
+| `PUT`, `DELETE` | Sí                                                     | No                        |
+| `POST`          | No                                                     | No                        |
+| `PATCH`         | Depende (`{"hecha":true}` sí; "suma 1 a contador", no) | No                        |
+
+¿Por qué importa? Porque **las redes fallan**. Si el móvil pierde la conexión justo después de enviar una petición, no sabes si llegó. Un cliente (o un proxy) puede reintentar un `PUT` o un `DELETE` sin riesgo; reintentar un `POST` puede duplicar un pago o un pedido. Esta plataforma marca una sección como leída con `PUT /api/progress/<sección>` y la desmarca con `DELETE`: pulsar el botón dos veces deja una sola marca.
+
+<Callout type="risk">
+
+- **Un `GET` que cambia datos es un error grave.** Los navegadores, los buscadores y la precarga de enlaces (`prefetch`, que Astro hace al pasar el ratón por un enlace) lanzan peticiones `GET` por su cuenta. Si `GET /api/tareas/1/borrar` borrara algo, un robot que recorre tu web lo borraría todo. Todo lo que modifica, con `POST`, `PUT`, `PATCH` o `DELETE`.
+- **`PUT` con datos incompletos borra campos**, como acabas de ver con `hecha`. Si el cliente solo quiere cambiar un campo, debe usar `PATCH`; si usa `PUT`, debe enviar el recurso completo.
+- **Si `POST` debe poder reintentarse** (pagos, pedidos), las APIs serias aceptan una cabecera `Idempotency-Key`: el cliente envía un identificador único y el servidor ignora los duplicados con la misma clave.
+
+</Callout>
+
+## Paso 4: los códigos de estado que de verdad usarás
+
+El código de estado es lo primero que mira un cliente para saber qué ha pasado, antes incluso de leer el cuerpo. Se agrupan por su primer dígito: **2xx** (éxito), **3xx** (redirección: "ve a otro sitio"), **4xx** (error **del cliente**: la petición está mal) y **5xx** (error **del servidor**: la petición estaba bien, pero algo se rompió). Provoca cada error con tu API:
+
+```bash
+# 409: título repetido (la comparación ignora mayúsculas)
+curl -i -X POST http://localhost:3001/api/tareas \
+  -H "Content-Type: application/json" -d '{"titulo":"leer sección b3.3","categoria":"estudio"}'
+
+# 422: el JSON es válido, pero los datos no cumplen las reglas
+curl -i -X POST http://localhost:3001/api/tareas \
+  -H "Content-Type: application/json" -d '{"titulo":"ok","categoria":"ocio","hecha":"si"}'
+
+# 400: el cuerpo ni siquiera es JSON válido
+curl -i -X POST http://localhost:3001/api/tareas \
+  -H "Content-Type: application/json" -d '{"titulo":'
+
+# 415: falta el Content-Type correcto
+curl -i -X POST http://localhost:3001/api/tareas -d 'titulo=hola'
+
+# 405: método no admitido en esa ruta
+curl -i -X DELETE http://localhost:3001/api/tareas
+
+# 301: la ruta antigua redirige a la nueva (-L hace que curl siga la redirección)
+curl -i http://localhost:3001/tareas
+curl -L http://localhost:3001/tareas
+
+# 500: un error inesperado dentro del servidor
+curl -i http://localhost:3001/api/fallo
+```
+
+```text
+HTTP/1.1 409 Conflict
+Content-Type: application/json; charset=utf-8
+
+{"error":"Ya existe una tarea con el título \"Leer sección B3.3\""}
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json; charset=utf-8
+
+{"error":"Datos inválidos","detalles":["titulo: texto de al menos 3 caracteres","categoria: una de trabajo, personal, salud, estudio","hecha: true o false"]}
+HTTP/1.1 400 Bad Request
+Content-Type: application/json; charset=utf-8
+
+{"error":"El cuerpo no es JSON válido"}
+HTTP/1.1 415 Unsupported Media Type
+Content-Type: application/json; charset=utf-8
+
+{"error":"El cuerpo debe enviarse con Content-Type: application/json"}
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json; charset=utf-8
+Allow: GET, HEAD, POST
+
+{"error":"Método DELETE no permitido"}
+HTTP/1.1 301 Moved Permanently
+Location: /api/tareas
+
+[{"id":1,"titulo":"Revisar pull request","categoria":"trabajo","hecha":false},{"id":3,"titulo":"Leer sección B3.3","categoria":"estudio","hecha":false}]
+HTTP/1.1 500 Internal Server Error
+Content-Type: application/json; charset=utf-8
+
+{"error":"Error interno del servidor"}
+```
+
+En la terminal de la API, el 500 deja el detalle completo (`Error: Algo se ha roto dentro del servidor` y su _stack trace_), mientras que el cliente solo ve el mensaje genérico. Y cada petición queda registrada con su código y su duración:
+
+```text
+POST /api/tareas → 409 (0.5 ms)
+POST /api/tareas → 422 (0.2 ms)
+POST /api/tareas → 400 (0.2 ms)
+```
+
+Los 15 códigos que cubren casi todos los casos:
+
+| Código | Nombre                | Cuándo usarlo                                                              |
+| ------ | --------------------- | -------------------------------------------------------------------------- |
+| `200`  | OK                    | Lectura o modificación correcta, con datos en el cuerpo                    |
+| `201`  | Created               | Se creó un recurso (con `Location`)                                        |
+| `204`  | No Content            | Correcto y sin nada que devolver (un `DELETE`)                             |
+| `301`  | Moved Permanently     | La URL cambió para siempre (los buscadores actualizan sus enlaces)         |
+| `302`  | Found                 | Redirección temporal (tras un login, ir a `/temario`)                      |
+| `304`  | Not Modified          | Tu copia en caché sigue valiendo (B3.5)                                    |
+| `400`  | Bad Request           | La petición está mal formada (JSON roto, parámetro imposible)              |
+| `401`  | Unauthorized          | **No sé quién eres**: falta la sesión o es inválida (B3.4)                 |
+| `403`  | Forbidden             | **Sé quién eres, y no puedes**: no tienes permiso                          |
+| `404`  | Not Found             | El recurso no existe                                                       |
+| `409`  | Conflict              | Choca con el estado actual (título o correo repetido)                      |
+| `422`  | Unprocessable Content | El formato es correcto, pero los datos no pasan la validación              |
+| `429`  | Too Many Requests     | Has superado el límite de peticiones (con `Retry-After`)                   |
+| `500`  | Internal Server Error | Algo falló en el servidor (un error en tu código)                          |
+| `503`  | Service Unavailable   | El servidor no puede atender ahora (mantenimiento, la base de datos caída) |
+
+<Callout type="risk">
+
+- **Responder `200` con `{"error": "…"}` es un antipatrón muy extendido:** el cliente (y `res.ok` en `fetch`, y los sistemas de monitorización) creen que todo fue bien. El código de estado **es** la respuesta principal; el cuerpo, el detalle.
+- **`401` frente a `403` y la tentación del `404`:** si alguien pide un recurso de otro usuario, `403` confirma que el recurso existe. Por eso muchas APIs responden `404` en ese caso: no revelan que existe. Las dos opciones son válidas si las aplicas siempre igual.
+- **`400` frente a `422`:** no todos los equipos los distinguen (muchos usan `400` para todo). Lo importante es la coherencia y un cuerpo que explique qué falló.
+- **`HEAD` no funciona solo:** en un servidor de Node a pelo, `HEAD` es un método más. Al principio, esta API respondía `405` a `curl -I` (que usa `HEAD`), hasta que se añadió `metodo === "HEAD"` junto a `GET`. Node se encarga de no enviar el cuerpo.
+
+</Callout>
+
+## Paso 5: las cabeceras que importan
+
+Las cabeceras son metadatos: información **sobre** el mensaje. Ya has usado varias en tu API; estas son las que más verás:
+
+| Cabecera                | Va en                | Para qué                                                                                      | Dónde la verás                    |
+| ----------------------- | -------------------- | --------------------------------------------------------------------------------------------- | --------------------------------- |
+| `Content-Type`          | Petición y respuesta | El formato del cuerpo: `application/json`, `text/html; charset=utf-8`, `multipart/form-data`… | Toda la API (`leerJson` la exige) |
+| `Location`              | Respuesta            | Adónde ir: el recurso creado (`201`) o el destino de una redirección (`301`, `302`)           | `POST` y `/tareas`                |
+| `Allow`                 | Respuesta            | Qué métodos admite la ruta (obligatoria con un `405`)                                         | El `405` del Paso 4               |
+| `Authorization`         | Petición             | Credenciales: `Bearer <token>`                                                                | El endpoint de B1.8               |
+| `Cookie` / `Set-Cookie` | Petición / respuesta | Recordar al usuario entre peticiones                                                          | B3.4                              |
+| `Cache-Control`         | Respuesta            | Cuánto tiempo puede guardarse la respuesta                                                    | B3.5                              |
+| `Retry-After`           | Respuesta            | Cuándo reintentar tras un `429` o un `503`                                                    | APIs con límite de uso            |
+
+Comprueba las cabeceras de una respuesta sin descargar el cuerpo, con `curl -I` (que envía `HEAD`):
+
+```bash
+curl -I http://localhost:3001/api/tareas
+```
+
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+```
+
+<Callout type="risk">
+
+- **El `charset=utf-8` importa:** sin él, algunos clientes interpretan el texto con otra codificación y las tildes llegan como `Ã³`. Inclúyelo siempre en `text/html` y en `application/json`.
+- **No pongas secretos en la URL:** `?token=abc` queda guardado en el historial del navegador, en los registros de los servidores y en la cabecera `Referer` que se envía a otras webs. Los secretos van en cabeceras (`Authorization`) o en cookies.
+- **Los nombres de las cabeceras no distinguen mayúsculas** (`Content-Type` y `content-type` son la misma). HTTP/2 las envía en minúsculas, como viste en el Paso 1. En Node, `peticion.headers` siempre las da en minúsculas: `peticion.headers["content-type"]`.
+
+</Callout>
+
+## Paso 6: consumir la API con `fetch`
+
+Al otro lado está el cliente: el navegador, una isla de React o un endpoint de Astro que llama a otra API. Crea `cliente.js`, que recorre el ciclo de vida de una tarea y reacciona a cada código:
+
+```js
+// Archivo: cliente.js
+// Recorre el ciclo de vida de una tarea contra la API (arráncala antes con: node api.js)
+const API = "http://localhost:3001/api/tareas";
+
+async function pedir(metodo, url, cuerpo) {
+  const respuesta = await fetch(url, {
+    method: metodo,
+    headers: cuerpo ? { "Content-Type": "application/json" } : {},
+    body: cuerpo ? JSON.stringify(cuerpo) : undefined,
+  });
+  // 204 No Content no tiene cuerpo: llamar a .json() lanzaría un error
+  const datos = respuesta.status === 204 ? null : await respuesta.json();
+  const ubicacion = respuesta.headers.get("location");
+  console.log(`${metodo.padEnd(6)} ${url.replace(API, "/api/tareas")} → ${respuesta.status} ${respuesta.statusText}${ubicacion ? ` · Location: ${ubicacion}` : ""}`);
+  if (datos) console.log(`       ${JSON.stringify(datos)}`);
+  return { respuesta, datos };
+}
+
+const { respuesta, datos: creada } = await pedir("POST", API, { titulo: "Preparar la comida", categoria: "salud" });
+if (!respuesta.ok) throw new Error("No se pudo crear la tarea");
+
+const url = `${API}/${creada.id}`;
+await pedir("POST", API, { titulo: "Preparar la comida", categoria: "salud" }); // 409: repetida
+await pedir("PATCH", url, { hecha: true });
+await pedir("PUT", url, { titulo: "Preparar la comida del lunes", categoria: "salud" }); // PUT reemplaza: hecha vuelve a false
+await pedir("DELETE", url);
+await pedir("GET", url); // 404: ya no existe
+```
+
+Con la API en marcha:
+
+```bash
+node cliente.js
+```
+
+```text
+POST   /api/tareas → 201 Created · Location: /api/tareas/3
+       {"id":3,"titulo":"Preparar la comida","categoria":"salud","hecha":false}
+POST   /api/tareas → 409 Conflict
+       {"error":"Ya existe una tarea con el título \"Preparar la comida\""}
+PATCH  /api/tareas/3 → 200 OK
+       {"id":3,"titulo":"Preparar la comida","categoria":"salud","hecha":true}
+PUT    /api/tareas/3 → 200 OK
+       {"id":3,"titulo":"Preparar la comida del lunes","categoria":"salud","hecha":false}
+DELETE /api/tareas/3 → 204 No Content
+GET    /api/tareas/3 → 404 Not Found
+       {"error":"No existe la tarea 3"}
+```
+
+(Si ya habías creado tareas en los pasos anteriores, el `id` será otro: reinicia la API para empezar de cero).
+
+Los tres detalles que hay que manejar en cualquier cliente:
+
+1. **`fetch` no lanza error con un 404 o un 500:** solo falla si no hay conexión. El código está en `respuesta.status`, y `respuesta.ok` es `true` solo para 200–299. Por eso el script comprueba `respuesta.ok` antes de usar la tarea creada.
+2. **Un `204` no tiene cuerpo:** `await respuesta.json()` sobre un 204 lanza `SyntaxError: Unexpected end of JSON input`. El script lo comprueba antes.
+3. **Las cabeceras se leen con `respuesta.headers.get("location")`**, sin importar mayúsculas.
+
+<Callout type="risk">
+
+- **No asumas que el cuerpo de un error es JSON:** un proxy, Vercel o un servidor caído pueden responder con HTML (una página de error 502 o 504). En código de producción, comprueba `respuesta.headers.get("content-type")` antes de llamar a `.json()`, o captura el error del _parse_.
+- **Datos de usuario que viajan a tu API:** que tu cliente valide un formulario no protege nada; cualquiera puede llamar a la API con `curl` y saltárselo. La validación de verdad es la del servidor (`validarTarea`). La del cliente solo mejora la experiencia de uso.
+
+</Callout>
+
+<Callout type="risk" title="Un caso real: la asignación masiva">
+
+La primera versión de esta API hacía el `PATCH` así: `const tarea = { ...actual, ...datos, id };`. Parece cómodo: copia todo lo que venga. Mira lo que ocurría:
+
+```bash
+curl -s -X PATCH http://localhost:3001/api/tareas/1 \
+  -H "Content-Type: application/json" -d '{"hecha":true,"esAdmin":true}'
+```
+
+```text
+{"id":1,"titulo":"Revisar pull request","categoria":"trabajo","hecha":true,"esAdmin":true}
+```
+
+El cliente añadió un campo que no existía, y la API lo guardó. Si en lugar de una tarea fuera un usuario con un campo `rol`, cualquiera podría hacerse administrador con una petición. Se llama **asignación masiva** (_mass assignment_), y es una vulnerabilidad clásica. La versión final copia **solo los campos permitidos** (`titulo`, `categoria` y `hecha`), uno a uno. Con MongoDB, el riesgo es el mismo si pasas el cuerpo de la petición directamente a `updateOne`.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Abre la pestaña Network en tu app de entrenamiento e identifica 5 peticiones: método, ruta,
-  código de estado y `Content-Type`. 2. Repite una de ellas con *Copy as cURL* en la terminal. 3.
-  Completa una tabla con los códigos 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 409, 422,
-  429, 500 y 503, con un ejemplo de cuándo los usarías en tus propias apps. 4. Haz un `POST` y un
-  `PUT` con `curl` a `jsonplaceholder.typicode.com` y compara las respuestas.
+
+1. Abre tu app de entrenamiento (o esta plataforma) con DevTools → pestaña _Network_ y recarga la página. Identifica 5 peticiones y anota de cada una: método, URL, código de estado y `Content-Type` de la respuesta.
+2. Añade a `api.js` un endpoint `POST /api/tareas/:id/duplicar` que cree una copia de una tarea con el título `"<título> (copia)"`. Elige el método y los códigos de estado correctos para cada caso (éxito, la tarea no existe, la copia ya existe).
+3. Completa la tabla de los 15 códigos del Paso 4 con un ejemplo **de tus propios proyectos** para cada uno.
+
+</Callout>
+
+Solución del punto 2. Añade este bloque en `manejar`, **justo antes** del comentario `// Elemento: /api/tareas/:id`:
+
+```js
+  // Acción: /api/tareas/:id/duplicar
+  const duplicar = url.pathname.match(/^\/api\/tareas\/(\d+)\/duplicar$/);
+  if (duplicar) {
+    if (metodo !== "POST") throw new ErrorHttp(405, `Método ${metodo} no permitido`, { Allow: "POST" });
+    const original = buscarTarea(Number(duplicar[1]));
+    const titulo = `${original.titulo} (copia)`;
+    comprobarTituloLibre(titulo);
+    const copia = { ...original, id: siguienteId++, titulo, hecha: false };
+    tareas.set(copia.id, copia);
+    return json(respuesta, 201, copia, { Location: `/api/tareas/${copia.id}` });
+  }
+```
+
+Reinicia la API y pruébalo:
+
+```bash
+curl -i -X POST http://localhost:3001/api/tareas/1/duplicar
+curl -i -X POST http://localhost:3001/api/tareas/1/duplicar
+curl -i -X POST http://localhost:3001/api/tareas/99/duplicar
+curl -i http://localhost:3001/api/tareas/1/duplicar
+```
+
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json; charset=utf-8
+Location: /api/tareas/3
+
+{"id":3,"titulo":"Revisar pull request (copia)","categoria":"trabajo","hecha":false}
+HTTP/1.1 409 Conflict
+Content-Type: application/json; charset=utf-8
+
+{"error":"Ya existe una tarea con el título \"Revisar pull request (copia)\""}
+HTTP/1.1 404 Not Found
+Content-Type: application/json; charset=utf-8
+
+{"error":"No existe la tarea 99"}
+HTTP/1.1 405 Method Not Allowed
+Content-Type: application/json; charset=utf-8
+Allow: POST
+
+{"error":"Método GET no permitido"}
+```
+
+Por qué así: **`POST`** porque crea un recurso nuevo cada vez (no es idempotente); **`201` + `Location`** porque se creó algo; **`404`** si el original no existe; **`409`** si la copia ya existe; **`405` + `Allow`** para cualquier otro método.
+
+Para el punto 1, en esta plataforma verás, entre otras: `GET /cursos/...` → `200` `text/html` (la página, SSR); `GET /_astro/*.css` → `200` `text/css` (estilos, desde caché); `GET /_astro/*.woff2` → `200` `font/woff2` (fuentes); `POST /api/study-sessions/heartbeat` → `204` (el registro del tiempo de estudio, sin cuerpo de respuesta); y, si marcas una sección como leída, `PUT /api/progress/B3.3` → `204` (y `DELETE` a la misma URL si la desmarcas: dos operaciones idempotentes).
+
+<Callout type="risk">
+
+- **El orden de las rutas importa:** la expresión del elemento (`/^\/api\/tareas\/(\d+)$/`) no coincide con `/api/tareas/1/duplicar` gracias al `$` final, pero si la escribieras sin `$`, se quedaría con la petición antes de llegar a la acción. Coloca las rutas más específicas primero y ancla siempre las expresiones regulares (`^` y `$`).
+- **Acciones frente a recursos:** `/duplicar` es un verbo en la URL, algo que REST "puro" evita. En la práctica, para acciones que no encajan en crear/leer/modificar/borrar, un `POST` a una subruta con nombre de acción es lo más claro.
+
 </Callout>
 
 <Callout type="mastery">
-  Eliges el método y el código de estado correctos al diseñar un endpoint y sabes explicar por qué.
+
+Eliges el método y el código de estado correctos al diseñar un endpoint: sabes qué métodos son idempotentes y por qué importa, distingues 400, 401, 403, 404, 409 y 422, devuelves `201` con `Location` al crear y `204` al borrar, y en el cliente compruebas `respuesta.ok` en lugar de confiar en que `fetch` falle.
+
 </Callout>
 
 ## Resumen
 
-- Una petición: método, ruta, cabeceras y cuerpo; una respuesta: código, cabeceras y cuerpo.
-- `GET` lee sin modificar; `PUT` y `DELETE` son idempotentes; `POST` no.
-- 2xx éxito, 3xx redirección, 4xx error del cliente, 5xx error del servidor.
-- 401 = no autenticado; 403 = no permitido.
-- `curl -i` y la pestaña Network permiten ver y repetir cualquier petición.
+- Todo mensaje HTTP: primera línea (método + ruta, o código de estado), cabeceras y cuerpo opcional. JSON es el formato estándar del cuerpo.
+- REST: recursos con URL propia y métodos como verbos. `PUT` reemplaza, `PATCH` modifica, `DELETE` borra.
+- Idempotente = repetir no cambia el resultado: `GET`, `PUT` y `DELETE` sí; `POST` no. Un `GET` nunca debe modificar datos.
+- 2xx éxito, 3xx redirección, 4xx error del cliente, 5xx error del servidor; el código es la respuesta principal.
+- `fetch` no falla con un 404 o un 500 (comprueba `res.ok`), y un 204 no tiene cuerpo. Copia solo los campos permitidos del cuerpo de una petición.

@@ -4,124 +4,405 @@ course: "B3"
 title: "DNS y dominios"
 order: 2
 minutes: 60
-summary: "Cómo se traduce un dominio a una IP, qué significa cada tipo de registro y qué haces realmente al conectar Namecheap con Vercel."
+summary: "Consultas registros DNS reales con dig y con tu propio script de Node, sigues una resolución desde la raíz, entiendes el TTL y conectas un dominio de Namecheap a Vercel sabiendo qué hace cada registro."
 ---
 
-Compras un dominio en Namecheap, copias un par de valores que te da Vercel y, al rato, tu web funciona. Ese "al rato" y esos valores tienen explicación. El **DNS** es la agenda telefónica de internet, y entenderlo te permite configurar dominios sin seguir un tutorial y diagnosticar por qué un dominio "no carga".
+Ya has conectado dominios de Namecheap a Vercel copiando valores de un tutorial: un registro `A` por aquí, un `CNAME` por allá, y esperar a que "propague". Funciona, pero el día que algo falla (el dominio no carga, el correo deja de llegar, Vercel dice _Invalid Configuration_) no sabes por dónde empezar. En esta sección vas a consultar el DNS de **dominios reales** con `dig`, a leer cada parte de la respuesta, a seguir una resolución completa desde los servidores raíz de internet, a escribir tu propio inspector de DNS en Node y, al final, a configurar un dominio en Vercel entendiendo qué hace cada registro.
 
-## Qué resuelve el DNS
+**Lo que tendrás al terminar:** `dns.js` en tu `web-lab`, un script que muestra todos los registros de cualquier dominio, y una ficha documentada de los registros de tus propios dominios.
 
-Los ordenadores se comunican con IP, pero las personas recordamos nombres. El DNS (_Domain Name System_) traduce:
+**Requisitos:** el proyecto `web-lab` de B3.1. `dig` viene instalado en macOS.
 
-```text
-academy.tudominio.com  ──DNS──▶  76.76.21.21
+## Paso 1: qué resuelve el DNS
+
+Los ordenadores se conectan por **IP** (`155.121.0.3`), pero las personas recordamos **nombres** (`nextjs.org`). El **DNS** (_Domain Name System_) es la agenda de contactos de internet: le das un nombre y te devuelve la dirección. Sin él tendrías que memorizar IPs que, además, cambian.
+
+Pregúntale al DNS por un dominio que está alojado en Vercel, la web de Next.js:
+
+```bash
+dig +short nextjs.org A
 ```
 
-La consulta no va a un único sitio. Es una cadena de servidores, cada uno responsable de una parte del nombre:
-
-1. Tu ordenador pregunta a un **resolvedor** (el de tu proveedor de internet, `1.1.1.1` o `8.8.8.8`).
-2. El resolvedor pregunta a los servidores **raíz**: "¿quién lleva `.com`?".
-3. Los servidores de `.com` responden: "`tudominio.com` lo llevan los _nameservers_ de Namecheap".
-4. Los _nameservers_ de tu dominio dan la respuesta final.
-
-El resolvedor **guarda la respuesta en caché** durante un tiempo, para no repetir el viaje.
-
-## Tipos de registro
-
-En el panel DNS de tu dominio (en Namecheap, _Advanced DNS_) defines **registros**. Los que usarás:
-
-| Registro | Apunta a             | Uso                                                   |
-| -------- | -------------------- | ----------------------------------------------------- |
-| `A`      | Una IPv4             | `tudominio.com → 76.76.21.21`                         |
-| `AAAA`   | Una IPv6             | Lo mismo con direcciones IPv6                         |
-| `CNAME`  | **Otro nombre**      | `www → cname.vercel-dns.com`                          |
-| `MX`     | Servidores de correo | Para recibir email en `@tudominio.com`                |
-| `TXT`    | Texto libre          | Verificar que el dominio es tuyo, SPF para el correo… |
-| `NS`     | _Nameservers_        | Quién responde por el dominio                         |
-
-### A vs CNAME
-
-- Un `A` dice "esta es la IP".
-- Un `CNAME` dice "pregunta por este otro nombre". Útil cuando la IP la gestiona otro (Vercel puede cambiarla sin que toques nada).
-
-Una restricción importante: el dominio raíz (`tudominio.com`, sin subdominio, también llamado _apex_) **no puede** ser un `CNAME`. Por eso Vercel te pide un registro `A` para la raíz y un `CNAME` para los subdominios.
-
-## TTL y "propagación"
-
-Cada registro tiene un **TTL** (_Time To Live_): los segundos durante los que los resolvedores pueden guardar la respuesta en caché.
-
 ```text
-academy.tudominio.com.  1800  IN  CNAME  cname.vercel-dns.com.
-                        ^^^^ TTL: 30 minutos
+155.121.0.3
 ```
 
-Cuando cambias un registro, los resolvedores que ya tenían la respuesta antigua la siguen usando **hasta que expira su TTL**. A esto se le llama, no muy exactamente, "propagación": no hay nada que se propague, solo cachés que caducan. Truco: **baja el TTL** unas horas antes de un cambio importante.
+`+short` muestra solo la respuesta. Le has preguntado por el registro de tipo **`A`** ("¿qué dirección IPv4 tiene este nombre?") y te ha devuelto una IP de Vercel. Tus resultados pueden variar: Vercel reparte las peticiones entre varias IPs.
 
-## Lo que haces al conectar Namecheap con Vercel
+<Callout type="risk">
 
-```text
-Namecheap (Advanced DNS)
-  A      @         76.76.21.21              ← la raíz apunta a la IP de Vercel
-  CNAME  www       cname.vercel-dns.com     ← www apunta a un nombre de Vercel
-  CNAME  academy   cname.vercel-dns.com     ← un subdominio para Dani Academy
+- **El DNS no es instantáneo ni infalible:** si una consulta no devuelve nada de forma puntual (una red inestable, un wifi que se cae), repítela antes de sacar conclusiones. Al preparar esta lección, una tanda de consultas devolvió respuestas vacías y, un minuto después, todo funcionaba.
+- **Una IP no identifica un sitio:** detrás de `155.121.0.3` hay miles de proyectos de Vercel. El servidor sabe cuál quieres por la cabecera `Host` de la petición HTTP (la viste en B3.1). Por eso no puedes visitar tu proyecto escribiendo la IP en el navegador.
+
+</Callout>
+
+## Paso 2: leer la respuesta completa de `dig`
+
+Sin `+short`, `dig` cuenta mucho más:
+
+```bash
+dig example.com A
 ```
 
-- `@` significa "el propio dominio".
-- Los valores exactos los muestra Vercel en _Settings → Domains_: copia siempre los que te indique, porque pueden ser distintos para tu proyecto.
-- Vercel comprueba que el registro existe, marca el dominio como válido y **emite el certificado HTTPS** automáticamente.
+```text
+; <<>> DiG 9.10.6 <<>> example.com A
+;; global options: +cmd
+;; Got answer:
+;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 2754
+;; flags: qr rd ra; QUERY: 1, ANSWER: 2, AUTHORITY: 0, ADDITIONAL: 1
 
-## Subdominios
+;; OPT PSEUDOSECTION:
+; EDNS: version: 0, flags:; udp: 512
+;; QUESTION SECTION:
+;example.com.			IN	A
 
-Un subdominio es solo otro nombre bajo tu dominio: `academy.tudominio.com`, `planner.tudominio.com`. Cada uno puede apuntar a un sitio distinto (un proyecto de Vercel, un VPS, otro servicio), y no cuestan nada extra.
+;; ANSWER SECTION:
+example.com.		125	IN	A	104.20.23.154
+example.com.		125	IN	A	172.66.147.243
 
-## Consultar el DNS con `dig`
+;; Query time: 13 msec
+;; SERVER: 2806:2a0:25::2#53(2806:2a0:25::2)
+;; WHEN: Fri Oct 09 03:26:42 CST 2026
+;; MSG SIZE  rcvd: 72
+```
 
-`dig` (incluido en macOS) pregunta directamente al DNS:
+Las partes que importan:
+
+- **`status: NOERROR`**: la consulta ha funcionado. Si el dominio no existe, verás `NXDOMAIN`.
+- **`QUESTION SECTION`**: lo que preguntaste.
+- **`ANSWER SECTION`**: la respuesta, una línea por registro, con cinco columnas: **nombre** (`example.com.`; el punto final indica la raíz del DNS), **TTL** (`125`, los segundos que puede guardarse en caché; lo verás en el Paso 5), **clase** (`IN`, internet, siempre igual), **tipo** (`A`) y **valor** (la IP). Aquí hay **dos** IPs: el cliente puede usar cualquiera, lo que reparte la carga y da redundancia.
+- **`SERVER`**: quién te ha respondido. No es el dueño de `example.com`, sino tu **resolutor** DNS, normalmente el de tu proveedor de internet. Hace las consultas por ti y guarda las respuestas en caché.
+
+Puedes preguntar a otro resolutor concreto con `@`, por ejemplo al de Cloudflare (`1.1.1.1`) o al de Google (`8.8.8.8`):
+
+```bash
+dig @1.1.1.1 nextjs.org A +noall +answer
+```
+
+```text
+nextjs.org.		17	IN	A	155.121.2.3
+```
+
+`+noall +answer` muestra solo la sección de respuesta (más legible que la completa y más informativa que `+short`).
+
+<Callout type="risk">
+
+- **Tu resolutor puede mentir o ir con retraso:** algunos proveedores de internet guardan respuestas más tiempo del indicado, o bloquean dominios. Si algo se ve distinto en tu casa y en el móvil con datos, compara con `@1.1.1.1` y `@8.8.8.8`.
+- **El navegador tiene su propia caché de DNS**, aparte de la del sistema y la del resolutor. Tras un cambio de DNS, a veces basta con abrir una ventana privada o reiniciar el navegador para ver la versión nueva.
+
+</Callout>
+
+## Paso 3: los tipos de registro que vas a usar
+
+Un dominio no tiene "una IP": tiene una colección de **registros**, cada uno con un propósito. Consulta los más importantes de dominios reales:
+
+```bash
+dig +short example.com AAAA
+dig +short www.nextjs.org CNAME
+dig +short nextjs.org MX
+dig +short nextjs.org NS
+dig +short nextjs.org TXT
+```
+
+```text
+2606:4700:10::6814:179a
+2606:4700:10::ac42:93f3
+```
+
+```text
+7db0c515ced5a8a7.vercel-dns.com.
+```
+
+```text
+1 aspmx.l.google.com.
+5 alt1.aspmx.l.google.com.
+5 alt2.aspmx.l.google.com.
+10 alt3.aspmx.l.google.com.
+10 alt4.aspmx.l.google.com.
+```
+
+```text
+ns1.vercel-dns.com.
+ns2.vercel-dns.com.
+```
+
+```text
+"google-site-verification=roTfUbzRkjTgiiXb6Lbsh2sQyaAlS_sN32t5nMz8kTQ"
+"v=spf1 include:_spf.google.com include:servers.mcsv.net include:sendgrid.net ~all"
+```
+
+(La respuesta TXT real tiene alguna línea más de verificación).
+
+Qué es cada uno y por qué existe:
+
+| Tipo    | Significa                    | Ejemplo real                                         | Para qué                                                   |
+| ------- | ---------------------------- | ---------------------------------------------------- | ---------------------------------------------------------- |
+| `A`     | Nombre → IPv4                | `nextjs.org` → `155.121.0.3`                         | Llegar al servidor                                         |
+| `AAAA`  | Nombre → IPv6                | `example.com` → `2606:4700:10::…`                    | Lo mismo, con direcciones nuevas                           |
+| `CNAME` | Nombre → **otro nombre**     | `www.nextjs.org` → `7db0c515ced5a8a7.vercel-dns.com` | Delegar: "pregunta a ese otro nombre"                      |
+| `MX`    | Dónde se entrega el correo   | `1 aspmx.l.google.com`                               | El correo de `@nextjs.org` lo recibe Google Workspace      |
+| `TXT`   | Texto libre                  | `v=spf1 include:_spf.google.com …`                   | Verificar propiedad del dominio y proteger el correo (SPF) |
+| `NS`    | Quién gestiona los registros | `ns1.vercel-dns.com`                                 | El DNS de `nextjs.org` lo administra Vercel                |
+
+Tres detalles que explican muchos problemas:
+
+1. **El `CNAME` es una delegación.** `www.nextjs.org` no tiene IP propia: dice "lo que tenga `7db0c515ced5a8a7.vercel-dns.com`". Si Vercel cambia sus IPs, actualiza **su** registro y tú no tocas nada. Por eso Vercel prefiere que uses `CNAME` siempre que se pueda.
+2. **El número de los `MX` es la prioridad:** menor = preferido. Si `aspmx` (prioridad 1) no responde, el correo se entrega a los de prioridad 5, y luego a los de 10.
+3. **Los `TXT` son la forma de demostrar que el dominio es tuyo:** Google, Vercel o Resend te piden añadir un texto concreto y lo comprueban con una consulta DNS. El que empieza por `v=spf1` lista qué servidores pueden enviar correo en nombre del dominio (lo que evita que tus correos caigan en spam).
+
+<Callout type="risk">
+
+- **La raíz de un dominio (`tudominio.com`, sin `www`) no puede ser un `CNAME`.** Las normas del DNS lo prohíben, porque en la raíz conviven obligatoriamente otros registros (`NS`, a menudo `MX` y `TXT`). Para la raíz se usa un `A` (con la IP que te indique Vercel); para `www` y los subdominios, un `CNAME`. Algunos proveedores ofrecen `ALIAS` o `ANAME`, que simulan un `CNAME` en la raíz.
+- **Tocar el DNS puede romper el correo.** Si borras o cambias los `MX` (o los `TXT` de SPF y DKIM) al configurar la web, el correo del dominio deja de llegar o empieza a caer en spam, y te enterarás días después. Antes de cambiar nada, **apunta todos los registros actuales**.
+
+</Callout>
+
+## Paso 4: seguir una resolución desde la raíz
+
+¿Cómo sabe el resolutor dónde preguntar por `nextjs.org`? El DNS es **jerárquico**, como un sistema de direcciones postales: país → ciudad → calle. `dig +trace` hace la consulta paso a paso, sin caché, y te enseña cada salto:
+
+```bash
+dig +trace nextjs.org A
+```
+
+```text
+.			468814	IN	NS	a.root-servers.net.
+.			468814	IN	NS	b.root-servers.net.
+.			468814	IN	NS	m.root-servers.net.
+org.			172800	IN	NS	a0.org.afilias-nst.info.
+org.			172800	IN	NS	b0.org.afilias-nst.org.
+org.			172800	IN	NS	d0.org.afilias-nst.org.
+nextjs.org.		3600	IN	NS	ns1.vercel-dns.com.
+nextjs.org.		3600	IN	NS	ns2.vercel-dns.com.
+nextjs.org.		39	IN	A	155.121.1.3
+```
+
+(Es un extracto: la salida real lista los 13 servidores raíz, más servidores de `.org` y líneas de firmas de seguridad).
+
+La cadena, salto a salto:
+
+1. **Los servidores raíz** (`.`, de `a.root-servers.net` a `m.root-servers.net`) no saben dónde está `nextjs.org`, pero saben quién gestiona `.org`.
+2. **Los servidores de `.org`** no saben la IP, pero saben quién gestiona `nextjs.org`: `ns1.vercel-dns.com` y `ns2.vercel-dns.com`. Esa información viene del **registrador** del dominio (donde se compró).
+3. **Los servidores de Vercel** (los **autoritativos**, los que tienen la última palabra) dan la respuesta final: el registro `A`.
+
+Esto explica qué cambia cuando, en Namecheap, sustituyes los _nameservers_ por los de Vercel: modificas el salto 2. A partir de ahí, **todos** los registros del dominio se gestionan en Vercel, y lo que tengas configurado en el panel de DNS de Namecheap deja de usarse.
+
+<Callout type="risk">
+
+- **Cambiar los _nameservers_ lleva más tiempo que cambiar un registro:** la información del salto 2 suele tener TTL de horas o días (`172800` segundos = 2 días para `.org`). Planifica los cambios de _nameservers_ con margen.
+- **Al cambiar de _nameservers_, los registros no se copian solos.** Si tu correo dependía de unos `MX` configurados en Namecheap, tienes que crearlos también en Vercel **antes** del cambio, o el correo se cortará.
+
+</Callout>
+
+## Paso 5: TTL y "propagación"
+
+Cada respuesta lleva un **TTL** (_Time To Live_): los segundos que un resolutor puede guardarla antes de volver a preguntar. Mira cómo cambia entre dos consultas seguidas al mismo resolutor:
+
+```bash
+dig @1.1.1.1 nextjs.org A +noall +answer
+sleep 5
+dig @1.1.1.1 nextjs.org A +noall +answer
+```
+
+```text
+nextjs.org.		17	IN	A	155.121.2.3
+nextjs.org.		40	IN	A	155.121.1.3
+```
+
+Vercel usa TTL muy cortos (60 segundos como máximo), y lo que ves es el **tiempo restante** en la caché de quien responde. Aquí, además, dos máquinas distintas del resolutor de Cloudflare respondieron con cachés en momentos distintos (y con IPs distintas, porque Vercel las va rotando). En dominios con TTL largos (3600 s o más), verás el número **bajar** entre consultas.
+
+Esto desmonta el mito de la **"propagación"**: el DNS no "se propaga" de servidor en servidor. Cuando cambias un registro, el cambio es inmediato en el servidor autoritativo, pero cada resolutor del mundo sigue usando su copia antigua **hasta que caduca su TTL**. Con un TTL de 3600 s, hay quien verá la IP vieja hasta una hora después.
+
+<Callout type="risk">
+
+- **Baja el TTL antes de una migración, no durante:** si vas a mover un dominio de servidor, baja el TTL (por ejemplo, a 300 s) **un día antes**; haz el cambio y, cuando todo funcione, vuelve a subirlo. Si lo bajas en el momento del cambio, las cachés aún tienen guardado el TTL largo antiguo.
+- **"Espera 48 horas"** es un consejo genérico de cuando los TTL eran largos. Si un cambio no se ve en 10 minutos con un TTL corto, probablemente no es la propagación: revisa que el registro esté bien escrito (con `dig @1.1.1.1`).
+- **Las respuestas negativas también se cachean:** si consultas un subdominio antes de crearlo, el resolutor guarda "no existe" durante un tiempo (lo indica el registro `SOA` del dominio). Crea primero el registro y consulta después.
+
+</Callout>
+
+## Paso 6: tu propio inspector de DNS con Node
+
+Node tiene un módulo de DNS. Crea `dns.js` en `web-lab`, que muestra todos los registros de un dominio en una sola orden:
+
+```js
+// Archivo: dns.js
+// Uso: node dns.js dominio.com
+import { lookup, resolve4, resolve6, resolveCname, resolveMx, resolveNs, resolveTxt } from "node:dns/promises";
+
+const dominio = process.argv[2] ?? "example.com";
+
+const consultas = {
+  A: async () => (await resolve4(dominio, { ttl: true })).map((r) => `${r.address} (TTL ${r.ttl} s)`),
+  AAAA: async () => (await resolve6(dominio, { ttl: true })).map((r) => `${r.address} (TTL ${r.ttl} s)`),
+  CNAME: () => resolveCname(dominio),
+  MX: async () =>
+    (await resolveMx(dominio)).toSorted((a, b) => a.priority - b.priority).map((r) => `${r.priority} ${r.exchange}`),
+  NS: () => resolveNs(dominio),
+  TXT: async () => (await resolveTxt(dominio)).map((partes) => partes.join("")),
+};
+
+console.log(`Registros DNS de ${dominio}`);
+for (const [tipo, consultar] of Object.entries(consultas)) {
+  try {
+    const valores = await consultar();
+    console.log(`${tipo.padEnd(5)} ${valores.length > 0 ? valores.join("\n      ") : "(sin registros de este tipo)"}`);
+  } catch (error) {
+    if (error.code === "ENODATA") {
+      console.log(`${tipo.padEnd(5)} (sin registros de este tipo)`);
+    } else if (error.code === "ENOTFOUND") {
+      console.log(`El dominio ${dominio} no existe (NXDOMAIN)`);
+      process.exit(1);
+    } else {
+      console.log(`${tipo.padEnd(5)} error: ${error.code}`);
+    }
+  }
+}
+
+// lookup pregunta al sistema operativo (incluye /etc/hosts), igual que el navegador
+const { address, family } = await lookup(dominio);
+console.log(`lookup del sistema: ${address} (IPv${family})`);
+```
+
+```bash
+node dns.js www.nextjs.org
+node dns.js no-existe-dani-academy-xyz.com
+```
+
+```text
+Registros DNS de www.nextjs.org
+A     155.121.0.3 (TTL 15 s)
+AAAA  (sin registros de este tipo)
+CNAME 7db0c515ced5a8a7.vercel-dns.com
+MX    (sin registros de este tipo)
+NS    (sin registros de este tipo)
+TXT   (sin registros de este tipo)
+lookup del sistema: 155.121.0.3 (IPv4)
+```
+
+```text
+Registros DNS de no-existe-dani-academy-xyz.com
+El dominio no-existe-dani-academy-xyz.com no existe (NXDOMAIN)
+```
+
+Cómo funciona:
+
+- **`resolve4`, `resolveCname`, `resolveMx`…** preguntan directamente al servidor DNS por un tipo de registro concreto, como `dig`.
+- **Un objeto de funciones** (`consultas`) evita seis bloques `try/catch` casi iguales: el bucle recorre cada tipo y maneja los errores en un solo sitio.
+- **Dos errores distintos:** `ENODATA` (el dominio existe, pero no tiene registros de ese tipo) y `ENOTFOUND` (el dominio no existe: `NXDOMAIN`). Distinguirlos es clave al depurar.
+- **`www.nextjs.org` tiene `A` aunque es un `CNAME`:** al pedir la IP, el resolutor sigue el `CNAME` y devuelve la IP del destino. Por la misma razón, `AAAA`, `MX` y `TXT` devuelven una lista vacía en lugar de un error.
+- **`lookup` frente a `resolve`:** `lookup` pregunta al **sistema operativo**, que también mira el archivo `/etc/hosts` y su propia caché, exactamente como hacen el navegador y `fetch`. `resolve*` va siempre al servidor DNS.
+
+<Callout type="risk">
+
+- **`/etc/hosts` gana al DNS:** una línea como `127.0.0.1 mi-app.test` en ese archivo hace que `lookup` (y tu navegador) resuelvan `mi-app.test` a tu Mac, aunque `dig` diga otra cosa. Es útil para pruebas, y es la explicación de muchos "en mi máquina va a otra IP". Revísalo con `cat /etc/hosts`.
+- **Las consultas DNS bloquean tiempo:** cada `fetch` a un dominio nuevo empieza con una resolución. En un servidor que llama a muchas APIs, las cachés del sistema lo amortiguan; no resuelvas a mano en cada petición.
+- **`toSorted`** necesita Node 20 o superior.
+
+</Callout>
+
+## Paso 7: conectar un dominio a Vercel (y un subdominio)
+
+Ahora lo que haces con Namecheap, entendiendo cada pieza. Hay **dos formas** de conectar `tudominio.com` a un proyecto de Vercel.
+
+**Opción A: mantener el DNS en Namecheap** (recomendada si el dominio tiene correo u otros servicios). En Vercel, en tu proyecto → _Settings_ → _Domains_, añade `tudominio.com` y `www.tudominio.com`. Vercel te mostrará los registros exactos que debes crear. En Namecheap → _Domain List_ → _Manage_ → _Advanced DNS_:
+
+1. **Borra los registros de "aparcamiento"** que Namecheap crea por defecto: un `CNAME` de `www` hacia `parkingpage.namecheap.com` y un `URL Redirect Record` en `@`. Si los dejas, chocarán con los nuevos.
+2. Crea un registro **`A`**: _Host_ `@` (significa la raíz del dominio), _Value_ la IP que te indica Vercel.
+3. Crea un registro **`CNAME`**: _Host_ `www`, _Value_ el nombre que te indica Vercel (con el formato `algo.vercel-dns.com`, como el que viste en `www.nextjs.org`).
+4. Deja intactos los `MX` y `TXT` del correo.
+
+**Opción B: delegar todo el DNS en Vercel.** En Namecheap → _Domain_ → _Nameservers_, elige _Custom DNS_ y pon `ns1.vercel-dns.com` y `ns2.vercel-dns.com`. A partir de ahí, todos los registros se crean en Vercel (que configura la web solo). Es lo que hace `nextjs.org`. Recuerda: **recrea antes en Vercel los registros de correo**.
+
+**Subdominios.** Para publicar esta plataforma en `academy.tudominio.com`, añade ese dominio en Vercel y crea en Namecheap un `CNAME` con _Host_ `academy` y el valor que te indique Vercel. Un subdominio es independiente: puede apuntar a otro proyecto, a otro proveedor o a ninguno.
+
+Comprueba el resultado desde la terminal:
 
 ```bash
 dig +short tudominio.com A
+dig +short www.tudominio.com CNAME
 dig +short academy.tudominio.com CNAME
-dig tudominio.com NS
-dig +short tudominio.com MX
+node dns.js tudominio.com
+```
+
+Cuando los valores coincidan con los de Vercel, el panel de _Domains_ pasará de _Invalid Configuration_ a _Valid Configuration_, y Vercel emitirá automáticamente el certificado HTTPS (B3.5).
+
+<Callout type="risk">
+
+- **Copia los valores del panel de Vercel, no de un tutorial:** Vercel ha cambiado sus valores recomendados con el tiempo (antes era una IP fija para todos y `cname.vercel-dns.com`; ahora son valores propios de cada proyecto, como el `7db0c515ced5a8a7.vercel-dns.com` de `nextjs.org`). Los antiguos pueden seguir funcionando, pero los del panel son los correctos.
+- **En Namecheap, el _Host_ no lleva el dominio:** se escribe `www`, no `www.tudominio.com`. Si escribes el nombre completo, Namecheap crea `www.tudominio.com.tudominio.com`, que nadie consulta.
+- **Si cambias la URL pública de una app con autenticación**, actualiza también sus variables: en esta plataforma, `BETTER_AUTH_URL` debe coincidir exactamente con el dominio (`https://academy.tudominio.com`), o el login fallará por seguridad.
+- **Un dominio en dos cuentas de Vercel:** si el dominio ya estuvo en otro proyecto o cuenta, Vercel te pedirá un registro `TXT` (en `_vercel`) para demostrar que es tuyo. Es el uso de `TXT` del Paso 3.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Ejecuta `node dns.js` sobre tus dominios (y sobre el `www` y los subdominios que uses).
+2. Para cada registro, documenta en una tabla: tipo, nombre, valor, TTL y **por qué existe** (qué servicio lo necesita).
+3. Averigua con `dig +trace` quién gestiona el DNS de cada dominio (Namecheap, Vercel u otro).
+4. Identifica cualquier registro que ya no tenga sentido (de un servicio que dejaste de usar) y decide si borrarlo.
+
+</Callout>
+
+Solución modelo, hecha sobre `nextjs.org` (con tus dominios, el procedimiento es el mismo):
+
+```bash
+node dns.js nextjs.org
+node dns.js www.nextjs.org
+dig +trace nextjs.org A | awk '$4 == "NS"'
 ```
 
 ```text
-$ dig academy.tudominio.com
-;; ANSWER SECTION:
-academy.tudominio.com.  1799  IN  CNAME  cname.vercel-dns.com.
-cname.vercel-dns.com.   1799  IN  A      76.76.21.21
+Registros DNS de nextjs.org
+A     155.121.0.3 (TTL 4 s)
+AAAA  (sin registros de este tipo)
+CNAME (sin registros de este tipo)
+MX    1 aspmx.l.google.com
+      5 alt1.aspmx.l.google.com
+      5 alt2.aspmx.l.google.com
+      10 alt3.aspmx.l.google.com
+      10 alt4.aspmx.l.google.com
+NS    ns2.vercel-dns.com
+      ns1.vercel-dns.com
+TXT   google-site-verification=roTfUbzRkjTgiiXb6Lbsh2sQyaAlS_sN32t5nMz8kTQ
+      v=spf1 include:_spf.google.com include:servers.mcsv.net include:sendgrid.net ~all
+      google-site-verification=BsXDDAvxM3KYqCMD-vaPIxduP9YLqllhaBlERyhjsgw
+      google-site-verification=VUelRm0rDJ9Mxpi3RYfJ0M_Qqbxyo8mSYdn0grLEFIU
+      google-site-verification=h7m7xPSl46-ALWigMUJfFFOFZjKe3jZECHyXSomzXvM
+lookup del sistema: 155.121.0.3 (IPv4)
 ```
 
-Para saltarte cachés locales, pregunta a un resolvedor concreto: `dig @1.1.1.1 tudominio.com`.
+La ficha documentada:
 
-<Callout type="tip">
-  Si un dominio nuevo "no funciona", primero `dig`. Si `dig` ya devuelve la IP correcta, el problema
-  no es el DNS: está en el servidor, el certificado o la caché de tu navegador.
-</Callout>
+| Tipo    | Nombre           | Valor                                                                               | TTL  | Por qué existe                                                                                                                   |
+| ------- | ---------------- | ----------------------------------------------------------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `NS`    | `nextjs.org`     | `ns1/ns2.vercel-dns.com`                                                            | 3600 | El DNS se gestiona en Vercel (opción B del Paso 7)                                                                               |
+| `A`     | `nextjs.org`     | `155.121.0.3`                                                                       | ≤ 60 | La web de la raíz la sirve Vercel                                                                                                |
+| `CNAME` | `www.nextjs.org` | `7db0c515ced5a8a7.vercel-dns.com`                                                   | ≤ 60 | `www` delega en el proyecto de Vercel                                                                                            |
+| `MX`    | `nextjs.org`     | `aspmx.l.google.com` y 4 de respaldo                                                | —    | El correo lo recibe Google Workspace                                                                                             |
+| `TXT`   | `nextjs.org`     | `v=spf1 include:_spf.google.com include:servers.mcsv.net include:sendgrid.net ~all` | —    | SPF: pueden enviar correo Google, Mailchimp (`mcsv.net`) y SendGrid                                                              |
+| `TXT`   | `nextjs.org`     | `google-site-verification=…` (4)                                                    | —    | Verificaciones de propiedad en servicios de Google; si alguna corresponde a una cuenta que ya no existe, es candidata a borrarse |
 
-## Errores comunes
+<Callout type="risk">
 
-- **Poner un `CNAME` en la raíz.** No está permitido; usa el registro `A` que indique el proveedor.
-- **Dejar registros antiguos** que contradicen los nuevos (dos `A` para el mismo nombre apuntando a sitios distintos).
-- **Cambiar los _nameservers_** sin querer al seguir un tutorial: entonces Namecheap deja de mandar y tus registros allí no sirven.
-- **Esperar resultados inmediatos** con un TTL alto.
+- **No borres un `TXT` de verificación sin saber de qué es:** algunos servicios vuelven a comprobarlo periódicamente y, si desaparece, desactivan la integración (por ejemplo, el envío de correos de un dominio verificado).
+- **Los TTL que muestra `dns.js` son el tiempo restante en la caché**, no el configurado. Para ver el valor configurado, pregunta directamente a un servidor autoritativo: `dig @ns1.vercel-dns.com www.nextjs.org CNAME +noall +answer` devuelve `60`. (Para el registro `A`, Vercel calcula el TTL de forma dinámica y ni siquiera el autoritativo devuelve siempre el mismo número).
 
-<Callout type="exercise">
-  1. Ejecuta `dig` sobre tus dominios (raíz, `www` y subdominios) y documenta en una tabla cada
-  registro, su tipo, su valor, su TTL y por qué existe. 2. Compara la respuesta de `dig @1.1.1.1` y
-  `dig @8.8.8.8` para el mismo nombre. 3. Identifica qué *nameservers* tiene cada dominio con `dig
-  NS`. 4. Dibuja el camino de una consulta DNS de tu subdominio, desde tu Mac hasta la IP de Vercel.
 </Callout>
 
 <Callout type="mastery">
-  Puedes configurar un dominio o subdominio nuevo hacia Vercel sin seguir un tutorial y diagnosticar
-  con `dig` si un problema es del DNS o no.
+
+Puedes configurar un dominio nuevo hacia Vercel sin seguir un tutorial: sabes cuándo usar `A` (la raíz) y `CNAME` (`www` y subdominios), qué cambias al tocar los _nameservers_, por qué el correo depende de los `MX` y `TXT`, y que la "propagación" es solo la caducidad del TTL en las cachés.
+
 </Callout>
 
 ## Resumen
 
-- El DNS traduce nombres en IP mediante una cadena de servidores con caché.
-- `A` → IP; `CNAME` → otro nombre; `MX` → correo; `TXT` → verificaciones; `NS` → quién manda.
-- La raíz del dominio no puede ser `CNAME`.
-- El TTL decide cuánto tardan en verse los cambios.
-- `dig` es la herramienta para comprobar qué responde realmente el DNS.
+- El DNS traduce nombres a IPs mediante registros; `dig +short dominio TIPO` los consulta y `dig` sin `+short` muestra estado, TTL y servidor.
+- `A`/`AAAA` = IP; `CNAME` = otro nombre (no en la raíz); `MX` = correo; `TXT` = verificaciones y SPF; `NS` = quién gestiona el DNS.
+- La resolución es jerárquica: raíz → `.org`/`.com` → servidores autoritativos (`dig +trace`).
+- El TTL marca cuánto se cachea una respuesta; la "propagación" es esperar a que caduquen las cachés.
+- Vercel: `A` en `@` y `CNAME` en `www` y subdominios (opción A), o _nameservers_ de Vercel (opción B). Copia siempre los valores de su panel.

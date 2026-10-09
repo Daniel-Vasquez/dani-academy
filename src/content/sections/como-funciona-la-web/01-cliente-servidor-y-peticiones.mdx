@@ -4,128 +4,483 @@ course: "B3"
 title: "Cliente, servidor y el viaje de una petición"
 order: 1
 minutes: 60
-summary: "Qué es un servidor, qué son las IP y los puertos, y todo lo que ocurre entre escribir una URL y ver la página."
+summary: "Escribes tu propio servidor HTTP con Node, ves cada petición desde los dos lados con curl -v y lsof, mides las fases reales de una visita a una web y comparas estático, SSR y SPA."
 ---
 
-Despliegas en Vercel, compras dominios en Namecheap y conectas tus apps a MongoDB Atlas. Todo funciona, pero entre "escribo la URL" y "veo la página" hay una cadena de pasos que hoy es invisible para ti. Cuando algo falla (un dominio que no resuelve, un certificado caducado, una API que tarda), saber **en qué eslabón** está el problema es media solución. Esta sección dibuja la cadena completa.
+Cada día escribes código que corre "en el servidor" o "en el cliente", despliegas en Vercel y abres `localhost:4321`. Pero ¿qué es exactamente un servidor? ¿Qué pasa en el medio segundo entre pulsar Enter y ver la página? En esta sección no vas a leer un diagrama: vas a **escribir tu propio servidor web** con Node (sin librerías), verás llegar cada petición en su terminal, la mirarás también desde el cliente con `curl`, medirás las fases reales de una visita a una web de verdad y construirás la misma página de tres formas (estática, SSR y SPA) para entender dónde encaja Astro.
 
-## Cliente y servidor
+**Lo que tendrás al terminar:** un proyecto `web-lab` con un servidor HTTP hecho a mano que usarás en todo el curso B3 (en B3.3 le añadirás una API, en B3.4 sesiones con cookies y en B3.5 CORS y caché).
 
-- Un **cliente** pide cosas: tu navegador, `curl`, la app del móvil, o tu propio servidor cuando llama a MongoDB.
-- Un **servidor** es un **programa** que espera peticiones y responde. También se llama "servidor" a la máquina donde corre, pero lo importante es el programa.
+**Requisitos:** Node.js 22 o superior y la terminal. Todo lo demás (`curl`, `lsof`, `dig`) viene con macOS.
 
-Cuando ejecutas `npm run dev`, tu Mac pasa a ser un servidor: el programa de Astro espera peticiones en un puerto.
+## Paso 1: entender qué es un cliente y qué es un servidor
 
-Un mismo programa puede ser servidor y cliente a la vez: tu app de Astro **responde** al navegador y, para hacerlo, **pide** datos a MongoDB.
+Un **servidor** no es una máquina especial: es **un programa que espera peticiones y las responde**. La palabra se usa también para la máquina donde corre ese programa, y de ahí viene la confusión. Tu Mac ejecutando `astro dev` **es** un servidor. Un **cliente** es el programa que hace la petición: el navegador, `curl`, la app del móvil o un `fetch` desde otro servidor.
 
-## IP, puertos y localhost
+La analogía de un restaurante: el cliente (tú) pide algo concreto con un formato acordado ("una mesa, el menú del día"); el camarero (el servidor) recibe el pedido, lo prepara y te devuelve una respuesta ("aquí tiene", o "no queda"). El **formato acordado** de ese pedido y esa respuesta en la web se llama **HTTP**, y lo verás a fondo en B3.3.
 
-- Una **dirección IP** identifica una máquina en la red: `76.76.21.21`, o `2606:4700::6810` en IPv6.
-- Un **puerto** identifica **qué programa** de esa máquina atiende: es como el número de departamento dentro de un edificio.
-
-| Puerto | Uso habitual |
-| ------ | ------------ |
-| 80     | HTTP         |
-| 443    | HTTPS        |
-| 22     | SSH          |
-| 27017  | MongoDB      |
-| 4321   | `astro dev`  |
-
-`localhost` (o `127.0.0.1`) significa "esta misma máquina". `http://localhost:4321` es "el programa que escucha en el puerto 4321 de mi ordenador".
-
-Solo un programa puede escuchar en un puerto a la vez. Si está ocupado, Astro prueba el siguiente (4322, 4323…). Para saber quién lo ocupa:
+Crea el proyecto:
 
 ```bash
-lsof -i :4321
+mkdir web-lab
+cd web-lab
+mkdir public
+code .
+```
+
+Crea `package.json`:
+
+```json
+{
+  "name": "web-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --watch servidor.js"
+  }
+}
+```
+
+`node --watch` reinicia el servidor automáticamente cada vez que guardas el archivo, como hace `astro dev`.
+
+## Paso 2: escribir el servidor más pequeño posible
+
+Crea `servidor.js`:
+
+```js
+// Archivo: servidor.js
+import { createServer } from "node:http";
+
+const PUERTO = 3000;
+
+const servidor = createServer((peticion, respuesta) => {
+  console.log(`${peticion.method} ${peticion.url} · ${peticion.headers["user-agent"]}`);
+
+  respuesta.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  respuesta.end("<h1>Hola desde mi servidor</h1><p>Esta página la ha generado Node.</p>");
+});
+
+servidor.listen(PUERTO, "127.0.0.1", () => {
+  console.log(`Servidor escuchando en http://localhost:${PUERTO}`);
+});
+```
+
+Lo que hace cada parte:
+
+- **`createServer(fn)`** crea un servidor HTTP. La función `fn` se ejecuta **una vez por cada petición** que llega, con dos objetos: `peticion` (lo que pide el cliente: método, URL, cabeceras) y `respuesta` (lo que vas a devolver).
+- **`respuesta.writeHead(200, {...})`** escribe el **código de estado** (`200`, "todo bien") y las **cabeceras** de la respuesta. `Content-Type` le dice al navegador que lo que llega es HTML codificado en UTF-8 (sin `charset=utf-8`, las tildes se verían mal).
+- **`respuesta.end(...)`** envía el cuerpo y cierra la respuesta.
+- **`servidor.listen(3000, "127.0.0.1")`** es el momento en que el programa se convierte en servidor: pide al sistema operativo **escuchar** en el puerto 3000.
+
+Arráncalo:
+
+```bash
+npm start
 ```
 
 ```text
-COMMAND  PID  USER   FD  TYPE  NODE NAME
-node    2495  dani   29u IPv6   TCP localhost:4321 (LISTEN)
+Servidor escuchando en http://localhost:3000
 ```
 
-## El viaje de una petición
-
-Escribes `https://academy.tudominio.com/temario` y pulsas Enter:
-
-1. **DNS**: el navegador pregunta qué IP corresponde a `academy.tudominio.com` (sección B3.2).
-2. **TCP**: abre una conexión con esa IP en el puerto 443.
-3. **TLS**: negocia el cifrado y comprueba el certificado del dominio (sección B3.5).
-4. **Petición HTTP**: envía `GET /temario` con sus cabeceras y cookies (sección B3.3).
-5. **Servidor**: Vercel recibe la petición, ejecuta tu función de Astro, el _middleware_ lee la cookie de sesión, consulta MongoDB y genera el HTML.
-6. **Respuesta HTTP**: código de estado, cabeceras y el HTML.
-7. **Renderizado**: el navegador lee el HTML, descubre que necesita CSS, JavaScript y fuentes, y hace **más peticiones** (repitiendo parte del viaje).
-8. **Interactividad**: se ejecuta el JavaScript de las islas (React) y la página responde a tus clics.
-
-Puedes ver gran parte de este viaje con `curl`:
-
-```bash
-curl -v https://example.com
-```
+El programa **no termina**: se queda esperando. Abre `http://localhost:3000` en el navegador y mira la terminal del servidor:
 
 ```text
-* Host example.com:443 was resolved.           ← 1. DNS
-* Connected to example.com (93.184.215.14)     ← 2. TCP
-* SSL connection using TLSv1.3                 ← 3. TLS
-> GET / HTTP/2                                 ← 4. petición
-> Host: example.com
-< HTTP/2 200                                   ← 6. respuesta
-< content-type: text/html
+GET / · Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/…
+GET /favicon.ico · Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/…
 ```
 
-Las líneas con `>` son lo que envía el cliente; las de `<`, lo que responde el servidor.
+Has visto una petición **desde el lado del servidor**. Y ha habido dos: el navegador pide automáticamente `/favicon.ico` (el icono de la pestaña). Tu servidor responde lo mismo a cualquier ruta, así que también le devolvió el HTML.
 
-## Estático, SSR y SPA
+<Callout type="risk">
 
-¿Quién genera el HTML y cuándo? Hay tres modelos:
+- **Un servidor que nunca llama a `respuesta.end()` deja al cliente esperando** hasta que se agota el tiempo. Es un error habitual en código con varios `if`: si ninguna rama responde, el navegador se queda "cargando" para siempre. Asegúrate de que **todos** los caminos terminan en una respuesta.
+- **`console.log` por cada petición** está bien para aprender. En producción, con miles de peticiones por minuto, se usan _loggers_ estructurados (curso A6) y nunca se registran datos sensibles (contraseñas, cookies, tokens).
+- **`--watch` reinicia el proceso:** cualquier dato que guardes en memoria (variables) se pierde con cada guardado. Lo notarás en B3.4, con las sesiones.
 
-| Modelo             | El HTML se genera…                                              | Ejemplo                                       |
-| ------------------ | --------------------------------------------------------------- | --------------------------------------------- |
-| **Estático (SSG)** | Una vez, al compilar. Se sirve el mismo archivo a todos         | Un blog, una landing                          |
-| **SSR**            | En el servidor, **en cada petición**                            | Dani Academy: cada página depende del usuario |
-| **SPA**            | En el navegador, con JavaScript, a partir de un HTML casi vacío | Muchas apps de React "clásicas"               |
-
-Astro puede hacer los dos primeros y mezclarlos; y con las islas, añade JavaScript solo donde hace falta. Esta plataforma usa `output: "server"`, porque cada página muestra el progreso de quien la visita.
-
-<Callout type="note">
-  Que una página sea SSR no significa que sea lenta: el servidor responde en decenas de
-  milisegundos. Lo que pesa de verdad suele ser el JavaScript y las imágenes que se descargan
-  después.
 </Callout>
 
-## La pestaña Network
+## Paso 3: IP, puertos y `localhost`
 
-DevTools (`Cmd` + `Opción` + `I`) → **Network** muestra cada petición del paso 7: tipo, tamaño, tiempo y orden. Recarga la página con la pestaña abierta y fíjate en:
+Para que un cliente encuentre un servidor necesita dos datos: **la máquina** (una dirección IP) y **el programa dentro de esa máquina** (un puerto). La analogía: la IP es la dirección de un edificio y el puerto, el número de piso. En un mismo Mac pueden escuchar a la vez Astro (4321), tu servidor (3000) y MongoDB (27017), cada uno en su puerto.
 
-- La primera fila: el documento HTML (_Doc_).
-- Los CSS, JS y fuentes que descubre después.
-- La columna **Waterfall**: qué peticiones se hacen en paralelo y cuáles esperan a otras.
+Puertos que verás constantemente:
 
-## Errores comunes
+| Puerto | Quién lo usa                                     |
+| ------ | ------------------------------------------------ |
+| 80     | HTTP (web sin cifrar)                            |
+| 443    | HTTPS (web cifrada)                              |
+| 3000   | Convención para servidores de Node en desarrollo |
+| 4321   | `astro dev`                                      |
+| 27017  | MongoDB                                          |
 
-- **"El servidor es la máquina."** El servidor es el programa; si se cae el proceso, la máquina sigue encendida pero no responde nadie.
-- **Confundir puerto ocupado con error de la app.** Si `astro dev` cambia de puerto, otro proceso tiene el tuyo: `lsof -i :4321`.
-- **Pensar que una página es "una petición".** Una página típica hace decenas: HTML, CSS, JS, fuentes, imágenes, APIs.
-- **Culpar al código de algo que falla antes**, en DNS o TLS. `curl -v` te dice en qué paso se corta.
+Por eso nunca escribes `:443` en el navegador: `https://` implica el 443 por defecto. Y **`localhost`** es un nombre especial que significa "esta misma máquina"; corresponde a la IP `127.0.0.1` (en IPv4) o `::1` (en IPv6). Las peticiones a `localhost` nunca salen de tu Mac.
+
+¿Qué programa ocupa un puerto? Con el servidor en marcha, en **otra** terminal:
+
+```bash
+lsof -nP -iTCP:3000 -sTCP:LISTEN
+```
+
+```text
+COMMAND   PID          USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+node    22577 tu-usuario   12u  IPv4 0xfc10fbfbec6b4935      0t0  TCP 127.0.0.1:3000 (LISTEN)
+```
+
+- **`-iTCP:3000 -sTCP:LISTEN`**: "procesos que escuchan conexiones TCP en el puerto 3000".
+- **`-nP`**: muestra IPs y números de puerto en lugar de traducirlos a nombres (más rápido y más claro).
+- **`PID`** es el identificador del proceso. Con él puedes detenerlo: `kill 22577`.
+
+Ahora, con el servidor aún en marcha, intenta arrancar **otro** en la segunda terminal con `node servidor.js`:
+
+```text
+Error: listen EADDRINUSE: address already in use 127.0.0.1:3000
+```
+
+**Un puerto solo puede tener un programa escuchando.** Es el error que ves cuando `astro dev` dice que el 4321 está ocupado (y salta al 4322): otro proceso (a menudo un servidor que dejaste abierto en otra pestaña) ya lo tiene.
+
+<Callout type="risk">
+
+- **`127.0.0.1` frente a `0.0.0.0`:** con `127.0.0.1`, solo tu Mac puede conectarse. Con `0.0.0.0` (o sin indicar dirección), el servidor acepta conexiones desde **cualquier dispositivo de tu red**: el móvil en tu wifi, pero también cualquiera en la red de una cafetería. Para probar desde el móvil está bien (`astro dev --host` hace eso); en redes públicas, no lo hagas.
+- **`kill -9` a ciegas:** antes de matar un proceso con `lsof`, mira qué es (`COMMAND`). Podrías estar cerrando una base de datos con datos sin guardar. Prueba primero `kill PID` (le pide que termine ordenadamente).
+- **Puertos por debajo de 1024** (como el 80) requieren permisos de administrador. Por eso en desarrollo se usan puertos altos (3000, 4321) y en producción una plataforma como Vercel se encarga del 443.
+
+</Callout>
+
+## Paso 4: ver la petición desde el cliente con `curl -v`
+
+`curl` es un cliente HTTP de terminal. Con `-v` (_verbose_) muestra **todo** el diálogo. Con el servidor en marcha:
+
+```bash
+curl -v http://localhost:3000/
+```
+
+```text
+* Host localhost:3000 was resolved.
+* IPv6: ::1
+* IPv4: 127.0.0.1
+*   Trying [::1]:3000...
+* connect to ::1 port 3000 from ::1 port 63591 failed: Connection refused
+*   Trying 127.0.0.1:3000...
+* Connected to localhost (127.0.0.1) port 3000
+> GET / HTTP/1.1
+> Host: localhost:3000
+> User-Agent: curl/8.7.1
+> Accept: */*
+>
+* Request completely sent off
+< HTTP/1.1 200 OK
+< Content-Type: text/html; charset=utf-8
+< Date: Fri, 09 Oct 2026 09:23:45 GMT
+< Connection: keep-alive
+< Keep-Alive: timeout=5
+< Transfer-Encoding: chunked
+<
+* Connection #0 to host localhost left intact
+<h1>Hola desde mi servidor</h1><p>Esta página la ha generado Node.</p>
+```
+
+Cómo leerlo, por el prefijo de cada línea:
+
+- **`*`**: lo que hace `curl` por dentro. Fíjate en la historia de las primeras líneas: `localhost` se resuelve a dos direcciones; `curl` prueba primero IPv6 (`::1`) y **falla** (`Connection refused`), porque tu servidor solo escucha en `127.0.0.1`; después prueba IPv4 y conecta.
+- **`>`**: lo que **envía** el cliente: la línea de petición (`GET / HTTP/1.1`) y las cabeceras.
+- **`<`**: lo que **responde** el servidor: la línea de estado (`HTTP/1.1 200 OK`) y las cabeceras. Algunas (`Date`, `Connection`, `Transfer-Encoding`) las añade Node automáticamente.
+- **Sin prefijo**: el cuerpo de la respuesta, el HTML.
+
+Mira la terminal del servidor: ahora la petición dice `GET / · curl/8.7.1`. **El servidor sabe qué cliente le habla gracias a la cabecera `User-Agent`**… que el cliente puede poner como quiera.
+
+<Callout type="risk">
+
+- **Nunca confíes en las cabeceras que envía el cliente:** `curl -H "User-Agent: iPhone"` se hace pasar por un móvil en un segundo. Lo mismo vale para cualquier dato de una petición (cabeceras, URL, cuerpo): el servidor debe validarlo todo (curso A5).
+- **El intento fallido por IPv6** añade unos milisegundos en cada conexión. Si te molesta, escucha en `"localhost"` o usa `http://127.0.0.1:3000` en el cliente. Es también la causa de errores raros del tipo `ECONNREFUSED ::1:27017` al conectar a un MongoDB local que solo escucha en IPv4.
+
+</Callout>
+
+## Paso 5: medir el viaje completo de una visita real
+
+En tu Mac, la petición no salía de la máquina. Una visita real a una web pasa por más fases. Pídele a `curl` que las mida, contra un sitio de verdad:
+
+```bash
+curl -s -o /dev/null -w 'dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total} ip=%{remote_ip} http=%{http_version} code=%{http_code}\n' https://example.com
+```
+
+```text
+dns=0.003234 tcp=0.050153 tls=0.117090 ttfb=0.178278 total=0.178557 ip=2606:4700:10::ac42:93f3 http=2 code=200
+```
+
+- **`-s`** (silencioso) y **`-o /dev/null`** (descarta el cuerpo): solo queremos las mediciones.
+- **`-w`** imprime variables al terminar. Los tiempos son **acumulados**, en segundos, desde el inicio.
+
+El viaje, fase a fase (tus números serán distintos):
+
+1. **URL**: el navegador separa protocolo (`https`), dominio (`example.com`) y ruta (`/`).
+2. **DNS** (`dns`, 3 ms): traduce `example.com` a una IP. Fue rapidísimo porque la respuesta estaba en caché (B3.2).
+3. **TCP** (`tcp`, 50 ms): abre una conexión con esa IP en el puerto 443. Son unos 47 ms de ida y vuelta: la distancia física hasta el servidor.
+4. **TLS** (`tls`, 117 ms): negocia el cifrado de HTTPS y verifica el certificado (B3.5). Es la fase más cara.
+5. **HTTP** (`ttfb`, 178 ms): envía la petición y espera el **primer byte** de la respuesta (_Time To First Byte_). Incluye el tiempo que el servidor tarda en generarla.
+6. **Respuesta** (`total`): termina de descargar el cuerpo.
+7. **Render**: el navegador interpreta el HTML, pide el CSS, el JavaScript y las imágenes (**cada uno es otra petición**) y pinta la página.
+
+Mira las fases 3–5 con detalle:
+
+```bash
+curl -v -o /dev/null https://example.com
+```
+
+```text
+* Host example.com:443 was resolved.
+* IPv6: 2606:4700:10::6814:179a, 2606:4700:10::ac42:93f3
+* IPv4: 104.20.23.154, 172.66.147.243
+*   Trying [2606:4700:10::6814:179a]:443...
+* Connected to example.com (2606:4700:10::6814:179a) port 443
+* ALPN: curl offers h2,http/1.1
+* (304) (OUT), TLS handshake, Client hello (1):
+* (304) (IN), TLS handshake, Server hello (2):
+* (304) (IN), TLS handshake, Certificate (11):
+* (304) (OUT), TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / AEAD-CHACHA20-POLY1305-SHA256 / [blank] / UNDEF
+* ALPN: server accepted h2
+* Server certificate:
+*  subject: CN=example.com
+*  issuer: C=US; O=SSL Corporation; CN=Cloudflare TLS Issuing ECC CA 3
+*  SSL certificate verify ok.
+* using HTTP/2
+> GET / HTTP/2
+> Host: example.com
+< HTTP/2 200
+< content-type: text/html; charset=utf-8
+< server: cloudflare
+< age: 4321
+< cf-cache-status: HIT
+```
+
+(Es un extracto: la salida real tiene algunas líneas más de TLS y de cabeceras).
+
+Ahí está todo: el DNS da **varias IPs** (para repartir la carga), la conexión se abre en el **443**, el **saludo TLS** (_handshake_) intercambia el certificado y lo verifica (`SSL certificate verify ok`), cliente y servidor acuerdan **HTTP/2** y llega la respuesta. Las cabeceras `server: cloudflare`, `cf-cache-status: HIT` y `age: 4321` cuentan que no respondió el servidor original sino una **CDN** (una red de servidores repartidos por el mundo) con una copia guardada hace 4321 segundos (B3.5). Cuando visitas tu app en Vercel pasa exactamente lo mismo: responde la red de Vercel, no "tu" máquina.
+
+<Callout type="risk">
+
+- **La distancia no se optimiza con código:** si tu servidor está en EE. UU. y tu usuario en México, cada ida y vuelta cuesta lo que cuesta. Por eso las CDN guardan copias cerca del usuario, y por eso una base de datos lejos de tu función de Vercel (MongoDB Atlas en otra región) multiplica la latencia de **cada** consulta. Elige regiones cercanas entre sí.
+- **Muchos archivos = muchas peticiones:** una página con 40 scripts e imágenes hace 40 peticiones más. HTTP/2 las envía en paralelo por una sola conexión, pero cada byte cuenta, sobre todo en móvil. Astro envía 0 KB de JavaScript por defecto en parte por esto.
+
+</Callout>
+
+## Paso 6: estático, SSR y SPA, la misma página de tres formas
+
+Hay tres grandes formas de que un servidor entregue una página, y Astro las mezcla. Vas a construir las tres en tu servidor. Crea `public/estatico.html`:
+
+```html
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>Página estática</title>
+  </head>
+  <body>
+    <h1>Página estática</h1>
+    <p>Este HTML está escrito en un archivo y se envía tal cual, igual para todos.</p>
+  </body>
+</html>
+```
+
+Y sustituye `servidor.js` por esta versión:
+
+```js
+// Archivo: servidor.js
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+
+const PUERTO = 3000;
+
+const horaMexico = () =>
+  new Date().toLocaleTimeString("es-MX", { timeZone: "America/Mexico_City", hourCycle: "h23" });
+
+function enviarHtml(respuesta, html, estado = 200) {
+  respuesta.writeHead(estado, { "Content-Type": "text/html; charset=utf-8" });
+  respuesta.end(html);
+}
+
+const servidor = createServer(async (peticion, respuesta) => {
+  const url = new URL(peticion.url ?? "/", `http://${peticion.headers.host}`);
+  console.log(`${peticion.method} ${url.pathname}`);
+
+  // 1. ESTÁTICO: un archivo HTML ya escrito, idéntico para todos
+  if (url.pathname === "/estatico") {
+    const html = await readFile(new URL("./public/estatico.html", import.meta.url), "utf-8");
+    return enviarHtml(respuesta, html);
+  }
+
+  // 2. SSR: el servidor genera el HTML en cada petición
+  if (url.pathname === "/ssr") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>SSR</title></head>
+<body><h1>Página SSR</h1><p>Generada en el servidor. Hora de México: ${horaMexico()}</p></body></html>`,
+    );
+  }
+
+  // 3. SPA: el servidor envía una "cáscara" vacía; el JavaScript del navegador la rellena
+  if (url.pathname === "/spa") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>SPA</title></head>
+<body><div id="app">Cargando…</div>
+<script>
+  fetch("/api/hora")
+    .then((r) => r.json())
+    .then((datos) => {
+      document.getElementById("app").innerHTML =
+        "<h1>Página SPA</h1><p>Pintada en el navegador. Hora de México: " + datos.hora + "</p>";
+    });
+</script></body></html>`,
+    );
+  }
+
+  // Una API: devuelve datos (JSON), no HTML
+  if (url.pathname === "/api/hora") {
+    respuesta.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    return respuesta.end(JSON.stringify({ hora: horaMexico() }));
+  }
+
+  if (url.pathname === "/") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Laboratorio web</title></head>
+<body><h1>Laboratorio web</h1><ul>
+<li><a href="/estatico">Estático</a></li><li><a href="/ssr">SSR</a></li><li><a href="/spa">SPA</a></li>
+</ul></body></html>`,
+    );
+  }
+
+  enviarHtml(respuesta, "<h1>404 · Esta página no existe</h1>", 404);
+});
+
+servidor.listen(PUERTO, "127.0.0.1", () => {
+  console.log(`Servidor escuchando en http://localhost:${PUERTO}`);
+});
+```
+
+`--watch` lo reinicia solo al guardar. Abre en el navegador `http://localhost:3000/` y visita las tres páginas: **las tres se ven igual de bien**. Ahora mira lo que recibe un cliente que **no ejecuta JavaScript**, como `curl` (o el robot de Google con prisa, o un navegador con una conexión lenta mientras descarga el JavaScript):
+
+```bash
+curl -s http://localhost:3000/ssr
+curl -s http://localhost:3000/spa
+curl -s http://localhost:3000/api/hora
+curl -i http://localhost:3000/no-existe
+```
+
+```text
+<!doctype html><html lang="es"><head><meta charset="utf-8"><title>SSR</title></head>
+<body><h1>Página SSR</h1><p>Generada en el servidor. Hora de México: 03:24:28</p></body></html>
+```
+
+```text
+<!doctype html><html lang="es"><head><meta charset="utf-8"><title>SPA</title></head>
+<body><div id="app">Cargando…</div>
+<script>
+  fetch("/api/hora")
+    .then((r) => r.json())
+    .then((datos) => {
+      document.getElementById("app").innerHTML =
+        "<h1>Página SPA</h1><p>Pintada en el navegador. Hora de México: " + datos.hora + "</p>";
+    });
+</script></body></html>
+```
+
+```text
+{"hora":"03:24:28"}
+```
+
+```text
+HTTP/1.1 404 Not Found
+Content-Type: text/html; charset=utf-8
+```
+
+Las diferencias, que son la clave de toda la sección:
+
+|                       | Estático                               | SSR                                | SPA                             |
+| --------------------- | -------------------------------------- | ---------------------------------- | ------------------------------- |
+| Quién genera el HTML  | Nadie: ya existe                       | El servidor, en cada petición      | El navegador, con JavaScript    |
+| Lo que recibe `curl`  | La página completa                     | La página completa                 | "Cargando…" y un script         |
+| Coste por visita      | Mínimo (se puede servir desde una CDN) | El servidor trabaja en cada visita | Se descargan JS y datos después |
+| Datos de cada usuario | No                                     | Sí                                 | Sí                              |
+| Ejemplo               | Una landing                            | Tu página de progreso              | Un panel tipo Gmail             |
+
+**Dónde encaja Astro:** Astro genera las páginas **estáticas por defecto** (al compilar, como `estatico.html`), puede renderizar en el servidor las que lo necesitan (`export const prerender = false`, o `output: "server"` como en esta plataforma) y solo envía JavaScript para las **islas** interactivas (curso B6). Es decir: el HTML llega completo como en estático o SSR, y el JavaScript se limita a las partes que de verdad lo necesitan.
+
+<Callout type="risk">
+
+- **Insertar texto en HTML sin escaparlo es una vulnerabilidad (XSS):** aquí metemos la hora, que controlamos nosotros. Si metieras algo que escribe un usuario (`?nombre=<script>…</script>`), ese script se ejecutaría en el navegador de quien visite la página. Astro escapa automáticamente todo lo que pones entre llaves `{}`; con _template strings_ a mano, no hay nadie que lo haga por ti.
+- **`readFile` en cada petición** lee el disco cada vez. Para un archivo estático que no cambia, lo correcto es servirlo desde una CDN o, al menos, leerlo una vez al arrancar. Vercel sirve tus páginas estáticas desde su CDN sin ejecutar ningún código.
+- **Las SPA dependen del JavaScript para todo:** si el `fetch` falla, el usuario se queda en "Cargando…" para siempre. Este ejemplo ni siquiera maneja el error. En React lo resolverás en B6.6.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Arranca tu app de Astro en local y localiza con `lsof -i :4321` (o el puerto que use) el
-  proceso que la sirve. 2. Ejecuta `curl -v` contra la URL de tu app en Vercel e identifica en la
-  salida los pasos de DNS, conexión, TLS, petición y respuesta. 3. Abre la pestaña Network en tu app
-  de entrenamiento, recarga y anota cuántas peticiones hace la página y cuál es la más pesada. 4.
-  Escribe en 10 pasos qué ocurre desde que escribes la URL de tu app hasta que puedes pulsar un
-  botón.
+
+1. Arranca tu app de entrenamiento (o esta misma plataforma) con `npm run dev` y localiza con `lsof` el proceso que escucha en el 4321. Comprueba con `ps` qué comando es.
+2. Mide con el `curl -w` del Paso 5 tu app desplegada en Vercel, dos veces seguidas. ¿Qué fase cambia más entre la primera y la segunda?
+3. Escribe en 10 pasos qué ocurre cuando visitas tu app en Vercel, desde que escribes la URL hasta que ves la página, usando lo que has medido.
+
+</Callout>
+
+Solución. El paso 1:
+
+```bash
+lsof -nP -iTCP:4321 -sTCP:LISTEN
+ps -o pid,command -p 10723
+```
+
+```text
+COMMAND   PID          USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+node    10723 tu-usuario   32u  IPv4 0x46d41ede68496b2c      0t0  TCP 127.0.0.1:4321 (LISTEN)
+  PID COMMAND
+10723 node /Users/tu-usuario/proyectos/mi-app/node_modules/.bin/astro dev
+```
+
+(Usa en `ps` el `PID` que te haya dado `lsof`). Si quieres hacerlo en un solo comando: `ps -o pid,command -p $(lsof -t -iTCP:4321 -sTCP:LISTEN)`. La opción `-t` hace que `lsof` devuelva solo el PID.
+
+El paso 2, con tu dominio:
+
+```bash
+curl -s -o /dev/null -w 'dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total}\n' https://tu-app.vercel.app/
+curl -s -o /dev/null -w 'dns=%{time_namelookup} tcp=%{time_connect} tls=%{time_appconnect} ttfb=%{time_starttransfer} total=%{time_total}\n' https://tu-app.vercel.app/
+```
+
+Lo habitual: en la primera medición, `dns` es más alto (no estaba en caché) y, si la página es SSR, `ttfb` también (la función de Vercel estaba "dormida" y tuvo que arrancar: un _cold start_). En la segunda, los dos bajan.
+
+El paso 3, una respuesta modelo:
+
+1. Escribes `https://tu-app.vercel.app/progreso` y pulsas Enter. El navegador separa protocolo, dominio y ruta.
+2. El navegador busca la IP del dominio en su caché; si no está, pregunta al **DNS** (B3.2) y recibe una o varias IPs de Vercel.
+3. Abre una conexión **TCP** con una de esas IPs en el puerto **443**. Responde un servidor de la red de Vercel cercano a ti.
+4. Negocia **TLS**: recibe el certificado de tu dominio, comprueba que lo firmó una autoridad de confianza y acuerdan las claves de cifrado.
+5. Envía la petición **HTTP** (`GET /progreso`), con las **cookies** de tu dominio, entre ellas la de sesión (B3.4).
+6. Vercel decide: si la ruta es estática, responde desde la **CDN**; si es SSR, ejecuta tu código de Astro en una **función** (con un posible _cold start_).
+7. Tu código lee la cookie, comprueba la sesión, consulta **MongoDB Atlas** (otra conexión, ahora del servidor a la base de datos) y genera el HTML.
+8. Vercel envía la **respuesta**: código `200`, cabeceras (`Content-Type`, `Cache-Control`…) y el HTML.
+9. El navegador analiza el HTML y hace **más peticiones** para el CSS, las fuentes, las imágenes y el JavaScript de las islas, muchas de ellas servidas desde la CDN y cacheadas.
+10. **Pinta** la página y ejecuta el JavaScript de las islas, que se vuelven interactivas.
+
+<Callout type="risk">
+
+- **`kill` con el PID equivocado:** si usas el comando combinado con `$(lsof -t …)` para matar procesos, comprueba antes qué devuelve. Si hay varios procesos, `kill` los terminará todos.
+- **Medir una sola vez engaña:** la red varía de un segundo a otro. Para comparar, mide varias veces y fíjate en la tendencia, no en un número suelto.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes explicar el viaje completo de una petición a alguien que no programa y señalar en qué paso
-  podría fallar cada problema típico.
+
+Puedes explicar el viaje de una petición a alguien que no programa, sabes qué es un puerto y cómo averiguar qué programa lo ocupa, lees la salida de `curl -v` línea a línea y distingues estático, SSR y SPA por lo que recibe un cliente que no ejecuta JavaScript.
+
 </Callout>
 
 ## Resumen
 
-- El cliente pide y el servidor (un programa) responde.
-- La IP identifica la máquina; el puerto, el programa dentro de ella.
-- Una visita implica DNS, TCP, TLS, petición, respuesta y renderizado, y muchas peticiones más.
-- `curl -v` y la pestaña Network muestran ese viaje.
-- Estático, SSR y SPA se diferencian en quién genera el HTML y cuándo.
+- Un servidor es un programa que escucha en un puerto y responde peticiones; un cliente es quien las hace. Tu Mac con `astro dev` es un servidor.
+- IP = la máquina; puerto = el programa. `localhost` es tu propia máquina; un puerto solo admite un programa (`EADDRINUSE`).
+- `curl -v` muestra la conexión (`*`), lo que envías (`>`) y lo que recibes (`<`).
+- El viaje: URL → DNS → TCP → TLS → HTTP → respuesta → render (más peticiones por cada recurso).
+- Estático (HTML ya hecho), SSR (HTML generado en el servidor por petición) y SPA (HTML generado en el navegador). Astro: estático por defecto, SSR donde hace falta, JavaScript solo en islas.

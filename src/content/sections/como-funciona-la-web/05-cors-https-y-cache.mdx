@@ -4,144 +4,778 @@ course: "B3"
 title: "CORS, HTTPS y caché"
 order: 5
 minutes: 60
-summary: "Por qué falla un fetch a otro dominio, cómo protege HTTPS tus datos y cómo la caché hace que tu web vuele."
+summary: "Provocas un error de CORS real entre dos servidores locales, lo arreglas con cabeceras y preflight, inspeccionas certificados de Let's Encrypt con openssl y añades caché con ETag y 304, comparándola con la de Vercel."
 ---
 
-Tres temas que suelen aparecer como errores misteriosos: un `fetch` que funciona en Postman pero falla en el navegador (CORS), un candado que avisa de "conexión no segura" (HTTPS) y cambios que "no se ven" después de desplegar (caché). Los tres tienen una lógica clara que vas a entender en esta sección.
+Tres temas que suelen aparecer como errores misteriosos: un `fetch` que funciona en `curl` pero falla en el navegador con un mensaje rojo sobre "CORS policy"; un certificado HTTPS caducado que deja tu web inaccesible; y una página que no se actualiza aunque acabas de desplegar. En esta sección los vas a **provocar todos a propósito** con tu `web-lab`: una página en el puerto 3000 llamará a tu API del 3001 y el navegador la bloqueará; la arreglarás entendiendo cada cabecera; inspeccionarás certificados reales con `openssl`; y añadirás caché con `ETag` a tu API, comparándola con lo que Vercel hace por ti.
 
-## Same-Origin Policy
+**Lo que tendrás al terminar:** la versión final del `web-lab`, con una API que acepta peticiones de un origen concreto, responde a los _preflight_ de CORS y devuelve `304 Not Modified` cuando el cliente ya tiene los datos. Sabrás diagnosticar un error de CORS sin buscarlo en Google.
 
-Un **origen** es la combinación de **protocolo + dominio + puerto**:
+**Requisitos:** el `web-lab` de B3.3 (`servidor.js` y `api.js`) y Google Chrome.
+
+## Paso 1: qué es un origen y la _Same-Origin Policy_
+
+Un **origen** es la combinación de **protocolo + dominio + puerto**. Dos URLs tienen el mismo origen solo si coinciden las tres partes:
+
+| URL A                     | URL B                       | ¿Mismo origen? | Por qué                                          |
+| ------------------------- | --------------------------- | -------------- | ------------------------------------------------ |
+| `http://localhost:3000/a` | `http://localhost:3000/b`   | Sí             | Solo cambia la ruta                              |
+| `http://localhost:3000`   | `http://localhost:3001`     | **No**         | Distinto puerto                                  |
+| `http://tudominio.com`    | `https://tudominio.com`     | **No**         | Distinto protocolo                               |
+| `https://tudominio.com`   | `https://api.tudominio.com` | **No**         | Distinto dominio (un subdominio es otro dominio) |
+
+La **Same-Origin Policy** (política del mismo origen) es una regla de seguridad **del navegador**: el JavaScript de una página **puede enviar** peticiones a otros orígenes, pero **no puede leer sus respuestas**, salvo que el otro servidor lo permita expresamente.
+
+¿Por qué existe? Imagina que estás conectado a tu banco en una pestaña y visitas una web maliciosa en otra. Sin esta regla, el JavaScript de esa web podría hacer `fetch("https://tubanco.com/movimientos")`; tu navegador enviaría tus cookies del banco y la web maliciosa leería tus movimientos. La política impide esa lectura. **CORS** (_Cross-Origin Resource Sharing_) es el mecanismo para que un servidor diga "este otro origen sí puede leer mis respuestas".
+
+<Callout type="risk">
+
+- **CORS no protege tu API:** solo lo aplica el navegador. `curl`, Postman, un script de Node o el servidor de un atacante ignoran CORS por completo. Tu API debe exigir autenticación y validar todo igual, tenga o no cabeceras CORS.
+- **`localhost` y `127.0.0.1` son orígenes distintos** para el navegador, aunque sean la misma máquina. Si tu página está en `http://localhost:3000` y llama a `http://127.0.0.1:3001`, el origen que llega es `http://localhost:3000`, y es el que hay que permitir.
+
+</Callout>
+
+## Paso 2: provocar un error de CORS
+
+Añade a `servidor.js` (el del puerto 3000) una página que lista y crea tareas usando la API del 3001. El archivo completo queda así:
+
+```js
+// Archivo: servidor.js
+import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+
+const PUERTO = 3000;
+
+const horaMexico = () =>
+  new Date().toLocaleTimeString("es-MX", { timeZone: "America/Mexico_City", hourCycle: "h23" });
+
+function enviarHtml(respuesta, html, estado = 200) {
+  respuesta.writeHead(estado, { "Content-Type": "text/html; charset=utf-8" });
+  respuesta.end(html);
+}
+
+const servidor = createServer(async (peticion, respuesta) => {
+  const url = new URL(peticion.url ?? "/", `http://${peticion.headers.host}`);
+  console.log(`${peticion.method} ${url.pathname}`);
+
+  // 1. ESTÁTICO: un archivo HTML ya escrito, idéntico para todos
+  if (url.pathname === "/estatico") {
+    const html = await readFile(new URL("./public/estatico.html", import.meta.url), "utf-8");
+    return enviarHtml(respuesta, html);
+  }
+
+  // 2. SSR: el servidor genera el HTML en cada petición
+  if (url.pathname === "/ssr") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>SSR</title></head>
+<body><h1>Página SSR</h1><p>Generada en el servidor. Hora de México: ${horaMexico()}</p></body></html>`,
+    );
+  }
+
+  // 3. SPA: el servidor envía una "cáscara" vacía; el JavaScript del navegador la rellena
+  if (url.pathname === "/spa") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>SPA</title></head>
+<body><div id="app">Cargando…</div>
+<script>
+  fetch("/api/hora")
+    .then((r) => r.json())
+    .then((datos) => {
+      document.getElementById("app").innerHTML =
+        "<h1>Página SPA</h1><p>Pintada en el navegador. Hora de México: " + datos.hora + "</p>";
+    });
+</script></body></html>`,
+    );
+  }
+
+  // Una API: devuelve datos (JSON), no HTML
+  if (url.pathname === "/api/hora") {
+    respuesta.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    return respuesta.end(JSON.stringify({ hora: horaMexico() }));
+  }
+
+  // 4. Una página que usa la API de OTRO origen (localhost:3001): CORS, B3.5
+  if (url.pathname === "/tareas-remotas") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Tareas remotas</title></head>
+<body><h1>Tareas desde la API</h1><ul id="lista"><li>Cargando…</li></ul>
+<button id="crear">Crear tarea</button><p id="estado"></p>
+<script>
+  const API = "http://localhost:3001/api/tareas";
+  const lista = document.getElementById("lista");
+  const estado = document.getElementById("estado");
+
+  async function cargar() {
+    try {
+      const respuesta = await fetch(API);
+      const tareas = await respuesta.json();
+      lista.innerHTML = "";
+      for (const tarea of tareas) {
+        const li = document.createElement("li");
+        li.textContent = (tarea.hecha ? "✓ " : "○ ") + tarea.titulo;
+        lista.append(li);
+      }
+    } catch (error) {
+      lista.innerHTML = "<li>No se pudo cargar: " + error.message + "</li>";
+    }
+  }
+
+  document.getElementById("crear").addEventListener("click", async () => {
+    try {
+      const respuesta = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ titulo: "Tarea creada desde el navegador " + Date.now(), categoria: "personal" }),
+      });
+      estado.textContent = "Respuesta: " + respuesta.status;
+      cargar();
+    } catch (error) {
+      estado.textContent = "No se pudo crear: " + error.message;
+    }
+  });
+
+  cargar();
+</script></body></html>`,
+    );
+  }
+
+  if (url.pathname === "/") {
+    return enviarHtml(
+      respuesta,
+      `<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Laboratorio web</title></head>
+<body><h1>Laboratorio web</h1><ul>
+<li><a href="/estatico">Estático</a></li><li><a href="/ssr">SSR</a></li><li><a href="/spa">SPA</a></li>
+<li><a href="/tareas-remotas">Tareas remotas (CORS)</a></li>
+</ul></body></html>`,
+    );
+  }
+
+  enviarHtml(respuesta, "<h1>404 · Esta página no existe</h1>", 404);
+});
+
+servidor.listen(PUERTO, "127.0.0.1", () => {
+  console.log(`Servidor escuchando en http://localhost:${PUERTO}`);
+});
+```
+
+Arranca los dos servidores, cada uno en su terminal, con la versión de `api.js` de B3.3:
+
+```bash
+node servidor.js
+```
+
+```bash
+node api.js
+```
+
+Abre `http://localhost:3000/tareas-remotas` en Chrome, con DevTools abiertas (_Console_ y _Network_). La lista dice `No se pudo cargar: Failed to fetch` y la consola muestra:
 
 ```text
-https://academy.tudominio.com:443
-└─┬──┘ └────────┬───────────┘ └┬┘
-protocolo     dominio        puerto
+Access to fetch at 'http://localhost:3001/api/tareas' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
 ```
 
-Por seguridad, el navegador aplica la **Same-Origin Policy**: el JavaScript de una página solo puede **leer las respuestas** de peticiones a su propio origen. Si no existiera, cualquier web que visitaras podría hacer `fetch` a tu banco con tus cookies y leer tus datos.
-
-Estos son orígenes distintos de `https://academy.tudominio.com`:
-
-- `http://academy.tudominio.com` (otro protocolo)
-- `https://api.tudominio.com` (otro subdominio)
-- `http://localhost:4321` (todo distinto)
-
-## CORS: permitir orígenes concretos
-
-**CORS** (_Cross-Origin Resource Sharing_) es la forma en que un servidor dice "acepto que este otro origen lea mis respuestas":
-
-```http
-Access-Control-Allow-Origin: https://academy.tudominio.com
-```
-
-El error típico en la consola:
+Ahora mira la terminal de la API:
 
 ```text
-Access to fetch at 'https://api.otrodominio.com/datos' from origin
-'http://localhost:4321' has been blocked by CORS policy: No
-'Access-Control-Allow-Origin' header is present on the requested resource.
+GET /api/tareas → 200 (2.6 ms)
 ```
 
-Claves para entenderlo:
+**La petición llegó y el servidor respondió 200.** Fue el navegador quien, al ver que la respuesta no traía la cabecera `Access-Control-Allow-Origin`, se negó a entregársela a tu JavaScript. Para el código, el resultado es el mismo que si no hubiera red: `TypeError: Failed to fetch`.
 
-- **Lo bloquea el navegador**, no el servidor. Por eso la misma petición funciona con `curl` o Postman: no aplican la política.
-- **Se arregla en el servidor** que recibe la petición, añadiendo las cabeceras. Desde el cliente no se puede "desactivar".
-- Para peticiones "no simples" (por ejemplo `PUT` o `Content-Type: application/json`), el navegador envía antes una petición **`OPTIONS` de comprobación** (_preflight_) y solo continúa si la respuesta lo permite.
+Pulsa el botón **Crear tarea**. La consola muestra otro error:
+
+```text
+Access to fetch at 'http://localhost:3001/api/tareas' from origin 'http://localhost:3000' has been blocked by CORS policy: Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+```
+
+Y en la API:
+
+```text
+OPTIONS /api/tareas → 405 (0.4 ms)
+```
+
+El `POST` **ni siquiera se envió**. Antes de una petición que podría modificar datos (un `POST` con JSON, un `PUT`, un `DELETE` o cualquiera con cabeceras especiales), el navegador envía una petición previa de método **`OPTIONS`**, el **_preflight_**: "¿me dejas hacer un `POST` con `Content-Type: application/json` desde `http://localhost:3000`?". Tu API no sabe responder a `OPTIONS` (devuelve `405`), así que el navegador cancela el `POST`.
+
+Compara con `curl`:
+
+```bash
+curl -s http://localhost:3001/api/tareas -H "Origin: http://localhost:3000"
+```
+
+Devuelve la lista sin problema. **CORS solo existe en el navegador.**
+
+<Callout type="risk">
+
+- **`mode: "no-cors"` no arregla nada:** es la "solución" que más se copia de internet. Con `fetch(url, { mode: "no-cors" })` el error desaparece, pero obtienes una respuesta **opaca** (`type=opaque status=0`) cuyo contenido no puedes leer. Sirve para enviar datos sin necesitar la respuesta, nunca para leer una API.
+- **El error de CORS esconde otros errores:** si tu API falla con un 500 y esa respuesta de error no lleva cabeceras CORS, el navegador mostrará un error de CORS, no el 500. Antes de tocar la configuración de CORS, mira en _Network_ qué código devolvió de verdad el servidor.
+
+</Callout>
+
+## Paso 3: permitir un origen y responder al _preflight_
+
+La solución está **en el servidor de la API**: debe decir qué orígenes pueden leer sus respuestas y responder a los _preflight_. Aprovecharás el mismo cambio para añadir caché (Paso 6). Sustituye `api.js` por la versión final:
+
+```js
+// Archivo: api.js
+// API REST de tareas en http://localhost:3001 (los datos viven en memoria)
+import { createServer } from "node:http";
+import { createHash } from "node:crypto";
+
+const PUERTO = 3001;
+const CATEGORIAS = ["trabajo", "personal", "salud", "estudio"];
+const LIMITE_CUERPO = 10_000; // bytes
+// Orígenes (protocolo + dominio + puerto) que pueden usar la API desde un navegador
+const ORIGENES_PERMITIDOS = ["http://localhost:3000"];
+
+let siguienteId = 3;
+const tareas = new Map([
+  [1, { id: 1, titulo: "Revisar pull request", categoria: "trabajo", hecha: false }],
+  [2, { id: 2, titulo: "Correr 5 km", categoria: "salud", hecha: true }],
+]);
+
+// ─── Utilidades de respuesta ───────────────────────────────────────
+function json(respuesta, estado, datos, cabeceras = {}) {
+  respuesta.writeHead(estado, { "Content-Type": "application/json; charset=utf-8", ...cabeceras });
+  respuesta.end(JSON.stringify(datos));
+}
+
+function sinContenido(respuesta) {
+  respuesta.writeHead(204);
+  respuesta.end();
+}
+
+class ErrorHttp extends Error {
+  constructor(estado, mensaje, cabeceras = {}) {
+    super(mensaje);
+    this.estado = estado;
+    this.cabeceras = cabeceras;
+  }
+}
+
+// ─── CORS y caché ───────────────────────────────────────────────────
+function aplicarCors(peticion, respuesta) {
+  const origen = peticion.headers.origin;
+  // La respuesta cambia según el Origin: las cachés deben guardar una copia por origen
+  respuesta.setHeader("Vary", "Origin");
+  if (origen && ORIGENES_PERMITIDOS.includes(origen)) {
+    respuesta.setHeader("Access-Control-Allow-Origin", origen);
+  }
+}
+
+function responderPreflight(respuesta) {
+  respuesta.writeHead(204, {
+    "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, PATCH, DELETE",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "600", // el navegador recuerda este permiso 10 minutos
+  });
+  respuesta.end();
+}
+
+// Responde 304 si el cliente ya tiene esta misma versión (ETag), o 200 con los datos
+function jsonConCache(peticion, respuesta, datos) {
+  const cuerpo = JSON.stringify(datos);
+  const etag = `"${createHash("sha1").update(cuerpo).digest("base64url")}"`;
+  const cabeceras = { ETag: etag, "Cache-Control": "no-cache" };
+  if (peticion.headers["if-none-match"] === etag) {
+    respuesta.writeHead(304, cabeceras);
+    return respuesta.end();
+  }
+  respuesta.writeHead(200, { "Content-Type": "application/json; charset=utf-8", ...cabeceras });
+  respuesta.end(cuerpo);
+}
+
+// ─── Lectura y validación del cuerpo ───────────────────────────────
+async function leerJson(peticion) {
+  const tipo = peticion.headers["content-type"] ?? "";
+  if (!tipo.startsWith("application/json")) {
+    throw new ErrorHttp(415, "El cuerpo debe enviarse con Content-Type: application/json");
+  }
+  let texto = "";
+  for await (const trozo of peticion) {
+    texto += trozo;
+    if (texto.length > LIMITE_CUERPO) throw new ErrorHttp(413, "El cuerpo es demasiado grande");
+  }
+  try {
+    return JSON.parse(texto);
+  } catch {
+    throw new ErrorHttp(400, "El cuerpo no es JSON válido");
+  }
+}
+
+// Devuelve los errores de validación (vacío si todo está bien)
+function validarTarea(datos, { parcial }) {
+  const errores = [];
+  if (typeof datos !== "object" || datos === null || Array.isArray(datos)) {
+    return ["Se esperaba un objeto JSON"];
+  }
+  if (!parcial || "titulo" in datos) {
+    if (typeof datos.titulo !== "string" || datos.titulo.trim().length < 3) {
+      errores.push("titulo: texto de al menos 3 caracteres");
+    }
+  }
+  if (!parcial || "categoria" in datos) {
+    if (!CATEGORIAS.includes(datos.categoria)) errores.push(`categoria: una de ${CATEGORIAS.join(", ")}`);
+  }
+  if ("hecha" in datos && typeof datos.hecha !== "boolean") errores.push("hecha: true o false");
+  return errores;
+}
+
+function comprobarTituloLibre(titulo, idPropio) {
+  for (const tarea of tareas.values()) {
+    if (tarea.id !== idPropio && tarea.titulo.toLowerCase() === titulo.trim().toLowerCase()) {
+      throw new ErrorHttp(409, `Ya existe una tarea con el título "${tarea.titulo}"`);
+    }
+  }
+}
+
+function buscarTarea(id) {
+  const tarea = tareas.get(id);
+  if (!tarea) throw new ErrorHttp(404, `No existe la tarea ${id}`);
+  return tarea;
+}
+
+// ─── Rutas ──────────────────────────────────────────────────────────
+async function manejar(peticion, respuesta) {
+  const url = new URL(peticion.url ?? "/", `http://${peticion.headers.host}`);
+  const metodo = peticion.method;
+
+  // Preflight de CORS: el navegador pregunta antes de enviar un POST/PUT/PATCH/DELETE con JSON
+  if (metodo === "OPTIONS") return responderPreflight(respuesta);
+
+  // Redirección permanente de la ruta antigua a la nueva
+  if (url.pathname === "/tareas") {
+    respuesta.writeHead(301, { Location: "/api/tareas" });
+    return respuesta.end();
+  }
+
+  // Colección: /api/tareas
+  if (url.pathname === "/api/tareas") {
+    if (metodo === "GET" || metodo === "HEAD") {
+      const filtro = url.searchParams.get("categoria");
+      const lista = [...tareas.values()].filter((t) => !filtro || t.categoria === filtro);
+      return jsonConCache(peticion, respuesta, lista);
+    }
+    if (metodo === "POST") {
+      const datos = await leerJson(peticion);
+      const errores = validarTarea(datos, { parcial: false });
+      if (errores.length > 0) return json(respuesta, 422, { error: "Datos inválidos", detalles: errores });
+      comprobarTituloLibre(datos.titulo);
+      const tarea = { id: siguienteId++, titulo: datos.titulo.trim(), categoria: datos.categoria, hecha: datos.hecha ?? false };
+      tareas.set(tarea.id, tarea);
+      return json(respuesta, 201, tarea, { Location: `/api/tareas/${tarea.id}` });
+    }
+    throw new ErrorHttp(405, `Método ${metodo} no permitido`, { Allow: "GET, HEAD, POST" });
+  }
+
+  // Elemento: /api/tareas/:id
+  const coincidencia = url.pathname.match(/^\/api\/tareas\/(\d+)$/);
+  if (coincidencia) {
+    const id = Number(coincidencia[1]);
+    if (metodo === "GET" || metodo === "HEAD") return json(respuesta, 200, buscarTarea(id));
+    if (metodo === "PUT") {
+      buscarTarea(id);
+      const datos = await leerJson(peticion);
+      const errores = validarTarea(datos, { parcial: false });
+      if (errores.length > 0) return json(respuesta, 422, { error: "Datos inválidos", detalles: errores });
+      comprobarTituloLibre(datos.titulo, id);
+      const tarea = { id, titulo: datos.titulo.trim(), categoria: datos.categoria, hecha: datos.hecha ?? false };
+      tareas.set(id, tarea);
+      return json(respuesta, 200, tarea);
+    }
+    if (metodo === "PATCH") {
+      const actual = buscarTarea(id);
+      const datos = await leerJson(peticion);
+      const errores = validarTarea(datos, { parcial: true });
+      if (errores.length > 0) return json(respuesta, 422, { error: "Datos inválidos", detalles: errores });
+      if ("titulo" in datos) comprobarTituloLibre(datos.titulo, id);
+      // Solo se copian los campos permitidos: nunca todo lo que mande el cliente
+      const tarea = {
+        ...actual,
+        ...("titulo" in datos && { titulo: datos.titulo.trim() }),
+        ...("categoria" in datos && { categoria: datos.categoria }),
+        ...("hecha" in datos && { hecha: datos.hecha }),
+      };
+      tareas.set(id, tarea);
+      return json(respuesta, 200, tarea);
+    }
+    if (metodo === "DELETE") {
+      buscarTarea(id);
+      tareas.delete(id);
+      return sinContenido(respuesta);
+    }
+    throw new ErrorHttp(405, `Método ${metodo} no permitido`, { Allow: "GET, HEAD, PUT, PATCH, DELETE" });
+  }
+
+  // Ruta para provocar un error inesperado y ver un 500
+  if (url.pathname === "/api/fallo") {
+    throw new Error("Algo se ha roto dentro del servidor");
+  }
+
+  throw new ErrorHttp(404, `No existe la ruta ${url.pathname}`);
+}
+
+const servidor = createServer(async (peticion, respuesta) => {
+  const inicio = performance.now();
+  aplicarCors(peticion, respuesta);
+  try {
+    await manejar(peticion, respuesta);
+  } catch (error) {
+    if (error instanceof ErrorHttp) {
+      json(respuesta, error.estado, { error: error.message }, error.cabeceras);
+    } else {
+      console.error(error); // el detalle se queda en el servidor
+      json(respuesta, 500, { error: "Error interno del servidor" });
+    }
+  } finally {
+    const ms = (performance.now() - inicio).toFixed(1);
+    console.log(`${peticion.method} ${peticion.url} → ${respuesta.statusCode} (${ms} ms)`);
+  }
+});
+
+servidor.listen(PUERTO, "127.0.0.1", () => {
+  console.log(`API escuchando en http://localhost:${PUERTO}/api/tareas`);
+});
+```
+
+Los cambios respecto a B3.3:
+
+1. **`ORIGENES_PERMITIDOS`**: una **lista explícita** de orígenes, no un comodín.
+2. **`aplicarCors`**, al principio de cada petición: si el `Origin` que envía el navegador está en la lista, añade `Access-Control-Allow-Origin` con ese mismo origen. Con `setHeader`, la cabecera se suma a las que después ponga `writeHead`.
+3. **`Vary: Origin`**: avisa a cualquier caché (del navegador, de una CDN) de que la respuesta depende del origen, para que no sirva a un origen la copia guardada para otro.
+4. **`responderPreflight`**: responde a `OPTIONS` con un `204` y tres cabeceras: qué métodos se permiten, qué cabeceras puede enviar el cliente (`Content-Type`, para el JSON) y durante cuánto tiempo puede el navegador recordar el permiso (`Access-Control-Max-Age: 600`, 10 minutos, para no repetir el _preflight_ en cada petición).
+
+Reinicia la API y recarga `http://localhost:3000/tareas-remotas`. La lista carga. Pulsa **Crear tarea**: el estado dice `Respuesta: 201` y la tarea aparece. En la pestaña _Network_ verás la secuencia completa:
+
+```text
+GET     /api/tareas  200
+OPTIONS /api/tareas  204   ← preflight
+POST    /api/tareas  201
+GET     /api/tareas  200   ← la página recarga la lista
+```
+
+Comprueba el _preflight_ a mano, enviando las cabeceras que envía el navegador:
+
+```bash
+curl -i -X OPTIONS http://localhost:3001/api/tareas \
+  -H "Origin: http://localhost:3000" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: content-type"
+```
+
+```text
+HTTP/1.1 204 No Content
+Vary: Origin
+Access-Control-Allow-Origin: http://localhost:3000
+Access-Control-Allow-Methods: GET, HEAD, POST, PUT, PATCH, DELETE
+Access-Control-Allow-Headers: Content-Type
+Access-Control-Max-Age: 600
+```
+
+Y con un origen que no está en la lista:
+
+```bash
+curl -i http://localhost:3001/api/tareas -H "Origin: https://atacante.example"
+```
+
+```text
+HTTP/1.1 200 OK
+Vary: Origin
+```
+
+La respuesta es `200` y los datos **se envían igualmente**, pero sin `Access-Control-Allow-Origin`, así que un navegador en `https://atacante.example` no dejará que su JavaScript los lea. Es otra prueba de que CORS controla la **lectura en el navegador**, no el acceso a la API.
+
+<Callout type="risk">
+
+- **`Access-Control-Allow-Origin: *`** permite leer a cualquier web. Es aceptable para datos realmente públicos (una API de cotizaciones, un CDN de fuentes), pero nunca para una API con datos de usuarios. Y no funciona con cookies (siguiente punto).
+- **Cookies entre orígenes:** si la página hace `fetch(url, { credentials: "include" })` para enviar cookies a otro origen, el navegador exige además `Access-Control-Allow-Credentials: true` y un origen concreto (no `*`). Sin ella, el error es: `The value of the 'Access-Control-Allow-Credentials' header in the response is '' which must be 'true' when the request's credentials mode is 'include'.` Y las cookies necesitarán `SameSite=None; Secure` (B3.4). Si puedes, evita todo esto sirviendo la página y la API desde el **mismo origen**, como hace Astro con sus endpoints en `/api/...`.
+- **Nunca devuelvas el `Origin` recibido sin comprobarlo:** `Access-Control-Allow-Origin: ${peticion.headers.origin}` sin consultar una lista es lo mismo que `*`, pero además funciona con cookies. Es una vulnerabilidad clásica.
+
+</Callout>
+
+## Paso 4: CORS en un endpoint de Astro
+
+En tus proyectos, la API será un endpoint de Astro. El mismo patrón, con `APIRoute`:
 
 ```ts
-// Endpoint de Astro que permite que otro origen lea la respuesta
-export const GET: APIRoute = () =>
+// Archivo: src/pages/api/publica.ts
+import type { APIRoute } from "astro";
+
+export const prerender = false;
+
+const ORIGENES_PERMITIDOS = ["https://tudominio.com", "http://localhost:3000"];
+
+function cabecerasCors(origen: string | null): Record<string, string> {
+  const cabeceras: Record<string, string> = { Vary: "Origin" };
+  if (origen && ORIGENES_PERMITIDOS.includes(origen)) {
+    cabeceras["Access-Control-Allow-Origin"] = origen;
+  }
+  return cabeceras;
+}
+
+export const OPTIONS: APIRoute = ({ request }) =>
+  new Response(null, {
+    status: 204,
+    headers: {
+      ...cabecerasCors(request.headers.get("origin")),
+      "Access-Control-Allow-Methods": "GET, POST",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Max-Age": "600",
+    },
+  });
+
+export const GET: APIRoute = ({ request }) =>
   Response.json(
-    { ok: true },
-    { headers: { "Access-Control-Allow-Origin": "https://academy.tudominio.com" } },
+    { ok: true, generado: new Date().toISOString() },
+    {
+      headers: {
+        ...cabecerasCors(request.headers.get("origin")),
+        "Cache-Control": "public, max-age=60",
+      },
+    },
   );
 ```
 
-<Callout type="note">
-  Si el frontend y la API están en el mismo origen (como en Dani Academy, donde Astro sirve ambos),
-  no necesitas CORS en absoluto. Es una de las ventajas de tener los endpoints dentro del mismo
-  proyecto.
+- **`OPTIONS`** se exporta como cualquier otro método: Astro llama a esa función en los _preflight_.
+- **`request.headers.get("origin")`** devuelve `string | null` (B1.2): por eso `cabecerasCors` acepta `null`.
+- **`"Cache-Control": "public, max-age=60"`** permite que el navegador y la CDN de Vercel guarden la respuesta 60 segundos (Paso 6).
+
+Una trampa al probarlo: **en `astro dev`, el _preflight_ no llega a tu endpoint**. El servidor de desarrollo (Vite) responde él mismo a los `OPTIONS`, con una configuración permisiva:
+
+```text
+HTTP/1.1 204 No Content
+Access-Control-Allow-Origin: http://localhost:3000
+Vary: Origin, Access-Control-Request-Headers
+Access-Control-Allow-Methods: GET,HEAD,PUT,PATCH,POST,DELETE
+```
+
+Fíjate en que no hay `Access-Control-Max-Age` y los métodos no son los tuyos. Compilado para producción (con `npm run build` y un adaptador, como en Vercel), responde tu función `OPTIONS`:
+
+```text
+HTTP/1.1 204 No Content
+access-control-allow-headers: Content-Type
+access-control-allow-methods: GET, POST
+access-control-allow-origin: http://localhost:3000
+access-control-max-age: 600
+vary: Origin
+```
+
+Conclusión: algo que funciona con CORS en `astro dev` puede fallar en producción si tu `OPTIONS` está mal. Prueba la configuración de CORS con la versión compilada (`npm run build` y `npm run preview`) o directamente en un despliegue de _preview_ de Vercel.
+
+<Callout type="risk">
+
+- **Astro tiene su propia protección para formularios:** con `security.checkOrigin` (activada por defecto en modo servidor), Astro rechaza peticiones `POST` de **otros orígenes** con tipos de formulario (`application/x-www-form-urlencoded`, `multipart/form-data`, `text/plain`) para evitar CSRF. Es independiente de CORS: aunque tus cabeceras CORS permitan un origen, un formulario `POST` de otro dominio será rechazado con `403`. Con JSON no aplica.
+- **En Vercel, `Cache-Control: public` en una respuesta personalizada es peligroso:** si la respuesta depende del usuario (lleva datos de su sesión) y la marcas `public`, la CDN puede servirle esa respuesta **a otro usuario**. Para datos de usuario, `private` o `no-store`.
+
 </Callout>
 
-### CORS no es protección contra CSRF
+## Paso 5: HTTPS, TLS y certificados
 
-CORS impide **leer** respuestas de otro origen, pero el navegador puede **enviar** ciertas peticiones igualmente: las "simples", como un formulario HTML que hace `POST` a tu web desde otra, no pasan por _preflight_. Por eso existen protecciones adicionales: la cookie `SameSite` (sección B3.4) y la comprobación de origen de Astro (`security.checkOrigin`, activa por defecto), que rechaza con **403** los `POST`, `PUT`, `PATCH` o `DELETE` de otro origen que llegan sin cuerpo o con tipo de formulario (`application/x-www-form-urlencoded`, `multipart/form-data` o `text/plain`). Las de otro origen con JSON ya las frena el _preflight_ de CORS.
+**HTTPS** es HTTP dentro de un túnel cifrado **TLS**. Resuelve tres problemas: **confidencialidad** (nadie en la red puede leer lo que envías, como tus cookies o tu contraseña en un wifi público), **integridad** (nadie puede modificar la página por el camino, como hacían algunos proveedores insertando anuncios) y **autenticidad** (estás hablando con el servidor real de `nextjs.org`, no con un impostor).
 
-## HTTPS y TLS
-
-HTTPS es HTTP dentro de un canal cifrado con **TLS**. Garantiza tres cosas:
-
-1. **Confidencialidad**: nadie en medio (la Wi-Fi del café) puede leer el tráfico.
-2. **Integridad**: nadie puede modificar la página por el camino.
-3. **Autenticidad**: hablas de verdad con `academy.tudominio.com` y no con un impostor.
-
-La tercera se basa en un **certificado**: un documento que dice "esta clave pertenece a este dominio", firmado por una **autoridad de certificación** en la que el navegador confía. **Let's Encrypt** emite certificados gratuitos y automáticos; es lo que usan Vercel y la mayoría de _hostings_ por debajo. Duran 90 días y se renuevan solos.
+La autenticidad la da el **certificado**: un documento que dice "esta clave pública pertenece a `nextjs.org`", firmado por una **autoridad de certificación** (CA) en la que confían los navegadores. Inspecciona uno real:
 
 ```bash
-curl -vI https://academy.tudominio.com 2>&1 | grep -E "subject|issuer|expire"
+echo | openssl s_client -connect nextjs.org:443 -servername nextjs.org 2>/dev/null | openssl x509 -noout -subject -issuer -dates
 ```
 
-Errores típicos: certificado caducado, emitido para otro dominio (`www` vs raíz) o contenido mixto (una página HTTPS que carga recursos por `http://`).
+```text
+subject= /CN=*.nextjs.org
+issuer= /C=US/O=Let's Encrypt/CN=YR2
+notBefore=Sep 23 22:38:26 2026 GMT
+notAfter=Dec 22 22:38:25 2026 GMT
+```
 
-## Caché HTTP
+- **`openssl s_client`** abre una conexión TLS como haría un navegador; `-servername` indica el dominio (varios dominios comparten IP, como viste en B3.2). El `echo |` cierra la conexión en cuanto termina el saludo.
+- **`subject`**: a quién pertenece. `*.nextjs.org` es un certificado **comodín**, válido para cualquier subdominio.
+- **`issuer`**: quién lo firmó, **Let's Encrypt**, una autoridad gratuita y automática. Es la que usa Vercel para los dominios de tus proyectos.
+- **`notBefore` / `notAfter`**: el certificado dura **90 días**. Vercel lo renueva solo, antes de que caduque.
 
-La forma más rápida de responder una petición es **no hacerla**. `Cache-Control` indica quién puede guardar una respuesta y cuánto tiempo:
+Mira la **cadena de confianza** completa:
 
-| Valor                                 | Significado                                         |
-| ------------------------------------- | --------------------------------------------------- |
-| `public, max-age=3600`                | Cualquiera (navegador y CDN) puede guardarla 1 hora |
-| `public, max-age=31536000, immutable` | Un año, y no cambiará nunca                         |
-| `s-maxage=60`                         | Tiempo solo para cachés compartidas (CDN)           |
-| `private`                             | Solo el navegador del usuario, nunca la CDN         |
-| `no-store`                            | No guardar en ningún sitio                          |
+```bash
+echo | openssl s_client -connect nextjs.org:443 -servername nextjs.org -showcerts 2>/dev/null | grep -E "^ ?[0-9] s:|i:"
+```
 
-En esta plataforma:
+```text
+ 0 s:/CN=*.nextjs.org
+   i:/C=US/O=Let's Encrypt/CN=YR2
+ 1 s:/C=US/O=Let's Encrypt/CN=YR2
+   i:/C=US/O=ISRG/CN=Root YR
+ 2 s:/C=US/O=ISRG/CN=Root YR
+   i:/C=US/O=Internet Security Research Group/CN=ISRG Root X1
+```
 
-- Los archivos de `/_astro/` (CSS y JS) llevan `max-age=31536000, immutable`. Es seguro porque su nombre incluye un _hash_ del contenido (`Quiz.BbdQaIp4.js`): si cambian, cambia el nombre.
-- `/api/health` responde con `no-store`, porque debe reflejar el estado real en cada llamada.
-- Las páginas con datos del usuario **nunca** deben quedar en una caché compartida, o otro usuario podría ver tu progreso.
+Cada certificado (`s:`, _subject_) está firmado por el siguiente (`i:`, _issuer_): el de `nextjs.org` lo firma un certificado intermedio de Let's Encrypt, que a su vez está firmado por un certificado raíz de ISRG (la organización detrás de Let's Encrypt). Ese certificado raíz viene **preinstalado** en macOS y en los navegadores: es el ancla de toda la confianza.
 
-### ETag y 304
+¿Y si algo falla? Prueba dos certificados rotos a propósito (`badssl.com` existe para eso):
 
-El servidor puede enviar un identificador de versión:
+```bash
+curl https://expired.badssl.com/
+curl https://wrong.host.badssl.com/
+```
 
-```http
+```text
+curl: (60) SSL certificate problem: certificate has expired
+curl: (60) SSL: no alternative certificate subject name matches target host name 'wrong.host.badssl.com'
+```
+
+Caducado, o emitido para otro dominio: en los dos casos la conexión se rechaza. En el navegador verías una página de advertencia a pantalla completa.
+
+<Callout type="risk">
+
+- **Nunca desactives la verificación de certificados** para "arreglar" un error (`curl -k`, `NODE_TLS_REJECT_UNAUTHORIZED=0` en Node). Si lo dejas en el código, cualquiera en la red podrá hacerse pasar por el servidor. Si un certificado falla, el problema está en el certificado o en la fecha de tu equipo.
+- **Un dominio nuevo en Vercel tarda un poco en tener certificado:** Vercel lo pide a Let's Encrypt cuando el DNS ya apunta bien (B3.2). Si el DNS está mal, verás errores de certificado hasta que lo corrijas.
+- **HSTS:** muchos sitios envían `strict-transport-security: max-age=31536000; includeSubDomains; preload` (lo verás en el Paso 6). Le dice al navegador "durante un año, conéctate a este dominio solo por HTTPS". Es muy recomendable, pero si lo activas con `includeSubDomains` y un subdominio no tiene HTTPS, ese subdominio dejará de funcionar.
+- **El contenido mixto se bloquea:** una página HTTPS que carga un script por `http://` verá ese recurso bloqueado por el navegador. Todas las URLs de tus recursos, en `https://`.
+
+</Callout>
+
+## Paso 6: caché HTTP con `ETag` y `304`
+
+La petición más rápida es la que no se hace, o la que no descarga nada. La caché HTTP lo consigue con dos mecanismos que tu nueva `api.js` ya tiene en `jsonConCache`:
+
+- **`Cache-Control`** dice **cuánto tiempo** puede reutilizarse una respuesta sin preguntar. Tu API usa `no-cache`, que (a pesar del nombre) significa "puedes guardarla, pero pregúntame antes de reutilizarla".
+- **`ETag`** es una **huella** del contenido (aquí, un _hash_ SHA-1 del JSON). El cliente la devuelve en `If-None-Match`, y si coincide, el servidor responde **`304 Not Modified` sin cuerpo**: "lo que tienes sigue valiendo".
+
+Compruébalo con la API en marcha:
+
+```bash
+curl -i http://localhost:3001/api/tareas
+```
+
+Copia el valor de la cabecera `ETag` (con las comillas) y repite la petición como lo haría un navegador que ya tiene la respuesta:
+
+```bash
+curl -i http://localhost:3001/api/tareas -H 'If-None-Match: "Q70iiMpJvsMUKBUVFTsofILQhz0"'
+```
+
+```text
+HTTP/1.1 304 Not Modified
+Vary: Origin
+ETag: "Q70iiMpJvsMUKBUVFTsofILQhz0"
+Cache-Control: no-cache
+```
+
+**Sin cuerpo**: el cliente reutiliza su copia. (Tu `ETag` será distinto si tus tareas son distintas). Ahora cambia una tarea y repite exactamente la misma petición:
+
+```bash
+curl -s -X PATCH http://localhost:3001/api/tareas/1 -H "Content-Type: application/json" -d '{"hecha":true}'
+curl -i http://localhost:3001/api/tareas -H 'If-None-Match: "Q70iiMpJvsMUKBUVFTsofILQhz0"'
+```
+
+```text
 HTTP/1.1 200 OK
-ETag: "a1b2c3"
+ETag: "x7TBgneyR_tNYFlOMfrvZZziSEA"
 ```
 
-La próxima vez, el navegador pregunta "¿ha cambiado?" con `If-None-Match: "a1b2c3"`. Si no cambió, el servidor responde **304 Not Modified** sin cuerpo, y el navegador usa su copia.
+Los datos cambiaron, la huella también, y el servidor envía la versión nueva con su nuevo `ETag`. El navegador hace todo esto **automáticamente**: guarda el `ETag` y envía `If-None-Match` en la siguiente petición. Lo verás en _Network_ como un `304`.
 
-### CDN
+Ahora mira lo que hace Vercel con una web real, `nextjs.org`, primero con su HTML y luego con uno de sus CSS:
 
-Una CDN (como la _Edge Network_ de Vercel) guarda copias de tus respuestas en servidores repartidos por el mundo, cerca de tus usuarios. Lo estático se sirve desde la CDN; lo dinámico llega a tu función.
+```bash
+curl -I https://nextjs.org/
+```
 
-## Errores comunes
+```text
+HTTP/2 200
+cache-control: public, max-age=0, must-revalidate
+server: Vercel
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-vercel-cache: HIT
+age: 142
+```
 
-- **Intentar arreglar CORS en el cliente** (con `mode: "no-cors"` o extensiones del navegador). Se arregla en el servidor.
-- **`Access-Control-Allow-Origin: *` con credenciales.** El navegador lo rechaza; y abrir la API a todos rara vez es lo que quieres.
-- **Cachear en la CDN respuestas privadas.**
-- **Recursos `http://` en páginas `https://`** (contenido mixto).
-- **Cachear archivos sin _hash_ en el nombre** durante mucho tiempo: los usuarios no verán tus cambios.
+```bash
+curl -I https://nextjs.org/_next/static/immutable/chunks/19t0k1gbut827.css
+```
+
+```text
+HTTP/2 200
+content-type: text/css; charset=utf-8
+cache-control: public,max-age=31536000,immutable
+x-vercel-cache: HIT
+age: 71769
+```
+
+(El nombre del archivo CSS cambia con cada despliegue de `nextjs.org`; busca uno actual en el código fuente de la página con `curl -s https://nextjs.org/ | grep -o '/_next/static/[^"]*\.css' | head -1`).
+
+Dos estrategias opuestas, y las dos correctas:
+
+|                       | HTML (`/`)                                                  | CSS con _hash_ en el nombre                                                                          |
+| --------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `Cache-Control`       | `max-age=0, must-revalidate`: el navegador pregunta siempre | `max-age=31536000, immutable`: un año, sin preguntar nunca                                           |
+| Por qué               | El HTML debe reflejar el último despliegue                  | Si el CSS cambia, cambia su **nombre** (`19t0k1gbut827.css`), y el HTML nuevo apunta al nombre nuevo |
+| `x-vercel-cache: HIT` | Lo sirvió la CDN de Vercel, sin ejecutar nada               | Igual                                                                                                |
+| `age`                 | Segundos que lleva la copia en la CDN                       | Casi 20 horas                                                                                        |
+
+Astro hace exactamente lo mismo con tu proyecto: los archivos de `/_astro/` llevan un _hash_ en el nombre y Vercel los sirve con caché de un año, mientras que el HTML se revalida.
+
+<Callout type="risk">
+
+- **Una caché larga sin _hash_ en el nombre deja a los usuarios con versiones viejas:** si sirves `estilos.css` con `max-age=31536000`, los navegadores que ya lo tienen no verán tus cambios en un año. La caché larga solo es segura con nombres que cambian con el contenido.
+- **Datos de usuario y CDN:** nunca `public` en una respuesta que depende de la sesión. Usa `private, no-cache` (solo el navegador del usuario puede guardarla) o `no-store` (nadie la guarda; para datos sensibles).
+- **El `ETag` no ahorra trabajo al servidor en esta implementación:** el servidor sigue generando el JSON para calcular su huella; solo ahorra enviarlo por la red. Para ahorrar también el cálculo, se guarda una versión o una fecha de modificación y se compara antes de generar nada.
+- **`Vary: Origin` multiplica las copias en caché**, una por origen. Con pocos orígenes es irrelevante; con `Vary` sobre cabeceras muy variables (como `User-Agent`), la caché deja de ser útil.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Desde una página en `localhost`, haz un `fetch` a una API que no tenga CORS habilitado, lee el
-  error en la consola y explica qué ha pasado. 2. Repite la misma petición con `curl` y explica por
-  qué ahí sí funciona. 3. Inspecciona con `curl -I` las cabeceras `cache-control` de un archivo de
-  `/_astro/` de tu app en Vercel y de una página HTML. 4. Con `curl -vI`, identifica quién emitió el
-  certificado de tu dominio y cuándo caduca.
+
+1. Con `servidor.js` (puerto 3000) y `sesiones.js` (puerto 3002) en marcha, abre `http://localhost:3000/`, abre la consola y ejecuta `await fetch("http://localhost:3002/api/yo")`. Lee el error y explica con tus palabras por qué ocurre, qué servidor tendría que cambiar y qué cabecera le falta.
+2. Comprueba en la terminal de `sesiones.js` si la petición llegó.
+3. Revisa las cabeceras de caché de tu app desplegada en Vercel: la página principal y un archivo de `/_astro/`. Anota `cache-control`, `x-vercel-cache` y `age`, y explica por qué son distintas.
+4. Inspecciona el certificado de tu dominio con `openssl` y anota quién lo emitió y cuándo caduca.
+
+</Callout>
+
+Solución. El punto 1, en la consola de Chrome:
+
+```js
+await fetch("http://localhost:3002/api/yo");
+```
+
+```text
+Access to fetch at 'http://localhost:3002/api/yo' from origin 'http://localhost:3000' has been blocked by CORS policy: No 'Access-Control-Allow-Origin' header is present on the requested resource.
+Uncaught TypeError: Failed to fetch
+```
+
+La explicación: la página tiene el origen `http://localhost:3000` y la petición va a `http://localhost:3002` (otro puerto, otro origen). El navegador envió la petición, pero la respuesta no trae `Access-Control-Allow-Origin: http://localhost:3000`, así que no deja que el JavaScript la lea. La solución está en **`sesiones.js`**, que tendría que añadir esa cabecera (y, como `/api/yo` depende de la cookie, también `Access-Control-Allow-Credentials: true`, y el `fetch` necesitaría `credentials: "include"`).
+
+El punto 2: en la terminal de `sesiones.js` verás `GET /api/yo · sin sesión`. **La petición llegó**; el bloqueo fue del navegador. Y dice "sin sesión" porque, entre orígenes distintos, `fetch` no envía cookies por defecto.
+
+Los puntos 3 y 4, con tu dominio:
+
+```bash
+curl -I https://tu-app.vercel.app/
+curl -s https://tu-app.vercel.app/ | grep -o '/_astro/[^"]*\.css' | head -1
+curl -I https://tu-app.vercel.app/_astro/NOMBRE-DEL-ARCHIVO.css
+echo | openssl s_client -connect tu-app.vercel.app:443 -servername tu-app.vercel.app 2>/dev/null | openssl x509 -noout -subject -issuer -dates
+```
+
+Lo esperable: la página, con `cache-control: public, max-age=0, must-revalidate` (o `private, no-cache` si es una página con sesión renderizada en el servidor); el CSS de `/_astro/`, con `public, max-age=31536000, immutable`; y el certificado, emitido por Let's Encrypt con 90 días de validez. Las cabeceras son distintas por la misma razón que en `nextjs.org`: el HTML debe revalidarse para reflejar cada despliegue, y los archivos con _hash_ en el nombre no cambian nunca.
+
+<Callout type="risk">
+
+- **Si tu dominio usa Cloudflare delante de Vercel** (con la nube naranja activada en el DNS de Cloudflare), verás cabeceras y certificados de Cloudflare, no de Vercel, y dos capas de caché que pueden contradecirse. Vercel recomienda no poner otra CDN delante.
+- **`age` alto en el HTML** no es un problema si `must-revalidate` está presente: la CDN comprueba con Vercel antes de servirlo. Tras un despliegue, Vercel invalida su caché automáticamente.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes diagnosticar un error de CORS sin buscarlo en internet, sabes qué garantiza HTTPS y decides
-  qué respuestas se pueden cachear y cuáles no.
+
+Puedes diagnosticar un error de CORS sin buscarlo en Google: sabes que lo aplica el navegador (no el servidor), que la petición suele llegar, qué cabecera falta y en qué servidor se arregla, y que `mode: "no-cors"` no es la solución. Además, sabes leer un certificado y elegir el `Cache-Control` adecuado para HTML, archivos con _hash_ y datos de usuario.
+
 </Callout>
 
 ## Resumen
 
-- Un origen es protocolo + dominio + puerto; el navegador aísla los orígenes.
-- CORS lo aplica el navegador y se configura en el servidor que responde.
-- HTTPS cifra, protege la integridad y autentica al servidor con un certificado.
-- `Cache-Control` decide quién guarda una respuesta y cuánto tiempo; lo privado, nunca en la CDN.
-- `ETag` y 304 permiten revalidar sin volver a descargar.
+- Origen = protocolo + dominio + puerto. La _Same-Origin Policy_ del navegador impide leer respuestas de otros orígenes.
+- CORS: el servidor permite un origen con `Access-Control-Allow-Origin` y responde al _preflight_ (`OPTIONS`) con métodos y cabeceras permitidos. No protege la API: solo controla la lectura en el navegador.
+- HTTPS = HTTP sobre TLS: confidencialidad, integridad y autenticidad. El certificado lo firma una CA de confianza (Let's Encrypt en Vercel) y dura 90 días.
+- `Cache-Control` decide cuánto se reutiliza una respuesta; `ETag` + `If-None-Match` permiten responder `304` sin cuerpo.
+- Vercel: HTML revalidado en cada visita, archivos con _hash_ cacheados un año, y nunca `public` en respuestas que dependen del usuario.
