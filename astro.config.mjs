@@ -21,6 +21,23 @@ export default defineConfig({
       wrap: false,
     },
   },
+  security: {
+    // CSP en <meta> con hashes de los scripts que emite Astro (solo en build, no en dev).
+    // Shiki pinta el código con estilos en línea, así que style-src necesita 'unsafe-inline';
+    // la protección importante contra XSS es la de script-src, que no la lleva.
+    csp: {
+      directives: [
+        "default-src 'self'",
+        "img-src 'self' data:",
+        "font-src 'self' data:", // fontsource incrusta algunas fuentes pequeñas como data:
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ],
+      styleDirective: { resources: ["'self'", "'unsafe-inline'"] },
+    },
+  },
   prefetch: {
     prefetchAll: false,
     defaultStrategy: "hover",

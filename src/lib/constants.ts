@@ -19,3 +19,10 @@ export const SESSION_GAP_MINUTES = 30; // más de 30 min sin latidos → sesión
 export const IDLE_AFTER_MINUTES = 5; // sin interacción durante 5 min → no se cuentan latidos
 
 export const THEME_STORAGE_KEY = "da-theme";
+
+/** Límites de uso por usuario (Tanda 9): ventana fija, contador en la colección rate_limits */
+export const RATE_LIMITS = {
+  quiz: { max: 10, windowSeconds: 60 * 60 }, // 10 evaluaciones por hora
+  progress: { max: 60, windowSeconds: 60 }, // 60 marcados/desmarcados por minuto
+  heartbeat: { max: 5, windowSeconds: 60 }, // 5 latidos por minuto (se envía 1)
+} as const;

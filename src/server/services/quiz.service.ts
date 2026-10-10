@@ -1,9 +1,10 @@
 import { getCollection, type CollectionEntry } from "astro:content";
-import { QUIZ_REQUIRES_ALL_SECTIONS } from "@/lib/constants";
+import { QUIZ_REQUIRES_ALL_SECTIONS, RATE_LIMITS } from "@/lib/constants";
 import { getCourseSections } from "@/lib/content";
 import { gradeQuiz } from "@/lib/domain/quiz";
 import { ForbiddenError, NotFoundError } from "@/lib/errors";
 import { repos } from "@/server/repositories";
+import { enforceRateLimit } from "@/server/services/rate-limit.service";
 
 export type Quiz = CollectionEntry<"quizzes">;
 
@@ -41,6 +42,8 @@ export async function getQuizAccess(userId: string, courseId: string) {
 }
 
 export async function submitQuiz(userId: string, courseId: string, answers: number[]) {
+  await enforceRateLimit(`quiz:${userId}`, RATE_LIMITS.quiz);
+
   const quiz = await getQuizByCourseId(courseId);
   if (!quiz) throw new NotFoundError("Este curso no tiene evaluación");
 

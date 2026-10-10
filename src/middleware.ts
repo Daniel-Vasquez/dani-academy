@@ -7,6 +7,26 @@ const PUBLIC_PREFIXES = ["/api/auth/", "/api/health"];
 const isApi = (pathname: string) =>
   pathname.startsWith("/api/") || pathname.startsWith("/_actions/");
 
+/** 0. Cabeceras de seguridad en todas las respuestas, y caché privada si hay sesión */
+const securityHeaders = defineMiddleware(async (ctx, next) => {
+  const response = await next();
+  try {
+    const h = response.headers;
+    h.set("X-Content-Type-Options", "nosniff");
+    h.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    h.set("X-Frame-Options", "DENY");
+    h.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    if (import.meta.env.PROD) {
+      h.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+    }
+    // Ninguna respuesta con datos de usuario debe quedarse en una caché compartida (temario A6.3)
+    if (ctx.locals.user) h.set("Cache-Control", "private, no-store");
+  } catch {
+    // Algunas respuestas (p. ej. un fetch reenviado) tienen cabeceras inmutables: se dejan tal cual
+  }
+  return response;
+});
+
 /** 1. Carga la sesión en Astro.locals */
 const loadSession = defineMiddleware(async (ctx, next) => {
   ctx.locals.user = null;
@@ -38,4 +58,4 @@ const guard = defineMiddleware(async (ctx, next) => {
   return next();
 });
 
-export const onRequest = sequence(loadSession, guard);
+export const onRequest = sequence(securityHeaders, loadSession, guard);

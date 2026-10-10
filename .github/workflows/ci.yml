@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Sin secretos: MongoDB en contenedor (o en memoria en los tests de integración)
+# y un BETTER_AUTH_SECRET desechable generado en cada ejecución
+env:
+  MONGODB_URI: mongodb://localhost:27017/?directConnection=true
+  MONGODB_DB: dani_academy_ci
+  BETTER_AUTH_URL: http://localhost:4321
+  APP_TIMEZONE: America/Mexico_City
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run check
+      # Los tests de integración descargan el binario de MongoDB la primera vez (mongodb-memory-server)
+      - run: npm run test:run
+      - run: npm run build
+
+  e2e:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+      - name: MongoDB (replica set de un nodo, necesario para las transacciones de Better Auth)
+        run: |
+          docker run -d --name mongo -p 27017:27017 mongo:8 --replSet rs0 --bind_ip_all
+          for i in $(seq 1 30); do
+            docker exec mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]}).ok }' && break
+            sleep 1
+          done
+      - run: npm run db:setup
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7

@@ -36,6 +36,23 @@ export const auth = betterAuth({
     cookieCache: { enabled: true, maxAge: 5 * 60 }, // evita ir a Mongo en cada petición
   },
   trustedOrigins,
+  // Fuerza bruta en login y registro (Tanda 9). En Vercel cada instancia tiene su propia memoria,
+  // así que el contador se guarda en Mongo (colección rateLimit). Activo también en desarrollo
+  // para poder probarlo; sin cabecera de IP, Better Auth usa 127.0.0.1 en local.
+  rateLimit: {
+    enabled: true,
+    storage: "database",
+    window: 60,
+    max: 100,
+    customRules: {
+      "/sign-in/email": { window: 60, max: 5 },
+      "/sign-up/email": { window: 60 * 60, max: 5 },
+    },
+  },
+  advanced: {
+    // Vercel sobrescribe estas cabeceras con la IP real del cliente: no se pueden falsificar
+    ipAddress: { ipAddressHeaders: ["x-vercel-forwarded-for", "x-forwarded-for"] },
+  },
 });
 
 export type AuthSession = typeof auth.$Infer.Session;

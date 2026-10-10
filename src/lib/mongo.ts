@@ -2,7 +2,6 @@ import { MongoClient, type Db } from "mongodb";
 import { MONGODB_DB, MONGODB_URI } from "astro:env/server";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __daMongoClient: MongoClient | undefined;
 }
 

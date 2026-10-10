@@ -34,7 +34,8 @@ export class NotFoundError extends HttpError {
 
 export class TooManyRequestsError extends HttpError {
   constructor(public readonly retryAfterSeconds: number) {
-    super(429, "Demasiadas peticiones");
+    const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+    super(429, `Demasiados intentos seguidos. Vuelve a probar en ${minutes} min.`);
   }
 }
 

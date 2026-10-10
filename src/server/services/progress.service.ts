@@ -1,5 +1,7 @@
 import { getSectionById } from "@/lib/content";
+import { RATE_LIMITS } from "@/lib/constants";
 import { NotFoundError } from "@/lib/errors";
+import { enforceRateLimit } from "@/server/services/rate-limit.service";
 import { repos } from "@/server/repositories";
 
 export async function setSectionRead(
@@ -7,6 +9,7 @@ export async function setSectionRead(
   sectionId: string,
   read: boolean,
 ): Promise<void> {
+  await enforceRateLimit(`progress:${userId}`, RATE_LIMITS.progress);
   const section = await getSectionById(sectionId);
   if (!section) throw new NotFoundError("La sección no existe");
 

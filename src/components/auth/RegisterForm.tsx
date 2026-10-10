@@ -18,7 +18,11 @@ export default function RegisterForm({ redirectTo }: { redirectTo: string }) {
     setServerError(null);
     const { error } = await authClient.signUp.email({ name, email, password });
     if (error) {
-      setServerError("No se pudo crear la cuenta. Si ya tienes una, inicia sesión.");
+      setServerError(
+        error.status === 429
+          ? "Demasiados registros desde esta conexión. Vuelve a probar más tarde."
+          : "No se pudo crear la cuenta. Si ya tienes una, inicia sesión.",
+      );
       return;
     }
     window.location.assign(redirectTo); // recarga completa: el servidor ya ve la cookie

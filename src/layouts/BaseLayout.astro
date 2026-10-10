@@ -3,8 +3,9 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/source-serif-4";
 import "@fontsource-variable/jetbrains-mono";
 import "@/styles/global.css";
+import { createHash } from "node:crypto";
 import { ClientRouter } from "astro:transitions";
-import { THEME_STORAGE_KEY } from "@/lib/constants";
+import themeInit from "@/scripts/theme-init.js?raw";
 // Mismos archivos que usan los @font-face de Fontsource (subconjunto latin): se precargan
 // para que el texto no cambie de fuente después del primer pintado (CLS)
 import serifFont from "@fontsource-variable/source-serif-4/files/source-serif-4-latin-wght-normal.woff2?url";
@@ -19,6 +20,10 @@ interface Props {
 
 const { title, description = "Plataforma personal de aprendizaje full-stack." } = Astro.props;
 const fullTitle = title === "Dani Academy" ? title : `${title} · Dani Academy`;
+
+// Astro no calcula el hash de los scripts is:inline: se registra aquí sobre el mismo texto
+// que se incrusta, así nunca se desincronizan (Astro.csp solo existe en build con CSP activa)
+Astro.csp?.insertScriptHash(`sha256-${createHash("sha256").update(themeInit).digest("base64")}`);
 ---
 
 <!doctype html>
@@ -34,24 +39,8 @@ const fullTitle = title === "Dani Academy" ? title : `${title} · Dani Academy`;
     ))}
     <title>{fullTitle}</title>
 
-    <!-- Aplica el tema antes del primer pintado (sin parpadeo) y tras cada navegación -->
-    <script is:inline define:vars={{ storageKey: THEME_STORAGE_KEY }}>
-      const applyTheme = () => {
-        let stored = null;
-        try {
-          stored = localStorage.getItem(storageKey);
-        } catch {}
-        const dark = stored
-          ? stored === "dark"
-          : window.matchMedia("(prefers-color-scheme: dark)").matches;
-        document.documentElement.dataset.theme = dark ? "dark" : "light";
-      };
-      applyTheme();
-      if (!window.__daThemeListener) {
-        window.__daThemeListener = true;
-        document.addEventListener("astro:after-swap", applyTheme);
-      }
-    </script>
+    <!-- Tema antes del primer pintado: script en línea con su hash en la CSP -->
+    <script is:inline set:html={themeInit} />
     <ClientRouter />
   </head>
   <body class="min-h-dvh bg-bg font-sans text-fg">

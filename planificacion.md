@@ -4674,7 +4674,7 @@ Criterio "Lo dominas si…" del temario, redactado como lo que el alumno ya sabe
 |---|---|
 | Objetivo | Tests unitarios, de integración y E2E; cabeceras de seguridad y *rate limiting*; auditoría de accesibilidad; *linting* y CI en GitHub Actions |
 | Prerrequisitos | Tanda 7 (puede hacerse en paralelo a la Tanda 8) |
-| Rama | `tanda-9-calidad` |
+| Rama | `main` (se trabaja sin ramas) |
 
 ### 🔑 Credenciales necesarias
 
@@ -5154,6 +5154,28 @@ jobs:
 ```
 
 En GitHub → *Settings* → *Branches*: protege `main` y exige que `verify` y `e2e` pasen antes de mezclar.
+
+### Notas de implementación (Tanda 9 ya ejecutada)
+
+Cambios respecto al plan, descubiertos al verificarla. **El código real del repositorio manda:**
+
+- **Sin Docker en local:** `npm run test:e2e:local` (`scripts/e2e-local.mjs`) levanta un *replica set* de MongoDB en memoria, ejecuta `db:setup` y Playwright, imprime cuántos usuarios se crearon en esa base (prueba de que no se tocó Atlas) y lo apaga. El CI sigue usando `mongo:8` en Docker. `npm run test:e2e` a secas es el comando del CI.
+- **Playwright nunca usa el servidor de trabajo:** puerto propio (`E2E_PORT`, 4322), `astro dev --ignore-lock`, `reuseExistingServer: false`, y `playwright.config.ts` se niega a arrancar si `MONGODB_URI` no es `localhost`/`127.0.0.1`.
+- **Las llamadas directas a la API en los E2E llevan `Origin`:** `security.checkOrigin` de Astro responde **403** ("Cross-site PUT form submissions are forbidden") a un PUT/POST/DELETE sin él. El `fetch` del navegador lo envía siempre; `page.request` no. Helper `api(page)` en `tests/e2e/fixtures.ts`, y un test que comprueba el 403 con un origen ajeno (CSRF).
+- **Una IP por test:** Better Auth limita por IP y en local todas las peticiones son `127.0.0.1`. El *fixture* da a cada test una `x-forwarded-for` aleatoria; así el límite de 5 registros/hora no se agota entre tests.
+- **Better Auth:** sin `rateLimit.enabled` solo limita en producción, y trae reglas por defecto para `/sign-in` y `/sign-up` (3 cada 10 s). Configurado `enabled: true` (también en desarrollo), `storage: "database"` (colección `rateLimit`, índice único en `key` en `db:setup`), 5 logins/min y 5 registros/hora por IP, y `ipAddressHeaders: ["x-vercel-forwarded-for", "x-forwarded-for"]` (Vercel sobrescribe ambas). Verificado: 5 × 401 y después 429 con `X-Retry-After`; otra IP no queda bloqueada.
+- **Rate limiting propio:** `RATE_LIMITS` en `constants.ts` y `enforceRateLimit()` en `rate-limit.service.ts`, llamado al principio de `submitQuiz`, `setSectionRead` y `recordHeartbeat`. El repositorio reintenta una vez si dos *upserts* simultáneos de una ventana nueva chocan con `_id` (probado con 20 peticiones en paralelo). `TooManyRequestsError` da un mensaje en español con los minutos de espera, y `RegisterForm` explica el 429.
+- **CSP nativa de Astro** (`security.csp`), verificada con un build de producción (adaptador Node en una copia) navegando en Chrome:
+  - Llega como **cabecera** `content-security-policy` con *hashes* en `script-src`. `style-src` lleva `'unsafe-inline'` porque Shiki pinta el código con estilos en línea (limitación documentada de Astro); la protección contra XSS está en `script-src`.
+  - Astro **no** calcula el *hash* de los scripts `is:inline` (ni con `define:vars` ni literales). El script del tema vive en `src/scripts/theme-init.js`, se incrusta con `set:html` y `BaseLayout` registra su *hash* con `Astro.csp.insertScriptHash()` sobre el mismo texto. Un test unitario comprueba que usa la clave `THEME_STORAGE_KEY`.
+  - `font-src` necesita `data:` (Fontsource incrusta subconjuntos pequeños).
+  - El `<ClientRouter />` funciona con la CSP (navegación sin recarga, islas y tema verificados). Única advertencia en consola: bloquea un `<script src="data:application/javascript,">` vacío que el router usa solo para esperar a los módulos en línea; su `onerror` resuelve la misma promesa, así que no afecta. No se añade `data:` a `script-src`.
+- **Cabeceras:** `X-Content-Type-Options`, `Referrer-Policy`, `X-Frame-Options`, `Permissions-Policy`, HSTS solo en producción y `Cache-Control: private, no-store` con sesión (comprobado en `/temario`, `/progreso` y la portada del curso).
+- **Versiones:** ESLint 10 (`defineConfig` de `eslint/config`), Vitest 5, jsdom 30, Playwright 1.64. El CI usa **Node 24**: jsdom 30 exige `^22.22.2 || ^24.15.0 || >=26`.
+- **Tipos de jest-dom:** `tests/jest-dom.d.ts` (sin él, `astro check` falla en los tests de componentes).
+- **Resultados:** 90 tests de Vitest (unitarios, integración y componentes), cobertura del 100 % en `src/lib/domain` y `src/lib/redirect.ts`; 25 E2E en escritorio y móvil (1 omitido a propósito en móvil: el límite de evaluaciones es de API); axe sin infracciones WCAG 2.1 A/AA en 7 páginas, claro y oscuro. El CI se simuló completo en una copia sin `.env` con `CI=true`.
+- **Pendiente del usuario:** ejecutar `npm run db:setup` contra Atlas (crea el índice TTL de `rate_limits` y el único de `rateLimit`); subir los commits para que corra el CI en GitHub; proteger `main` exigiendo `verify` y `e2e`.
+- `npm audit` informa de 6 vulnerabilidades (2 moderadas, 4 altas) que ya existían antes de esta Tanda, en dependencias de `@astrojs/vercel` y `@tailwindcss/typography`; su arreglo exige `--force` (cambios incompatibles).
 
 ### Criterios de aceptación — Tanda 9
 

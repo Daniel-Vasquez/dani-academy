@@ -98,11 +98,15 @@ const indexes: IndexDef[] = [
   ],
   [COLLECTIONS.quizAttempts, { userId: 1, submittedAt: -1 }, { name: "user_submittedAt" }],
   [COLLECTIONS.studySessions, { userId: 1, lastSeenAt: -1 }, { name: "user_lastSeenAt" }],
+  // Tanda 9: Mongo borra cada ventana de rate limiting cuando llega su expiresAt
+  [COLLECTIONS.rateLimits, { expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl" }],
   // Better Auth (Tanda 3): consultas por email, token y userId
   ["user", { email: 1 }, { unique: true, name: "email_unique" }],
   ["session", { token: 1 }, { unique: true, name: "token_unique" }],
   ["session", { userId: 1 }, { name: "userId" }],
   ["account", { userId: 1 }, { name: "userId" }],
+  // Better Auth rate limiting (Tanda 9): una fila por IP y ruta
+  ["rateLimit", { key: 1 }, { unique: true, name: "key_unique" }],
 ];
 
 const UNAUTHORIZED = 13;
