@@ -1,0 +1,492 @@
+---
+sectionId: "I2.1"
+course: "I2"
+title: "Cómo renderiza React"
+order: 1
+minutes: 60
+summary: "Mides en el navegador qué dispara un re-render, separas render y commit, ves cómo la identidad de objetos y funciones anula memo, compruebas qué hace StrictMode en una isla y usas el Profiler."
+---
+
+En B6 aprendiste que, cuando cambia el estado, React "vuelve a pintar" el componente. Es una buena primera idea, pero se queda corta en cuanto la app crece: ¿se vuelven a pintar también los hijos?, ¿toca React el DOM cada vez?, ¿por qué un componente envuelto en `memo` se sigue renderizando?, ¿por qué en desarrollo todo aparece dos veces en la consola? En esta sección vas a dejar de adivinar: vas a instrumentar componentes para que escriban en la consola cada vez que se renderizan, vas a **medir** en el navegador qué provoca cada render y vas a terminar usando el _Profiler_ de React para responder a la pregunta clave de la optimización: ¿qué se ha renderizado y por qué?
+
+**Lo que tendrás al terminar:** cuatro páginas de medición en tu `react-lab` (render y commit, identidad, `StrictMode` y _Profiler_), y la capacidad de predecir qué componentes se vuelven a renderizar ante un cambio.
+
+**Requisitos:** el proyecto `react-lab` de B6, con sus componentes de hidratación (B6.3) y de islas compartidas (B6.7). Todo el curso I2 se hace en ese proyecto. Crea la carpeta de esta sección:
+
+```bash
+cd react-lab
+mkdir -p src/components/render
+```
+
+## Paso 1: render y commit no son lo mismo
+
+Cuando React "actualiza" un componente, hace dos cosas distintas:
+
+1. **Render:** llama a tu función componente para obtener el JSX nuevo. Es solo JavaScript: calcula qué **debería** haber en pantalla.
+2. **_Commit_:** compara ese resultado con el anterior y aplica al DOM **solo las diferencias**. Después ejecuta los efectos (`useEffect`).
+
+La analogía: el render es el arquitecto que redibuja el plano entero; el _commit_ es el obrero que solo cambia los ladrillos que el plano nuevo tiene distintos. Redibujar el plano es barato; mover ladrillos es caro. Créalo para verlo. `src/components/render/RenderBasico.tsx`:
+
+```tsx
+// Archivo: src/components/render/RenderBasico.tsx
+import { useEffect, useState } from "react";
+
+function Hijo() {
+  console.log("[render] Hijo");
+  return <p id="hijo">Soy el hijo: no uso el contador</p>;
+}
+
+export function Padre() {
+  const [n, setN] = useState(0);
+  console.log(`[render] Padre (n = ${n})`);
+
+  useEffect(() => {
+    console.log(`[commit] Padre: el DOM ya muestra n = ${n}`);
+  });
+
+  return (
+    <div className="tarjeta">
+      <button id="sumar" onClick={() => setN(n + 1)}>
+        Pulsado {n} veces
+      </button>
+      <button id="mismo" onClick={() => setN(n)}>
+        Guardar el mismo valor
+      </button>
+      <Hijo />
+    </div>
+  );
+}
+```
+
+Y la página `src/pages/render.astro`:
+
+```astro
+---
+// Archivo: src/pages/render.astro
+import Base from "../layouts/Base.astro";
+import { Padre } from "../components/render/RenderBasico";
+---
+
+<Base titulo="Cómo renderiza React">
+  <h1>Render y commit</h1>
+  <Padre client:load />
+</Base>
+```
+
+Arranca `npm run dev`, abre `http://localhost:4321/render` con la consola de DevTools abierta y pulsa los botones. Medido en Chrome (con un `MutationObserver` vigilando el DOM del hijo):
+
+```text
+— al cargar (hidratación):
+  [render] Padre (n = 0)
+  [render] Hijo
+  [commit] Padre: el DOM ya muestra n = 0
+— Pulsar +1:
+  [render] Padre (n = 1)
+  [render] Hijo
+  [commit] Padre: el DOM ya muestra n = 1
+— Pulsar +1:
+  [render] Padre (n = 2)
+  [render] Hijo
+  [commit] Padre: el DOM ya muestra n = 2
+— Guardar el mismo valor:
+  [render] Padre (n = 2)
+— Guardar el mismo valor:
+  (nada)
+cambios en el DOM del hijo: 0
+```
+
+Tres conclusiones:
+
+- **Cuando un componente se renderiza, se renderizan todos sus hijos.** `Hijo` no usa `n`, pero se vuelve a ejecutar cada vez que `Padre` cambia. Es el comportamiento por defecto de React.
+- **Renderizar no es tocar el DOM.** `Hijo` se renderizó 3 veces y su DOM cambió **0 veces**: React comparó el resultado, vio que era idéntico y no tocó nada. Por eso, casi siempre, un render "de más" no es un problema.
+- **Guardar el mismo valor no provoca un re-render… casi nunca.** La primera vez, React vuelve a llamar a `Padre` una vez más (sin hijos y sin _commit_) para confirmar que no cambia nada; la segunda, ya ni eso. React compara con `Object.is`, así que esto solo funciona con valores primitivos o con **el mismo** objeto.
+
+<Callout type="risk">
+
+- **El cuerpo de un componente debe ser puro:** como React puede llamarlo cuando quiera (y más de una vez), nunca hagas en él efectos secundarios, como peticiones, `localStorage.setItem` o modificar variables de fuera. Esos van en manejadores de eventos o en `useEffect`.
+- **Un `console.log` en el cuerpo es para medir, no para producción:** déjalo solo mientras investigas. Para medir en serio, usa el _Profiler_ del Paso 5.
+- **"Se renderiza mucho" no es un bug por sí mismo:** antes de optimizar, comprueba si de verdad hay algo lento (Paso 5 y sección I2.6). La mayoría de los re-renders cuestan microsegundos.
+
+</Callout>
+
+## Paso 2: qué dispara un re-render
+
+Un componente se vuelve a renderizar por **cuatro motivos**, y solo por ellos:
+
+| Disparador                                       | Ejemplo                                                   |
+| ------------------------------------------------ | --------------------------------------------------------- |
+| Su **estado** cambia                             | `setN(n + 1)`                                             |
+| Su **padre** se renderiza                        | `Hijo` en el Paso 1                                       |
+| Un **contexto** que lee cambia                   | `useContext(TemaCtx)` y el `Provider` recibe otro `value` |
+| Un **store externo** al que está suscrito cambia | `useStore($vasos)` de nanostores (B6.7)                   |
+
+Las _props_ no aparecen en la tabla, y no es un despiste: un componente no se renderiza "porque cambien sus props". Se renderiza porque su padre se renderizó, y entonces recibe las props nuevas. `memo` (el Paso 3) es justo lo que permite saltarse el render si las props no han cambiado.
+
+<Callout type="risk">
+
+- **Cambiar el estado no lo cambia "ya":** después de `setN(n + 1)`, la variable `n` sigue teniendo el valor antiguo hasta el próximo render (B6.3). React agrupa las actualizaciones de un mismo evento en un solo render.
+- **Un efecto que actualiza el estado provoca otro render:** `useEffect(() => setX(algo))` sin dependencias bien puestas crea un bucle de renders. Si un valor se puede calcular durante el render, calcúlalo directamente en lugar de guardarlo en el estado con un efecto.
+
+</Callout>
+
+## Paso 3: identidad de objetos y funciones
+
+`memo(Componente)` le dice a React: "si las props son iguales que la última vez, no me renderices". El matiz está en **iguales**: React compara cada prop con `Object.is`, es decir, por **identidad**, no por contenido. Y un objeto o una función escritos dentro del componente son **nuevos en cada render**, aunque tengan el mismo contenido. Crea `src/components/render/Identidad.tsx`:
+
+```tsx
+// Archivo: src/components/render/Identidad.tsx
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useState } from "react";
+
+interface TarjetaProps {
+  etiqueta: string;
+  estilo: { color: string };
+  onElegir: () => void;
+}
+
+// memo: React se salta el render si TODAS las props son iguales (Object.is) que la vez anterior
+const Tarjeta = memo(function Tarjeta({ etiqueta, estilo, onElegir }: TarjetaProps) {
+  console.log(`[render] Tarjeta ${etiqueta}`);
+  return (
+    <button style={estilo} onClick={onElegir}>
+      {etiqueta}
+    </button>
+  );
+});
+
+const TemaCtx = createContext("claro");
+
+// También con memo: el contexto se salta memo y lo re-renderiza cuando cambia el valor
+const LectorTema = memo(function LectorTema() {
+  const tema = useContext(TemaCtx);
+  console.log(`[render] LectorTema (${tema})`);
+  return <p>Tema: {tema}</p>;
+});
+
+const ESTILO_FIJO = { color: "teal" }; // fuera del componente: el mismo objeto siempre
+
+export function Identidad() {
+  const [n, setN] = useState(0);
+  const [tema, setTema] = useState("claro");
+
+  // Se crean de nuevo en CADA render: mismo contenido, otra identidad
+  const estiloNuevo = { color: "teal" };
+  const elegirNuevo = () => console.log("elegido");
+
+  // Se conservan entre renders mientras sus dependencias no cambien
+  const estiloMemo = useMemo(() => ({ color: "teal" }), []);
+  const elegirMemo = useCallback(() => console.log("elegido"), []);
+
+  useEffect(() => {
+    console.log("[efecto] depende de estiloNuevo");
+  }, [estiloNuevo]);
+
+  console.log(`[render] Identidad (n = ${n})`);
+  return (
+    <TemaCtx.Provider value={tema}>
+      <div className="tarjeta">
+        <button id="otro-render" onClick={() => setN((x) => x + 1)}>
+          Re-renderizar el padre ({n})
+        </button>
+        <button id="cambiar-tema" onClick={() => setTema((t) => (t === "claro" ? "oscuro" : "claro"))}>
+          Cambiar tema
+        </button>
+        <Tarjeta etiqueta="A (objetos nuevos)" estilo={estiloNuevo} onElegir={elegirNuevo} />
+        <Tarjeta etiqueta="B (useMemo/useCallback)" estilo={estiloMemo} onElegir={elegirMemo} />
+        <Tarjeta etiqueta="C (constante de módulo)" estilo={ESTILO_FIJO} onElegir={elegirMemo} />
+        <LectorTema />
+      </div>
+    </TemaCtx.Provider>
+  );
+}
+```
+
+Y `src/pages/identidad.astro`:
+
+```astro
+---
+// Archivo: src/pages/identidad.astro
+import Base from "../layouts/Base.astro";
+import { Identidad } from "../components/render/Identidad";
+---
+
+<Base titulo="Identidad entre renders">
+  <h1>Identidad de objetos y funciones</h1>
+  <Identidad client:load />
+</Base>
+```
+
+Abre `/identidad`. Medido:
+
+```text
+— al cargar:
+  [render] Identidad (n = 0)
+  [render] Tarjeta A (objetos nuevos)
+  [render] Tarjeta B (useMemo/useCallback)
+  [render] Tarjeta C (constante de módulo)
+  [render] LectorTema (claro)
+  [efecto] depende de estiloNuevo
+— Re-renderizar el padre:
+  [render] Identidad (n = 1)
+  [render] Tarjeta A (objetos nuevos)
+  [efecto] depende de estiloNuevo
+— Cambiar tema:
+  [render] Identidad (n = 1)
+  [render] Tarjeta A (objetos nuevos)
+  [render] LectorTema (oscuro)
+  [efecto] depende de estiloNuevo
+```
+
+- **Tarjeta A** tiene `memo` y **no sirve de nada**: `{ color: "teal" }` y `() => …` son objetos nuevos en cada render, así que sus props "cambian" siempre.
+- **Tarjeta B** recibe valores de `useMemo` y `useCallback`, que **conservan la identidad** entre renders mientras sus dependencias no cambien: `memo` funciona y se salta el render.
+- **Tarjeta C** usa una constante declarada **fuera** del componente: un único objeto para siempre. Es la solución más simple cuando el valor no depende de nada del componente.
+- **El efecto** con `[estiloNuevo]` como dependencia se ejecuta **en cada render**, por el mismo motivo. Es una de las causas más habituales de efectos que se disparan sin parar.
+- **`LectorTema`** también tiene `memo`, pero se renderiza al cambiar el tema: **el contexto se salta `memo`**. Cuando el valor de un `Provider` cambia, todos los componentes que lo leen se renderizan.
+
+<Callout type="risk">
+
+- **El valor de un `Provider` también es una prop:** `<Ctx.Provider value={{ usuario, salir }}>` crea un objeto nuevo en cada render, y **todos** los consumidores se renderizan cada vez que el padre lo hace. Memoriza el valor con `useMemo` (lo verás en I2.4).
+- **`useMemo` y `useCallback` no son gratis:** guardan valores y comparan dependencias en cada render. Úsalos cuando hay un motivo medible (una prop de un componente con `memo`, una dependencia de un efecto), no "por si acaso" (I2.6).
+- **Una dependencia que falta da datos viejos:** `useCallback(() => guardar(n), [])` usará siempre el `n` del primer render. El _linter_ de los hooks (`react-hooks/exhaustive-deps`) lo detecta; no lo silencies.
+
+</Callout>
+
+## Paso 4: `StrictMode`, y lo que hace en una isla de Astro
+
+`<StrictMode>` es una herramienta de **desarrollo** para encontrar bugs. Hace dos cosas:
+
+1. **Renderiza cada componente dos veces**, para detectar cuerpos impuros: si tu componente modifica algo de fuera al renderizarse, el doble render hace que el bug se note.
+2. **Monta, desmonta y vuelve a montar los efectos**, para detectar efectos sin limpieza: si un `useEffect` abre un intervalo o una suscripción y no lo cierra en la función de limpieza, al ejecutarse dos veces aparecen dos.
+
+Crea `src/components/render/Estricto.tsx`:
+
+```tsx
+// Archivo: src/components/render/Estricto.tsx
+import { StrictMode, useEffect, useState } from "react";
+
+function Reloj() {
+  const [segundos, setSegundos] = useState(0);
+  console.log("[render] Reloj");
+
+  useEffect(() => {
+    console.log("[efecto] Reloj: arranco el intervalo");
+    const id = setInterval(() => setSegundos((s) => s + 1), 1000);
+    return () => {
+      console.log("[limpieza] Reloj: paro el intervalo");
+      clearInterval(id);
+    };
+  }, []);
+
+  return <p id="segundos">Llevas {segundos} s en la página</p>;
+}
+
+// StrictMode solo actúa en desarrollo: en producción no hace nada
+export function RelojEstricto() {
+  return (
+    <StrictMode>
+      <Reloj />
+    </StrictMode>
+  );
+}
+```
+
+Y `src/pages/estricto.astro`:
+
+```astro
+---
+// Archivo: src/pages/estricto.astro
+import Base from "../layouts/Base.astro";
+import { RelojEstricto } from "../components/render/Estricto";
+---
+
+<Base titulo="StrictMode">
+  <h1>StrictMode</h1>
+  <RelojEstricto client:load />
+</Base>
+```
+
+Abre `/estricto` en desarrollo y espera unos segundos. Para comparar con producción, el proyecto necesita un adaptador (B6.6 añadió una ruta de API que se ejecuta en el servidor, y sin adaptador `npm run build` falla con `NoAdapterInstalled`):
+
+```bash
+npx astro add node --yes
+npm run build
+PORT=4322 node dist/server/entry.mjs
+```
+
+Abre `http://localhost:4322/estricto`. Medido en los dos:
+
+```text
+Desarrollo (npm run dev):
+  [render] Reloj
+  [render] Reloj
+  [efecto] Reloj: arranco el intervalo
+  [render] Reloj
+  [render] Reloj
+  [render] Reloj
+  [render] Reloj
+  [render] Reloj
+  [render] Reloj
+  → Llevas 3 s en la página
+Producción (npm run build):
+  [render] Reloj
+  [efecto] Reloj: arranco el intervalo
+  [render] Reloj
+  [render] Reloj
+  [render] Reloj
+  → Llevas 3 s en la página
+```
+
+En desarrollo, **cada render ocurre dos veces** (el inicial y uno por segundo); en producción, una. El contador avanza igual en los dos: el segundo render se descarta y no duplica nada.
+
+¿Y el doble efecto? En la medición **no aparece**: un solo `[efecto]` y ningún `[limpieza]`. No es un fallo de la medición. Con React 19, el doble montaje de efectos solo ocurre cuando `StrictMode` envuelve **la raíz** de la aplicación. Medido con React 19.3:
+
+| Dónde está `<StrictMode>`                           | Render | Efectos                    |
+| --------------------------------------------------- | ------ | -------------------------- |
+| En la raíz (`createRoot(el).render(<StrictMode>…)`) | doble  | efecto → limpieza → efecto |
+| Anidado dentro del árbol, como en una isla          | doble  | uno solo                   |
+
+En una isla de Astro, la raíz la crea la integración de React, que no activa `StrictMode` (ni ofrece una opción para hacerlo), así que solo puedes envolver tu componente, y eso duplica los renders pero no los efectos. En una app de React "normal" creada con Vite o Next.js, `StrictMode` está en la raíz y **sí** verás `efecto → limpieza → efecto` en desarrollo. Por eso tantos tutoriales dicen que "los efectos se ejecutan dos veces".
+
+<Callout type="risk">
+
+- **No "arregles" el doble efecto con una variable:** el truco de `let yaMontado = false` para que el efecto solo corra una vez esconde exactamente el bug que `StrictMode` intenta mostrarte. Si un efecto falla al ejecutarse dos veces, le falta la función de limpieza (B6.6).
+- **En las islas, la limpieza la pruebas tú:** como `StrictMode` no duplica los efectos en Astro, un efecto sin limpieza no se nota hasta que el componente se desmonta (con `<ClientRouter />`, al navegar). Revisa que cada `setInterval`, `addEventListener` o suscripción tenga su limpieza.
+- **Si el puerto está ocupado, el servidor de producción se cierra sin avisar:** `node dist/server/entry.mjs` usa por defecto el puerto 4321, el mismo que `npm run dev`. Si el servidor de desarrollo sigue abierto, el de producción termina al instante, sin ningún mensaje de error. Por eso el comando lleva `PORT=4322`. Si al arrancarlo no ves `Server listening on…`, el puerto está ocupado.
+- **El doble render puede duplicar peticiones si las haces mal:** un `fetch` en el cuerpo del componente (en lugar de en un efecto o un evento) se lanzará dos veces en desarrollo. Es `StrictMode` señalándote un componente impuro.
+
+</Callout>
+
+## Paso 5: medir con React DevTools y con `<Profiler>`
+
+Los `console.log` sirven para aprender, pero para investigar una app real tienes dos herramientas mejores.
+
+**React DevTools**, la extensión de Chrome y Firefox (búscala como "React Developer Tools" en la tienda de extensiones). Añade dos pestañas a DevTools:
+
+- **⚛️ Components**: el árbol de componentes, con sus props, estado y hooks. En el engranaje de ajustes, la opción **_Highlight updates when components render_** dibuja un recuadro de color alrededor de cada componente cada vez que se renderiza. Es la forma más rápida de ver un re-render inesperado.
+- **⚛️ Profiler**: pulsa el botón de grabar, interactúa con la página y para. Muestra cada _commit_, qué componentes se renderizaron en él y cuánto tardaron. Activa en sus ajustes **_Record why each component rendered while profiling_** y te dirá el motivo de cada render ("Hook 1 changed", "The parent component rendered"…).
+
+**El componente `<Profiler>`** hace lo mismo desde el código: envuelves un árbol y React llama a `onRender` en cada _commit_, con el identificador, la fase (`mount` o `update`) y el tiempo que tardó. Es útil para registrar renders en una prueba o para medir sin la extensión. Lo usarás en el ejercicio.
+
+<Callout type="risk">
+
+- **Mide en producción para los tiempos:** en desarrollo, React hace comprobaciones extra (y `StrictMode` duplica los renders), así que todo parece más lento de lo que es. El _Profiler_ sirve en desarrollo para ver **qué** se renderiza; para saber **cuánto** cuesta, mide con un _build_ de producción.
+- **`<Profiler>` tiene un coste:** en producción está desactivado por defecto (necesita un _build_ especial de React). Úsalo para investigar y quítalo después.
+- **Los islotes no se ven como un solo árbol:** en DevTools, cada isla de Astro aparece como una raíz de React independiente. Es correcto: son aplicaciones separadas (lo verás a fondo en I2.4).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Instala React DevTools, activa _Highlight updates when components render_ y abre `/estado` (el panel de hidratación de B6.3) y `/compartido` (las islas de B6.7).
+2. **Antes de pulsar nada**, escribe tu predicción: ¿qué componentes se renderizan al pulsar "+" en el panel de hidratación, al cambiar el objetivo, al elegir el **mismo** objetivo y al pulsar "+ 1 vaso" en la página de islas compartidas?
+3. Comprueba la predicción con los recuadros de DevTools.
+4. Para dejarlo medido, envuelve esos componentes en `<Profiler>` en `src/components/render/Medidos.tsx` y móntalos todos en `src/pages/ejercicio-i21.astro`.
+
+</Callout>
+
+Solución. `src/components/render/Medidos.tsx`:
+
+```tsx
+// Archivo: src/components/render/Medidos.tsx
+// Los componentes de B6 envueltos en <Profiler>: cada commit escribe qué se renderizó y cuánto tardó
+import { Profiler, type ProfilerOnRenderCallback, type ReactNode } from "react";
+import { Hidratacion } from "../estado/Hidratacion";
+import { BotonVaso } from "../islas/BotonVaso";
+import { MarcadorAgua } from "../islas/MarcadorAgua";
+
+const registrar: ProfilerOnRenderCallback = (id, fase, duracion) => {
+  console.log(`[profiler] ${id}: ${fase} (${duracion.toFixed(1)} ms)`);
+};
+
+function Medir({ id, children }: { id: string; children: ReactNode }) {
+  return (
+    <Profiler id={id} onRender={registrar}>
+      {children}
+    </Profiler>
+  );
+}
+
+export const HidratacionMedida = () => (
+  <Medir id="Hidratacion">
+    <Hidratacion />
+  </Medir>
+);
+
+export const MarcadorMedido = () => (
+  <Medir id="MarcadorAgua">
+    <MarcadorAgua />
+  </Medir>
+);
+
+export const BotonMedido = () => (
+  <Medir id="BotonVaso">
+    <BotonVaso />
+  </Medir>
+);
+```
+
+`src/pages/ejercicio-i21.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-i21.astro
+import Base from "../layouts/Base.astro";
+import { BotonMedido, HidratacionMedida, MarcadorMedido } from "../components/render/Medidos";
+---
+
+<Base titulo="Ejercicio I2.1">
+  <h1>¿Qué se re-renderiza?</h1>
+  <HidratacionMedida client:load />
+  <header class="tarjeta"><MarcadorMedido client:load /></header>
+  <p>Este párrafo es HTML estático.</p>
+  <BotonMedido client:load />
+</Base>
+```
+
+Medido en Chrome (los milisegundos varían en cada equipo):
+
+```text
+— al cargar:
+  [profiler] MarcadorAgua: mount (… ms)
+  [profiler] BotonVaso: mount (… ms)
+  [profiler] Hidratacion: mount (… ms)
+— Hidratación: pulsar +:
+  [profiler] Hidratacion: update (… ms)
+— Hidratación: cambiar el objetivo:
+  [profiler] Hidratacion: update (… ms)
+— Hidratación: elegir el mismo objetivo:
+  [profiler] Hidratacion: update (… ms)
+— Pulsar + 1 vaso (islas compartidas):
+  [profiler] MarcadorAgua: update (… ms)
+```
+
+Cómo leerlo:
+
+- **Cada isla se monta por separado** (`mount` tres veces) y en el orden en que termina de cargar su código, no en el orden de la página.
+- **El panel de hidratación es un solo componente**: todo su estado vive en `Hidratacion`, así que cualquier cambio lo renderiza entero. Para una tarjeta así es perfecto; si fuera una página entera, convendría dividirla.
+- **Elegir el mismo objetivo** produce todavía un `update`: es el render de confirmación del Paso 1, cuando React vuelve a llamar al componente una vez para comprobar que nada ha cambiado. Repite la acción y ya no aparecerá.
+- **"+ 1 vaso" solo renderiza `MarcadorAgua`.** `BotonVaso` no lee el _store_ (solo llama a `anadirVaso`), así que no se suscribe y no se renderiza. El párrafo estático, por supuesto, nunca: no es React.
+- **`<Medir>` está dentro de cada componente de React, no en el `.astro`:** si escribieras `<Profiler>` como envoltorio en la página de Astro, sus hijos llegarían como HTML estático (un _slot_), no como componentes de React.
+
+<Callout type="risk">
+
+- **Predecir antes de medir es el ejercicio importante:** si tu predicción falló (por ejemplo, esperabas que `BotonVaso` se renderizara), ese es justo el modelo mental que esta sección corrige. Vuelve al Paso 2 y busca cuál de los cuatro disparadores explica cada render.
+- **No dejes `<Profiler>` en el código de la app:** tiene un coste y ensucia la consola. Este archivo es una herramienta de laboratorio.
+- **Highlight updates también marca los renders sin cambios:** un recuadro significa "se ejecutó el componente", no "cambió el DOM". Recuerda el Paso 1: el hijo se renderizaba y su DOM no cambiaba.
+
+</Callout>
+
+<Callout type="mastery">
+
+Predices qué componentes se volverán a renderizar ante un cambio: sabes que un componente se renderiza por su estado, por su padre, por un contexto o por un _store_ externo; distingues render (calcular) de _commit_ (tocar el DOM); sabes por qué un objeto o una función nuevos anulan `memo` y disparan efectos; y compruebas tus predicciones con React DevTools y `<Profiler>`.
+
+</Callout>
+
+## Resumen
+
+- Render = llamar al componente y calcular el JSX; _commit_ = aplicar al DOM solo las diferencias y ejecutar los efectos.
+- Un componente se renderiza si cambia su estado, si se renderiza su padre, si cambia un contexto que lee o un _store_ al que está suscrito.
+- React compara con `Object.is`: los objetos y funciones creados en el render son nuevos cada vez; `useMemo`, `useCallback` o una constante de módulo conservan su identidad.
+- `StrictMode` duplica los renders en desarrollo; el doble montaje de efectos solo ocurre con `StrictMode` en la raíz, que en una isla de Astro no está.
+- React DevTools (_Highlight updates_, _Profiler_) y `<Profiler>` muestran qué se renderizó y por qué: mide antes de optimizar.

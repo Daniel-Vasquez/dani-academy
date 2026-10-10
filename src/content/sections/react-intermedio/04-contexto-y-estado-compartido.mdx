@@ -1,0 +1,499 @@
+---
+sectionId: "I2.4"
+course: "I2"
+title: "Contexto y estado compartido"
+order: 4
+minutes: 60
+summary: "Creas un contexto con Provider y hook tipado, mides cuántos consumidores re-renderiza y lo divides, compruebas que no cruza islas de Astro y compartes las secciones leídas entre islas con nanostores."
+---
+
+Cuando dos componentes necesitan el mismo dato, la primera solución es "subirlo" al padre común y pasarlo por _props_ (B6.2). Funciona, hasta que el dato tiene que atravesar cinco niveles de componentes que no lo usan solo para llegar a quien sí lo necesita: es el **_prop drilling_**. El **contexto** de React resuelve eso: un componente "proveedor" pone un valor a disposición de todo su árbol, y cualquier descendiente lo lee directamente. Pero el contexto tiene dos letras pequeñas: puede renderizar mucho más de lo que esperas, y en Astro **no cruza de una isla a otra**. En esta sección vas a medir las dos cosas y vas a aprender a elegir entre _props_, contexto o un _store_ externo.
+
+**Lo que tendrás al terminar:** un contexto de progreso con su hook tipado, dividido para no renderizar de más; y la versión con nanostores que comparte "secciones leídas" entre tres islas independientes.
+
+**Requisitos:** las secciones I2.1 a I2.3 y el _store_ de nanostores de B6.7 (`npm install nanostores @nanostores/react`, ya instalado en tu `react-lab`).
+
+```bash
+mkdir -p src/components/progreso
+```
+
+## Paso 1: `createContext`, `Provider` y un hook tipado
+
+Una lista de secciones para los ejemplos, `src/lib/secciones.ts`:
+
+```ts
+// Archivo: src/lib/secciones.ts
+export const SECCIONES = [
+  { id: "I2.1", titulo: "Cómo renderiza React" },
+  { id: "I2.2", titulo: "Custom hooks" },
+  { id: "I2.3", titulo: "useReducer y estado complejo" },
+  { id: "I2.4", titulo: "Contexto y estado compartido" },
+] as const;
+```
+
+El contexto, `src/components/progreso/ProgresoContext.tsx`:
+
+```tsx
+// Archivo: src/components/progreso/ProgresoContext.tsx
+// Versión 1: un solo contexto con el estado y la acción juntos
+import { createContext, useContext, useState, type ReactNode } from "react";
+
+interface ValorProgreso {
+  leidas: Set<string>;
+  alternar: (id: string) => void;
+}
+
+// null por defecto: así se detecta el uso fuera del Provider
+const ProgresoCtx = createContext<ValorProgreso | null>(null);
+
+export function ProgresoProvider({ children }: { children: ReactNode }) {
+  const [leidas, setLeidas] = useState<Set<string>>(new Set());
+
+  const alternar = (id: string) =>
+    setLeidas((actual) => {
+      const nuevo = new Set(actual); // un Set nuevo: React compara por identidad
+      if (nuevo.has(id)) nuevo.delete(id);
+      else nuevo.add(id);
+      return nuevo;
+    });
+
+  return <ProgresoCtx.Provider value={{ leidas, alternar }}>{children}</ProgresoCtx.Provider>;
+}
+
+/** El hook tipado: devuelve el valor sin null, o explica qué falta */
+export function useProgreso(): ValorProgreso {
+  const ctx = useContext(ProgresoCtx);
+  if (!ctx) throw new Error("useProgreso debe usarse dentro de <ProgresoProvider>");
+  return ctx;
+}
+```
+
+Las tres piezas:
+
+1. **`createContext<ValorProgreso | null>(null)`** crea el contexto. El valor por defecto es `null` a propósito: si alguien lo lee fuera de un `Provider`, recibirá `null` y lo detectaremos.
+2. **`<ProgresoCtx.Provider value={…}>`** pone el valor a disposición de todo lo que haya dentro.
+3. **`useProgreso()`** envuelve `useContext` y comprueba el `null`. Quien lo usa recibe un `ValorProgreso` sin `null` (no tiene que comprobarlo en cada componente) y, si lo usa fuera del `Provider`, el error dice exactamente qué falta.
+
+Una isla que lo usa, `src/components/progreso/PaginaCurso.tsx`, con tres consumidores: el índice, el botón de la sección y un botón que solo usa la acción:
+
+```tsx
+// Archivo: src/components/progreso/PaginaCurso.tsx
+// Una isla con el índice lateral, el botón de la sección y un botón que solo usa la acción
+import { memo } from "react";
+import { SECCIONES } from "../../lib/secciones";
+import { ProgresoProvider, useProgreso } from "./ProgresoContext";
+
+const Indice = memo(function Indice() {
+  const { leidas } = useProgreso();
+  console.log("[render] Indice");
+  return (
+    <ol id="indice">
+      {SECCIONES.map((s) => (
+        <li key={s.id}>
+          {leidas.has(s.id) ? "✓" : "○"} {s.titulo}
+        </li>
+      ))}
+    </ol>
+  );
+});
+
+const BotonLeido = memo(function BotonLeido({ id }: { id: string }) {
+  const { leidas, alternar } = useProgreso();
+  console.log(`[render] BotonLeido ${id}`);
+  return (
+    <button id={`boton-${id}`} aria-pressed={leidas.has(id)} onClick={() => alternar(id)}>
+      {leidas.has(id) ? "Leído ✓" : "Marcar como leído"}
+    </button>
+  );
+});
+
+// Solo usa la acción: no debería tener motivos para volver a renderizarse
+const MarcarTodo = memo(function MarcarTodo() {
+  const { alternar } = useProgreso();
+  console.log("[render] MarcarTodo");
+  return <button onClick={() => SECCIONES.forEach((s) => alternar(s.id))}>Alternar todas</button>;
+});
+
+export function PaginaCurso() {
+  return (
+    <ProgresoProvider>
+      <div className="tarjeta">
+        <Indice />
+        <BotonLeido id="I2.4" />
+        <MarcarTodo />
+      </div>
+    </ProgresoProvider>
+  );
+}
+```
+
+Y la página `src/pages/contexto.astro`:
+
+```astro
+---
+// Archivo: src/pages/contexto.astro
+import Base from "../layouts/Base.astro";
+import { PaginaCurso } from "../components/progreso/PaginaCurso";
+---
+
+<Base titulo="Contexto">
+  <h1>Contexto en una isla</h1>
+  <PaginaCurso client:load />
+</Base>
+```
+
+Abre `/contexto` y pulsa "Marcar como leído". Medido:
+
+```text
+al cargar: Indice, BotonLeido I2.4, MarcarTodo
+marcar I2.4: Indice, BotonLeido I2.4, MarcarTodo · índice: ○ Cómo renderiza React | ○ Custom hooks | ○ useReducer y estado complejo | ✓ Contexto y estado compartido
+```
+
+El índice y el botón se comunican sin pasarse nada por _props_. Pero fíjate en `MarcarTodo`: tiene `memo`, solo usa `alternar` (que no cambia de significado) y **se ha vuelto a renderizar**.
+
+<Callout type="risk">
+
+- **El valor del `Provider` es un objeto nuevo en cada render:** `value={{ leidas, alternar }}` crea un objeto distinto cada vez que `ProgresoProvider` se renderiza, y `alternar` también es una función nueva. Para React, el valor del contexto "ha cambiado" y **todos** los consumidores se renderizan, con `memo` o sin él (I2.1). Lo arreglas en el Paso 2.
+- **Un `Set` o un objeto en el estado se reemplaza, nunca se modifica:** `leidas.add(id); setLeidas(leidas)` no hace nada, porque es el mismo objeto y React no ve cambios. Por eso `alternar` crea un `new Set(actual)`.
+- **El contexto no es un gestor de estado:** solo **transporta** un valor por el árbol. El estado sigue estando en un `useState` (o un `useReducer`) del proveedor.
+
+</Callout>
+
+## Paso 2: dividir el contexto para no renderizar de más
+
+El problema es mezclar en un mismo valor **lo que cambia** (las secciones leídas) con **lo que no cambia** (la función para cambiarlas). La solución es separarlos en **dos contextos**, y dar identidad estable a las acciones con `useCallback` y `useMemo`. Sustituye `src/components/progreso/ProgresoContext.tsx`:
+
+```tsx
+// Archivo: src/components/progreso/ProgresoContext.tsx
+// Versión 2: el estado y las acciones en dos contextos, con valores de identidad estable
+import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+
+interface AccionesProgreso {
+  alternar: (id: string) => void;
+}
+
+const LeidasCtx = createContext<ReadonlySet<string> | null>(null);
+const AccionesCtx = createContext<AccionesProgreso | null>(null);
+
+export function ProgresoProvider({ children }: { children: ReactNode }) {
+  const [leidas, setLeidas] = useState<ReadonlySet<string>>(new Set());
+
+  // setLeidas es estable, así que alternar también lo es (dependencias vacías)
+  const alternar = useCallback(
+    (id: string) =>
+      setLeidas((actual) => {
+        const nuevo = new Set(actual);
+        if (nuevo.has(id)) nuevo.delete(id);
+        else nuevo.add(id);
+        return nuevo;
+      }),
+    [],
+  );
+  const acciones = useMemo(() => ({ alternar }), [alternar]);
+
+  return (
+    <AccionesCtx.Provider value={acciones}>
+      <LeidasCtx.Provider value={leidas}>{children}</LeidasCtx.Provider>
+    </AccionesCtx.Provider>
+  );
+}
+
+export function useLeidas(): ReadonlySet<string> {
+  const ctx = useContext(LeidasCtx);
+  if (!ctx) throw new Error("useLeidas debe usarse dentro de <ProgresoProvider>");
+  return ctx;
+}
+
+export function useAccionesProgreso(): AccionesProgreso {
+  const ctx = useContext(AccionesCtx);
+  if (!ctx) throw new Error("useAccionesProgreso debe usarse dentro de <ProgresoProvider>");
+  return ctx;
+}
+```
+
+Y `src/components/progreso/PaginaCurso.tsx`, para usar los dos hooks:
+
+```tsx
+// Archivo: src/components/progreso/PaginaCurso.tsx
+// Una isla con el índice lateral, el botón de la sección y un botón que solo usa la acción
+import { memo } from "react";
+import { SECCIONES } from "../../lib/secciones";
+import { ProgresoProvider, useAccionesProgreso, useLeidas } from "./ProgresoContext";
+
+const Indice = memo(function Indice() {
+  const leidas = useLeidas();
+  console.log("[render] Indice");
+  return (
+    <ol id="indice">
+      {SECCIONES.map((s) => (
+        <li key={s.id}>
+          {leidas.has(s.id) ? "✓" : "○"} {s.titulo}
+        </li>
+      ))}
+    </ol>
+  );
+});
+
+const BotonLeido = memo(function BotonLeido({ id }: { id: string }) {
+  const leidas = useLeidas();
+  const { alternar } = useAccionesProgreso();
+  console.log(`[render] BotonLeido ${id}`);
+  return (
+    <button id={`boton-${id}`} aria-pressed={leidas.has(id)} onClick={() => alternar(id)}>
+      {leidas.has(id) ? "Leído ✓" : "Marcar como leído"}
+    </button>
+  );
+});
+
+// Solo usa la acción: no debería tener motivos para volver a renderizarse
+const MarcarTodo = memo(function MarcarTodo() {
+  const { alternar } = useAccionesProgreso(); // solo las acciones: no cambian nunca
+  console.log("[render] MarcarTodo");
+  return <button onClick={() => SECCIONES.forEach((s) => alternar(s.id))}>Alternar todas</button>;
+});
+
+export function PaginaCurso() {
+  return (
+    <ProgresoProvider>
+      <div className="tarjeta">
+        <Indice />
+        <BotonLeido id="I2.4" />
+        <MarcarTodo />
+      </div>
+    </ProgresoProvider>
+  );
+}
+```
+
+Medido de nuevo:
+
+```text
+al cargar: Indice, BotonLeido I2.4, MarcarTodo
+marcar I2.4: Indice, BotonLeido I2.4
+```
+
+`MarcarTodo` ya no se renderiza: solo lee `AccionesCtx`, cuyo valor es **el mismo objeto** en cada render (`useMemo` con `alternar` estable, y `alternar` estable porque `setLeidas` siempre lo es). El índice y el botón sí se renderizan, porque leen `LeidasCtx`, y las secciones leídas sí han cambiado.
+
+<Callout type="risk">
+
+- **Divide cuando lo hayas medido, no por defecto:** en esta isla, el render extra de `MarcarTodo` cuesta microsegundos. Dividir el contexto merece la pena cuando un valor cambia a menudo (escribir en un campo, mover el ratón) y lo leen muchos componentes, o componentes caros. Mide antes con el _Profiler_ (I2.1).
+- **Cualquier cambio de un contexto renderiza a todos sus lectores:** aunque un componente solo use `leidas.size`, se renderiza cada vez que cambia cualquier sección. Si necesitas suscribirte solo a una parte, un _store_ externo con selectores (nanostores `computed`, Zustand) es más fino que el contexto.
+- **No conviertas todo en contexto:** si un dato solo baja uno o dos niveles, las _props_ son más claras (se ve de dónde viene cada dato) y más fáciles de probar.
+
+</Callout>
+
+## Paso 3: el contexto no cruza islas de Astro
+
+En una página de Astro, cada isla es **una aplicación de React independiente**, con su propia raíz. Lo que hay entre ellas es HTML estático. Compruébalo intentando poner el `Provider` en una isla y los consumidores en otras. Crea `src/components/progreso/IslasSueltas.tsx`:
+
+```tsx
+// Archivo: src/components/progreso/IslasSueltas.tsx
+// ❌ Intento: un Provider en una isla y los consumidores en OTRAS islas
+import type { ReactNode } from "react";
+import { SECCIONES } from "../../lib/secciones";
+import { ProgresoProvider, useAccionesProgreso, useLeidas } from "./ProgresoContext";
+
+export function ProveedorIsla({ children }: { children?: ReactNode }) {
+  return <ProgresoProvider>{children}</ProgresoProvider>;
+}
+
+export function IndiceIsla() {
+  const leidas = useLeidas();
+  return (
+    <ol id="indice-isla">
+      {SECCIONES.map((s) => (
+        <li key={s.id}>
+          {leidas.has(s.id) ? "✓" : "○"} {s.titulo}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+export function BotonIsla({ id }: { id: string }) {
+  const { alternar } = useAccionesProgreso();
+  return <button onClick={() => alternar(id)}>Marcar {id}</button>;
+}
+```
+
+Y `src/pages/contexto-islas.astro`, que "anida" las islas en el `.astro`:
+
+```astro
+---
+// Archivo: src/pages/contexto-islas.astro
+import Base from "../layouts/Base.astro";
+import { BotonIsla, IndiceIsla, ProveedorIsla } from "../components/progreso/IslasSueltas";
+---
+
+<Base titulo="Contexto entre islas">
+  <h1>¿Cruza el contexto entre islas?</h1>
+  <ProveedorIsla client:load>
+    <IndiceIsla client:load />
+    <BotonIsla id="I2.4" client:load />
+  </ProveedorIsla>
+</Base>
+```
+
+Abre `/contexto-islas`. En lugar de la página aparece la pantalla de error de Astro (en desarrollo), con estos mensajes:
+
+```text
+Error: useLeidas debe usarse dentro de <ProgresoProvider>
+Error: useAccionesProgreso debe usarse dentro de <ProgresoProvider>
+```
+
+Astro renderiza cada isla **por separado**, ya en el servidor: `IndiceIsla` se renderiza como su propia raíz, sin ningún `Provider` por encima, aunque en el `.astro` esté escrita "dentro" de `ProveedorIsla`. Los hijos de una isla en un archivo `.astro` le llegan como HTML (un _slot_), no como componentes de React con los que pueda compartir contexto. Gracias a la comprobación del `null` en el hook, el error dice exactamente qué pasa; sin ella, verías un confuso `Cannot read properties of null`. Cuando lo hayas visto, **borra `src/pages/contexto-islas.astro`**: es una página rota a propósito y hace fallar `npm run build`.
+
+**Las alternativas para compartir estado entre islas:**
+
+| Opción                            | Cómo funciona                                                                       | Cuándo usarla                                                       |
+| --------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Una sola isla                     | Mueve los componentes que comparten estado a la misma isla y usa contexto o _props_ | Si están cerca en la página                                         |
+| _Store_ externo (nanostores)      | Un módulo con el estado, fuera de React; cada isla se suscribe                      | Islas separadas que comparten estado en el navegador                |
+| Eventos del DOM                   | Una isla dispara `CustomEvent`, las demás escuchan                                  | Avisos puntuales entre islas, o entre una isla y un script de Astro |
+| El servidor como fuente de verdad | Cada isla pide o recibe los datos del servidor                                      | Datos que deben persistir o que también ve el servidor              |
+
+Esta plataforma combina dos de ellas: el botón "Marcar como leído" (una isla) guarda en el servidor y dispara el evento `da:section-read`, que escucha el índice lateral (un script de Astro, no React) para actualizarse sin recargar.
+
+<Callout type="risk">
+
+- **Un _store_ de módulo en el servidor es compartido entre usuarios:** el módulo `src/stores/progreso.ts` también se carga en el servidor al renderizar las islas, y **una sola instancia** sirve a todas las peticiones. Si el código de servidor escribiera en el _store_ los datos de un usuario, el siguiente usuario los vería. Escribe en el _store_ solo desde el navegador (eventos y efectos) o pasa los datos iniciales como _props_.
+- **Nanostores no persiste nada:** al recargar, `$leidas` vuelve a estar vacío. Para persistir, guarda en el servidor (la fuente de verdad) o en `localStorage`.
+- **Si una isla no hidrata tras añadir un import nuevo,** y la consola muestra `504 (Outdated Optimize Dep)`, Vite tiene una caché de dependencias desfasada. Reinicia `npm run dev`.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Comparte "secciones leídas" entre **islas distintas** con nanostores: un contador en la cabecera ("1/4 leídas"), el índice en un `<aside>` y el botón de la sección dentro del `<article>`, cada uno en su propia isla.
+2. Guarda el estado en `src/stores/progreso.ts`, con una función `alternarLeida(id)` y el contador como valor derivado (`computed`).
+3. Comprueba que al pulsar el botón se actualizan las tres islas, y que el texto estático de la página no forma parte de ninguna.
+
+</Callout>
+
+Solución. `src/stores/progreso.ts`:
+
+```ts
+// Archivo: src/stores/progreso.ts
+// El estado vive fuera de React, en un módulo: todas las islas importan el MISMO módulo
+import { atom, computed } from "nanostores";
+import { SECCIONES } from "../lib/secciones";
+
+export const $leidas = atom<ReadonlySet<string>>(new Set());
+
+// Derivado: se recalcula solo cuando cambia $leidas
+export const $resumen = computed($leidas, (leidas) => ({
+  leidas: leidas.size,
+  total: SECCIONES.length,
+}));
+
+export function alternarLeida(id: string) {
+  const nuevo = new Set($leidas.get()); // un Set nuevo: nanostores también compara por identidad
+  if (nuevo.has(id)) nuevo.delete(id);
+  else nuevo.add(id);
+  $leidas.set(nuevo);
+}
+```
+
+`src/components/progreso/IslasStore.tsx`:
+
+```tsx
+// Archivo: src/components/progreso/IslasStore.tsx
+// Tres islas independientes que comparten el mismo store
+import { useStore } from "@nanostores/react";
+import { SECCIONES } from "../../lib/secciones";
+import { $leidas, $resumen, alternarLeida } from "../../stores/progreso";
+
+export function ContadorLeidas() {
+  const { leidas, total } = useStore($resumen);
+  console.log("[render] ContadorLeidas");
+  return (
+    <p id="contador">
+      {leidas}/{total} leídas
+    </p>
+  );
+}
+
+export function IndiceLateral() {
+  const leidas = useStore($leidas);
+  console.log("[render] IndiceLateral");
+  return (
+    <ol id="indice-store">
+      {SECCIONES.map((s) => (
+        <li key={s.id}>
+          {leidas.has(s.id) ? "✓" : "○"} {s.titulo}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+export function BotonLeidoStore({ id }: { id: string }) {
+  const leida = useStore($leidas).has(id);
+  console.log(`[render] BotonLeidoStore ${id}`);
+  return (
+    <button id={`store-${id}`} aria-pressed={leida} onClick={() => alternarLeida(id)}>
+      {leida ? "Leído ✓" : "Marcar como leído"}
+    </button>
+  );
+}
+```
+
+`src/pages/ejercicio-i24.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-i24.astro
+import Base from "../layouts/Base.astro";
+import { BotonLeidoStore, ContadorLeidas, IndiceLateral } from "../components/progreso/IslasStore";
+---
+
+<Base titulo="Ejercicio I2.4">
+  <header class="tarjeta"><ContadorLeidas client:load /></header>
+  <aside class="tarjeta"><IndiceLateral client:load /></aside>
+  <article>
+    <h1>I2.4 · Contexto y estado compartido</h1>
+    <p>Texto de la lección (HTML estático).</p>
+    <BotonLeidoStore id="I2.4" client:load />
+  </article>
+</Base>
+```
+
+Medido en Chrome:
+
+```text
+al cargar: 0/4 leídas · ○ Cómo renderiza React | ○ Custom hooks | ○ useReducer y estado complejo | ○ Contexto y estado compartido · botón: Marcar como leído
+pulsar el botón: 1/4 leídas · ○ Cómo renderiza React | ○ Custom hooks | ○ useReducer y estado complejo | ✓ Contexto y estado compartido · botón: Leído ✓
+  renders: IndiceLateral, BotonLeidoStore I2.4, ContadorLeidas
+pulsar otra vez: 0/4 leídas · ○ Cómo renderiza React | ○ Custom hooks | ○ useReducer y estado complejo | ○ Contexto y estado compartido · botón: Marcar como leído
+```
+
+Las decisiones:
+
+- **El estado vive en un módulo, no en React:** las tres islas importan **el mismo** módulo `src/stores/progreso.ts` (el navegador lo carga una sola vez), así que comparten el mismo `$leidas`. Cada `useStore` suscribe su isla a los cambios.
+- **`computed` deriva el contador:** `$resumen` se recalcula solo cuando cambia `$leidas`, y `ContadorLeidas` no tiene que saber cómo se cuentan las secciones.
+- **`alternarLeida` está fuera de los componentes:** es una función normal del módulo. El botón la llama directamente, sin contexto ni _props_.
+- **Es el equivalente entre islas del contexto dividido del Paso 2:** el estado (`$leidas`) y las acciones (`alternarLeida`) están separados, y quien solo necesita la acción no se suscribe a nada.
+
+<Callout type="risk">
+
+- **`useStore` en todas las islas renderiza las tres a la vez:** es lo que quieres aquí. Si una isla solo necesita un dato derivado, suscríbela a un `computed` y no a `$leidas`, y se renderizará solo cuando ese dato cambie.
+- **El HTML inicial no conoce el estado:** en el servidor, `$leidas` está vacío, así que el HTML siempre llega con "0/4". Si las secciones leídas vienen de la base de datos, pásalas como _props_ a la isla e inicializa el _store_ en el navegador, o la página parpadeará de 0 al valor real.
+- **Elige la herramienta por la distancia:** dentro de un componente, `useState`; entre componentes cercanos, _props_; dentro de una isla grande, contexto; entre islas, un _store_ o eventos; entre usuarios o sesiones, el servidor.
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes elegir entre _props_, contexto o un _store_ externo: usas contexto con un hook tipado que detecta el uso fuera del `Provider`, lo divides en estado y acciones de identidad estable cuando un valor cambiante renderiza de más, sabes que en Astro cada isla es una raíz separada a la que el contexto no llega, y compartes estado entre islas con nanostores (o con eventos y el servidor como fuente de verdad).
+
+</Callout>
+
+## Resumen
+
+- `createContext<T | null>(null)` + `Provider` + un hook `useX()` que comprueba el `null`: tipado y con un error claro.
+- Un valor de contexto nuevo en cada render renderiza a todos los consumidores, incluso con `memo`; separa estado y acciones y dales identidad estable.
+- En Astro, cada isla es una aplicación de React independiente: el contexto no cruza de una a otra, ni siquiera "anidando" islas en el `.astro`.
+- Entre islas: un _store_ de módulo (nanostores, con `computed` para derivados), eventos del DOM o el servidor como fuente de verdad.
+- Un _store_ de módulo es único en el servidor: nunca guardes en él datos de un usuario durante el renderizado.

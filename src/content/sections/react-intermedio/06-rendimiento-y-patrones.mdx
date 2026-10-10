@@ -1,0 +1,569 @@
+---
+sectionId: "I2.6"
+course: "I2"
+title: "Rendimiento y patrones"
+order: 6
+minutes: 60
+summary: "Mides cuándo useMemo y memo compensan, pruebas el React Compiler en Astro y su conflicto de versiones, usas render props, lifting state up, lazy con Suspense y construyes unas Tabs compuestas accesibles."
+---
+
+Cuando una app de React "va lenta", la tentación es llenarla de `memo`, `useMemo` y `useCallback`. A veces ayuda; muchas veces solo añade ruido y complejidad sin ganar nada medible. En esta sección vas a decidir con datos: vas a medir cuánto ahorra `useMemo` en un caso concreto, vas a probar el **React Compiler**, que promete hacer esa memorización automáticamente, y vas a comprobar en qué estado está hoy dentro de Astro. Después verás tres patrones para organizar componentes (_render props_, _lifting state up_ y componentes compuestos), la carga diferida con `lazy`, y terminarás construyendo unas pestañas accesibles con teclado.
+
+**Lo que tendrás al terminar:** mediciones reales de memorización (manual y automática), una página de patrones, un componente cargado bajo demanda y un componente `Tabs` compuesto y accesible.
+
+**Requisitos:** las secciones I2.1 a I2.5 (sobre todo la medición de identidad de I2.1) y el adaptador de Node de I2.1.
+
+```bash
+mkdir -p src/components/rendimiento src/components/tabs
+```
+
+## Paso 1: `memo`, `useMemo` y `useCallback`, cuándo sirven
+
+Las tres herramientas evitan trabajo repetido entre renders:
+
+| Herramienta                  | Qué memoriza                                        | Sirve cuando…                                                                            |
+| ---------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `memo(Componente)`           | El render del componente, si sus _props_ no cambian | El componente es caro y su padre se renderiza a menudo por motivos que no le afectan     |
+| `useMemo(() => valor, deps)` | Un valor calculado                                  | El cálculo es caro, o el valor es una _prop_ de un `memo` o una dependencia de un efecto |
+| `useCallback(fn, deps)`      | Una función                                         | La función es una _prop_ de un `memo` o una dependencia de un efecto                     |
+
+En I2.1 ya mediste el segundo uso (identidad): sin `useMemo`/`useCallback`, `memo` no servía de nada y el efecto se disparaba en cada render. Ahora mide el primero, un cálculo caro. Crea `src/components/rendimiento/Estadisticas.tsx`:
+
+```tsx
+// Archivo: src/components/rendimiento/Estadisticas.tsx
+// Un cálculo caro y un estado que no tiene nada que ver con él: con y sin useMemo
+import { useMemo, useState, type ReactNode } from "react";
+
+const ENTRENOS = Array.from({ length: 200_000 }, (_, i) => ({ minutos: 20 + (i % 70), km: (i % 13) + 0.5 }));
+
+function calcularResumen(entrenos: typeof ENTRENOS) {
+  let minutos = 0;
+  let km = 0;
+  for (const e of entrenos) {
+    minutos += e.minutos;
+    km += Math.sqrt(e.km * e.km); // trabajo de más, a propósito
+  }
+  return { minutos, km: Math.round(km) };
+}
+
+function Tarjeta({ id, resumen, children }: { id: string; resumen: { minutos: number; km: number }; children: ReactNode }) {
+  return (
+    <div className="tarjeta" id={id}>
+      <p>
+        {resumen.minutos} min · {resumen.km} km
+      </p>
+      {children}
+    </div>
+  );
+}
+
+export function EstadisticasSinMemo() {
+  const [abierto, setAbierto] = useState(false); // estado que NO afecta al cálculo
+  const inicio = performance.now();
+  const resumen = calcularResumen(ENTRENOS); // se recalcula en CADA render
+  console.log(`[medida] sin useMemo: ${(performance.now() - inicio).toFixed(1)} ms`);
+  return (
+    <Tarjeta id="sin-memo" resumen={resumen}>
+      <button onClick={() => setAbierto(!abierto)}>{abierto ? "Ocultar" : "Ver"} detalles</button>
+    </Tarjeta>
+  );
+}
+
+export function EstadisticasConMemo() {
+  const [abierto, setAbierto] = useState(false);
+  const inicio = performance.now();
+  const resumen = useMemo(() => calcularResumen(ENTRENOS), []); // solo la primera vez
+  console.log(`[medida] con useMemo: ${(performance.now() - inicio).toFixed(1)} ms`);
+  return (
+    <Tarjeta id="con-memo" resumen={resumen}>
+      <button onClick={() => setAbierto(!abierto)}>{abierto ? "Ocultar" : "Ver"} detalles</button>
+    </Tarjeta>
+  );
+}
+```
+
+Y `src/pages/rendimiento.astro`:
+
+```astro
+---
+// Archivo: src/pages/rendimiento.astro
+import Base from "../layouts/Base.astro";
+import { EstadisticasConMemo, EstadisticasSinMemo } from "../components/rendimiento/Estadisticas";
+---
+
+<Base titulo="Rendimiento">
+  <h1>useMemo: cuándo sirve</h1>
+  <EstadisticasSinMemo client:load />
+  <EstadisticasConMemo client:load />
+</Base>
+```
+
+Pulsa tres veces "Ver detalles" en cada tarjeta. El botón cambia un estado que **no** tiene nada que ver con el cálculo. Medido en Chrome (en desarrollo):
+
+```text
+al hidratar: sin useMemo: 1.7 ms · con useMemo: 1.7 ms
+3 clics en "Ver detalles" (sin-memo): sin useMemo: 2.8 ms · sin useMemo: 4.7 ms · sin useMemo: 1.4 ms
+3 clics en "Ver detalles" (con-memo): con useMemo: 0.1 ms · con useMemo: 0.0 ms · con useMemo: 0.0 ms
+```
+
+`useMemo` funciona: tras el primer render, el cálculo no se repite (0 ms). Pero fíjate en la escala: recorrer **200 000 entrenos** cuesta entre 1,4 y 4,7 ms. Un fotograma dura 16 ms, así que ni siquiera sin `useMemo` el usuario notaría nada. Esa es la lección: **la mayoría de los cálculos son más baratos de lo que parecen**. La documentación de React propone una regla práctica: si un cálculo tarda más de **1 ms** de forma constante, memorizarlo puede compensar; por debajo, es ruido. Y la única forma de saberlo es medir (`console.time`, el _Profiler_ de I2.1).
+
+<Callout type="risk">
+
+- **La memorización tiene coste:** cada `useMemo` guarda el valor anterior y compara sus dependencias en cada render. Envolver un `a + b` o un `.filter` de 20 elementos es más lento que no hacerlo, y además más difícil de leer.
+- **`memo` sin estabilizar las _props_ no hace nada:** si pasas un objeto o una función creados en el render (I2.1, Paso 3), `memo` compara, ve que han cambiado y renderiza igual. O estabilizas las _props_ o quitas el `memo`.
+- **Unas dependencias incompletas dan valores viejos:** `useMemo(() => calcular(datos), [])` con `datos` cambiantes devolverá siempre el primer resultado. Deja que la regla `react-hooks/exhaustive-deps` revise las dependencias.
+
+</Callout>
+
+## Paso 2: el React Compiler y su estado actual en Astro
+
+El **React Compiler** analiza tus componentes al compilar y añade la memorización por ti: es como si cada valor, función y JSX llevara su `useMemo` o `useCallback` exacto, sin escribirlos. Su versión 1.0 es estable y React recomienda usarlo en proyectos nuevos. La integración de React de Astro 7 lo activa con una opción:
+
+```js
+// @ts-check
+import { defineConfig } from 'astro/config';
+
+import react from '@astrojs/react';
+
+import node from '@astrojs/node';
+
+// https://astro.build/config
+export default defineConfig({
+  // compiler: true activa el React Compiler (necesita babel-plugin-react-compiler)
+  integrations: [react({ compiler: true })],
+
+  adapter: node({
+    mode: 'standalone'
+  })
+});
+```
+
+Pero al activarlo hay que instalar una pieza más, y ahí aparece el problema. Si arrancas el proyecto solo con `compiler: true`:
+
+```text
+React Compiler requires the optional `oxc-transform-react` package. Install it in your project before enabling `react({ compiler: true })`.
+```
+
+Con estas versiones, el compilador lo ejecuta `oxc-transform-react`, y no el `babel-plugin-react-compiler` que indican la mayoría de los tutoriales. Pero al instalarlo, npm encuentra un conflicto entre lo que pide cada paquete (fragmento):
+
+```text
+npm error While resolving: @astrojs/react@7.0.1
+npm error Found: oxc-transform-react@0.152.0
+npm error   peerOptional oxc-transform-react@"^0.152.0" from @vitejs/plugin-react@6.1.2
+npm error Could not resolve dependency:
+npm error peerOptional oxc-transform-react@"^0.145.0" from @astrojs/react@7.0.1
+```
+
+`@astrojs/react` 7.0.1 pide la versión `^0.145.0` y el _plugin_ de Vite que trae dentro pide `^0.152.0`. En versiones `0.x`, `^0.145.0` no admite la `0.152`, así que no hay ninguna versión que satisfaga a los dos. Para **probarlo** (no para producción), se puede forzar:
+
+```bash
+npm install --save-dev "oxc-transform-react@^0.152.0" --legacy-peer-deps
+```
+
+Con el compilador funcionando, repite las mediciones de `/identidad` (I2.1) y `/rendimiento` **sin cambiar ni una línea de los componentes** (solo las líneas que cambian respecto a las mediciones anteriores):
+
+```text
+=== /identidad con React Compiler:
+— Re-renderizar el padre:
+  [render] Identidad (n = 1)
+— Cambiar tema:
+  [render] Identidad (n = 1)
+  [render] LectorTema (oscuro)
+=== /rendimiento con React Compiler:
+3 clics en "Ver detalles" (sin-memo): sin useMemo: 0.0 ms · sin useMemo: 0.0 ms · sin useMemo: 0.0 ms
+```
+
+En I2.1, "Re-renderizar el padre" renderizaba también la **Tarjeta A** (objetos nuevos en cada render) y volvía a ejecutar el efecto; con el compilador, ni lo uno ni lo otro. Y el cálculo de `EstadisticasSinMemo`, que no tiene `useMemo`, ya no se repite. El compilador ha memorizado todo lo que tú hacías a mano.
+
+**El estado actual, en resumen:** el compilador funciona y hace exactamente lo que promete, pero en Astro 7.3 con `@astrojs/react` 7.0.1 solo se instala forzando las dependencias. Hasta que una versión nueva de la integración resuelva el conflicto, úsalo para experimentar en una rama, no en producción. Cuando lo pruebes, **deshazlo** al terminar: quita `compiler: true` y desinstala el paquete (`npm uninstall oxc-transform-react --legacy-peer-deps`).
+
+<Callout type="risk">
+
+- **`--legacy-peer-deps` instala combinaciones que nadie ha probado juntas:** aquí funcionó en las mediciones, pero las versiones de pares (_peer dependencies_) existen precisamente para avisar de incompatibilidades. En producción, espera a una combinación oficial.
+- **Tras activar o desactivar el compilador, Vite puede quedarse con una caché incoherente:** en el laboratorio, una isla falló al hidratar con `_jsxDEV is not a function`. Reiniciar con `npm run dev -- --force` (que regenera la caché de dependencias) lo resolvió.
+- **El compilador no arregla un componente lento:** evita renders y cálculos **repetidos**, pero el primer render de una lista de 10 000 filas sigue costando lo mismo. Para eso, menos filas (paginación, virtualización) o `useTransition` (I2.5).
+- **El compilador asume que tu código sigue las reglas de React:** componentes puros y estado sin mutar. Si un componente las rompe (modifica una _prop_, lee algo mutable en el render), el compilador puede saltárselo o cambiar su comportamiento. Otra razón para respetar las reglas de I2.1 e I2.2.
+
+</Callout>
+
+## Paso 3: patrones para organizar componentes
+
+Tres patrones que verás en cualquier proyecto de React. Crea `src/components/rendimiento/Patrones.tsx`:
+
+```tsx
+// Archivo: src/components/rendimiento/Patrones.tsx
+import { useState, type ReactNode } from "react";
+
+// ── Render props: el componente gestiona la lógica (filtrar) y QUIEN LO USA decide cómo pintar
+interface ListaFiltrableProps<T> {
+  elementos: T[];
+  texto: (elemento: T) => string; // por qué campo se filtra
+  renderElemento: (elemento: T) => ReactNode; // cómo se pinta cada uno
+}
+
+export function ListaFiltrable<T>({ elementos, texto, renderElemento }: ListaFiltrableProps<T>) {
+  const [filtro, setFiltro] = useState("");
+  const visibles = elementos.filter((e) => texto(e).toLowerCase().includes(filtro.toLowerCase()));
+  return (
+    <div>
+      <input aria-label="Filtrar" value={filtro} onChange={(e) => setFiltro(e.target.value)} />
+      <ul>{visibles.map((e) => <li key={texto(e)}>{renderElemento(e)}</li>)}</ul>
+    </div>
+  );
+}
+
+// ── Lifting state up: dos componentes hermanos que necesitan el mismo dato
+function SelectorSemana({ semana, onCambiar }: { semana: number; onCambiar: (s: number) => void }) {
+  return (
+    <p>
+      <button onClick={() => onCambiar(semana - 1)}>←</button> Semana {semana}{" "}
+      <button onClick={() => onCambiar(semana + 1)}>→</button>
+    </p>
+  );
+}
+
+function ResumenSemana({ semana }: { semana: number }) {
+  return <p id="resumen-semana">Resumen de la semana {semana}: {(semana * 37) % 300} min</p>;
+}
+
+export function PanelSemanal() {
+  const [semana, setSemana] = useState(41); // el estado vive en el padre común
+  return (
+    <div className="tarjeta">
+      <SelectorSemana semana={semana} onCambiar={setSemana} />
+      <ResumenSemana semana={semana} />
+    </div>
+  );
+}
+
+const ENTRENOS = [
+  { nombre: "Rodaje suave", minutos: 40 },
+  { nombre: "Series 6x400", minutos: 35 },
+  { nombre: "Fuerza tren inferior", minutos: 50 },
+];
+
+export function DemoPatrones() {
+  return (
+    <>
+      <div className="tarjeta" id="render-props">
+        <ListaFiltrable
+          elementos={ENTRENOS}
+          texto={(e) => e.nombre}
+          renderElemento={(e) => (
+            <>
+              <strong>{e.nombre}</strong> · {e.minutos} min
+            </>
+          )}
+        />
+      </div>
+      <PanelSemanal />
+    </>
+  );
+}
+```
+
+- **_Render props_:** `ListaFiltrable` se encarga de la **lógica** (el filtro y su estado) y recibe una función `renderElemento` que decide **cómo se pinta** cada elemento. Es genérica (`<T>`, I1.1): sirve para entrenos, cursos o notas. Hoy, la mayoría de estos casos se resuelven con un _custom hook_ (I2.2), pero el patrón sigue siendo útil cuando la parte variable es JSX.
+- **_Lifting state up_:** `SelectorSemana` y `ResumenSemana` necesitan la misma semana. El estado "sube" al padre común (`PanelSemanal`) y baja a cada hijo por _props_. Es la primera herramienta que hay que probar antes que el contexto o un _store_ (I2.4).
+- **Componentes compuestos:** varios componentes que solo tienen sentido juntos (`<Tabs>`, `<Tabs.List>`, `<Tabs.Panel>`) y comparten estado a través de un contexto interno. Es el patrón del ejercicio.
+
+La carga diferida va en dos archivos más. `src/components/rendimiento/GraficoPesado.tsx`:
+
+```tsx
+// Archivo: src/components/rendimiento/GraficoPesado.tsx
+// Imagina una librería de gráficos de 200 KB: solo se descarga si alguien abre el gráfico
+const DATOS = [120, 180, 90, 210, 160, 240, 200];
+
+export default function GraficoPesado() {
+  const maximo = Math.max(...DATOS);
+  return (
+    <svg id="grafico" viewBox="0 0 140 60" width="280" role="img" aria-label="Minutos por día de la semana">
+      {DATOS.map((m, i) => (
+        <rect key={i} x={i * 20 + 2} y={60 - (m / maximo) * 58} width="16" height={(m / maximo) * 58} fill="#0d9488" />
+      ))}
+    </svg>
+  );
+}
+```
+
+Y `src/components/rendimiento/PanelGrafico.tsx`, que lo carga con **`lazy`** y muestra un _fallback_ con **`Suspense`** mientras llega:
+
+```tsx
+// Archivo: src/components/rendimiento/PanelGrafico.tsx
+import { lazy, Suspense, useState } from "react";
+
+// lazy: el import() se ejecuta la primera vez que se renderiza <GraficoPesado />, no antes
+const GraficoPesado = lazy(() => import("./GraficoPesado"));
+
+export function PanelGrafico() {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="tarjeta">
+      <button id="ver-grafico" onClick={() => setVisible(true)}>
+        Ver gráfico
+      </button>
+      {visible && (
+        <Suspense fallback={<p id="cargando-grafico">Cargando gráfico…</p>}>
+          <GraficoPesado />
+        </Suspense>
+      )}
+    </div>
+  );
+}
+```
+
+La página `src/pages/patrones.astro`:
+
+```astro
+---
+// Archivo: src/pages/patrones.astro
+import Base from "../layouts/Base.astro";
+import { DemoPatrones } from "../components/rendimiento/Patrones";
+import { PanelGrafico } from "../components/rendimiento/PanelGrafico";
+---
+
+<Base titulo="Patrones">
+  <h1>Patrones</h1>
+  <DemoPatrones client:load />
+  <PanelGrafico client:load />
+</Base>
+```
+
+Para ver la carga diferida, compila y mide en producción, con la red de DevTools en modo lento (_Slow 4G_):
+
+```bash
+npm run build
+PORT=4322 node dist/server/entry.mjs
+```
+
+Medido en Chrome, con la red limitada a 200 KB/s y 300 ms de latencia:
+
+```text
+al cargar, ¿se ha pedido GraficoPesado? no (6 archivos /_astro/)
+render props, filtro 'ser': [ 'Series 6x400 · 35 min' ]
+lifting state up, tras →: Resumen de la semana 42: 54 min
+50 ms después del clic: Cargando gráfico…
+al final: gráfico visible · pedido tras el clic: [ 'GraficoPesado.DAhAWByG.js' ]
+```
+
+El _build_ generó un archivo propio para el gráfico (`GraficoPesado.DAhAWByG.js`; el código final varía), y el navegador **solo lo pidió al pulsar** "Ver gráfico". Mientras tanto, `Suspense` mostró "Cargando gráfico…".
+
+<Callout type="risk">
+
+- **En Astro, la primera herramienta de carga diferida son las directivas:** `client:visible` o `client:idle` (B6.7) ya retrasan toda una isla. `lazy` sirve **dentro** de una isla, para una parte que solo se necesita a veces (una pestaña, un modal, un gráfico).
+- **`lazy` necesita un `export default`:** `lazy(() => import("./GraficoPesado"))` espera un módulo con exportación por defecto. Con una exportación con nombre, hay que adaptarla: `lazy(() => import("./X").then((m) => ({ default: m.X })))`.
+- **Declara `lazy` fuera del componente:** si lo llamas dentro, cada render crea un componente nuevo, React desmonta el anterior y el estado del gráfico se pierde en cada render.
+- **Un _fallback_ que cambia de tamaño hace saltar la página:** si "Cargando…" ocupa una línea y el gráfico 200 px, el contenido de debajo se mueve (CLS). Dale al _fallback_ el mismo alto que el contenido.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Implementa el componente compuesto `Tabs` en `src/components/tabs/Tabs.tsx`, con `<Tabs defaultValue>`, `<Tabs.List label>`, `<Tabs.Trigger value>` y `<Tabs.Panel value>`.
+2. Debe ser accesible: roles `tablist`, `tab` y `tabpanel`, `aria-selected`, `aria-controls` y `aria-labelledby`, y que cada `<Tabs>` tenga identificadores únicos.
+3. Teclado: Tab entra en la pestaña activa (solo en ella), las flechas izquierda y derecha cambian de pestaña (dando la vuelta), Inicio y Fin van a la primera y la última, y un segundo Tab lleva al panel.
+4. Úsalo en un panel de actividad con tres pestañas (Progreso, Exámenes, Sesiones) y compruébalo con el teclado y con axe.
+
+</Callout>
+
+Solución. `src/components/tabs/Tabs.tsx`:
+
+```tsx
+// Archivo: src/components/tabs/Tabs.tsx
+// Componente compuesto accesible: <Tabs> + <Tabs.List> + <Tabs.Trigger> + <Tabs.Panel>
+import { createContext, useContext, useId, useState, type KeyboardEvent, type ReactNode } from "react";
+
+interface TabsContexto {
+  valor: string;
+  seleccionar: (valor: string) => void;
+  idBase: string;
+}
+
+const TabsCtx = createContext<TabsContexto | null>(null);
+
+function useTabs(componente: string): TabsContexto {
+  const ctx = useContext(TabsCtx);
+  if (!ctx) throw new Error(`<${componente}> debe usarse dentro de <Tabs>`);
+  return ctx;
+}
+
+// Los id se derivan del valor: así el botón y su panel se referencian entre sí
+const idTab = (base: string, valor: string) => `${base}-tab-${valor}`;
+const idPanel = (base: string, valor: string) => `${base}-panel-${valor}`;
+
+function Tabs({ defaultValue, children }: { defaultValue: string; children: ReactNode }) {
+  const [valor, seleccionar] = useState(defaultValue);
+  const idBase = useId(); // único aunque haya varios <Tabs> en la página
+  return (
+    <TabsCtx.Provider value={{ valor, seleccionar, idBase }}>
+      <div className="tabs">{children}</div>
+    </TabsCtx.Provider>
+  );
+}
+
+function List({ label, children }: { label: string; children: ReactNode }) {
+  const { seleccionar } = useTabs("Tabs.List");
+
+  // Flechas, Inicio y Fin mueven el foco entre pestañas y la activan (activación automática)
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    const tabs = [...e.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    const actual = tabs.indexOf(document.activeElement as HTMLButtonElement);
+    if (actual === -1) return;
+    const destino = {
+      ArrowRight: (actual + 1) % tabs.length,
+      ArrowLeft: (actual - 1 + tabs.length) % tabs.length,
+      Home: 0,
+      End: tabs.length - 1,
+    }[e.key];
+    if (destino === undefined) return;
+    e.preventDefault(); // Inicio/Fin no deben desplazar la página
+    const tab = tabs[destino]!;
+    tab.focus();
+    seleccionar(tab.dataset.valor!);
+  }
+
+  return (
+    <div role="tablist" aria-label={label} onKeyDown={onKeyDown}>
+      {children}
+    </div>
+  );
+}
+
+function Trigger({ value, children }: { value: string; children: ReactNode }) {
+  const { valor, seleccionar, idBase } = useTabs("Tabs.Trigger");
+  const activa = valor === value;
+  return (
+    <button
+      type="button"
+      role="tab"
+      id={idTab(idBase, value)}
+      data-valor={value}
+      aria-selected={activa}
+      aria-controls={idPanel(idBase, value)}
+      tabIndex={activa ? 0 : -1} // "roving tabindex": solo la pestaña activa está en el orden de Tab
+      onClick={() => seleccionar(value)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Panel({ value, children }: { value: string; children: ReactNode }) {
+  const { valor, idBase } = useTabs("Tabs.Panel");
+  return (
+    <div
+      role="tabpanel"
+      id={idPanel(idBase, value)}
+      aria-labelledby={idTab(idBase, value)}
+      hidden={valor !== value}
+      tabIndex={0} // el panel recibe el foco con Tab desde la pestaña
+    >
+      {children}
+    </div>
+  );
+}
+
+// Los subcomponentes cuelgan del principal: <Tabs.List>, <Tabs.Trigger>…
+Tabs.List = List;
+Tabs.Trigger = Trigger;
+Tabs.Panel = Panel;
+
+export { Tabs };
+```
+
+`src/components/tabs/PanelProgreso.tsx`:
+
+```tsx
+// Archivo: src/components/tabs/PanelProgreso.tsx
+import { Tabs } from "./Tabs";
+
+export function PanelProgreso() {
+  return (
+    <Tabs defaultValue="progreso">
+      <Tabs.List label="Mi actividad">
+        <Tabs.Trigger value="progreso">Progreso</Tabs.Trigger>
+        <Tabs.Trigger value="examenes">Exámenes</Tabs.Trigger>
+        <Tabs.Trigger value="sesiones">Sesiones</Tabs.Trigger>
+      </Tabs.List>
+      <Tabs.Panel value="progreso">
+        <p>8 de 24 cursos completados.</p>
+      </Tabs.Panel>
+      <Tabs.Panel value="examenes">
+        <p>Última evaluación: I1 · 5/5.</p>
+      </Tabs.Panel>
+      <Tabs.Panel value="sesiones">
+        <p>Esta semana: 4 sesiones, 3 h 20 min.</p>
+      </Tabs.Panel>
+    </Tabs>
+  );
+}
+```
+
+`src/pages/ejercicio-i26.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-i26.astro
+import Base from "../layouts/Base.astro";
+import { PanelProgreso } from "../components/tabs/PanelProgreso";
+---
+
+<Base titulo="Ejercicio I2.6">
+  <h1>Tabs accesibles</h1>
+  <PanelProgreso client:load />
+  <p><a href="#">Un enlace después de las pestañas</a></p>
+</Base>
+<style is:global>
+  [role="tab"][aria-selected="true"] { background: #0f766e; color: white; }
+  [role="tabpanel"] { border: 1px solid #cbd5e1; padding: 0.5rem 1rem; }
+</style>
+```
+
+Medido en Chrome, recorriendo el componente solo con el teclado (y después con axe, la misma herramienta de accesibilidad que usan los E2E de esta plataforma):
+
+```text
+Tab:         foco: tab "Progreso" · seleccionada: Progreso · panel visible: "8 de 24 cursos completados." (aria-labelledby ok: true)
+ArrowRight   foco: tab "Exámenes" · seleccionada: Exámenes · panel visible: "Última evaluación: I1 · 5/5." (aria-labelledby ok: true)
+ArrowRight   foco: tab "Sesiones" · seleccionada: Sesiones · panel visible: "Esta semana: 4 sesiones, 3 h 20 min." (aria-labelledby ok: true)
+ArrowRight   foco: tab "Progreso" · seleccionada: Progreso · panel visible: "8 de 24 cursos completados." (aria-labelledby ok: true)
+ArrowLeft    foco: tab "Sesiones" · seleccionada: Sesiones · panel visible: "Esta semana: 4 sesiones, 3 h 20 min." (aria-labelledby ok: true)
+End          foco: tab "Sesiones" · seleccionada: Sesiones · panel visible: "Esta semana: 4 sesiones, 3 h 20 min." (aria-labelledby ok: true)
+Home         foco: tab "Progreso" · seleccionada: Progreso · panel visible: "8 de 24 cursos completados." (aria-labelledby ok: true)
+Tab:         foco: tabpanel "8 de 24 cursos completados." · seleccionada: Progreso · panel visible: "8 de 24 cursos completados." (aria-labelledby ok: true)
+Tab:         foco: a "Un enlace después de las pesta" · seleccionada: Progreso · panel visible: "8 de 24 cursos completados." (aria-labelledby ok: true)
+tabindex de las pestañas: Progreso=0 Exámenes=-1 Sesiones=-1
+axe (WCAG A/AA): sin infracciones
+```
+
+Las decisiones:
+
+- **Un contexto interno y un hook que lo exige:** `useTabs("Tabs.Trigger")` lanza un error que dice qué subcomponente se usó fuera de `<Tabs>` (el patrón de I2.4).
+- **_Roving tabindex_:** solo la pestaña activa tiene `tabIndex={0}`; las demás, `-1`. Así, Tab entra en el grupo una sola vez y sale al panel, en lugar de recorrer cada pestaña. Dentro del grupo se navega con flechas, como espera cualquier usuario de lector de pantalla.
+- **Activación automática:** mover el foco con las flechas también selecciona la pestaña. Es lo recomendado cuando los paneles se muestran al instante (si cargaran datos, sería mejor activar solo con Intro o espacio).
+- **`useId()` para los identificadores:** dos `<Tabs>` en la misma página no chocan, y el id coincide entre el servidor y la hidratación (un contador propio o `Math.random()` romperían la hidratación).
+- **`hidden` en los paneles inactivos:** quedan fuera de la vista, del orden de tabulación y del árbol de accesibilidad, pero siguen montados (el estado de su contenido se conserva al cambiar de pestaña).
+- **`Tabs.List = List`:** asignar los subcomponentes como propiedades de la función da la sintaxis `<Tabs.List>` y deja claro que solo tienen sentido juntos.
+
+<Callout type="risk">
+
+- **Unas pestañas no son navegación:** si cada pestaña debe tener su propia URL (compartible, con historial), usa enlaces normales y páginas, no `role="tab"`. Las pestañas son para cambiar de vista **dentro** de una página.
+- **Los atributos ARIA prometen un comportamiento:** poner `role="tab"` sin implementar las flechas es peor que no ponerlo, porque el lector de pantalla anuncia "pestaña 1 de 3" y el usuario intentará usar las flechas. Si añades un rol, implementa su teclado completo (guía de patrones de la WAI-ARIA).
+- **Con muchos paneles pesados, `hidden` puede no bastar:** todos los paneles se renderizan aunque no se vean. Si un panel es caro, renderízalo solo cuando esté activo (`{activa && …}`), a cambio de perder su estado al salir, o cárgalo con `lazy` como el gráfico.
+
+</Callout>
+
+<Callout type="mastery">
+
+Optimizas solo después de medir con el _Profiler_: sabes que la mayoría de los cálculos cuestan menos de un fotograma, usas `memo`, `useMemo` y `useCallback` solo cuando la medición o la identidad lo justifican, conoces el React Compiler y su estado real en Astro, organizas componentes con _render props_, _lifting state up_ y componentes compuestos accesibles, y difieres con `lazy` lo que no se necesita al cargar.
+
+</Callout>
+
+## Resumen
+
+- `useMemo` evitó repetir un cálculo de 200 000 elementos… que solo costaba 1,4–4,7 ms: memoriza lo que dura más de ~1 ms o lo que necesita identidad estable.
+- El React Compiler memoriza automáticamente (medido: sin re-renders de la Tarjeta A ni cálculos repetidos), pero en Astro 7.3 con `@astrojs/react` 7.0.1 solo se instala forzando un conflicto de dependencias.
+- _Render props_: lógica en el componente, presentación en una función; _lifting state up_: el estado compartido en el padre común.
+- `lazy` + `Suspense` cargan una parte de una isla solo cuando se necesita (medido: el archivo del gráfico se pide tras el clic).
+- Componente compuesto accesible: contexto interno, roles ARIA, _roving tabindex_, flechas/Inicio/Fin y `useId`.

@@ -1,0 +1,727 @@
+---
+sectionId: "I2.5"
+course: "I2"
+title: "Formularios y peticiones en producción"
+order: 5
+minutes: 60
+summary: "Usas react-hook-form con un resolver de Zod, gestionas envío y errores del servidor, aplicas actualizaciones optimistas con rollback (a mano y con useOptimistic) y mides cómo useTransition evita bloquear la UI."
+---
+
+En B6.5 hiciste formularios controlados a mano: un estado por campo, tus propias funciones de validación y un `onSubmit` que solo mostraba un mensaje. En producción, un formulario tiene que hacer bastante más: validar con las **mismas reglas** que el servidor, deshabilitar el botón mientras envía, mostrar junto a cada campo los errores que devuelve el servidor (un correo ya registrado) y no dejar al usuario sin respuesta si la red falla. Y hay acciones, como "Marcar como leído", en las que esperar al servidor se siente lento. En esta sección vas a construir todo eso midiendo cada estado en el navegador: formularios con `react-hook-form` y Zod, **actualizaciones optimistas** que se corrigen solas si el servidor falla, y `useTransition` para que la interfaz no se congele.
+
+**Lo que tendrás al terminar:** un formulario de notas y uno de registro con `react-hook-form` y validación compartida con el servidor, dos botones optimistas con _rollback_ y un buscador que no se bloquea al teclear.
+
+**Requisitos:** las secciones I2.1 a I2.4, Zod (I1.4) y el adaptador de Node que añadiste en I2.1 (las APIs de prueba de esta sección se ejecutan en el servidor).
+
+```bash
+mkdir -p src/components/produccion src/pages/api/progreso src/schemas
+```
+
+## Paso 1: react-hook-form y el puente con Zod
+
+`react-hook-form` gestiona el estado de un formulario (valores, errores, campos tocados, si se está enviando) **sin un `useState` por campo**: lee los valores directamente de los `<input>` y solo vuelve a renderizar cuando cambia algo que se ve, como un error. Para validar con un esquema de Zod necesita un **_resolver_**: una función que recibe los valores y devuelve los valores limpios o los errores por campo. Instala la librería:
+
+```bash
+npm install react-hook-form
+```
+
+Para el _resolver_ hay dos opciones:
+
+- **`@hookform/resolvers`**, la librería oficial, con soporte para Zod 4. Ojo: si la instalas **en el mismo comando** que Zod (`npm install zod @hookform/resolvers`), npm falla con un conflicto en una cadena de dependencias opcionales que todavía pide Zod 3 (fragmento del error):
+
+  ```text
+  npm error code ERESOLVE
+  npm error ERESOLVE could not resolve
+  npm error While resolving: react-lab@0.0.1
+  npm error Found: zod@4.6.5
+  npm error Could not resolve dependency:
+  npm error Conflicting peer dependency: zod@3.25.76
+  npm error   peerOptional zod@"^3.23.8" from @typeschema/zod@0.14.0
+  npm error       peerOptional @typeschema/main@">=0.13.7" from @hookform/resolvers@5.9.1
+  ```
+
+  Si Zod ya está instalado, `npm install @hookform/resolvers` funciona y su `zodResolver` valida bien con Zod 4.
+
+- **Un _resolver_ propio de 20 líneas**, que es lo que usa esta plataforma (`src/lib/zod-resolver.ts`) para no depender de esa cadena. Es el que usarás aquí, porque además te enseña qué hace un _resolver_ por dentro. Crea `src/lib/zodResolver.ts`:
+
+```ts
+// Archivo: src/lib/zodResolver.ts
+// Conecta un esquema de Zod con react-hook-form, sin @hookform/resolvers
+// (su cadena de dependencias opcionales todavía pide Zod 3 y choca con el Zod 4 de Astro)
+import type { FieldErrors, FieldValues, Resolver } from "react-hook-form";
+import type { ZodType } from "zod";
+
+export function zodResolver<T extends FieldValues>(esquema: ZodType<T>): Resolver<T> {
+  return async (valores) => {
+    const resultado = await esquema.safeParseAsync(valores);
+    if (resultado.success) return { values: resultado.data, errors: {} };
+
+    const errores: Record<string, { type: string; message: string }> = {};
+    for (const issue of resultado.error.issues) {
+      const ruta = issue.path.join(".");
+      if (ruta && !errores[ruta]) errores[ruta] = { type: issue.code, message: issue.message }; // el primero de cada campo
+    }
+    return { values: {}, errors: errores as FieldErrors<T> };
+  };
+}
+```
+
+- **`safeParseAsync`** valida (en versión asíncrona, por si el esquema tiene reglas asíncronas).
+- **Si es válido**, devuelve `values: resultado.data`: los datos **ya transformados** por el esquema (sin espacios, en minúsculas…), que son los que recibirá tu `onSubmit`.
+- **Si no**, convierte cada _issue_ de Zod en un error de `react-hook-form` en la ruta del campo (`issue.path.join(".")`), quedándose con el primer error de cada uno.
+
+<Callout type="risk">
+
+- **Un _resolver_ casero también es código que mantener:** el de aquí cubre formularios planos y anidados. Si necesitas validación por campo en tiempo real con reglas asíncronas complejas, la librería oficial está más probada.
+- **`--legacy-peer-deps` y `--force` no son la solución al `ERESOLVE`:** silencian el conflicto y pueden instalar combinaciones que fallan al ejecutarse. Primero entiende el conflicto (aquí, una dependencia opcional) y elige el orden de instalación o la alternativa.
+
+</Callout>
+
+## Paso 2: un formulario con estados de envío y errores del servidor
+
+El esquema de una nota, compartido por el formulario y la API. `src/schemas/nota.ts`:
+
+```ts
+// Archivo: src/schemas/nota.ts
+import { z } from "zod";
+
+export const NotaSchema = z.object({
+  titulo: z.string().trim().min(3, "Mínimo 3 caracteres").max(60, "Máximo 60 caracteres"),
+  categoria: z.enum(["trabajo", "personal", "salud", "estudio"], "Elige una categoría"),
+});
+export type Nota = z.infer<typeof NotaSchema>;
+```
+
+Una API de prueba que tarda 600 ms, valida con el mismo esquema, rechaza títulos repetidos (409) y simula un fallo del servidor (500) con un título concreto. `src/pages/api/notas.ts`:
+
+```ts
+// Archivo: src/pages/api/notas.ts
+// API de prueba: valida con el mismo esquema, tarda 600 ms y rechaza títulos repetidos
+import type { APIRoute } from "astro";
+import { NotaSchema } from "../../schemas/nota";
+
+export const prerender = false;
+
+const titulos = new Set(["Revisar presupuesto"]); // ya existe una nota con este título
+
+export const POST: APIRoute = async ({ request }) => {
+  await new Promise((r) => setTimeout(r, 600));
+  const r = NotaSchema.safeParse(await request.json().catch(() => null));
+  if (!r.success) {
+    const campos: Record<string, string[]> = {};
+    for (const i of r.error.issues) (campos[String(i.path[0])] ??= []).push(i.message);
+    return Response.json({ error: "Revisa los datos", campos }, { status: 422 });
+  }
+  if (r.data.titulo === "Fallo del servidor") return Response.json({ error: "Error interno" }, { status: 500 });
+  if (titulos.has(r.data.titulo)) {
+    return Response.json({ error: "Ya existe", campos: { titulo: ["Ya tienes una nota con ese título"] } }, { status: 409 });
+  }
+  titulos.add(r.data.titulo);
+  return Response.json({ id: crypto.randomUUID(), ...r.data }, { status: 201 });
+};
+```
+
+El formulario, `src/components/produccion/FormNota.tsx`:
+
+```tsx
+// Archivo: src/components/produccion/FormNota.tsx
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { z } from "zod";
+import { zodResolver } from "../../lib/zodResolver";
+import { NotaSchema, type Nota } from "../../schemas/nota";
+
+const RespuestaError = z.object({ error: z.string(), campos: z.record(z.string(), z.array(z.string())).optional() });
+
+export function FormNota() {
+  const [guardada, setGuardada] = useState<string | null>(null);
+  const {
+    register,
+    handleSubmit,
+    setError,
+    reset,
+    formState: { errors, isSubmitting },
+  } = useForm<Nota>({ resolver: zodResolver(NotaSchema), mode: "onBlur" });
+
+  // handleSubmit valida con el esquema y solo llama a esta función si todo es correcto
+  const onSubmit = handleSubmit(async (nota) => {
+    setGuardada(null);
+    let res: Response;
+    try {
+      res = await fetch("/api/notas", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nota),
+      });
+    } catch {
+      setError("root", { message: "Sin conexión. Inténtalo de nuevo." });
+      return;
+    }
+    if (res.ok) {
+      setGuardada(nota.titulo);
+      reset(); // vacía el formulario
+      return;
+    }
+    // Errores del servidor: los de un campo van junto a ese campo; el resto, arriba
+    const cuerpo = RespuestaError.safeParse(await res.json().catch(() => null));
+    const campos = cuerpo.success ? (cuerpo.data.campos ?? {}) : {};
+    for (const [campo, mensajes] of Object.entries(campos)) {
+      if (campo === "titulo" || campo === "categoria") setError(campo, { message: mensajes[0] });
+    }
+    if (Object.keys(campos).length === 0) {
+      setError("root", { message: "No se pudo guardar. Inténtalo de nuevo." });
+    }
+  });
+
+  return (
+    <form onSubmit={onSubmit} noValidate className="tarjeta" id="form-nota">
+      <p>
+        <label htmlFor="nota-titulo">Título</label>
+        <br />
+        <input id="nota-titulo" aria-invalid={errors.titulo ? true : undefined} {...register("titulo")} />
+        {errors.titulo && <span className="error"> {errors.titulo.message}</span>}
+      </p>
+      <p>
+        <label htmlFor="nota-categoria">Categoría</label>
+        <br />
+        <select id="nota-categoria" defaultValue="" {...register("categoria")}>
+          <option value="" disabled>
+            Elige…
+          </option>
+          <option value="trabajo">Trabajo</option>
+          <option value="personal">Personal</option>
+          <option value="salud">Salud</option>
+          <option value="estudio">Estudio</option>
+        </select>
+        {errors.categoria && <span className="error"> {errors.categoria.message}</span>}
+      </p>
+      {errors.root && (
+        <p className="error" role="alert">
+          {errors.root.message}
+        </p>
+      )}
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? "Guardando…" : "Guardar nota"}
+      </button>
+      {guardada && <p id="guardada">Guardada: {guardada}</p>}
+    </form>
+  );
+}
+```
+
+Y la página `src/pages/produccion.astro`:
+
+```astro
+---
+// Archivo: src/pages/produccion.astro
+import Base from "../layouts/Base.astro";
+import { FormNota } from "../components/produccion/FormNota";
+---
+
+<Base titulo="Formularios en producción">
+  <h1>Formularios y peticiones</h1>
+  <FormNota client:load />
+</Base>
+```
+
+Abre `/produccion` y prueba cada caso: enviar vacío, un título que ya existe ("Revisar presupuesto"), el título que provoca un 500 ("Fallo del servidor") y uno válido con espacios (" Correr 10 km "). Medido en Chrome:
+
+```text
+1) enviar vacío: Mínimo 3 caracteres · Elige una categoría · Guardar nota · peticiones: 0
+2) mientras envía: Guardando… (deshabilitado)
+   respuesta 409: Ya tienes una nota con ese título · Guardar nota
+3) error 500: No se pudo guardar. Inténtalo de nuevo. · Guardar nota
+4) válida: Guardar nota · Guardada: Correr 10 km · campo título: ""
+peticiones totales: 3
+```
+
+Las piezas de `useForm`:
+
+- **`register("titulo")`** conecta el `<input>` con el formulario (nombre, `onChange`, `onBlur` y `ref`). No hay `value` ni `useState`.
+- **`handleSubmit(fn)`** valida con el _resolver_ y solo llama a `fn` si todo es correcto: por eso el envío vacío hizo **0 peticiones**. `fn` recibe los datos limpios (`"  Correr 10 km  "` llegó como `"Correr 10 km"`).
+- **`formState.isSubmitting`** es `true` mientras la función asíncrona no termina: el botón se deshabilita y cambia el texto (caso 2). Esto evita los envíos dobles.
+- **`setError("titulo", …)`** coloca un error **del servidor** junto a su campo (el 409), y **`setError("root", …)`** pone un error general para lo que no es de ningún campo (el 500 y la falta de conexión).
+- **`reset()`** vacía el formulario tras guardar.
+
+| `mode`                     | Cuándo valida (antes del primer envío)                               |
+| -------------------------- | -------------------------------------------------------------------- |
+| `"onSubmit"` (por defecto) | Solo al enviar                                                       |
+| `"onBlur"`                 | Al salir de cada campo; hasta salir de él, el error no se actualiza  |
+| `"onTouched"`              | La primera vez al salir del campo; desde entonces, en cada cambio    |
+| `"onChange"`               | En cada pulsación (puede ser molesto: errores mientras aún escribes) |
+
+Después del primer envío, todos vuelven a validar en cada cambio (`reValidateMode`, por defecto `"onChange"`).
+
+<Callout type="risk">
+
+- **El servidor valida siempre, aunque el formulario ya lo haga:** el esquema compartido garantiza que las reglas son las mismas, pero cualquiera puede enviar la petición sin pasar por el formulario. La API de prueba vuelve a llamar a `NotaSchema.safeParse`.
+- **Valida también la respuesta de error:** `RespuestaError.safeParse` comprueba la forma del JSON de error antes de usarlo. Un proxy que devuelve una página HTML de error, o un 502 sin cuerpo, no debe romper el formulario.
+- **No muestres el mensaje técnico del error:** "No se pudo guardar. Inténtalo de nuevo." es útil; `TypeError: Failed to fetch` o el texto de una excepción del servidor, no.
+
+</Callout>
+
+## Paso 3: actualizaciones optimistas con rollback
+
+Una **actualización optimista** cambia la interfaz **antes** de que responda el servidor, suponiendo que todo irá bien. Si el servidor confirma, no hay que hacer nada; si falla, se **deshace** el cambio (_rollback_) y se avisa. Es ideal para acciones que casi siempre funcionan y donde esperar 500 ms se siente lento, como marcar una sección como leída.
+
+Una API de prueba que tarda 500 ms y falla siempre con la sección `"I2.9"`. `src/pages/api/progreso/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/progreso/[id].ts
+// API de prueba: tarda 500 ms; la sección "I2.9" falla siempre, para probar el rollback
+import type { APIRoute } from "astro";
+
+export const prerender = false;
+
+const leidas = new Set<string>();
+
+const responder =
+  (leida: boolean): APIRoute =>
+  async ({ params }) => {
+    await new Promise((r) => setTimeout(r, 500));
+    const id = params.id ?? "";
+    if (id === "I2.9") return Response.json({ error: "Error interno" }, { status: 500 });
+    if (leida) leidas.add(id);
+    else leidas.delete(id);
+    return new Response(null, { status: 204 });
+  };
+
+export const PUT = responder(true);
+export const DELETE = responder(false);
+```
+
+La versión manual, `src/components/produccion/BotonLeidoManual.tsx`:
+
+```tsx
+// Archivo: src/components/produccion/BotonLeidoManual.tsx
+// Optimista "a mano": cambia ya, y deshace si el servidor falla
+import { useState } from "react";
+
+export function BotonLeidoManual({ seccionId }: { seccionId: string }) {
+  const [leido, setLeido] = useState(false);
+  const [pendiente, setPendiente] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function alternar() {
+    const anterior = leido;
+    setLeido(!anterior); // 1. optimista: la UI cambia antes de que responda el servidor
+    setError(null);
+    setPendiente(true);
+    try {
+      const res = await fetch(`/api/progreso/${seccionId}`, { method: anterior ? "DELETE" : "PUT" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    } catch {
+      setLeido(anterior); // 2. rollback: vuelve al valor que había
+      setError("No se pudo guardar. Inténtalo de nuevo.");
+    } finally {
+      setPendiente(false);
+    }
+  }
+
+  return (
+    <p id={`manual-${seccionId}`}>
+      <button aria-pressed={leido} disabled={pendiente} onClick={alternar}>
+        {leido ? "Leído ✓" : "Marcar como leído"}
+      </button>
+      {error && <span className="error"> {error}</span>}
+    </p>
+  );
+}
+```
+
+Y la de React 19, con **`useOptimistic`**: un estado provisional que solo existe mientras dura una transición y que desaparece solo al terminar. `src/components/produccion/BotonLeidoOptimista.tsx`:
+
+```tsx
+// Archivo: src/components/produccion/BotonLeidoOptimista.tsx
+// React 19: useOptimistic muestra un valor provisional MIENTRAS dura la transición
+import { useOptimistic, useState, useTransition } from "react";
+
+export function BotonLeidoOptimista({ seccionId }: { seccionId: string }) {
+  const [leido, setLeido] = useState(false); // el valor confirmado por el servidor
+  const [leidoVisible, setLeidoOptimista] = useOptimistic(leido); // lo que se ve
+  const [pendiente, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  function alternar() {
+    setError(null);
+    startTransition(async () => {
+      setLeidoOptimista(!leido); // provisional: solo vive hasta que acabe la transición
+      const res = await fetch(`/api/progreso/${seccionId}`, { method: leido ? "DELETE" : "PUT" }).catch(() => null);
+      if (res?.ok) {
+        startTransition(() => setLeido(!leido)); // confirmado: pasa a ser el valor real
+      } else {
+        setError("No se pudo guardar. Inténtalo de nuevo."); // sin rollback a mano: el optimista caduca solo
+      }
+    });
+  }
+
+  return (
+    <p id={`optimista-${seccionId}`}>
+      <button aria-pressed={leidoVisible} disabled={pendiente} onClick={alternar}>
+        {leidoVisible ? "Leído ✓" : "Marcar como leído"}
+      </button>
+      {error && <span className="error"> {error}</span>}
+    </p>
+  );
+}
+```
+
+La página `src/pages/optimista.astro`, con un botón de cada tipo para una sección que funciona y otra que falla:
+
+```astro
+---
+// Archivo: src/pages/optimista.astro
+import Base from "../layouts/Base.astro";
+import { BotonLeidoManual } from "../components/produccion/BotonLeidoManual";
+import { BotonLeidoOptimista } from "../components/produccion/BotonLeidoOptimista";
+---
+
+<Base titulo="Actualizaciones optimistas">
+  <h1>Actualizaciones optimistas</h1>
+  <h2>Manual</h2>
+  <BotonLeidoManual seccionId="I2.5" client:load />
+  <BotonLeidoManual seccionId="I2.9" client:load />
+  <h2>useOptimistic</h2>
+  <BotonLeidoOptimista seccionId="I2.5" client:load />
+  <BotonLeidoOptimista seccionId="I2.9" client:load />
+</Base>
+```
+
+Medido en Chrome, leyendo el botón en distintos momentos tras el clic:
+
+```text
+manual-I2.5
+  0 ms: Leído ✓ (deshabilitado)
+  100 ms: Leído ✓ (deshabilitado)
+  300 ms: Leído ✓ (deshabilitado)
+  700 ms: Leído ✓
+  1000 ms: Leído ✓
+manual-I2.9
+  0 ms: Leído ✓ (deshabilitado)
+  100 ms: Leído ✓ (deshabilitado)
+  300 ms: Leído ✓ (deshabilitado)
+  700 ms: Marcar como leído · No se pudo guardar. Inténtalo de nuevo.
+  1000 ms: Marcar como leído · No se pudo guardar. Inténtalo de nuevo.
+optimista-I2.5
+  0 ms: Leído ✓ (deshabilitado)
+  100 ms: Leído ✓ (deshabilitado)
+  300 ms: Leído ✓ (deshabilitado)
+  700 ms: Leído ✓
+  1000 ms: Leído ✓
+optimista-I2.9
+  0 ms: Leído ✓ (deshabilitado)
+  100 ms: Leído ✓ (deshabilitado)
+  300 ms: Leído ✓ (deshabilitado)
+  700 ms: Marcar como leído · No se pudo guardar. Inténtalo de nuevo.
+  1000 ms: Marcar como leído · No se pudo guardar. Inténtalo de nuevo.
+```
+
+Las dos versiones se comportan igual: el cambio se ve **al instante** (0 ms), el botón se deshabilita mientras la petición está en curso, y a los 500 ms el servidor decide: se queda "Leído ✓" o vuelve a "Marcar como leído" con el aviso. La diferencia está en el código:
+
+- **Manual:** guardas el valor `anterior`, lo cambias, y en el `catch` lo restauras. Tú gestionas el `pendiente` y el _rollback_.
+- **`useOptimistic`:** el valor provisional (`setLeidoOptimista`) solo vive **dentro de la transición**. Cuando la transición termina, `leidoVisible` vuelve a ser `leido`: si no confirmaste el cambio, el _rollback_ ocurre solo. `useTransition` da el `pendiente` sin otro `useState`.
+
+Esta plataforma usa la versión manual en su `MarkAsReadButton.tsx`, con un detalle más: avisa al índice lateral con un evento (I2.4) tanto al cambiar como al deshacer.
+
+<Callout type="risk">
+
+- **Optimista solo para lo que casi siempre funciona y se puede deshacer:** marcar como leído, dar "me gusta" o reordenar, sí. Un pago, un envío de correo o borrar una cuenta, nunca: el usuario no debe ver "Hecho" hasta que el servidor lo confirme.
+- **Deshabilitar el botón evita carreras:** sin `disabled`, dos clics rápidos lanzan un `PUT` y un `DELETE` casi a la vez, y si llegan al servidor en orden inverso, el estado final es el contrario del que se ve. Si no puedes deshabilitar, numera las peticiones e ignora las respuestas antiguas (el patrón de B6.6).
+- **Con `useOptimistic`, las actualizaciones después de un `await` necesitan su propio `startTransition`:** por eso `setLeido(!leido)` va envuelto de nuevo. Fuera de una transición, React avisa en desarrollo de que una actualización optimista ocurrió fuera de una acción.
+
+</Callout>
+
+## Paso 4: `useTransition` para no bloquear la interfaz
+
+React actualiza el estado por orden de llegada, y un render caro bloquea todo: mientras pinta una lista de 100 filas lentas, el navegador no puede mostrar la letra que acabas de teclear. **`useTransition`** marca una actualización como **no urgente**: React la calcula "en segundo plano", la interrumpe si llega algo más urgente (otra tecla) y mientras tanto mantiene la interfaz respondiendo. Crea `src/components/produccion/BuscadorLento.tsx`:
+
+```tsx
+// Archivo: src/components/produccion/BuscadorLento.tsx
+// Un filtro sobre una lista cara de pintar: con y sin useTransition
+import { memo, useState, useTransition } from "react";
+
+const ENTRENOS = Array.from({ length: 300 }, (_, i) => `Entreno ${i + 1} · ${["running", "fuerza", "movilidad"][i % 3]}`);
+
+// Simula un componente caro: cada fila tarda ~1 ms en renderizarse
+function FilaLenta({ texto }: { texto: string }) {
+  const fin = performance.now() + 1;
+  while (performance.now() < fin) {
+    // trabajo sintético
+  }
+  return <li>{texto}</li>;
+}
+
+const Lista = memo(function Lista({ filtro }: { filtro: string }) {
+  const visibles = ENTRENOS.filter((e) => e.includes(filtro));
+  return (
+    <ul className="lista">
+      {visibles.map((e) => (
+        <FilaLenta key={e} texto={e} />
+      ))}
+    </ul>
+  );
+});
+
+export function BuscadorLento({ conTransicion }: { conTransicion: boolean }) {
+  const [texto, setTexto] = useState(""); // lo que se escribe: urgente
+  const [filtro, setFiltro] = useState(""); // lo que filtra la lista: puede esperar
+  const [pendiente, startTransition] = useTransition();
+
+  return (
+    <div className="tarjeta" id={conTransicion ? "con" : "sin"}>
+      <input
+        value={texto}
+        placeholder={conTransicion ? "Con useTransition" : "Sin useTransition"}
+        onChange={(e) => {
+          setTexto(e.target.value);
+          if (conTransicion) startTransition(() => setFiltro(e.target.value));
+          else setFiltro(e.target.value);
+        }}
+      />
+      {pendiente && <span> actualizando…</span>}
+      <Lista filtro={filtro} />
+    </div>
+  );
+}
+```
+
+Y `src/pages/transicion.astro`:
+
+```astro
+---
+// Archivo: src/pages/transicion.astro
+import Base from "../layouts/Base.astro";
+import { BuscadorLento } from "../components/produccion/BuscadorLento";
+---
+
+<Base titulo="useTransition">
+  <h1>useTransition</h1>
+  <BuscadorLento conTransicion={false} client:load />
+  <BuscadorLento conTransicion={true} client:load />
+</Base>
+```
+
+Escribe "fuerza" en cada buscador. Medido en Chrome (en desarrollo), el tiempo que espera cada tecla hasta que el navegador puede pintar el siguiente fotograma:
+
+```text
+Sin useTransition → espera por tecla (ms): 108, 103, 103, 103, 103, 103 · máxima 108 ms · filas al final: 100
+Con useTransition → espera por tecla (ms): 16, 1, 9, 1, 4, 1 · máxima 16 ms · filas al final: 100
+```
+
+Sin transición, cada pulsación congela la página unos 100 ms: al escribir rápido, las letras aparecen a saltos. Con transición, el campo responde en un fotograma (16 ms o menos) y la lista llega un poco después, con el mismo resultado final. La clave es separar **dos estados**: `texto` (lo que se ve en el campo, urgente) y `filtro` (lo que filtra la lista, puede esperar), y actualizar solo el segundo dentro de `startTransition`.
+
+<Callout type="risk">
+
+- **`useTransition` no hace el render más rápido:** la lista tarda lo mismo; lo que cambia es que no bloquea lo urgente. Si un componente es lento, primero intenta que no lo sea (menos filas, virtualización, `memo` donde se mida, I2.6).
+- **El texto del campo nunca va en la transición:** si el `value` de un `<input>` controlado se actualiza dentro de `startTransition`, React puede retrasarlo y el cursor salta. Lo urgente, fuera; lo derivado y caro, dentro.
+- **`useDeferredValue` es la alternativa cuando no controlas el `setState`:** `const filtroDiferido = useDeferredValue(texto)` da una versión "retrasada" del valor para pasársela a la lista. Hace lo mismo desde el lado de quien recibe el dato.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Rehaz el formulario de registro de B6.5 con `react-hook-form`, el `zodResolver` del Paso 1 y el `RegistroSchema` de I1.4 (nombre, email y contraseña), guardado en `src/schemas/registro.ts` para compartirlo con la API.
+2. Crea `src/pages/api/registro.ts`: valida con el mismo esquema, responde 409 si el correo ya existe (por ejemplo, `dani@example.com`) y 201 con el nombre y el correo, nunca la contraseña.
+3. Los errores se validan al salir de cada campo y se actualizan mientras el usuario los corrige; los del servidor aparecen junto a su campo, con el foco en el primero; y el botón se deshabilita mientras envía.
+4. Comprueba que el correo llega limpio al servidor (`" Dani@Example.COM "` → `dani@example.com`).
+
+</Callout>
+
+Solución. `src/schemas/registro.ts`:
+
+```ts
+// Archivo: src/schemas/registro.ts
+// El RegistroSchema de I1.4: lo usan el formulario (cliente) y el endpoint (servidor)
+import { z } from "zod";
+
+export const RegistroSchema = z.object({
+  nombre: z.string().trim().min(2, "Mínimo 2 caracteres").max(60, "Máximo 60 caracteres"),
+  email: z.string().trim().toLowerCase().pipe(z.email("Correo no válido")),
+  password: z.string().min(8, "Mínimo 8 caracteres").max(128, "Máximo 128 caracteres"),
+});
+
+export type Registro = z.infer<typeof RegistroSchema>;
+```
+
+`src/pages/api/registro.ts`:
+
+```ts
+// Archivo: src/pages/api/registro.ts
+// API de prueba: valida con el mismo esquema y simula un correo ya registrado
+import type { APIRoute } from "astro";
+import { z } from "zod";
+import { RegistroSchema } from "../../schemas/registro";
+
+export const prerender = false;
+
+const registrados = new Set(["dani@example.com"]);
+
+export const POST: APIRoute = async ({ request }) => {
+  await new Promise((r) => setTimeout(r, 600));
+  const r = RegistroSchema.safeParse(await request.json().catch(() => null));
+  if (!r.success) {
+    return Response.json({ error: "Revisa los datos", campos: z.flattenError(r.error).fieldErrors }, { status: 422 });
+  }
+  if (registrados.has(r.data.email)) {
+    return Response.json({ error: "Ya existe", campos: { email: ["Ya existe una cuenta con ese correo"] } }, { status: 409 });
+  }
+  registrados.add(r.data.email);
+  return Response.json({ nombre: r.data.nombre, email: r.data.email }, { status: 201 }); // nunca la contraseña
+};
+```
+
+`src/components/produccion/RegistroRHF.tsx`:
+
+```tsx
+// Archivo: src/components/produccion/RegistroRHF.tsx
+// El registro de B6.5, con react-hook-form y el esquema compartido
+import { useId, useState } from "react";
+import { useForm, type FieldPath } from "react-hook-form";
+import { z } from "zod";
+import { zodResolver } from "../../lib/zodResolver";
+import { RegistroSchema, type Registro } from "../../schemas/registro";
+
+const RespuestaError = z.object({ campos: z.record(z.string(), z.array(z.string()).optional()).optional() });
+const CAMPOS: FieldPath<Registro>[] = ["nombre", "email", "password"];
+
+export function RegistroRHF() {
+  const id = useId();
+  const [creada, setCreada] = useState<string | null>(null);
+  const {
+    register,
+    handleSubmit,
+    setError,
+    formState: { errors, isSubmitting },
+  } = useForm<Registro>({
+    resolver: zodResolver(RegistroSchema),
+    mode: "onTouched", // valida al salir del campo la primera vez y, desde entonces, en cada cambio
+    defaultValues: { nombre: "", email: "", password: "" },
+  });
+
+  const onSubmit = handleSubmit(async (datos) => {
+    const res = await fetch("/api/registro", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(datos), // ya limpio: sin espacios y con el correo en minúsculas
+    }).catch(() => null);
+
+    if (res?.status === 201) {
+      const usuario = (await res.json()) as { nombre: string; email: string };
+      setCreada(`Cuenta creada: ${usuario.nombre} <${usuario.email}>`);
+      return;
+    }
+    const cuerpo = res ? RespuestaError.safeParse(await res.json().catch(() => null)) : null;
+    const campos = cuerpo?.success ? (cuerpo.data.campos ?? {}) : {};
+    let alguno = false;
+    for (const campo of CAMPOS) {
+      const mensaje = campos[campo]?.[0];
+      if (mensaje) {
+        setError(campo, { message: mensaje }, { shouldFocus: !alguno }); // lleva el foco al primero
+        alguno = true;
+      }
+    }
+    if (!alguno) setError("root", { message: res ? "No se pudo crear la cuenta." : "Sin conexión. Inténtalo de nuevo." });
+  });
+
+  function campo(nombre: FieldPath<Registro>, etiqueta: string, tipo: string, autoComplete: string) {
+    const error = errors[nombre]?.message;
+    return (
+      <p>
+        <label htmlFor={`${id}-${nombre}`}>{etiqueta}</label>
+        <br />
+        <input
+          id={`${id}-${nombre}`}
+          type={tipo}
+          autoComplete={autoComplete}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-${nombre}-error` : undefined}
+          {...register(nombre)}
+        />
+        {error && (
+          <span id={`${id}-${nombre}-error`} className="error" role="alert">
+            {" "}
+            {error}
+          </span>
+        )}
+      </p>
+    );
+  }
+
+  if (creada) return <p className="tarjeta" id="creada">{creada}</p>;
+
+  return (
+    <form onSubmit={onSubmit} noValidate className="tarjeta" id="registro-rhf">
+      <h2 style={{ marginTop: 0 }}>Crear cuenta</h2>
+      {campo("nombre", "Nombre", "text", "name")}
+      {campo("email", "Correo", "email", "email")}
+      {campo("password", "Contraseña", "password", "new-password")}
+      {errors.root && (
+        <p className="error" role="alert">
+          {errors.root.message}
+        </p>
+      )}
+      <button type="submit" disabled={isSubmitting}>
+        {isSubmitting ? "Creando cuenta…" : "Crear cuenta"}
+      </button>
+    </form>
+  );
+}
+```
+
+`src/pages/ejercicio-i25.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-i25.astro
+import Base from "../layouts/Base.astro";
+import { RegistroRHF } from "../components/produccion/RegistroRHF";
+---
+
+<Base titulo="Ejercicio I2.5">
+  <h1>Registro</h1>
+  <RegistroRHF client:load />
+</Base>
+```
+
+Medido en Chrome:
+
+```text
+1) nombre 'D' y salgo del campo: Mínimo 2 caracteres · Crear cuenta
+2) lo corrijo mientras escribo: Crear cuenta
+3) correo ya registrado, enviando: Creando cuenta… (deshabilitado)
+   respuesta 409: Ya existe una cuenta con ese correo · Crear cuenta · foco en: email · aria-invalid: true
+4) correo nuevo: Cuenta creada: Dani <nuevo@example.com>
+peticiones: 2
+```
+
+Las decisiones:
+
+- **`mode: "onTouched"`:** el primer error aparece al salir del campo (no mientras se escribe por primera vez) y desaparece en cuanto se corrige (caso 2). La primera versión de esta solución usaba `mode: "onBlur"` con `reValidateMode: "onChange"`, y al medirla el error "Mínimo 2 caracteres" **seguía visible** después de escribir "Dani": `reValidateMode` solo actúa tras el primer envío.
+- **`setError(campo, …, { shouldFocus: !alguno })`:** el foco salta al primer campo con error del servidor (`foco en: email`), y `aria-invalid` y `aria-describedby` hacen que un lector de pantalla lea el mensaje al llegar.
+- **Un solo esquema en `src/schemas/registro.ts`:** el formulario y la API lo importan. El correo con espacios y mayúsculas se limpia en el navegador (el _resolver_ devuelve los datos transformados) y se vuelve a limpiar en el servidor.
+- **La API nunca devuelve la contraseña,** ni siquiera en el 201: solo lo que el cliente necesita mostrar.
+- **Solo 2 peticiones:** los errores del nombre se resolvieron en el navegador; solo salieron el intento con el correo repetido y el bueno.
+
+<Callout type="risk">
+
+- **Un 409 que dice "ese correo ya existe" revela quién está registrado:** en un registro público es un compromiso habitual (el usuario necesita saberlo), pero en el inicio de sesión nunca: allí el mensaje es siempre genérico ("Correo o contraseña incorrectos"), como en esta plataforma (I5).
+- **La validación del navegador no protege de nada:** el servidor de prueba vuelve a validar con `RegistroSchema`. Sin esa segunda validación, un `curl` podría crear una cuenta con un nombre de 1 carácter o una contraseña de 3.
+- **Las APIs de prueba guardan en memoria:** los correos registrados se pierden al reiniciar `npm run dev` y, mientras tanto, se acumulan. Si al repetir la prueba "nuevo@example.com" da 409, es porque ya lo registraste.
+
+</Callout>
+
+<Callout type="mastery">
+
+La UI responde al instante y se corrige sola si el servidor falla: validas los formularios con el mismo esquema que el servidor (`react-hook-form` y un _resolver_ de Zod), muestras los estados de envío y los errores del servidor junto a cada campo, aplicas actualizaciones optimistas con _rollback_ (a mano o con `useOptimistic`) solo donde tiene sentido, y separas lo urgente de lo que puede esperar con `useTransition`.
+
+</Callout>
+
+## Resumen
+
+- `react-hook-form` + un _resolver_ de Zod: `register`, `handleSubmit` (solo envía si es válido, con los datos ya transformados), `isSubmitting` y `setError` para los errores del servidor.
+- Elige el `mode`: `"onTouched"` valida al salir y se actualiza mientras se corrige; `reValidateMode` solo actúa tras el primer envío.
+- Optimista = cambiar ya, deshacer si falla; deshabilita mientras está pendiente y no lo uses para acciones irreversibles.
+- `useOptimistic` mantiene un valor provisional durante una transición y lo descarta solo si no lo confirmas.
+- `useTransition` marca como no urgente un render caro: en la medición, cada tecla pasó de ~103 ms de espera a 16 ms o menos.

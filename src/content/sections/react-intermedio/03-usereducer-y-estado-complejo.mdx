@@ -1,0 +1,574 @@
+---
+sectionId: "I2.3"
+course: "I2"
+title: "useReducer y estado complejo"
+order: 3
+minutes: 60
+summary: "Provocas un estado contradictorio con varios useState, lo eliminas con un reducer puro y estados como unión discriminada, lo pruebas con node --test sin montar React y construyes un cuestionario de 5 preguntas."
+---
+
+Un cuestionario parece sencillo: la pregunta actual, las respuestas, si ya se envió y cuántos aciertos hubo. Con `useState` son cuatro variables, y cada botón tiene que actualizar **la combinación correcta** de ellas. El problema llega el día que una función olvida una: la pantalla muestra un resultado con todas las respuestas vacías, o un botón que "no hace nada". Son **estados contradictorios**, combinaciones de valores que nunca deberían existir a la vez. `useReducer` resuelve esto concentrando todas las transiciones en una sola función pura, y una **unión discriminada** (B1.6) hace que esas combinaciones imposibles ni siquiera se puedan escribir. En esta sección vas a provocar el bug, vas a hacerlo imposible y vas a probar la lógica sin abrir el navegador.
+
+**Lo que tendrás al terminar:** un _reducer_ de cuestionario puro y probado con `node --test`, y un componente de cuestionario de 5 preguntas con navegación, respuestas y una pantalla de resultado con explicaciones.
+
+**Requisitos:** las secciones I2.1 e I2.2 y uniones discriminadas (B1.6). Crea las carpetas:
+
+```bash
+mkdir -p src/components/cuestionario src/lib
+```
+
+## Paso 1: el bug de los estados contradictorios
+
+Crea las preguntas de prueba, `src/lib/preguntas.ts`:
+
+```ts
+// Archivo: src/lib/preguntas.ts
+export interface Pregunta {
+  enunciado: string;
+  opciones: string[];
+  correcta: number; // índice de la opción correcta
+}
+
+export const PREGUNTAS_DEMO: Pregunta[] = [
+  { enunciado: "¿Qué dispara un re-render?", opciones: ["Cambiar una variable local", "Cambiar el estado", "Un console.log"], correcta: 1 },
+  { enunciado: "¿Dónde se llaman los hooks?", opciones: ["Dentro de un if", "En el nivel superior", "En un bucle"], correcta: 1 },
+  { enunciado: "¿Qué compara memo?", opciones: ["El contenido", "La identidad (Object.is)", "El tipo"], correcta: 1 },
+];
+```
+
+Y un cuestionario con cuatro `useState`, `src/components/cuestionario/ConUseState.tsx`:
+
+```tsx
+// Archivo: src/components/cuestionario/ConUseState.tsx
+// ❌ Cuatro useState que deben cambiar a la vez… y un día uno se olvida
+import { useState } from "react";
+import { PREGUNTAS_DEMO as PREGUNTAS } from "../../lib/preguntas";
+
+export function CuestionarioConUseState() {
+  const [paso, setPaso] = useState(0);
+  const [respuestas, setRespuestas] = useState<(number | null)[]>(PREGUNTAS.map(() => null));
+  const [enviado, setEnviado] = useState(false);
+  const [aciertos, setAciertos] = useState(0);
+
+  function elegir(opcion: number) {
+    setRespuestas(respuestas.map((r, i) => (i === paso ? opcion : r)));
+  }
+
+  function enviar() {
+    setAciertos(respuestas.filter((r, i) => r === PREGUNTAS[i]!.correcta).length);
+    setEnviado(true);
+  }
+
+  function repetir() {
+    setPaso(0);
+    setRespuestas(PREGUNTAS.map(() => null));
+    // ← olvido: setEnviado(false) y setAciertos(0)
+  }
+
+  if (enviado) {
+    return (
+      <div className="tarjeta" id="usestate">
+        <p className="resultado">
+          Resultado: {aciertos}/{PREGUNTAS.length} · respuestas: {JSON.stringify(respuestas)}
+        </p>
+        <button onClick={repetir}>Repetir</button>
+      </div>
+    );
+  }
+
+  const pregunta = PREGUNTAS[paso]!;
+  return (
+    <div className="tarjeta" id="usestate">
+      <p>
+        {paso + 1}/{PREGUNTAS.length} · {pregunta.enunciado}
+      </p>
+      {pregunta.opciones.map((o, i) => (
+        <button key={o} aria-pressed={respuestas[paso] === i} onClick={() => elegir(i)}>
+          {o}
+        </button>
+      ))}
+      {paso < PREGUNTAS.length - 1 ? (
+        <button onClick={() => setPaso(paso + 1)}>Siguiente</button>
+      ) : (
+        <button onClick={enviar}>Enviar</button>
+      )}
+    </div>
+  );
+}
+```
+
+Crea la página `src/pages/cuestionario.astro` con solo este componente por ahora:
+
+```astro
+---
+// Archivo: src/pages/cuestionario.astro
+import Base from "../layouts/Base.astro";
+import { CuestionarioConUseState } from "../components/cuestionario/ConUseState";
+---
+
+<Base titulo="useReducer">
+  <h1>Cuestionario</h1>
+  <CuestionarioConUseState client:load />
+</Base>
+```
+
+Abre `/cuestionario`, responde las tres preguntas, envía y pulsa "Repetir". Medido en Chrome:
+
+```text
+al enviar: Resultado: 2/3 · respuestas: [1,1,0] Repetir
+tras Repetir: Resultado: 2/3 · respuestas: [null,null,null] Repetir
+```
+
+"Repetir" vació las respuestas y volvió al paso 0, pero **olvidó** `enviado` y `aciertos`. El resultado es una pantalla imposible: un 2/3 sin ninguna respuesta, y un botón que, a ojos del usuario, no hace nada. Nada en el código impide este estado: las cuatro variables son independientes, y TypeScript acepta cualquier combinación de sus valores (`enviado: true` con `respuestas: [null, null, null]` es perfectamente válido para él).
+
+<Callout type="risk">
+
+- **Cada `useState` nuevo multiplica las combinaciones:** con 4 variables, cada función que cambia el flujo tiene que acordarse de las 4. Con 6 (añade `cargando` y `error` para enviar a un servidor), los olvidos son casi seguros.
+- **Los estados "derivados" no van en el estado:** `aciertos` se puede calcular a partir de `respuestas` y las preguntas. Guardarlo aparte es una de las causas del bug: dos fuentes de verdad que se desincronizan.
+
+</Callout>
+
+## Paso 2: un reducer y estados como unión discriminada
+
+Un **_reducer_** es una función pura con esta forma: **(estado actual, acción) → estado nuevo**. Las **acciones** describen _qué ha pasado_ ("el usuario eligió la opción 2", "pulsó enviar"), y el _reducer_ decide _cómo cambia el estado_. Todas las transiciones viven en un solo sitio. Crea `src/lib/cuestionario.ts`:
+
+```ts
+// Archivo: src/lib/cuestionario.ts
+// El flujo del cuestionario como una función pura: (estado, acción) → estado nuevo
+import type { Pregunta } from "./preguntas.ts";
+
+// Unión discriminada (B1.6): cada fase tiene SOLO los datos que tienen sentido en ella
+export type EstadoCuestionario =
+  | { fase: "respondiendo"; paso: number; respuestas: (number | null)[] }
+  | { fase: "resultado"; respuestas: number[]; aciertos: number };
+
+export type AccionCuestionario =
+  | { type: "elegir"; opcion: number }
+  | { type: "ir"; paso: number }
+  | { type: "enviar"; preguntas: Pregunta[] }
+  | { type: "repetir"; total: number };
+
+export const estadoInicial = (total: number): EstadoCuestionario => ({
+  fase: "respondiendo",
+  paso: 0,
+  respuestas: Array<number | null>(total).fill(null),
+});
+
+export function cuestionarioReducer(
+  estado: EstadoCuestionario,
+  accion: AccionCuestionario,
+): EstadoCuestionario {
+  switch (accion.type) {
+    case "elegir":
+      if (estado.fase !== "respondiendo") return estado;
+      return {
+        ...estado,
+        respuestas: estado.respuestas.map((r, i) => (i === estado.paso ? accion.opcion : r)),
+      };
+
+    case "ir":
+      if (estado.fase !== "respondiendo") return estado;
+      return { ...estado, paso: Math.max(0, Math.min(accion.paso, estado.respuestas.length - 1)) };
+
+    case "enviar": {
+      if (estado.fase !== "respondiendo") return estado;
+      const { respuestas } = estado;
+      if (respuestas.some((r) => r === null)) return estado; // no se envía con huecos
+      const completas = respuestas as number[];
+      const aciertos = completas.filter((r, i) => r === accion.preguntas[i]?.correcta).length;
+      return { fase: "resultado", respuestas: completas, aciertos };
+    }
+
+    case "repetir":
+      return estadoInicial(accion.total); // UNA transición: imposible olvidar una variable
+  }
+}
+```
+
+Las dos ideas clave:
+
+- **El estado es una unión discriminada por `fase`:** en `"respondiendo"` existen `paso` y unas respuestas que pueden ser `null`; en `"resultado"` existen `aciertos` y unas respuestas completas. No hay forma de escribir "resultado con respuestas vacías": el tipo no lo permite. Es la idea de "hacer imposibles los estados imposibles".
+- **Las acciones también son una unión discriminada, por `type`:** dentro de cada `case`, TypeScript sabe qué datos trae la acción (`accion.opcion`, `accion.preguntas`…).
+
+`"repetir"` es ahora **una sola transición**, `estadoInicial(total)`, y no hay variables que olvidar. Y cada `case` comprueba la fase: en la pantalla de resultado, `"elegir"` simplemente no hace nada.
+
+Ahora el componente, que solo pinta el estado y envía acciones con `dispatch`. `src/components/cuestionario/ConReducer.tsx`:
+
+```tsx
+// Archivo: src/components/cuestionario/ConReducer.tsx
+// ✅ El mismo cuestionario: el componente solo pinta el estado y envía acciones
+import { useReducer } from "react";
+import { cuestionarioReducer, estadoInicial } from "../../lib/cuestionario";
+import { PREGUNTAS_DEMO as PREGUNTAS } from "../../lib/preguntas";
+
+export function CuestionarioConReducer() {
+  const [estado, dispatch] = useReducer(cuestionarioReducer, PREGUNTAS.length, estadoInicial);
+
+  if (estado.fase === "resultado") {
+    return (
+      <div className="tarjeta" id="reducer">
+        <p className="resultado">
+          Resultado: {estado.aciertos}/{PREGUNTAS.length} · respuestas: {JSON.stringify(estado.respuestas)}
+        </p>
+        <button onClick={() => dispatch({ type: "repetir", total: PREGUNTAS.length })}>Repetir</button>
+      </div>
+    );
+  }
+
+  const { paso, respuestas } = estado; // aquí TypeScript sabe que la fase es "respondiendo"
+  const pregunta = PREGUNTAS[paso]!;
+  return (
+    <div className="tarjeta" id="reducer">
+      <p>
+        {paso + 1}/{PREGUNTAS.length} · {pregunta.enunciado}
+      </p>
+      {pregunta.opciones.map((o, i) => (
+        <button key={o} aria-pressed={respuestas[paso] === i} onClick={() => dispatch({ type: "elegir", opcion: i })}>
+          {o}
+        </button>
+      ))}
+      {paso < PREGUNTAS.length - 1 ? (
+        <button onClick={() => dispatch({ type: "ir", paso: paso + 1 })}>Siguiente</button>
+      ) : (
+        <button onClick={() => dispatch({ type: "enviar", preguntas: PREGUNTAS })}>Enviar</button>
+      )}
+    </div>
+  );
+}
+```
+
+`useReducer(cuestionarioReducer, PREGUNTAS.length, estadoInicial)` usa la forma de tres argumentos: React llama a `estadoInicial(PREGUNTAS.length)` una sola vez para crear el estado de partida. Sustituye la página para comparar los dos:
+
+```astro
+---
+// Archivo: src/pages/cuestionario.astro
+import Base from "../layouts/Base.astro";
+import { CuestionarioConUseState } from "../components/cuestionario/ConUseState";
+import { CuestionarioConReducer } from "../components/cuestionario/ConReducer";
+---
+
+<Base titulo="useReducer">
+  <h1>Cuestionario</h1>
+  <h2>Con cuatro useState</h2>
+  <CuestionarioConUseState client:load />
+  <h2>Con useReducer</h2>
+  <CuestionarioConReducer client:load />
+</Base>
+```
+
+Repite el recorrido en el cuestionario con `useReducer`:
+
+```text
+al enviar: Resultado: 2/3 · respuestas: [1,1,0] Repetir
+tras Repetir: 1/3 · ¿Qué dispara un re-render? Cambiar una variable localCambiar el estadoUn console.logSiguiente
+```
+
+"Repetir" vuelve a la primera pregunta, limpio.
+
+**El compilador también vigila las acciones.** Añade una acción nueva a la unión, `| { type: "salir" }`, sin tratarla en el `switch`, y ejecuta `npx astro check`:
+
+```text
+src/lib/cuestionario.ts:26:4 - error ts(2366): Function lacks ending return statement and return type does not include 'undefined'.
+```
+
+Como el _reducer_ declara que devuelve `EstadoCuestionario` y el `switch` no cubre `"salir"`, TypeScript sabe que hay un camino que no devuelve nada. Cada acción nueva te obliga a decidir qué hace. Quita la acción añadida.
+
+<Callout type="risk">
+
+- **Un reducer nunca modifica el estado que recibe:** `estado.respuestas[paso] = opcion; return estado;` devuelve **el mismo objeto**, React lo compara con `Object.is` (I2.1), ve que no ha cambiado y **no vuelve a renderizar**. Crea siempre objetos y arrays nuevos (`{ ...estado, … }`, `.map`).
+- **Nada de efectos dentro del reducer:** ni `fetch`, ni `localStorage`, ni `Math.random()` ni `Date.now()`. En desarrollo, `StrictMode` puede llamar al reducer dos veces, y una petición dentro se enviaría dos veces. Lo que no es puro va en el manejador del evento, antes o después del `dispatch`.
+- **No añadas `default:` "por si acaso":** un `default: return estado;` silencia el error de las acciones sin tratar. Deja que el compilador te avise.
+
+</Callout>
+
+## Paso 3: probar el reducer sin montar React
+
+Como el _reducer_ es una función pura, se prueba como cualquier función: le das un estado y una acción y compruebas lo que devuelve. No hace falta navegador, ni React, ni librerías de pruebas; basta con el _test runner_ que trae Node. Crea `src/lib/cuestionario.test.ts`:
+
+```ts
+// Archivo: src/lib/cuestionario.test.ts
+// Uso: node --test src/lib/cuestionario.test.ts (Node 23.6+ ejecuta TypeScript directamente)
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { cuestionarioReducer as reducer, estadoInicial } from "./cuestionario.ts";
+import { PREGUNTAS_DEMO as PREGUNTAS } from "./preguntas.ts";
+
+/** Responde las primeras preguntas de un cuestionario de `total` preguntas */
+const responder = (total: number, opciones: number[]) =>
+  opciones.reduce(
+    (s, opcion, paso) => reducer(reducer(s, { type: "ir", paso }), { type: "elegir", opcion }),
+    estadoInicial(total),
+  );
+
+test("no se puede enviar con preguntas sin responder", () => {
+  const s = responder(3, [1, 1]); // falta la tercera
+  assert.equal(reducer(s, { type: "enviar", preguntas: PREGUNTAS }), s);
+});
+
+test("enviar calcula los aciertos y pasa a resultado", () => {
+  const s = reducer(responder(3, [1, 1, 0]), { type: "enviar", preguntas: PREGUNTAS });
+  assert.deepEqual(s, { fase: "resultado", respuestas: [1, 1, 0], aciertos: 2 });
+});
+
+test("en la pantalla de resultado no se puede cambiar una respuesta", () => {
+  const s = reducer(responder(3, [1, 1, 1]), { type: "enviar", preguntas: PREGUNTAS });
+  assert.equal(reducer(s, { type: "elegir", opcion: 0 }), s);
+});
+
+test("repetir vuelve al estado inicial completo", () => {
+  const s = reducer(responder(3, [1, 1, 0]), { type: "enviar", preguntas: PREGUNTAS });
+  assert.deepEqual(reducer(s, { type: "repetir", total: 3 }), estadoInicial(3));
+});
+
+test("ir no se sale de los límites", () => {
+  const s = reducer(estadoInicial(3), { type: "ir", paso: 99 });
+  assert.deepEqual(s, { fase: "respondiendo", paso: 2, respuestas: [null, null, null] });
+});
+```
+
+```bash
+node --test src/lib/cuestionario.test.ts
+```
+
+```text
+✔ no se puede enviar con preguntas sin responder (0.316792ms)
+✔ enviar calcula los aciertos y pasa a resultado (0.260375ms)
+✔ en la pantalla de resultado no se puede cambiar una respuesta (0.051834ms)
+✔ repetir vuelve al estado inicial completo (0.048958ms)
+✔ ir no se sale de los límites (0.043125ms)
+ℹ tests 5
+ℹ pass 5
+ℹ fail 0
+```
+
+(Los tiempos varían en cada ejecución).
+
+- **Node 23.6 o superior ejecuta TypeScript directamente**, quitando los tipos al cargar el archivo. Por eso los _imports_ entre estos dos archivos llevan la extensión `.ts` (`"./cuestionario.ts"`): Node no la adivina. La configuración de TypeScript de Astro lo permite (`allowImportingTsExtensions`).
+- **`assert.equal(a, b)`** compara por identidad; sirve para comprobar que una acción ignorada devuelve **el mismo** estado. **`assert.deepEqual`** compara el contenido.
+
+Estas pruebas se ejecutan en milisegundos y cubren justo lo que se rompía en el Paso 1. En la Tanda 9, esta plataforma prueba así su propio `quizReducer` (`tests/components/quiz-reducer.test.ts`), con Vitest.
+
+<Callout type="risk">
+
+- **Prueba transiciones, no implementaciones:** "enviar con huecos no cambia nada" seguirá siendo cierto aunque reescribas el reducer; "el reducer llama a `.some()`" no. Las buenas pruebas describen comportamiento.
+- **`node --test` no entiende los alias de Astro:** si el reducer importara `@/lib/…`, Node no sabría resolverlo. Mantén los _reducers_ con _imports_ relativos (o usa Vitest, que lee la configuración de Vite, como en la plataforma).
+- **El tipo no sustituye a la prueba:** la unión discriminada impide "resultado sin respuestas", pero no impide que calcules mal los aciertos. Para eso está el segundo test.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Con el mismo `cuestionarioReducer`, implementa en `src/components/cuestionario/Cuestionario.tsx` un cuestionario de **5 preguntas** que reciba las preguntas por _props_.
+2. Navegación: "Anterior" y "Siguiente", y una barra con un botón por pregunta que indique cuáles están respondidas y cuál es la actual.
+3. Las opciones, como botones de radio accesibles (`fieldset` y `legend`). "Enviar" solo se puede pulsar cuando todas tengan respuesta, con un aviso de cuántas faltan.
+4. Pantalla de resultado: aprobado con 4 de 5, y cada pregunta con ✓ o ✗, tu respuesta, la correcta y una explicación. Un botón "Repetir".
+
+</Callout>
+
+Solución. Las preguntas, con su explicación, en `src/lib/preguntas-react.ts`:
+
+```ts
+// Archivo: src/lib/preguntas-react.ts
+import type { Pregunta } from "./preguntas";
+
+export interface PreguntaConExplicacion extends Pregunta {
+  explicacion: string;
+}
+
+export const PREGUNTAS_REACT: PreguntaConExplicacion[] = [
+  {
+    enunciado: "¿Qué hace React cuando un componente se renderiza?",
+    opciones: ["Reescribe todo su DOM", "Calcula el JSX y aplica al DOM solo las diferencias", "Recarga la isla"],
+    correcta: 1,
+    explicacion: "Render (calcular) y commit (aplicar las diferencias) son fases distintas.",
+  },
+  {
+    enunciado: "Un componente con memo recibe onClick={() => …}. ¿Se re-renderiza cuando lo hace su padre?",
+    opciones: ["No, memo lo impide", "Solo en desarrollo", "Sí: la función es nueva en cada render"],
+    correcta: 2,
+    explicacion: "memo compara por identidad, y una función creada en el render es nueva cada vez.",
+  },
+  {
+    enunciado: "¿Por qué no se puede llamar a un hook dentro de un if?",
+    opciones: ["Porque React guarda los hooks por orden de llamada", "Porque es más lento", "Porque TypeScript lo prohíbe"],
+    correcta: 0,
+    explicacion: "Si el orden cambia entre renders, React asigna el estado al hook equivocado.",
+  },
+  {
+    enunciado: "¿Qué devuelve un reducer?",
+    opciones: ["Nada: modifica el estado", "Un estado nuevo a partir del anterior y la acción", "Una promesa"],
+    correcta: 1,
+    explicacion: "Es una función pura: (estado, acción) → estado nuevo, sin modificar el anterior.",
+  },
+  {
+    enunciado: "En una isla, ¿por qué leer localStorage en useState(() => …) da un error de hidratación?",
+    opciones: ["Porque localStorage es lento", "Porque React no permite localStorage", "Porque el servidor y el navegador renderizan valores distintos"],
+    correcta: 2,
+    explicacion: "El servidor no tiene localStorage: su HTML no coincide con el primer render del navegador.",
+  },
+];
+```
+
+`src/components/cuestionario/Cuestionario.tsx`:
+
+```tsx
+// Archivo: src/components/cuestionario/Cuestionario.tsx
+import { useReducer } from "react";
+import { cuestionarioReducer, estadoInicial } from "../../lib/cuestionario";
+import type { PreguntaConExplicacion } from "../../lib/preguntas-react";
+
+const LETRAS = ["A", "B", "C", "D"];
+
+export function Cuestionario({ preguntas }: { preguntas: PreguntaConExplicacion[] }) {
+  const [estado, dispatch] = useReducer(cuestionarioReducer, preguntas.length, estadoInicial);
+  const total = preguntas.length;
+
+  // ── Pantalla de resultado ──────────────────────────────────────────
+  if (estado.fase === "resultado") {
+    return (
+      <section className="tarjeta" id="cuestionario" aria-live="polite">
+        <h2>
+          {estado.aciertos >= Math.ceil(total * 0.8) ? "¡Aprobado!" : "Aún no"} · {estado.aciertos}/{total}
+        </h2>
+        <ol>
+          {preguntas.map((p, i) => {
+            const elegida = estado.respuestas[i]!;
+            const bien = elegida === p.correcta;
+            return (
+              <li key={p.enunciado} className={bien ? "bien" : "mal"}>
+                {bien ? "✓" : "✗"} {p.enunciado}
+                {!bien && (
+                  <p>
+                    Elegiste «{p.opciones[elegida]}»; la correcta es «{p.opciones[p.correcta]}».
+                  </p>
+                )}
+                <p>{p.explicacion}</p>
+              </li>
+            );
+          })}
+        </ol>
+        <button onClick={() => dispatch({ type: "repetir", total })}>Repetir</button>
+      </section>
+    );
+  }
+
+  // ── Respondiendo ───────────────────────────────────────────────────
+  const { paso, respuestas } = estado;
+  const pregunta = preguntas[paso]!;
+  const pendientes = respuestas.filter((r) => r === null).length;
+
+  return (
+    <section className="tarjeta" id="cuestionario">
+      <nav aria-label="Preguntas">
+        {preguntas.map((p, i) => (
+          <button
+            key={p.enunciado}
+            aria-current={i === paso ? "step" : undefined}
+            aria-label={`Pregunta ${i + 1}${respuestas[i] === null ? ", sin responder" : ", respondida"}`}
+            onClick={() => dispatch({ type: "ir", paso: i })}
+          >
+            {i + 1}
+            {respuestas[i] !== null && "•"}
+          </button>
+        ))}
+      </nav>
+
+      <fieldset>
+        <legend>
+          Pregunta {paso + 1} de {total}: {pregunta.enunciado}
+        </legend>
+        {pregunta.opciones.map((opcion, i) => (
+          <label key={opcion} style={{ display: "block" }}>
+            <input
+              type="radio"
+              name={`pregunta-${paso}`}
+              checked={respuestas[paso] === i}
+              onChange={() => dispatch({ type: "elegir", opcion: i })}
+            />{" "}
+            {LETRAS[i]}. {opcion}
+          </label>
+        ))}
+      </fieldset>
+
+      <p>
+        <button disabled={paso === 0} onClick={() => dispatch({ type: "ir", paso: paso - 1 })}>
+          ← Anterior
+        </button>{" "}
+        {paso < total - 1 ? (
+          <button onClick={() => dispatch({ type: "ir", paso: paso + 1 })}>Siguiente →</button>
+        ) : (
+          <button disabled={pendientes > 0} onClick={() => dispatch({ type: "enviar", preguntas })}>
+            Enviar respuestas
+          </button>
+        )}
+      </p>
+      {paso === total - 1 && pendientes > 0 && (
+        <p className="aviso">Te faltan {pendientes} pregunta(s) por responder.</p>
+      )}
+    </section>
+  );
+}
+```
+
+`src/pages/ejercicio-i23.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-i23.astro
+import Base from "../layouts/Base.astro";
+import { Cuestionario } from "../components/cuestionario/Cuestionario";
+import { PREGUNTAS_REACT } from "../lib/preguntas-react";
+---
+
+<Base titulo="Ejercicio I2.3">
+  <h1>Cuestionario de React</h1>
+  <Cuestionario preguntas={PREGUNTAS_REACT} client:load />
+</Base>
+```
+
+Medido en Chrome: responde las tres primeras (la tercera mal), salta a la quinta con la barra, respóndela, vuelve a la cuarta, respóndela y envía:
+
+```text
+en la 5 con la 4 sin responder: Pregunta 5 de 5: En una isla, ¿por qué leer localStorage en useState(() => …) da un error de hidratación? · Te faltan 1 pregunta(s) por responder. · Enviar deshabilitado: true
+navegación: Pregunta 1, respondida | Pregunta 2, respondida | Pregunta 3, respondida | Pregunta 4, sin responder | Pregunta 5, respondida [actual]
+vuelvo a la 4 y respondo: Pregunta 4 de 5: ¿Qué devuelve un reducer?
+resultado: ¡Aprobado! · 4/5
+✓ ¿Qué hace React cuando un componente se renderiza? · Render (calcular) y commit (aplicar las diferencias) son fases distintas.
+✓ Un componente con memo recibe onClick={() => …}. ¿Se re-renderiza cuando lo hace su padre? · memo compara por identidad, y una función creada en el render es nueva cada vez.
+✗ ¿Por qué no se puede llamar a un hook dentro de un if? · Elegiste «Porque es más lento»; la correcta es «Porque React guarda los hooks por orden de llamada». · Si el orden cambia entre renders, React asigna el estado al hook equivocado.
+✓ ¿Qué devuelve un reducer? · Es una función pura: (estado, acción) → estado nuevo, sin modificar el anterior.
+✓ En una isla, ¿por qué leer localStorage en useState(() => …) da un error de hidratación? · El servidor no tiene localStorage: su HTML no coincide con el primer render del navegador.
+tras repetir: Pregunta 1 de 5: ¿Qué hace React cuando un componente se renderiza? · marcadas: 0
+```
+
+Las decisiones:
+
+- **El reducer no ha cambiado:** el mismo `cuestionarioReducer` de 3 preguntas sirve para 5, con barra de navegación y explicaciones. Toda la complejidad nueva está en la UI.
+- **El botón de "Enviar" está deshabilitado y el reducer también lo impide:** la UI lo bloquea por comodidad, y el reducer por seguridad. Aunque alguien quitara el `disabled`, `"enviar"` con huecos no cambia el estado (lo dice el primer test).
+- **`aria-current="step"` y `aria-label`** en la barra: un lector de pantalla anuncia "Pregunta 4, sin responder" y cuál es la actual. Los radios dentro de `fieldset` con `legend` se anuncian como un grupo con su enunciado.
+- **`aria-live="polite"` en el resultado:** al aparecer, se lee sin que el usuario tenga que buscarlo.
+- **Las respuestas correctas cambian de posición:** si siempre fuera la B, se podría aprobar sin leer. Comprueba esto en cualquier evaluación que escribas.
+
+<Callout type="risk">
+
+- **Las respuestas correctas viajan al navegador:** las _props_ de una isla se envían en el HTML. Busca en el código fuente de la página y encontrarás `"correcta":[0,1]` dentro del atributo `props` de `<astro-island>`. Cualquiera puede ver las soluciones. Para una autoevaluación no importa; para una evaluación que cuente, el cliente recibe solo enunciados y opciones, y la corrección se hace **en el servidor**. Así lo hace esta plataforma (`toPublicQuestions` en `quiz.service.ts`) y así lo harás en el proyecto del curso.
+- **El reducer es la fuente de verdad, no la URL ni el almacenamiento:** si el usuario recarga la página, el cuestionario empieza de cero. Si necesitas conservar el progreso, guarda el estado (con `useLocalStorage` de I2.2, validándolo con un esquema al leerlo) o envíalo al servidor.
+- **`!` en `preguntas[paso]!`:** es seguro porque el reducer mantiene `paso` dentro de los límites (lo comprueba el último test). Si un día cambias el número de preguntas sin hacer `"repetir"`, ese `!` dejaría pasar un `undefined`.
+
+</Callout>
+
+<Callout type="mastery">
+
+Modelas un flujo de varios pasos sin estados contradictorios: eliges `useReducer` cuando varias variables cambian juntas, representas cada fase con una unión discriminada que hace imposibles las combinaciones inválidas, escribes _reducers_ puros con acciones tipadas que el compilador obliga a tratar, y los pruebas como funciones normales, sin montar React.
+
+</Callout>
+
+## Resumen
+
+- Varios `useState` que cambian juntos acaban en estados contradictorios cuando una función olvida uno.
+- `useReducer(reducer, arg, init)`: un _reducer_ puro `(estado, acción) → estado` concentra todas las transiciones; los componentes solo hacen `dispatch`.
+- Estado y acciones como uniones discriminadas: las combinaciones imposibles no se pueden escribir y el compilador avisa de las acciones sin tratar.
+- Nunca modifiques el estado recibido ni hagas efectos en el _reducer_; nada de `default` que silencie errores.
+- Un _reducer_ se prueba con `node --test` (o Vitest) en milisegundos, sin navegador.
