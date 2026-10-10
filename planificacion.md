@@ -5174,7 +5174,7 @@ Cambios respecto al plan, descubiertos al verificarla. **El código real del rep
 - **Versiones:** ESLint 10 (`defineConfig` de `eslint/config`), Vitest 5, jsdom 30, Playwright 1.64. El CI usa **Node 24**: jsdom 30 exige `^22.22.2 || ^24.15.0 || >=26`.
 - **Tipos de jest-dom:** `tests/jest-dom.d.ts` (sin él, `astro check` falla en los tests de componentes).
 - **Resultados:** 90 tests de Vitest (unitarios, integración y componentes), cobertura del 100 % en `src/lib/domain` y `src/lib/redirect.ts`; 25 E2E en escritorio y móvil (1 omitido a propósito en móvil: el límite de evaluaciones es de API); axe sin infracciones WCAG 2.1 A/AA en 7 páginas, claro y oscuro. El CI se simuló completo en una copia sin `.env` con `CI=true`.
-- **Pendiente del usuario:** ejecutar `npm run db:setup` contra Atlas (crea el índice TTL de `rate_limits` y el único de `rateLimit`); subir los commits para que corra el CI en GitHub; proteger `main` exigiendo `verify` y `e2e`.
+- **Hecho tras la Tanda:** `npm run db:setup` ejecutado contra Atlas (índice TTL de `rate_limits` y único de `rateLimit`, verificados) y primer CI en GitHub en verde (`verify` y `e2e`). **Pendiente:** revisar la consola de la web desplegada en Vercel con la CSP y proteger `main` exigiendo `verify` y `e2e`.
 - `npm audit` informa de 6 vulnerabilidades (2 moderadas, 4 altas) que ya existían antes de esta Tanda, en dependencias de `@astrojs/vercel` y `@tailwindcss/typography`; su arreglo exige `--force` (cambios incompatibles).
 
 ### Criterios de aceptación — Tanda 9
