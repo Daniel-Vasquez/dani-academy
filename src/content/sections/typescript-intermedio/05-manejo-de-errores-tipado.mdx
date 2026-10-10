@@ -1,0 +1,566 @@
+---
+sectionId: "I1.5"
+course: "I1"
+title: "Manejo de errores tipado"
+order: 5
+minutes: 60
+summary: "Tratas el unknown del catch, creas errores propios con código HTTP y causa, usas Result<T, E> para fallos esperables, capturas solo en el borde y conviertes cualquier error en la respuesta correcta."
+---
+
+En una app real, las cosas fallan constantemente y por motivos muy distintos: un usuario pide una nota que no existe, otro envía un formulario incompleto, alguien intenta ver datos ajenos, la base de datos tarda demasiado o tú dejas un bug. Si todo eso acaba igual, como un `500 Error interno` o, peor, como un `null` silencioso, ni el usuario sabe qué hacer ni tú sabes qué arreglar. En esta sección vas a darle **tipo** a los errores: distinguir lo que se lanzó, crear errores que llevan su código HTTP, decidir cuándo un fallo es una excepción y cuándo un resultado normal, y concentrar en **un solo sitio** la traducción de errores a respuestas.
+
+**Lo que tendrás al terminar:** un módulo `src/i1/errores.ts` con tus errores HTTP, un _helper_ `validar()` que une Zod con esos errores y una función `aRespuesta(e: unknown): Response` que convierte cualquier error en la respuesta correcta.
+
+**Requisitos:** las secciones I1.1–I1.4 (genéricos, uniones discriminadas y Zod).
+
+## Paso 1: el `catch` recibe `unknown`
+
+Crea `src/i1/05-unknown.ts`:
+
+```ts
+// Archivo: src/i1/05-unknown.ts
+
+// En JavaScript se puede lanzar CUALQUIER cosa, no solo errores
+const lanzadores: Array<() => void> = [
+  () => {
+    throw new Error("Se cortó la conexión");
+  },
+  () => {
+    throw new TypeError("x.map is not a function");
+  },
+  () => {
+    throw "texto suelto"; // una librería antigua o un descuido
+  },
+  () => {
+    throw { codigo: 503, motivo: "mantenimiento" }; // un objeto cualquiera
+  },
+  () => {
+    JSON.parse("{roto"); // errores que lanza el propio JavaScript
+  },
+];
+
+// Por eso, con "strict", la variable del catch es unknown: TypeScript no puede saber qué llegó
+function describir(e: unknown): string {
+  if (e instanceof Error) return `${e.name}: ${e.message}`; // Error y todas sus subclases
+  if (typeof e === "string") return `texto: ${e}`;
+  return `valor desconocido: ${JSON.stringify(e)}`;
+}
+
+for (const lanzar of lanzadores) {
+  try {
+    lanzar();
+  } catch (e) {
+    console.log(describir(e));
+  }
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/05-unknown.ts
+```
+
+```text
+Error: Se cortó la conexión
+TypeError: x.map is not a function
+texto: texto suelto
+valor desconocido: {"codigo":503,"motivo":"mantenimiento"}
+SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+```
+
+En JavaScript, `throw` acepta **cualquier valor**: un `Error`, un texto o un objeto. Por eso, con `strict` activado, TypeScript tipa la variable del `catch` como `unknown`: no puede saber qué se lanzó. Compruébalo. Añade al final:
+
+```ts
+try {
+  JSON.parse("{roto");
+} catch (e) {
+  console.log(e.message);
+}
+```
+
+```text
+src/i1/05-unknown.ts(40,15): error TS18046: 'e' is of type 'unknown'.
+```
+
+Tienes que **estrechar** el tipo antes de usarlo, igual que con cualquier `unknown` (B1.6):
+
+- **`e instanceof Error`** cubre `Error` y **todas sus subclases** (`TypeError`, `SyntaxError` y las que crees tú). Dentro del `if`, `e.message` y `e.name` existen.
+- **`typeof e === "string"`** para los textos sueltos.
+- **El resto** se describe sin suponer nada (`JSON.stringify`).
+
+Borra las cinco líneas que añadiste.
+
+<Callout type="risk">
+
+- **No uses `catch (e: any)`:** compila y te deja escribir `e.message`, pero si se lanzó un texto, `e.message` es `undefined` y el mensaje de error se pierde justo cuando más lo necesitas. Mantén el `unknown` y estrecha.
+- **Lanza siempre objetos `Error`:** `throw "algo falló"` no tiene traza (_stack trace_), así que no sabrás desde dónde se lanzó. `throw new Error("algo falló")` sí la tiene.
+- **`JSON.stringify` de un `Error` da `{}`:** sus propiedades `message` y `stack` no son enumerables. Para registrar un error, usa `console.error(e)` o lee `e.message` y `e.stack` explícitamente.
+
+</Callout>
+
+## Paso 2: tus propias clases de error
+
+Un `Error` genérico solo tiene un mensaje. Para responder bien a una petición necesitas saber **qué tipo de fallo** es: "no existe" es un 404, "ya existe" es un 409. Crea `src/i1/errores.ts`, un módulo que solo declara clases:
+
+```ts
+// Archivo: src/i1/errores.ts
+// Solo declaraciones: importar este módulo no ejecuta nada
+
+// Clase base: un error con su código HTTP
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+    options?: ErrorOptions, // { cause }: el error original que lo provocó
+  ) {
+    super(message, options);
+    this.name = new.target.name; // "NoEncontradoError", etc., sin repetirlo en cada subclase
+  }
+}
+
+export class NoEncontradoError extends HttpError {
+  constructor(recurso: string, id: string) {
+    super(404, `${recurso} ${id} no existe`);
+  }
+}
+
+export class ConflictoError extends HttpError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(409, message, options);
+  }
+}
+```
+
+Y úsalo desde `src/i1/05-errores.ts`:
+
+```ts
+// Archivo: src/i1/05-errores.ts
+import { ConflictoError, HttpError, NoEncontradoError } from "./errores";
+
+// Simulación de una capa de datos
+const entrenos = new Map([["e1", { id: "e1", tipo: "running", minutos: 30 }]]);
+
+function obtenerEntreno(id: string) {
+  const entreno = entrenos.get(id);
+  if (!entreno) throw new NoEncontradoError("El entreno", id);
+  return entreno;
+}
+
+function crearEntreno(id: string) {
+  try {
+    // Simula el error del driver de MongoDB al repetir una clave única
+    if (entrenos.has(id)) throw Object.assign(new Error(`E11000 duplicate key { _id: "${id}" }`), { code: 11000 });
+    entrenos.set(id, { id, tipo: "fuerza", minutos: 45 });
+  } catch (e) {
+    // Se traduce a un error del dominio, conservando el original como causa
+    throw new ConflictoError(`Ya existe un entreno con id ${id}`, { cause: e });
+  }
+}
+
+for (const accion of [() => obtenerEntreno("e1"), () => obtenerEntreno("e9"), () => crearEntreno("e1")]) {
+  try {
+    console.log("OK:", accion());
+  } catch (e) {
+    if (e instanceof HttpError) {
+      console.log(`${e.name} (${e.status}): ${e.message}`);
+      if (e.cause instanceof Error) console.log(`  causa: ${e.cause.message}`);
+    } else {
+      throw e; // no es nuestro: que lo trate quien sepa
+    }
+  }
+}
+
+const error = new NoEncontradoError("La nota", "n7");
+console.log(error instanceof NoEncontradoError, error instanceof HttpError, error instanceof Error);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/05-errores.ts
+```
+
+```text
+OK: { id: 'e1', tipo: 'running', minutos: 30 }
+NoEncontradoError (404): El entreno e9 no existe
+ConflictoError (409): Ya existe un entreno con id e1
+  causa: E11000 duplicate key { _id: "e1" }
+true true true
+```
+
+Las piezas:
+
+- **`extends Error`**: tus errores son errores de verdad, con traza y con todo lo que espera cualquier herramienta (`console.error`, Sentry, los logs de Vercel).
+- **`public readonly status`** en el constructor: declara y asigna la propiedad en un solo paso. Cada error sabe su código HTTP.
+- **`this.name = new.target.name`**: `new.target` es la clase con la que se hizo el `new`. Así, un `NoEncontradoError` se llama `"NoEncontradoError"` sin repetir esa línea en cada subclase. Sin ella, todos se llamarían `"Error"`.
+- **`{ cause }`** (opción estándar de `Error`): `ConflictoError` **traduce** el error técnico del driver (`E11000 duplicate key`) a uno que entiende el dominio ("ya existe"), pero **conserva el original** como causa para los logs.
+- **`instanceof`** funciona en toda la cadena: un `NoEncontradoError` también es un `HttpError` y un `Error`. Por eso basta con un solo `if (e instanceof HttpError)` para todos.
+- **`throw e`** en el `else`: si el error no es tuyo, **no lo tragues**. Vuelve a lanzarlo para que llegue a quien sepa tratarlo.
+
+Esta plataforma tiene exactamente este módulo: `src/lib/errors.ts` define `HttpError` y sus subclases (`BadRequestError`, `NotFoundError`, `TooManyRequestsError`…), con el mismo truco de `new.target.name`.
+
+<Callout type="risk">
+
+- **Un módulo de errores no debe ejecutar nada al importarse:** si `errores.ts` tuviera código de prueba al final (un `console.log`, una consulta), se ejecutaría cada vez que otro archivo lo importe. Mantén los módulos compartidos con solo declaraciones, y las pruebas en archivos aparte, como `05-errores.ts`.
+- **`instanceof` falla si hay dos copias de la clase:** si una librería empaqueta su propia copia de tu `HttpError`, o un archivo se carga dos veces con rutas distintas, `e instanceof HttpError` da `false` aunque el error "sea" un `HttpError`. Si algún día te pasa, compara por una propiedad (`"status" in e`) o por `e.name`.
+- **El mensaje de un error de dominio puede llegar al usuario:** escribe `message` pensando en quien lo leerá ("La nota n9 no existe"), y deja los detalles técnicos en `cause`, que solo va a los logs.
+
+</Callout>
+
+## Paso 3: `Result<T, E>`, cuando el fallo es un resultado normal
+
+Lanzar un error tiene un problema: **la firma de la función no lo dice**. `function calcularRitmo(km, min): number` puede lanzar, y nada obliga a quien la llama a usar `try/catch`. Para fallos **esperables**, los que forman parte del funcionamiento normal (un dato que el usuario escribe mal, una búsqueda sin resultados), es mejor que el error forme parte del **tipo de retorno**. Es el `Resultado<T>` de I1.1, ahora con un tipo de error propio. Crea `src/i1/05-result.ts`:
+
+```ts
+// Archivo: src/i1/05-result.ts
+
+// El error forma parte del tipo de retorno: quien llama NO puede ignorarlo
+export type Result<T, E = string> = { ok: true; value: T } | { ok: false; error: E };
+
+export const ok = <T>(value: T): Result<T, never> => ({ ok: true, value });
+export const err = <E>(error: E): Result<never, E> => ({ ok: false, error });
+
+// Errores esperables del dominio, como una unión de literales (no como excepciones)
+type ErrorRitmo = "km-no-valido" | "tiempo-no-valido" | "ritmo-imposible";
+
+function calcularRitmo(km: number, minutos: number): Result<number, ErrorRitmo> {
+  if (!(km > 0)) return err("km-no-valido");
+  if (!(minutos > 0)) return err("tiempo-no-valido");
+  const minPorKm = minutos / km;
+  if (minPorKm < 2.5) return err("ritmo-imposible"); // más rápido que un récord mundial
+  return ok(+minPorKm.toFixed(2));
+}
+
+const MENSAJES: Record<ErrorRitmo, string> = {
+  "km-no-valido": "Los kilómetros deben ser mayores que 0",
+  "tiempo-no-valido": "El tiempo debe ser mayor que 0",
+  "ritmo-imposible": "Ese ritmo no es humano: revisa los datos",
+};
+
+const casos: [km: number, minutos: number][] = [
+  [10, 52],
+  [0, 30],
+  [10, 12],
+];
+
+for (const [km, min] of casos) {
+  const r = calcularRitmo(km, min);
+  if (r.ok) console.log(`${km} km en ${min} min → ${r.value} min/km`);
+  else console.log(`${km} km en ${min} min → ${MENSAJES[r.error]}`);
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/05-result.ts
+```
+
+```text
+10 km en 52 min → 5.2 min/km
+0 km en 30 min → Los kilómetros deben ser mayores que 0
+10 km en 12 min → Ese ritmo no es humano: revisa los datos
+```
+
+Añade al final:
+
+```ts
+const r = calcularRitmo(5, 25);
+console.log(r.value * 2);
+```
+
+```text
+src/i1/05-result.ts(39,15): error TS2339: Property 'value' does not exist on type 'Result<number, ErrorRitmo>'.
+  Property 'value' does not exist on type '{ ok: false; error: ErrorRitmo; }'.
+```
+
+Esa es la ventaja: **no se puede olvidar el caso de error**. El compilador obliga a comprobar `r.ok`. Y como `ErrorRitmo` es una unión de literales, `Record<ErrorRitmo, string>` obliga a tener un mensaje para cada error posible: si añades `"km-excesivos"`, `MENSAJES` deja de compilar hasta que lo escribas. Borra las dos líneas.
+
+¿Cuándo usar cada uno?
+
+| Situación                                                       | Herramienta                    | Por qué                                                               |
+| --------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------- |
+| Datos del usuario que pueden estar mal, búsquedas sin resultado | `Result<T, E>` (o `safeParse`) | Es un caso normal: quien llama **debe** tratarlo                      |
+| Fallos de infraestructura (base de datos caída, red)            | `throw`                        | No hay nada razonable que hacer en cada llamada; se trata en el borde |
+| Bugs (algo que "no puede pasar")                                | `throw`                        | Debe llegar al log con su traza, no quedar oculto                     |
+| Fallos que atraviesan varias capas hasta el _endpoint_          | `throw` de un `HttpError`      | Evita repetir `if (!r.ok) return r` en cada capa                      |
+
+`safeParse` de Zod es exactamente un `Result`: `{ success: true, data } | { success: false, error }`.
+
+<Callout type="risk">
+
+- **`Result` en cadenas largas se vuelve verboso:** si cinco funciones se llaman entre sí y todas devuelven `Result`, cada una repite `if (!r.ok) return r`. Usa `Result` en las funciones de lógica, donde el error es parte del dominio, y excepciones para atravesar capas.
+- **El `never` de `ok` y `err` no es decorativo:** `ok(5)` devuelve `Result<number, never>`, y `never` encaja con cualquier tipo de error, así que se puede devolver desde cualquier función. Si `ok` devolviera `Result<T>` (con el error por defecto, `string`), `return ok(5)` en una función que devuelve `Result<number, ErrorRitmo>` daría `Type 'Result<number, string>' is not assignable to type 'Result<number, ErrorRitmo>'`.
+- **`!(km > 0)` en vez de `km <= 0`:** si `km` es `NaN` (un `Number("abc")`), `km <= 0` es `false` y el `NaN` pasaría como válido. `!(km > 0)` también rechaza `NaN`.
+
+</Callout>
+
+## Paso 4: dónde capturar, en el borde y en ningún otro sitio
+
+Un error se **lanza** donde se detecta y se **captura** donde se puede hacer algo útil con él. En una API, ese sitio es casi siempre el **borde**: el _endpoint_, que es quien decide la respuesta. Crea `src/i1/05-donde-capturar.ts`:
+
+```ts
+// Archivo: src/i1/05-donde-capturar.ts
+import { HttpError, NoEncontradoError } from "./errores";
+
+let baseDeDatosCaida = false;
+
+// Capa de datos: solo sabe leer; si la conexión falla, el driver lanza
+function repoBuscarNota(id: string) {
+  if (baseDeDatosCaida) throw new Error("MongoServerSelectionError: connection timed out");
+  return id === "n1" ? { id: "n1", titulo: "Correr 10 km" } : null;
+}
+
+// ❌ Antipatrón: capturar en el servicio y "arreglarlo" devolviendo null
+function servicioNotaMal(id: string) {
+  try {
+    return repoBuscarNota(id);
+  } catch {
+    return null; // el error desaparece: ya nadie sabe que la base de datos está caída
+  }
+}
+
+// ✅ El servicio solo traduce lo que entiende (no existe → 404) y deja pasar el resto
+function servicioNota(id: string) {
+  const nota = repoBuscarNota(id);
+  if (!nota) throw new NoEncontradoError("La nota", id);
+  return nota;
+}
+
+// El borde (el endpoint): el ÚNICO sitio que convierte errores en respuestas
+function endpoint(servicio: (id: string) => unknown, id: string): string {
+  try {
+    const nota = servicio(id);
+    if (nota === null) return "404 La nota no existe";
+    return `200 ${JSON.stringify(nota)}`;
+  } catch (e) {
+    if (e instanceof HttpError) return `${e.status} ${e.message}`;
+    console.error("  [log del servidor]", e instanceof Error ? e.message : e);
+    return "500 Error interno";
+  }
+}
+
+for (const caida of [false, true]) {
+  baseDeDatosCaida = caida;
+  console.log(caida ? "— Base de datos caída —" : "— Base de datos OK —");
+  console.log("mal:", endpoint(servicioNotaMal, "n1"));
+  console.log("bien:", endpoint(servicioNota, "n1"));
+  console.log("bien:", endpoint(servicioNota, "n9"));
+}
+```
+
+```bash
+npm start -- src/i1/05-donde-capturar.ts
+```
+
+```text
+— Base de datos OK —
+mal: 200 {"id":"n1","titulo":"Correr 10 km"}
+bien: 200 {"id":"n1","titulo":"Correr 10 km"}
+bien: 404 La nota n9 no existe
+— Base de datos caída —
+mal: 404 La nota no existe
+  [log del servidor] MongoServerSelectionError: connection timed out
+bien: 500 Error interno
+  [log del servidor] MongoServerSelectionError: connection timed out
+bien: 500 Error interno
+```
+
+Con la base de datos funcionando, las dos versiones parecen iguales. Con la base de datos **caída**, se ve la diferencia:
+
+- **La versión "mal"** responde `404 La nota no existe`. El `catch` del servicio convirtió una caída de la base de datos en "no hay nota". El usuario cree que su nota se ha borrado, y en tus logs **no hay nada**: el error desapareció.
+- **La versión "bien"** responde `500 Error interno` y deja el error real en el log del servidor. El servicio solo traduce lo que entiende (no existe → `NoEncontradoError`) y deja pasar el resto, que llega intacto al único `catch`, el del _endpoint_.
+
+La regla: **no captures un error si no sabes qué hacer con él**. Capturar para "que no explote" casi siempre esconde el problema.
+
+<Callout type="risk">
+
+- **Un `catch` vacío es casi siempre un bug escondido:** `catch {}` o `catch { return null }` hace que el error desaparezca sin rastro. Si de verdad quieres ignorar un error concreto (por ejemplo, `localStorage` bloqueado), compruébalo y vuelve a lanzar todo lo demás, y deja un comentario explicando por qué.
+- **No muestres el error interno al cliente:** el mensaje `MongoServerSelectionError: connection timed out` revela qué base de datos usas y cómo falla. Al cliente, `Error interno`; en el log, todo.
+- **Los errores asíncronos sin `await` no llegan al `catch`:** `try { guardar(); } catch {}` no captura nada si `guardar` es `async` y no lo esperas. Con `await guardar()` dentro del `try`, sí.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Amplía `src/i1/errores.ts` con `NoAutorizadoError` (401) y `ValidacionError` (422), que guarde los errores por campo y se pueda crear desde un `ZodError`.
+2. Añade un _helper_ genérico `validar<T>(esquema, dato): T` que devuelva el dato tipado o lance un `ValidacionError`.
+3. Escribe `aRespuesta(e: unknown): Response`, que convierta cada error en su código HTTP y, si no es ninguno conocido, registre el error completo y responda un 500 genérico.
+4. Pruébala en `src/i1/05-ejercicio.ts` con un error de cada tipo, un `parse` de Zod sin capturar, un bug real y un texto lanzado.
+
+</Callout>
+
+Solución. `src/i1/errores.ts` completo (sustituye al del Paso 2; los archivos anteriores siguen funcionando):
+
+```ts
+// Archivo: src/i1/errores.ts
+// Solo declaraciones: importar este módulo no ejecuta nada
+import { z } from "zod";
+
+// Clase base: un error con su código HTTP
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+    options?: ErrorOptions, // { cause }: el error original que lo provocó
+  ) {
+    super(message, options);
+    this.name = new.target.name; // "NoEncontradoError", etc., sin repetirlo en cada subclase
+  }
+}
+
+export class NoEncontradoError extends HttpError {
+  constructor(recurso: string, id: string) {
+    super(404, `${recurso} ${id} no existe`);
+  }
+}
+
+export class NoAutorizadoError extends HttpError {
+  constructor(message = "Inicia sesión para continuar") {
+    super(401, message);
+  }
+}
+
+export class ConflictoError extends HttpError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(409, message, options);
+  }
+}
+
+/** Datos que no cumplen el esquema: lleva los errores por campo para el formulario */
+export class ValidacionError extends HttpError {
+  constructor(
+    public readonly campos: Record<string, string[] | undefined>,
+    message = "Revisa los datos del formulario",
+  ) {
+    super(422, message);
+  }
+
+  static desdeZod(error: z.ZodError): ValidacionError {
+    return new ValidacionError(z.flattenError(error).fieldErrors);
+  }
+}
+
+/** Valida un dato externo y devuelve su tipo, o lanza un ValidacionError con los errores por campo */
+export function validar<T>(esquema: z.ZodType<T>, dato: unknown): T {
+  const resultado = esquema.safeParse(dato);
+  if (!resultado.success) throw ValidacionError.desdeZod(resultado.error);
+  return resultado.data;
+}
+
+/** El único punto que convierte cualquier error en una respuesta HTTP */
+export function aRespuesta(e: unknown): Response {
+  if (e instanceof ValidacionError) {
+    return Response.json({ error: e.message, campos: e.campos }, { status: e.status });
+  }
+  if (e instanceof HttpError) {
+    return Response.json({ error: e.message }, { status: e.status });
+  }
+  if (e instanceof z.ZodError) {
+    // Un parse() que se escapó: también es culpa de los datos, no del servidor
+    return aRespuesta(ValidacionError.desdeZod(e));
+  }
+  // Cualquier otra cosa es un fallo nuestro: se registra entero y al cliente no se le cuenta nada
+  console.error("[api] Error no controlado:", e);
+  return Response.json({ error: "Error interno" }, { status: 500 });
+}
+```
+
+`src/i1/05-ejercicio.ts`:
+
+```ts
+// Archivo: src/i1/05-ejercicio.ts
+import { z } from "zod";
+import {
+  aRespuesta,
+  ConflictoError,
+  NoAutorizadoError,
+  NoEncontradoError,
+  validar,
+} from "./errores";
+
+const NotaSchema = z.object({ titulo: z.string().min(1, "El título es obligatorio") });
+
+/** Ejecuta una función y devuelve lo que lance (para probar aRespuesta con errores reales) */
+function capturar(fn: () => unknown): unknown {
+  try {
+    fn();
+    return undefined;
+  } catch (e) {
+    return e;
+  }
+}
+
+const casos: Array<[string, unknown]> = [
+  ["no existe", new NoEncontradoError("La nota", "n9")],
+  ["sin sesión", new NoAutorizadoError()],
+  ["duplicado", new ConflictoError("Ya existe una nota con ese título")],
+  ["validación", capturar(() => validar(NotaSchema, { titulo: "" }))],
+  ["parse sin capturar", capturar(() => NotaSchema.parse({}))],
+  ["bug nuestro", capturar(() => (undefined as unknown as { titulo: string }).titulo)],
+  ["algo que no es un Error", "texto suelto"],
+];
+
+for (const [nombre, error] of casos) {
+  const res = aRespuesta(error);
+  console.log(`${nombre.padEnd(24)} → ${res.status} ${JSON.stringify(await res.json())}`);
+}
+
+// validar() devuelve el dato ya tipado cuando es correcto
+const nota = validar(NotaSchema, { titulo: "Correr 10 km", extra: "se descarta" });
+console.log("validar OK:", nota);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/05-ejercicio.ts
+```
+
+```text
+no existe                → 404 {"error":"La nota n9 no existe"}
+sin sesión               → 401 {"error":"Inicia sesión para continuar"}
+duplicado                → 409 {"error":"Ya existe una nota con ese título"}
+validación               → 422 {"error":"Revisa los datos del formulario","campos":{"titulo":["El título es obligatorio"]}}
+parse sin capturar       → 422 {"error":"Revisa los datos del formulario","campos":{"titulo":["Invalid input: expected string, received undefined"]}}
+[api] Error no controlado: TypeError: Cannot read properties of undefined (reading 'titulo')
+    at <anonymous> (…)
+    at capturar (…)
+    …
+bug nuestro              → 500 {"error":"Error interno"}
+[api] Error no controlado: texto suelto
+algo que no es un Error  → 500 {"error":"Error interno"}
+validar OK: { titulo: 'Correr 10 km' }
+```
+
+(Las líneas `at …` de la traza muestran las rutas de tu equipo; aquí están abreviadas).
+
+Las decisiones:
+
+- **El orden de los `if` importa:** `ValidacionError` va **antes** que `HttpError`, porque también es un `HttpError` y necesita su propia respuesta (con `campos`).
+- **Un `ZodError` suelto también es un 422:** si alguien usa `parse` y olvida capturarlo, el fallo es de los datos, no del servidor. Sin ese caso, un formulario mal rellenado acabaría como `500 Error interno`.
+- **`validar<T>`** junta las tres secciones anteriores: es genérico (I1.1), usa Zod (I1.4) y lanza un error tipado (I1.5). En un _endpoint_, `const nota = validar(NotaSchema, await request.json())` deja `nota` tipada, y el error, si lo hay, lo traduce `aRespuesta`.
+- **Lo desconocido se registra entero y no se explica:** el bug y el texto lanzado acaban en el log con todos sus detalles, y el cliente solo recibe `Error interno`.
+
+Esta plataforma tiene la misma función: `toErrorResponse` en `src/lib/errors.ts`, que usan todos sus _endpoints_ en el `catch`.
+
+<Callout type="risk">
+
+- **Un 500 genérico no es un fracaso, es un aviso:** la meta no es que nunca haya 500, sino que cada 500 sea un bug de verdad (y aparezca en el log), no un error esperable mal clasificado. Si ves en los logs un 500 que debería ser un 404 o un 422, falta una clase de error o un `throw` en el sitio correcto.
+- **401 frente a 403:** `NoAutorizadoError` (401) significa "no sé quién eres: inicia sesión". Si sé quién eres pero **no tienes permiso** (intentas ver la nota de otro usuario), es un 403. A veces conviene responder 404 en su lugar, para no revelar a un curioso que esa nota existe.
+- **No pongas datos sensibles en el mensaje:** `new NoEncontradoError("El usuario", email)` mete el correo en la respuesta y en los logs. Usa identificadores internos, nunca contraseñas, _tokens_ ni datos personales.
+
+</Callout>
+
+<Callout type="mastery">
+
+Ningún error de tu app termina como un 500 genérico sin motivo: estrechas el `unknown` del `catch`, lanzas errores propios que llevan su código y su causa, usas `Result<T, E>` cuando el fallo es un resultado esperable, capturas solo en el borde y conviertes cada error en su respuesta con una única función.
+
+</Callout>
+
+## Resumen
+
+- La variable del `catch` es `unknown`: estréchala con `instanceof Error` antes de usarla; lanza siempre `Error`.
+- Las clases de error propias (`extends Error`) llevan su código HTTP y su `cause`; `new.target.name` les da su nombre.
+- `Result<T, E>` pone el error en el tipo de retorno para los fallos esperables; `throw`, para infraestructura y bugs.
+- Captura en el borde (el _endpoint_), no en cada función; un `catch` que devuelve `null` esconde caídas reales.
+- Una sola función, `aRespuesta(e: unknown)`, traduce cada error a su respuesta y registra lo desconocido.

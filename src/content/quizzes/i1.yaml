@@ -1,0 +1,64 @@
+course: I1
+passingScore: 4
+questions:
+  - prompt: "¿Para qué sirve el `extends` en la firma de esta función genérica?"
+    code: |
+      function porId<T extends { id: string }>(lista: T[], id: string): T | undefined {
+        return lista.find((x) => x.id === id);
+      }
+    options:
+      - "Hace que `T` herede de una clase `id`, como en la programación orientada a objetos."
+      - "Convierte el resultado en `{ id: string }`, así que se pierden las demás propiedades."
+      - "Exige que `T` tenga como mínimo un `id` de texto, sin perder el resto de su tipo: con una lista de `Entreno`, devuelve `Entreno | undefined`."
+      - "Comprueba en tiempo de ejecución que cada elemento tenga un `id`."
+    answer: 2
+    explanation: 'En un genérico, `extends` es una restricción: "T puede ser cualquier tipo que cumpla, como mínimo, con esto". Permite usar `x.id` dentro de la función y, como `T` viaja completo hasta el resultado, `porId(entrenos, "e2")` devuelve un `Entreno`, no un `{ id: string }`. Como todos los tipos, no comprueba nada al ejecutar.'
+
+  - prompt: "¿Qué es `CampoEntreno`?"
+    code: |
+      interface Entreno {
+        id: string;
+        tipo: "fuerza" | "running";
+        minutos: number;
+      }
+      type CampoEntreno = keyof Entreno;
+    options:
+      - 'La unión de los nombres de las propiedades: `"id" | "tipo" | "minutos"`.'
+      - "La unión de los tipos de las propiedades: `string | number`."
+      - "Un array con las claves, igual que `Object.keys(entreno)`."
+      - "El tipo de la primera propiedad, `string`."
+    answer: 0
+    explanation: '`keyof T` devuelve las claves de un tipo como una unión de textos literales. Para el tipo de una propiedad se usa el acceso por índice (`Entreno["minutos"]` es `number`). `Object.keys` es una función que se ejecuta y devuelve `string[]`; `keyof` solo existe al compilar.'
+
+  - prompt: 'Tienes una interfaz `Usuario` con `id`, `nombre`, `email`, `passwordHash` y `creado`. ¿Qué diferencia hay entre `Pick<Usuario, "id" | "nombre">` y `Omit<Usuario, "passwordHash">`?'
+    options:
+      - "Ninguna: los dos quitan las propiedades indicadas."
+      - "`Pick` se queda solo con `id` y `nombre`; `Omit` se queda con todo menos `passwordHash`. Si añades un campo a `Usuario`, aparecerá en el `Omit` pero no en el `Pick`."
+      - "`Pick` hace las propiedades opcionales y `Omit` las hace de solo lectura."
+      - "`Omit` elimina `passwordHash` del objeto al ejecutar, así que es seguro devolverlo en una API."
+    answer: 1
+    explanation: "`Pick` es una lista blanca (solo lo que nombras) y `Omit`, una lista negra (todo menos lo que nombras). Por eso, ante un campo nuevo, `Omit` lo incluye solo. Ninguno quita propiedades al ejecutar: para no filtrar el `passwordHash`, hay que construir el objeto de salida campo a campo. Además, `Omit` no detecta erratas en las claves."
+
+  - prompt: "Este código compila sin errores. ¿Qué imprime al ejecutarlo y por qué?"
+    code: |
+      interface Entreno {
+        minutos: number;
+      }
+      const entreno = JSON.parse('{"minutos":"30"}') as Entreno;
+      console.log(entreno.minutos + 15);
+    options:
+      - '`45`, porque `as Entreno` convierte el texto `"30"` en número.'
+      - "Un error en tiempo de ejecución, porque `minutos` no es un número."
+      - "No se ejecuta: TypeScript detecta que el JSON tiene un texto."
+      - '`3015`, porque los tipos desaparecen al compilar: `as` solo le pide al compilador que confíe, y en ejecución `"30" + 15` concatena.'
+    answer: 3
+    explanation: "Los tipos de TypeScript no existen en ejecución, y `as` es una afirmación, no una comprobación ni una conversión. `JSON.parse` devuelve `any` y nada verifica su forma. Por eso los datos que cruzan una frontera (peticiones, formularios, APIs, base de datos) se validan con un esquema, por ejemplo con Zod."
+
+  - prompt: "En un endpoint, ¿por qué se suele usar `safeParse` de Zod en lugar de `parse` para validar el cuerpo de la petición?"
+    options:
+      - "Porque `safeParse` no lanza: devuelve `{ success: true, data }` o `{ success: false, error }`, y un dato inválido es algo esperado que se responde con un 422."
+      - "Porque `parse` no comprueba los tipos, solo la forma del objeto."
+      - "Porque `safeParse` descarta las claves de más y `parse` las conserva."
+      - "Porque `parse` es de Zod 3 y no existe en Zod 4."
+    answer: 0
+    explanation: "Los dos validan igual y los dos descartan las claves que no están en un `z.object`. La diferencia es cómo informan del fallo: `parse` lanza un `ZodError` y `safeParse` lo devuelve como parte del resultado, igual que un `Result`. Con datos de usuario, que fallen es normal, así que `safeParse` obliga a tratar el caso y responder con los errores por campo."

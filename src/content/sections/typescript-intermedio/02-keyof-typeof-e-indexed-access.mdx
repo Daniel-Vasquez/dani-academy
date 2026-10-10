@@ -1,0 +1,492 @@
+---
+sectionId: "I1.2"
+course: "I1"
+title: "keyof, typeof e indexed access"
+order: 2
+minutes: 60
+summary: "Derivas tipos de otros tipos y de valores con keyof, typeof, T[K] y T[number], congelas constantes con as const y construyes el catálogo de cursos como única fuente de verdad de sus tipos."
+---
+
+Hasta ahora, cada vez que tenías una lista de valores válidos la escribías **dos veces**: una como valor (`const NIVELES = ["basico", "intermedio"]`, para pintar un selector) y otra como tipo (`type Nivel = "basico" | "intermedio"`, para que el compilador te proteja). El día que añades `"avanzado"` a una y te olvidas de la otra, el selector muestra una opción que el tipo rechaza, o al revés. En esta sección vas a aprender las cuatro herramientas que permiten escribir las cosas **una sola vez** y derivar el resto: `keyof`, `typeof`, el acceso por índice (`T["prop"]` y `T[number]`) y `as const`.
+
+**Lo que tendrás al terminar:** el catálogo de los 24 cursos del temario como constante, con los tipos `CursoId`, `Nivel` y `Curso` derivados de ella sin escribir ninguno a mano.
+
+**Requisitos:** la sección I1.1 (genéricos y `K extends keyof T`).
+
+## Paso 1: `keyof`, las claves como unión
+
+`keyof T` convierte las **claves** de un tipo en una **unión de textos literales**. Crea `src/i1/02-keyof.ts`:
+
+```ts
+// Archivo: src/i1/02-keyof.ts
+
+interface Entreno {
+  id: string;
+  tipo: "fuerza" | "running";
+  minutos: number;
+  fecha: Date;
+}
+
+// keyof convierte las claves de un tipo en una unión de textos literales
+type CampoEntreno = keyof Entreno; // "id" | "tipo" | "minutos" | "fecha"
+
+const columnas: CampoEntreno[] = ["fecha", "tipo", "minutos"];
+
+// T[K] es el tipo de la propiedad K dentro de T: lo verás a fondo en el paso 3
+function leer<T, K extends keyof T>(objeto: T, clave: K): T[K] {
+  return objeto[clave];
+}
+
+const entreno: Entreno = {
+  id: "e1",
+  tipo: "running",
+  minutos: 30,
+  fecha: new Date("2026-10-08T07:30:00Z"),
+};
+
+const min = leer(entreno, "minutos"); // number
+const fecha = leer(entreno, "fecha"); // Date
+
+console.log(min + 15, fecha.toISOString().slice(0, 10));
+for (const columna of columnas) {
+  console.log(columna.padEnd(8), JSON.stringify(entreno[columna]));
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/02-keyof.ts
+```
+
+```text
+45 2026-10-08
+fecha    "2026-10-08T07:30:00.000Z"
+tipo     "running"
+minutos  30
+```
+
+- **`type CampoEntreno = keyof Entreno`** es `"id" | "tipo" | "minutos" | "fecha"`. Pasa el ratón por `CampoEntreno` para verlo.
+- **`columnas: CampoEntreno[]`** solo admite nombres de columna que existan. Es el tipo que necesitarías para una tabla configurable o un "ordenar por".
+- **`leer<T, K extends keyof T>`** devuelve `T[K]`: el tipo **de esa propiedad concreta**. `leer(entreno, "minutos")` es `number` (por eso `min + 15` funciona) y `leer(entreno, "fecha")` es `Date`.
+
+Comprueba qué evita. Añade al final del archivo:
+
+```ts
+const malas: CampoEntreno[] = ["fecha", "distancia"];
+leer(entreno, "km");
+const t: string = leer(entreno, "minutos");
+```
+
+```text
+src/i1/02-keyof.ts(35,41): error TS2322: Type '"distancia"' is not assignable to type 'keyof Entreno'.
+src/i1/02-keyof.ts(36,15): error TS2345: Argument of type '"km"' is not assignable to parameter of type 'keyof Entreno'.
+src/i1/02-keyof.ts(37,7): error TS2322: Type 'number' is not assignable to type 'string'.
+```
+
+El tercer error es el más interesante: TypeScript sabe que `leer(entreno, "minutos")` devuelve un `number` exactamente, no "algún valor de `Entreno`". Borra esas tres líneas.
+
+Si renombras `minutos` a `duracion` en la interfaz, `CampoEntreno` cambia solo, y el compilador marca cada `"minutos"` que quede en el código. Esa es la idea de toda la sección.
+
+<Callout type="risk">
+
+- **`keyof` en un objeto con firma de índice:** si el tipo es `Record<string, number>` o `{ [clave: string]: number }`, `keyof` es simplemente `string` (cualquier texto), no una lista concreta. `keyof` solo da una unión útil con claves conocidas.
+- **`Object.keys(obj)` devuelve `string[]`, no `(keyof T)[]`:** TypeScript no puede garantizar que un objeto no tenga propiedades **de más** (un `Entreno` puede venir con un campo extra de la base de datos). Por eso `entreno[columna]` funciona con `columna: CampoEntreno`, pero no con el resultado de `Object.keys`. El cast `as (keyof T)[]` es habitual, pero es una promesa tuya, no una comprobación.
+
+</Callout>
+
+## Paso 2: `typeof`, el tipo de un valor que ya existe
+
+Muchas veces el valor existe primero: una configuración por defecto, un objeto de constantes, una función. `typeof` **en posición de tipo** extrae su tipo para no escribirlo dos veces. Crea `src/i1/02-typeof.ts`:
+
+```ts
+// Archivo: src/i1/02-typeof.ts
+
+// Un valor que ya existe: la configuración por defecto de la app
+const configPorDefecto = {
+  tema: "dark",
+  idioma: "es",
+  recordatorios: true,
+  minutosObjetivo: 150,
+};
+
+// typeof (en posición de tipo) extrae el tipo de ese valor: no hay que escribirlo dos veces
+type Config = typeof configPorDefecto;
+// { tema: string; idioma: string; recordatorios: boolean; minutosObjetivo: number }
+
+type ClaveConfig = keyof Config; // "tema" | "idioma" | "recordatorios" | "minutosObjetivo"
+
+function actualizar(actual: Config, cambios: Partial<Config>): Config {
+  return { ...actual, ...cambios };
+}
+
+const nueva = actualizar(configPorDefecto, { tema: "light", minutosObjetivo: 180 });
+console.log(nueva);
+
+const claves = Object.keys(nueva) as ClaveConfig[];
+console.log(claves.join(", "));
+
+// typeof también funciona con funciones: el tipo de la función entera
+function calcularRitmo(km: number, minutos: number) {
+  return { km, minutos, minPorKm: +(minutos / km).toFixed(2) };
+}
+type FuncionRitmo = typeof calcularRitmo; // (km: number, minutos: number) => { km: number; … }
+
+const calcular: FuncionRitmo = calcularRitmo;
+console.log(calcular(10, 52));
+
+// En JavaScript, typeof en una expresión sigue siendo el operador de siempre
+console.log(typeof configPorDefecto.tema);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/02-typeof.ts
+```
+
+```text
+{
+  tema: 'light',
+  idioma: 'es',
+  recordatorios: true,
+  minutosObjetivo: 180
+}
+tema, idioma, recordatorios, minutosObjetivo
+{ km: 10, minutos: 52, minPorKm: 5.2 }
+string
+```
+
+- **`type Config = typeof configPorDefecto`**: el tipo sale del objeto. Si añades una opción a `configPorDefecto`, `Config` la incluye sin tocar nada más.
+- **`keyof Config`**: se combinan. Primero el tipo del valor y después sus claves.
+- **`typeof calcularRitmo`**: el tipo de la función completa, con sus parámetros y su retorno. En I1.3 sacarás solo el retorno con `ReturnType<typeof calcularRitmo>`.
+- **`Partial<Config>`** (cada propiedad opcional) es un _utility type_, también de I1.3. Aquí permite pasar solo los cambios.
+- **El último `typeof`** es el operador de JavaScript de siempre: está en una **expresión** y se ejecuta, devolviendo el texto `"string"`. El `typeof` de tipos solo aparece después de `type X =` o de `:`.
+
+Ahora el problema. Añade al final:
+
+```ts
+actualizar(configPorDefecto, { tema: "azul", fuente: "grande" });
+```
+
+```text
+src/i1/02-typeof.ts(39,46): error TS2353: Object literal may only specify known properties, and 'fuente' does not exist in type 'Partial<{ tema: string; idioma: string; recordatorios: boolean; minutosObjetivo: number; }>'.
+```
+
+`fuente` se detecta, pero fíjate en lo que **no** da error: `tema: "azul"`. Para TypeScript, `tema` es de tipo `string`, no `"dark" | "light"`, porque al inferir el tipo de un objeto **ensancha** los literales a su tipo general. Borra la línea; el Paso 4 lo resuelve.
+
+<Callout type="risk">
+
+- **`typeof` copia también lo que sobra:** si `configPorDefecto` tiene una propiedad temporal o de depuración, pasa a formar parte del tipo `Config`. El valor de origen debe ser limpio y representativo.
+- **Un valor no es un tipo:** `function f(c: configPorDefecto)` da error, porque `configPorDefecto` es un valor. Dentro de una posición de tipo, siempre `typeof configPorDefecto`.
+- **Ensanchamiento:** `const tema = "dark"` tiene tipo `"dark"`, pero `{ tema: "dark" }` tiene `tema: string`, porque las propiedades de un objeto se pueden reasignar. Es el origen del falso positivo de `"azul"`.
+
+</Callout>
+
+## Paso 3: acceso por índice, `T["prop"]` y `T[number]`
+
+Igual que `objeto["prop"]` lee una propiedad de un **valor**, `Tipo["prop"]` lee el tipo de una propiedad de un **tipo**. Sirve para reutilizar trozos de una interfaz grande sin copiarlos. Crea `src/i1/02-indexed.ts`:
+
+```ts
+// Archivo: src/i1/02-indexed.ts
+
+interface Usuario {
+  id: string;
+  nombre: string;
+  preferencias: {
+    tema: "light" | "dark";
+    unidades: "km" | "millas";
+  };
+  entrenos: { tipo: "fuerza" | "running"; minutos: number }[];
+}
+
+// T["propiedad"]: el tipo de una propiedad concreta
+type Preferencias = Usuario["preferencias"]; // { tema: …; unidades: … }
+type Tema = Usuario["preferencias"]["tema"]; // "light" | "dark"
+
+// Con una unión de claves, una unión de tipos
+type IdONombre = Usuario["id" | "nombre"]; // string
+
+// T[number]: el tipo de los ELEMENTOS de un array
+type EntrenoUsuario = Usuario["entrenos"][number]; // { tipo: …; minutos: number }
+type TipoEntreno = Usuario["entrenos"][number]["tipo"]; // "fuerza" | "running"
+
+function cambiarTema(prefs: Preferencias, tema: Tema): Preferencias {
+  return { ...prefs, tema };
+}
+
+function minutosDe(entrenos: EntrenoUsuario[], tipo: TipoEntreno): number {
+  return entrenos.filter((e) => e.tipo === tipo).reduce((suma, e) => suma + e.minutos, 0);
+}
+
+const dani: Usuario = {
+  id: "u1",
+  nombre: "Dani",
+  preferencias: { tema: "light", unidades: "km" },
+  entrenos: [
+    { tipo: "running", minutos: 30 },
+    { tipo: "fuerza", minutos: 45 },
+    { tipo: "running", minutos: 50 },
+  ],
+};
+
+const nombre: IdONombre = dani.nombre;
+console.log(nombre, cambiarTema(dani.preferencias, "dark"));
+console.log("running:", minutosDe(dani.entrenos, "running"), "min");
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/02-indexed.ts
+```
+
+```text
+Dani { tema: 'dark', unidades: 'km' }
+running: 80 min
+```
+
+- **`Usuario["preferencias"]`** es el objeto completo de preferencias, y **`Usuario["preferencias"]["tema"]`** baja un nivel más: `"light" | "dark"`.
+- **`Usuario["id" | "nombre"]`**: con una unión de claves, se obtiene la unión de sus tipos (aquí, `string | string`, es decir, `string`).
+- **`Usuario["entrenos"][number]`**: `Usuario["entrenos"]` es un array; `[number]` significa "lo que obtengo al acceder con **cualquier índice numérico**", es decir, el tipo de **un elemento**. Así sacas el tipo de un entreno sin haberle dado nombre en la interfaz.
+
+Añade al final:
+
+```ts
+cambiarTema(dani.preferencias, "azul");
+type Mal = Usuario["edad"];
+```
+
+```text
+src/i1/02-indexed.ts(47,32): error TS2345: Argument of type '"azul"' is not assignable to parameter of type '"dark" | "light"'.
+src/i1/02-indexed.ts(48,20): error TS2339: Property 'edad' does not exist on type 'Usuario'.
+```
+
+Borra las dos líneas.
+
+<Callout type="risk">
+
+- **Con punto no funciona:** en tipos solo existe la forma con corchetes. `Usuario.preferencias` da error; tiene que ser `Usuario["preferencias"]`.
+- **Las propiedades opcionales arrastran `undefined`:** si la interfaz dice `preferencias?: {…}`, entonces `Usuario["preferencias"]` es `{…} | undefined`, y `Usuario["preferencias"]["tema"]` da error. Se resuelve con `NonNullable<Usuario["preferencias"]>["tema"]` (I1.3).
+- **No abuses de las cadenas largas:** `A["b"]["c"][number]["d"]` es difícil de leer. Si un tipo interno se usa en varios sitios, dale nombre propio (`interface Entreno`) y úsalo dentro de la interfaz grande.
+
+</Callout>
+
+## Paso 4: `as const` y una única fuente de verdad
+
+`as const` le dice a TypeScript: "este valor no va a cambiar; guarda los **literales exactos** y hazlo de solo lectura". Combinado con `typeof` y `[number]`, permite escribir una lista **una vez** y derivar de ella el tipo. Crea `src/i1/02-as-const.ts`:
+
+```ts
+// Archivo: src/i1/02-as-const.ts
+
+// Sin as const: TypeScript "ensancha" los literales a string
+const nivelesSueltos = ["basico", "intermedio", "avanzado"];
+type NivelSuelto = (typeof nivelesSueltos)[number]; // string
+
+// Con as const: array de solo lectura con los literales exactos
+const NIVELES = ["basico", "intermedio", "avanzado"] as const;
+type Nivel = (typeof NIVELES)[number]; // "basico" | "intermedio" | "avanzado"
+
+// Lo mismo con un objeto: cada valor queda congelado como literal
+const TIPOS_ENTRENO = {
+  fuerza: { etiqueta: "Fuerza", color: "#d97706" },
+  running: { etiqueta: "Running", color: "#0284c7" },
+  movilidad: { etiqueta: "Movilidad", color: "#0d9488" },
+} as const;
+type TipoEntreno = keyof typeof TIPOS_ENTRENO; // "fuerza" | "running" | "movilidad"
+
+function etiqueta(tipo: TipoEntreno): string {
+  return TIPOS_ENTRENO[tipo].etiqueta;
+}
+
+// Una sola fuente de verdad: el array sirve para pintar Y para validar en ejecución
+function esNivel(valor: string): valor is Nivel {
+  return (NIVELES as readonly string[]).includes(valor);
+}
+
+const deLaUrl = "intermedio"; // imagina que viene de ?nivel=intermedio
+const otro: NivelSuelto = "cualquier cosa";
+
+console.log(NIVELES.map((n) => n.toUpperCase()).join(" → "));
+console.log(etiqueta("running"), Object.keys(TIPOS_ENTRENO));
+console.log(esNivel(deLaUrl), esNivel("experto"), otro);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/02-as-const.ts
+```
+
+```text
+BASICO → INTERMEDIO → AVANZADO
+Running [ 'fuerza', 'running', 'movilidad' ]
+true false cualquier cosa
+```
+
+La diferencia está en los tipos (pasa el ratón por encima):
+
+| Declaración                                     | `typeof` del array                              | Tipo de un elemento                      |
+| ----------------------------------------------- | ----------------------------------------------- | ---------------------------------------- |
+| `["basico", "intermedio", "avanzado"]`          | `string[]`                                      | `string`                                 |
+| `["basico", "intermedio", "avanzado"] as const` | `readonly ["basico", "intermedio", "avanzado"]` | `"basico" \| "intermedio" \| "avanzado"` |
+
+- **`NivelSuelto` es `string`**: por eso `const otro: NivelSuelto = "cualquier cosa"` compila. Sin `as const`, el tipo derivado no protege nada.
+- **`(typeof NIVELES)[number]`**: el tipo de un elemento de la tupla de literales, es decir, la unión de los tres niveles. Si añades `"experto"` al array, `Nivel` lo incluye sin tocar nada más.
+- **`keyof typeof TIPOS_ENTRENO`**: con un objeto, las claves son la lista de valores válidos, y cada entrada guarda sus datos (`etiqueta`, `color`). Esta plataforma usa exactamente este patrón en `src/lib/constants.ts`: `LEVELS` es un objeto `as const`, y `type Level = keyof typeof LEVELS`.
+- **`esNivel`** usa el mismo array **en ejecución** para validar un texto que llega de fuera. El valor sirve para validar y para pintar, y el tipo se deriva de él: una única fuente de verdad.
+
+Añade al final del archivo:
+
+```ts
+const n: Nivel = "experto";
+NIVELES.push("experto");
+etiqueta("natacion");
+const x: string = "basico";
+NIVELES.includes(x);
+```
+
+```text
+src/i1/02-as-const.ts(35,7): error TS2322: Type '"experto"' is not assignable to type '"avanzado" | "basico" | "intermedio"'.
+src/i1/02-as-const.ts(36,9): error TS2339: Property 'push' does not exist on type 'readonly ["basico", "intermedio", "avanzado"]'.
+src/i1/02-as-const.ts(37,10): error TS2345: Argument of type '"natacion"' is not assignable to parameter of type '"fuerza" | "movilidad" | "running"'.
+src/i1/02-as-const.ts(39,18): error TS2345: Argument of type 'string' is not assignable to parameter of type '"avanzado" | "basico" | "intermedio"'.
+```
+
+Los tres primeros son la protección que buscabas. El cuarto es una trampa conocida: `NIVELES.includes(x)` con un `x: string` **no compila**, porque `includes` de una tupla de literales solo acepta esos literales. Es absurdo (precisamente quieres comprobar si un texto cualquiera está en la lista), y por eso `esNivel` lo resuelve con `(NIVELES as readonly string[]).includes(valor)`: amplía el tipo del array, lo cual es seguro, porque solo lee. Borra las cinco líneas.
+
+<Callout type="risk">
+
+- **`as const` es solo de TypeScript:** al ejecutar, el array se puede modificar igual (`readonly` desaparece al compilar). Si de verdad necesitas impedirlo en ejecución, usa además `Object.freeze`.
+- **`readonly` se contagia:** una función que pide `string[]` no acepta un `readonly string[]` (podría modificarlo). Si una función solo lee la lista, decláralo: `function pintar(niveles: readonly string[])`.
+- **`as const` no es `as`:** `as Tipo` es una afirmación que puede mentir (B1.5); `as const` solo hace los tipos **más estrictos** a partir del valor real, así que no puede mentir.
+- **El orden de las uniones no importa:** el compilador muestra `"avanzado" | "basico" | "intermedio"` ordenado alfabéticamente, no en el orden del array. Si necesitas el orden (para pintar un selector), usa el array, no el tipo.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. En `src/i1/02-ejercicio.ts`, define los 24 cursos del temario (`id`, `nivel` y `titulo`) como una constante `as const`.
+2. Deriva de ella, sin escribirlos a mano, los tipos `Curso`, `CursoId` (`"B1" | "B2" | …`) y `Nivel`.
+3. Escribe `cursoPorId(id: CursoId)`, `cursosDeNivel(nivel: Nivel)` y una guarda `esCursoId(valor: string)` para textos que llegan de una URL.
+4. Comprueba que `cursoPorId("C1")` no compila, y que un `string` cualquiera necesita pasar antes por `esCursoId`.
+
+</Callout>
+
+Solución completa, `src/i1/02-ejercicio.ts`:
+
+```ts
+// Archivo: src/i1/02-ejercicio.ts
+
+// Única fuente de verdad: el catálogo de cursos del temario
+export const CURSOS = [
+  { id: "B1", nivel: "basico", titulo: "TypeScript desde cero" },
+  { id: "B2", nivel: "basico", titulo: "Git y flujo de trabajo" },
+  { id: "B3", nivel: "basico", titulo: "Cómo funciona la web" },
+  { id: "B4", nivel: "basico", titulo: "Fundamentos de bases de datos" },
+  { id: "B5", nivel: "basico", titulo: "MongoDB esencial" },
+  { id: "B6", nivel: "basico", titulo: "React esencial" },
+  { id: "B7", nivel: "basico", titulo: "Tailwind CSS v4 esencial" },
+  { id: "I1", nivel: "intermedio", titulo: "TypeScript intermedio" },
+  { id: "I2", nivel: "intermedio", titulo: "React intermedio" },
+  { id: "I3", nivel: "intermedio", titulo: "Backend con Astro" },
+  { id: "I4", nivel: "intermedio", titulo: "Modelado de datos con MongoDB" },
+  { id: "I5", nivel: "intermedio", titulo: "Autenticación y autorización a fondo" },
+  { id: "I6", nivel: "intermedio", titulo: "Servidores Linux" },
+  { id: "I7", nivel: "intermedio", titulo: "Sistema de diseño con Tailwind v4" },
+  { id: "I8", nivel: "intermedio", titulo: "Testing" },
+  { id: "A1", nivel: "avanzado", titulo: "TypeScript avanzado" },
+  { id: "A2", nivel: "avanzado", titulo: "MongoDB avanzado" },
+  { id: "A3", nivel: "avanzado", titulo: "SQL y PostgreSQL" },
+  { id: "A4", nivel: "avanzado", titulo: "Despliegue en servidores propios" },
+  { id: "A5", nivel: "avanzado", titulo: "Seguridad web" },
+  { id: "A6", nivel: "avanzado", titulo: "Rendimiento y observabilidad" },
+  { id: "A7", nivel: "avanzado", titulo: "CI/CD con GitHub Actions" },
+  { id: "A8", nivel: "avanzado", titulo: "Arquitectura con Astro y React" },
+  { id: "P1", nivel: "final", titulo: "Proyecto integrador" },
+] as const;
+
+// Todos los tipos se derivan del valor: nada se escribe dos veces
+export type Curso = (typeof CURSOS)[number];
+export type CursoId = Curso["id"]; // "B1" | "B2" | … | "P1"
+export type Nivel = Curso["nivel"]; // "basico" | "intermedio" | "avanzado" | "final"
+
+export function cursoPorId(id: CursoId): Curso {
+  // find puede devolver undefined; como id es un CursoId, sabemos que existe
+  return CURSOS.find((c) => c.id === id)!;
+}
+
+// Guarda de tipo para textos que llegan de fuera (URL, formulario, base de datos)
+export function esCursoId(valor: string): valor is CursoId {
+  return CURSOS.some((c) => c.id === valor);
+}
+
+export function cursosDeNivel(nivel: Nivel): CursoId[] {
+  return CURSOS.filter((c) => c.nivel === nivel).map((c) => c.id);
+}
+
+console.log(cursoPorId("I1").titulo);
+console.log("Intermedio:", cursosDeNivel("intermedio").join(", "));
+
+for (const deLaUrl of ["A3", "Z9"]) {
+  if (esCursoId(deLaUrl)) {
+    console.log(`${deLaUrl} → ${cursoPorId(deLaUrl).titulo}`); // aquí deLaUrl ya es CursoId
+  } else {
+    console.log(`${deLaUrl} → no es un curso`);
+  }
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/02-ejercicio.ts
+```
+
+```text
+TypeScript intermedio
+Intermedio: I1, I2, I3, I4, I5, I6, I7, I8
+A3 → SQL y PostgreSQL
+Z9 → no es un curso
+```
+
+Añade al final estas cuatro líneas y comprueba los errores:
+
+```ts
+cursoPorId("C1");
+cursosDeNivel("experto");
+const parametro: string = "B3";
+cursoPorId(parametro);
+```
+
+```text
+src/i1/02-ejercicio.ts(61,12): error TS2345: Argument of type '"C1"' is not assignable to parameter of type '"A1" | "A2" | "A3" | "A4" | "A5" | "A6" | "A7" | "A8" | "B1" | "B2" | "B3" | "B4" | "B5" | "B6" | "B7" | "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8" | "P1"'.
+src/i1/02-ejercicio.ts(62,15): error TS2345: Argument of type '"experto"' is not assignable to parameter of type '"avanzado" | "basico" | "final" | "intermedio"'.
+src/i1/02-ejercicio.ts(64,12): error TS2345: Argument of type 'string' is not assignable to parameter of type '"A1" | "A2" | "A3" | "A4" | "A5" | "A6" | "A7" | "A8" | "B1" | "B2" | "B3" | "B4" | "B5" | "B6" | "B7" | "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8" | "P1"'.
+```
+
+Las decisiones:
+
+- **`(typeof CURSOS)[number]`** es el tipo de un curso; **`Curso["id"]`** y **`Curso["nivel"]`** bajan a sus propiedades. Los 24 identificadores aparecen en el mensaje de error sin haberlos escrito nunca como tipo.
+- **`esCursoId(valor): valor is CursoId`** es una guarda de tipo (B1.6). Dentro del `if`, `deLaUrl` pasa de `string` a `CursoId` y se puede usar con `cursoPorId`. Es el puente entre el mundo exterior (texto) y el tipado.
+- **`cursosDeNivel`** devuelve `CursoId[]`, no `string[]`: el resultado sigue protegido para la siguiente función que lo reciba.
+- **Añadir un curso** es añadir una línea al array. `CursoId`, `Nivel`, los selectores y la validación se actualizan solos.
+
+<Callout type="risk">
+
+- **El `!` de `cursoPorId` es una promesa tuya:** `find` devuelve `Curso | undefined`, y el `!` le dice al compilador "no es `undefined`". Aquí es cierto porque `id` es un `CursoId`, pero si alguien llega con un cast (`cursoPorId(x as CursoId)`), el `!` deja pasar un `undefined` y el error aparece más tarde, lejos de su causa. Úsalo solo cuando el tipo lo garantice de verdad.
+- **Esta plataforma hace otra cosa, y por una buena razón:** su catálogo vive en `src/content/courses.json`, porque es contenido que se edita sin tocar código, y Astro lo valida con un esquema. Los IDs se comprueban con una expresión regular (`COURSE_ID_REGEX`). Un `as const` encaja con constantes **del código**; para datos que cambian (contenido, base de datos), la validación en ejecución de I1.4 es la herramienta.
+- **Uniones muy grandes ralentizan el editor:** con 24 valores no se nota, pero una unión de miles de literales (por ejemplo, generada desde una base de datos) hace que el autocompletado y la comprobación de tipos vayan lentos. En esos casos, `string` con validación en ejecución es más práctico.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tienes una única fuente de verdad para tus constantes y sus tipos: escribes la lista una vez con `as const`, derivas los tipos con `typeof`, `keyof`, `T["prop"]` y `T[number]`, y la misma constante te sirve para pintar y para validar en ejecución con una guarda de tipo.
+
+</Callout>
+
+## Resumen
+
+- `keyof T` da la unión de las claves de `T`; `T[K]` es el tipo de la propiedad `K`.
+- `typeof valor`, en posición de tipo, extrae el tipo de un valor, una función o un objeto existente.
+- `T["prop"]` lee el tipo de una propiedad; `T[number]` da el tipo de un elemento de un array.
+- `as const` congela los literales y hace el valor de solo lectura; sin él, el tipo derivado se ensancha a `string`.
+- Patrón de fuente única: `const LISTA = [...] as const` + `type X = (typeof LISTA)[number]` + una guarda `esX(valor)` para validar en ejecución.

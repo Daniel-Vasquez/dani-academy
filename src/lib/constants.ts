@@ -24,5 +24,6 @@ export const THEME_STORAGE_KEY = "da-theme";
 export const RATE_LIMITS = {
   quiz: { max: 10, windowSeconds: 60 * 60 }, // 10 evaluaciones por hora
   progress: { max: 60, windowSeconds: 60 }, // 60 marcados/desmarcados por minuto
-  heartbeat: { max: 5, windowSeconds: 60 }, // 5 latidos por minuto (se envía 1)
+  // Se envía 1 por minuto y otro al abrir cada sección: 20 deja navegar rápido entre secciones
+  heartbeat: { max: 20, windowSeconds: 60 },
 } as const;

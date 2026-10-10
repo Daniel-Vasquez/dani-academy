@@ -1,0 +1,451 @@
+---
+sectionId: "I1.3"
+course: "I1"
+title: "Utility types"
+order: 3
+minutes: 60
+summary: "Usas Partial, Required, Readonly, Pick, Omit, Record, ReturnType, Parameters, Awaited y NonNullable para derivar entradas y salidas de un CRUD de notas a partir de una sola interfaz."
+---
+
+Abre el código de cualquier proyecto que haya crecido sin cuidado y verás interfaces casi idénticas: `Usuario`, `UsuarioNuevo` (igual pero sin `id`), `UsuarioActualizar` (igual pero todo opcional), `UsuarioPublico` (igual pero sin la contraseña)… Cada una escrita a mano. El día que añades `telefono` a `Usuario`, tienes que acordarte de añadirlo en tres sitios más, y nadie se acuerda. Los **_utility types_** son tipos genéricos que trae TypeScript para **transformar** un tipo en otro: quitar propiedades, hacerlas opcionales, quedarte con unas pocas, extraer lo que devuelve una función… Con ellos escribes la interfaz una vez y derivas todas sus variantes.
+
+**Lo que tendrás al terminar:** los tipos de entrada y salida de un CRUD completo de notas del Planificador, todos derivados de una sola interfaz `Nota`, con un repositorio en memoria que los usa.
+
+**Requisitos:** las secciones I1.1 (genéricos) y I1.2 (`keyof`, `typeof`, `T["prop"]`).
+
+## Paso 1: `Partial`, `Required` y `Readonly`
+
+Los tres primeros cambian **los modificadores** de todas las propiedades a la vez. Crea `src/i1/03-modificadores.ts`:
+
+```ts
+// Archivo: src/i1/03-modificadores.ts
+
+interface Preferencias {
+  tema: "light" | "dark";
+  idioma: "es" | "en";
+  recordatorio?: string; // opcional: hora "HH:MM"
+}
+
+// Partial<T>: todas las propiedades opcionales (ideal para "lo que cambia")
+function aplicar(actuales: Preferencias, cambios: Partial<Preferencias>): Preferencias {
+  return { ...actuales, ...cambios };
+}
+
+// Required<T>: todas obligatorias (ideal para "ya con los valores por defecto")
+const POR_DEFECTO: Required<Preferencias> = { tema: "light", idioma: "es", recordatorio: "07:00" };
+
+function completar(parciales: Preferencias): Required<Preferencias> {
+  return { ...POR_DEFECTO, ...parciales, recordatorio: parciales.recordatorio ?? POR_DEFECTO.recordatorio };
+}
+
+// Readonly<T>: nadie puede reasignar sus propiedades
+const congeladas: Readonly<Preferencias> = { tema: "dark", idioma: "es" };
+
+const mias: Preferencias = { tema: "light", idioma: "es" };
+console.log(aplicar(mias, { tema: "dark" }));
+console.log(completar(mias));
+console.log(congeladas);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/03-modificadores.ts
+```
+
+```text
+{ tema: 'dark', idioma: 'es' }
+{ tema: 'light', idioma: 'es', recordatorio: '07:00' }
+{ tema: 'dark', idioma: 'es' }
+```
+
+| _Utility type_ | Qué hace                           | Uso típico                                                        |
+| -------------- | ---------------------------------- | ----------------------------------------------------------------- |
+| `Partial<T>`   | Todas las propiedades opcionales   | Los cambios de un formulario de edición: llega solo lo que cambió |
+| `Required<T>`  | Todas obligatorias (quita los `?`) | Una configuración ya completada con los valores por defecto       |
+| `Readonly<T>`  | Ninguna se puede reasignar         | Estado que no debe tocarse (configuración, estado de React)       |
+
+Añade al final del archivo:
+
+```ts
+const incompletas: Required<Preferencias> = { tema: "dark", idioma: "en" };
+congeladas.tema = "light";
+```
+
+```text
+src/i1/03-modificadores.ts(29,7): error TS2741: Property 'recordatorio' is missing in type '{ tema: "dark"; idioma: "en"; }' but required in type 'Required<Preferencias>'.
+src/i1/03-modificadores.ts(30,12): error TS2540: Cannot assign to 'tema' because it is a read-only property.
+```
+
+Borra las dos líneas.
+
+<Callout type="risk">
+
+- **Un opcional puede llegar como `undefined` explícito y pisar el valor por defecto.** Por eso `completar` vuelve a escribir `recordatorio` con `??`. Prueba a quitar esa parte y dejar solo `{ ...POR_DEFECTO, ...parciales }`: compila igual, pero con `completar({ tema: "dark", idioma: "es", recordatorio: undefined })` el resultado tiene `recordatorio: undefined` **aunque su tipo diga `string`**, y un `.toUpperCase()` posterior explota con `TypeError: Cannot read properties of undefined`. Es un agujero conocido de TypeScript con el operador de propagación (`...`). La opción `exactOptionalPropertyTypes` de `tsconfig.json` lo cierra, a cambio de ser más estricta en todo el proyecto.
+- **`Readonly` es superficial:** `Readonly<{ entrenos: Entreno[] }>` impide reasignar `entrenos`, pero no `entrenos.push(…)`. Para listas, usa además `readonly Entreno[]`.
+- **`Partial` en todo es tentador y peligroso:** si una función recibe `Partial<Usuario>` cuando en realidad necesita el `email`, el compilador ya no te avisa cuando falta. Usa `Partial` solo donde de verdad todo es opcional.
+
+</Callout>
+
+## Paso 2: `Pick`, `Omit` y `Record`
+
+Los siguientes eligen **qué propiedades** se quedan. Crea `src/i1/03-pick-omit-record.ts`:
+
+```ts
+// Archivo: src/i1/03-pick-omit-record.ts
+
+interface Usuario {
+  id: string;
+  nombre: string;
+  email: string;
+  passwordHash: string;
+  creado: Date;
+}
+
+// Omit<T, K>: todo menos K → lo que envía el formulario de registro
+type NuevoUsuario = Omit<Usuario, "id" | "creado" | "passwordHash"> & { password: string };
+
+// Pick<T, K>: solo K → lo que es seguro mostrar en público
+type UsuarioPublico = Pick<Usuario, "id" | "nombre">;
+
+// Se combinan: solo nombre y email, y los dos opcionales → un PATCH de perfil
+type CambiosUsuario = Partial<Pick<Usuario, "nombre" | "email">>;
+
+// Record<K, V>: un objeto con claves K y valores V
+type CursoId = "B1" | "B2" | "I1";
+type ProgresoPorCurso = Record<CursoId, number>; // las tres claves son obligatorias
+
+function registrar(datos: NuevoUsuario): Usuario {
+  return {
+    id: crypto.randomUUID(),
+    nombre: datos.nombre,
+    email: datos.email,
+    passwordHash: `hash(${datos.password.length} caracteres)`, // en la vida real: bcrypt/argon2
+    creado: new Date("2026-10-09T10:00:00Z"),
+  };
+}
+
+function aPublico({ id, nombre }: Usuario): UsuarioPublico {
+  return { id, nombre };
+}
+
+function actualizar(usuario: Usuario, cambios: CambiosUsuario): Usuario {
+  return { ...usuario, ...cambios };
+}
+
+const dani = registrar({ nombre: "Dani", email: "dani@example.com", password: "secreto-largo" });
+console.log(aPublico(dani).nombre, dani.passwordHash);
+console.log(actualizar(dani, { email: "dani@nuevo.dev" }).email);
+
+const progreso: ProgresoPorCurso = { B1: 100, B2: 50, I1: 0 };
+console.log(Object.entries(progreso).map(([curso, pct]) => `${curso}: ${pct} %`).join(" · "));
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/03-pick-omit-record.ts
+```
+
+```text
+Dani hash(13 caracteres)
+dani@nuevo.dev
+B1: 100 % · B2: 50 % · I1: 0 %
+```
+
+- **`Omit<Usuario, "id" | "creado" | "passwordHash">`**: todo menos esas tres propiedades. Es lo que envía el formulario de registro: el `id` y la fecha los pone el servidor, y el _hash_ lo calcula él. Con `& { password: string }` (una **intersección**) se añade la contraseña en claro, que no forma parte de `Usuario`.
+- **`Pick<Usuario, "id" | "nombre">`**: solo esas dos. Lo que es seguro enseñar a otros usuarios.
+- **`Partial<Pick<…>>`**: se combinan de dentro afuera. Primero se eligen `nombre` y `email`, y después se hacen opcionales. Es el cuerpo exacto de un `PATCH /perfil`.
+- **`Record<CursoId, number>`**: un objeto con **una clave por cada valor** de la unión. Las tres son obligatorias.
+
+¿Cuál usar, `Pick` u `Omit`? Usa `Pick` cuando quieres **pocas** propiedades de un tipo grande, y `Omit` cuando quieres **casi todas**. Y piensa qué pasa cuando añadas una propiedad nueva a `Usuario`: con `Pick` no aparece en el tipo derivado hasta que la añades a mano; con `Omit` aparece sola.
+
+Añade al final:
+
+```ts
+const publico: UsuarioPublico = { id: "u1", nombre: "Dani", email: "x@x.com" };
+const incompleto: ProgresoPorCurso = { B1: 100, B2: 50 };
+actualizar(dani, { passwordHash: "otro" });
+type SinEmial = Omit<Usuario, "emial">;
+```
+
+```text
+src/i1/03-pick-omit-record.ts(49,61): error TS2353: Object literal may only specify known properties, and 'email' does not exist in type 'UsuarioPublico'.
+src/i1/03-pick-omit-record.ts(50,7): error TS2741: Property 'I1' is missing in type '{ B1: number; B2: number; }' but required in type 'ProgresoPorCurso'.
+src/i1/03-pick-omit-record.ts(51,20): error TS2353: Object literal may only specify known properties, and 'passwordHash' does not exist in type 'Partial<Pick<Usuario, "email" | "nombre">>'.
+```
+
+Tres errores para cuatro líneas: la última, con la errata `"emial"`, **compila sin avisar**. Lo explica el primer punto de los riesgos. Borra las cuatro líneas.
+
+<Callout type="risk">
+
+- **`Omit` no comprueba que la clave exista:** su definición acepta cualquier texto (`K extends keyof any`), así que `Omit<Usuario, "emial">` es simplemente `Usuario` entero, sin error. Con `Pick`, una errata sí falla. Revisa con especial cuidado las claves de cada `Omit`; si el error es grave (por ejemplo, un `Omit<Usuario, "passwordHash">` mal escrito), el tipo "público" incluirá el _hash_.
+- **Los tipos no quitan propiedades al ejecutar.** `function aPublico(u: Usuario): UsuarioPublico { return u; }` compila (un objeto con propiedades de más es asignable a uno con menos) y `JSON.stringify` de su resultado incluye `"passwordHash"`. Por eso `aPublico` del ejemplo construye un objeto **nuevo** con solo `id` y `nombre`. Para respuestas de una API, crea siempre el objeto de salida campo a campo (o valídalo con Zod, I1.4).
+- **`Record<string, T>` no es lo mismo que `Record<CursoId, T>`:** con `string`, cualquier clave es válida y ninguna es obligatoria. Usa una unión concreta siempre que la tengas.
+
+</Callout>
+
+## Paso 3: `ReturnType`, `Parameters`, `Awaited` y `NonNullable`
+
+Los últimos trabajan con **funciones y promesas**: sacan el tipo de lo que devuelve una función, de sus parámetros o de lo que hay dentro de una promesa. Crea `src/i1/03-funciones.ts`:
+
+```ts
+// Archivo: src/i1/03-funciones.ts
+
+interface Entreno {
+  tipo: "fuerza" | "running";
+  minutos: number;
+}
+
+async function cargarResumen(usuarioId: string, semanas: number) {
+  // Simula una consulta a la base de datos
+  await new Promise((r) => setTimeout(r, 50));
+  const entrenos: Entreno[] = [
+    { tipo: "running", minutos: 30 },
+    { tipo: "fuerza", minutos: 45 },
+  ];
+  return { usuarioId, semanas, total: entrenos.length, minutos: 75, ultimo: entrenos.at(-1) };
+}
+
+// ReturnType: lo que devuelve la función (aquí, una Promise<…>)
+type PromesaResumen = ReturnType<typeof cargarResumen>;
+// Awaited: lo que hay dentro de la promesa
+type Resumen = Awaited<PromesaResumen>;
+// Parameters: los parámetros como tupla → [usuarioId: string, semanas: number]
+type ArgsResumen = Parameters<typeof cargarResumen>;
+// NonNullable: quita null y undefined
+type UltimoEntreno = NonNullable<Resumen["ultimo"]>; // Entreno
+
+// Un envoltorio que mide el tiempo y acepta exactamente los mismos argumentos
+async function conTiempo(...args: ArgsResumen): Promise<Resumen> {
+  const inicio = performance.now();
+  const resultado = await cargarResumen(...args);
+  console.log(`cargarResumen(${args.join(", ")}): ${Math.round(performance.now() - inicio) >= 50 ? "≥ 50" : "< 50"} ms`);
+  return resultado;
+}
+
+function describir(e: UltimoEntreno): string {
+  return `${e.tipo} ${e.minutos} min`;
+}
+
+const resumen = await conTiempo("u1", 4);
+console.log(`${resumen.total} entrenos, ${resumen.minutos} min`);
+if (resumen.ultimo) console.log("Último:", describir(resumen.ultimo));
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/03-funciones.ts
+```
+
+```text
+cargarResumen(u1, 4): ≥ 50 ms
+2 entrenos, 75 min
+Último: fuerza 45 min
+```
+
+Paso a paso, pasando el ratón por cada tipo:
+
+1. **`ReturnType<typeof cargarResumen>`**: como `cargarResumen` es `async`, devuelve una `Promise<{ usuarioId: string; … }>`.
+2. **`Awaited<PromesaResumen>`**: "desenvuelve" la promesa y deja el objeto. Combinados, `Awaited<ReturnType<typeof f>>` es el patrón para "lo que obtengo al hacer `await f()`".
+3. **`Parameters<typeof cargarResumen>`**: la tupla `[usuarioId: string, semanas: number]`. `conTiempo(...args: ArgsResumen)` acepta **exactamente** los mismos argumentos que la función que envuelve; si `cargarResumen` cambia de firma, `conTiempo` cambia sola.
+4. **`NonNullable<Resumen["ultimo"]>`**: `ultimo` es `Entreno | undefined` (porque `.at(-1)` de una lista vacía es `undefined`); `NonNullable` quita el `undefined`.
+
+Nunca escribiste la forma del resumen: la escribió la función. Añade al final:
+
+```ts
+await conTiempo("u1");
+describir(resumen.ultimo);
+```
+
+```text
+src/i1/03-funciones.ts(43,7): error TS2554: Expected 2 arguments, but got 1.
+src/i1/03-funciones.ts(44,11): error TS2345: Argument of type 'Entreno | undefined' is not assignable to parameter of type 'Entreno'.
+  Type 'undefined' is not assignable to type 'Entreno'.
+```
+
+El segundo error es `NonNullable` haciendo su trabajo: `describir` exige un entreno de verdad y el compilador te obliga a comprobar `if (resumen.ultimo)` antes, como hace el código. Borra las dos líneas.
+
+Esta plataforma usa este patrón en su capa de datos. En `src/server/services/quiz.service.ts`:
+
+```ts
+export type SubmitQuizResult = Awaited<ReturnType<typeof submitQuiz>>;
+```
+
+El componente de la evaluación (`Quiz.tsx`) importa `SubmitQuizResult` para tipar el resultado que muestra. Si `submitQuiz` añade un campo a su respuesta, el componente lo conoce sin que nadie toque un tipo. Los repositorios hacen lo mismo: `export type ProgressRepo = ReturnType<typeof createProgressRepo>`.
+
+<Callout type="risk">
+
+- **`ReturnType` de una función `async` es una promesa:** olvidar el `Awaited` es el error más común. `ReturnType<typeof cargarResumen>["total"]` da error, porque una `Promise` no tiene `total`.
+- **Derivar el tipo de la implementación tiene un precio:** si cambias el cuerpo de `cargarResumen` por error (devuelves `minutos` como texto), el tipo cambia con él y el error aparece **en quien lo usa**, no en la función. Para funciones públicas importantes (la respuesta de una API), escribe el tipo de retorno a mano y deja que el compilador compruebe la implementación contra él.
+- **`ReturnType` necesita `typeof`:** `ReturnType<cargarResumen>` da error, porque `cargarResumen` es un valor. Siempre `ReturnType<typeof cargarResumen>`.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. En `src/i1/03-ejercicio.ts`, escribe a mano **una sola interfaz**, `Nota`, para las notas del Planificador 2026: `id`, `usuarioId`, `titulo`, `contenido`, `categoria` (trabajo, personal, salud o estudio), `fijada`, `creada` y `actualizada`.
+2. Deriva, solo con _utility types_, los tipos del CRUD: `NuevaNota` (crear), `CambiosNota` (actualizar), `FiltroNotas` (listar), `NotaResumen` (lo que devuelve la lista) y `NotasPorCategoria` (un recuento).
+3. Implementa un repositorio en memoria `crearRepoNotas(usuarioId)` con `crear`, `actualizar`, `listar`, `recuento` y `eliminar` que use esos tipos, y deriva también el tipo del repositorio.
+4. Comprueba que no se puede crear una nota sin categoría, ni con un `id` inventado, ni cambiar su `usuarioId`.
+
+</Callout>
+
+Solución completa, `src/i1/03-ejercicio.ts`:
+
+```ts
+// Archivo: src/i1/03-ejercicio.ts
+
+// La única interfaz escrita a mano: una nota del Planificador 2026
+interface Nota {
+  id: string;
+  usuarioId: string;
+  titulo: string;
+  contenido: string;
+  categoria: "trabajo" | "personal" | "salud" | "estudio";
+  fijada: boolean;
+  creada: Date;
+  actualizada: Date;
+}
+
+// ── Entradas (lo que llega del cliente) ──────────────────────────────
+// Crear: el servidor pone id, usuarioId (de la sesión) y las fechas; fijada es opcional
+type NuevaNota = Omit<Nota, "id" | "usuarioId" | "creada" | "actualizada" | "fijada"> &
+  Partial<Pick<Nota, "fijada">>;
+// Actualizar: solo lo editable, y todo opcional (PATCH)
+type CambiosNota = Partial<Pick<Nota, "titulo" | "contenido" | "categoria" | "fijada">>;
+// Listar: filtros opcionales
+type FiltroNotas = Partial<Pick<Nota, "categoria" | "fijada">>;
+
+// ── Salidas (lo que se devuelve al cliente) ──────────────────────────
+// Resumen para la lista: sin el contenido completo ni el usuarioId
+type NotaResumen = Pick<Nota, "id" | "titulo" | "categoria" | "fijada" | "actualizada">;
+// Recuento por categoría: una clave por cada categoría posible
+type NotasPorCategoria = Record<Nota["categoria"], number>;
+
+// ── Implementación en memoria (en la app real sería MongoDB) ─────────
+function crearRepoNotas(usuarioId: string) {
+  const notas: Nota[] = [];
+  let siguiente = 1;
+  let reloj = Date.parse("2026-10-09T09:00:00Z");
+  const ahora = () => new Date((reloj += 60_000)); // cada operación, un minuto después
+
+  return {
+    crear(datos: NuevaNota): Nota {
+      const fecha = ahora();
+      const nota: Nota = {
+        fijada: false,
+        ...datos,
+        id: `n${siguiente++}`,
+        usuarioId,
+        creada: fecha,
+        actualizada: fecha,
+      };
+      notas.push(nota);
+      return nota;
+    },
+    actualizar(id: string, cambios: CambiosNota): Nota | null {
+      const nota = notas.find((n) => n.id === id);
+      if (!nota) return null;
+      Object.assign(nota, cambios, { actualizada: ahora() });
+      return nota;
+    },
+    listar(filtro: FiltroNotas = {}): NotaResumen[] {
+      return notas
+        .filter((n) => (filtro.categoria ? n.categoria === filtro.categoria : true))
+        .filter((n) => (filtro.fijada !== undefined ? n.fijada === filtro.fijada : true))
+        .map(({ id, titulo, categoria, fijada, actualizada }) => ({ id, titulo, categoria, fijada, actualizada }));
+    },
+    recuento(): NotasPorCategoria {
+      const r: NotasPorCategoria = { trabajo: 0, personal: 0, salud: 0, estudio: 0 };
+      for (const n of notas) r[n.categoria]++;
+      return r;
+    },
+    eliminar(id: string): boolean {
+      const i = notas.findIndex((n) => n.id === id);
+      if (i === -1) return false;
+      notas.splice(i, 1);
+      return true;
+    },
+  };
+}
+
+// Los tipos del repositorio también se derivan: no se escriben a mano
+type RepoNotas = ReturnType<typeof crearRepoNotas>;
+type ResultadoListar = ReturnType<RepoNotas["listar"]>; // NotaResumen[]
+
+const repo: RepoNotas = crearRepoNotas("u1");
+repo.crear({ titulo: "Revisar presupuesto", contenido: "Q4", categoria: "trabajo" });
+repo.crear({ titulo: "Correr 10 km", contenido: "Sábado", categoria: "salud", fijada: true });
+repo.crear({ titulo: "Terminar I1", contenido: "Genéricos y Zod", categoria: "estudio" });
+repo.actualizar("n3", { fijada: true, contenido: "Hasta I1.4" });
+repo.eliminar("n1");
+
+const fijadas: ResultadoListar = repo.listar({ fijada: true });
+console.log(fijadas.map((n) => `${n.id} ${n.titulo} (${n.categoria}) ${n.actualizada.toISOString().slice(11, 16)}`));
+console.log(repo.recuento());
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/03-ejercicio.ts
+```
+
+```text
+[ 'n2 Correr 10 km (salud) 09:02', 'n3 Terminar I1 (estudio) 09:04' ]
+{ trabajo: 0, personal: 0, salud: 1, estudio: 1 }
+```
+
+Añade al final para comprobar las reglas:
+
+```ts
+repo.crear({ titulo: "Sin categoría", contenido: "" });
+repo.crear({ id: "n99", titulo: "Id inventado", contenido: "", categoria: "personal" });
+repo.actualizar("n2", { usuarioId: "otro-usuario" });
+repo.listar({ categoria: "ocio" });
+```
+
+```text
+src/i1/03-ejercicio.ts(92,12): error TS2345: Argument of type '{ titulo: string; contenido: string; }' is not assignable to parameter of type 'NuevaNota'.
+  Property 'categoria' is missing in type '{ titulo: string; contenido: string; }' but required in type 'Omit<Nota, "actualizada" | "creada" | "fijada" | "id" | "usuarioId">'.
+src/i1/03-ejercicio.ts(93,14): error TS2353: Object literal may only specify known properties, and 'id' does not exist in type 'NuevaNota'.
+src/i1/03-ejercicio.ts(94,25): error TS2353: Object literal may only specify known properties, and 'usuarioId' does not exist in type 'Partial<Pick<Nota, "categoria" | "contenido" | "fijada" | "titulo">>'.
+src/i1/03-ejercicio.ts(95,15): error TS2322: Type '"ocio"' is not assignable to type '"estudio" | "personal" | "salud" | "trabajo" | undefined'.
+```
+
+Borra las cuatro líneas. Las decisiones:
+
+- **`NuevaNota`** combina un `Omit` (lo que pone el servidor) con `Partial<Pick<Nota, "fijada">>` (opcional, con valor por defecto `false`). En `crear`, `fijada: false` va **antes** de `...datos` (para que el cliente pueda cambiarlo) y `id`, `usuarioId` y las fechas van **después** (para que nadie los pueda pisar).
+- **`CambiosNota`** usa `Pick` (lista blanca) y no `Omit`: si mañana añades `compartidaCon` a `Nota`, no será editable por accidente hasta que lo decidas.
+- **`NotasPorCategoria = Record<Nota["categoria"], number>`**: con el acceso por índice de I1.2, las claves salen de la propia interfaz. Si añades la categoría `"ocio"`, el compilador marcará `recuento()` hasta que la incluyas.
+- **`RepoNotas = ReturnType<typeof crearRepoNotas>`** y **`ReturnType<RepoNotas["listar"]>`**: ni el repositorio ni sus resultados tienen un tipo escrito a mano.
+
+<Callout type="risk">
+
+- **Los tipos solo protegen el código que tú escribes, no los datos que llegan.** Prueba esto al final del archivo:
+
+  ```ts
+  const cuerpo = JSON.parse('{"titulo":"Correr 12 km","usuarioId":"atacante"}'); // imagina: await request.json()
+  console.log(repo.actualizar("n2", cuerpo)?.usuarioId);
+  ```
+
+  Compila sin errores (porque `JSON.parse` devuelve `any`) e imprime `atacante`: el `Object.assign` copió el campo que `CambiosNota` "prohibía", y la nota ha cambiado de dueño. Es un ataque real llamado **_mass assignment_**. `CambiosNota` dice qué **debería** llegar; para comprobar qué llega **de verdad** necesitas validación en tiempo de ejecución, que es exactamente la sección siguiente (I1.4).
+
+- **`Object.assign(nota, cambios)` modifica el objeto original:** cualquier otra parte del código que tuviera una referencia a esa nota ve el cambio. En React, el estado nunca se modifica así (B6.3); allí se crea un objeto nuevo con `{ ...nota, ...cambios }`.
+- **Demasiados _utility types_ anidados se vuelven ilegibles:** `Partial<Omit<Pick<Nota, …>, …>>` es difícil de revisar. Si un tipo derivado se usa mucho, dale un nombre (como `CambiosNota`) y comenta en una línea qué representa.
+
+</Callout>
+
+<Callout type="mastery">
+
+No duplicas interfaces casi idénticas: escribes una sola interfaz por entidad y derivas sus variantes con `Omit`, `Pick`, `Partial` y `Record`; sacas tipos de funciones existentes con `Awaited<ReturnType<typeof f>>` y `Parameters`; y sabes que esos tipos no comprueban nada de lo que llega en ejecución.
+
+</Callout>
+
+## Resumen
+
+- `Partial`, `Required` y `Readonly` cambian los modificadores de todas las propiedades a la vez.
+- `Pick` se queda con unas propiedades y `Omit` quita otras; `Omit` no detecta erratas en las claves.
+- `Record<K, V>` crea un objeto con una clave obligatoria por cada valor de `K`.
+- `ReturnType`, `Parameters`, `Awaited` y `NonNullable` derivan tipos de funciones y promesas existentes.
+- Patrón CRUD: una interfaz, y `Omit` para crear, `Partial<Pick>` para actualizar y `Pick` para las salidas.

@@ -1,0 +1,976 @@
+---
+sectionId: "I1.6"
+course: "I1"
+title: "Tipar un proyecto real de extremo a extremo"
+order: 6
+minutes: 60
+summary: "Llevas un esquema Zod del formulario de React al endpoint, a MongoDB y de vuelta al listado, mapeas documentos a DTOs, migras JavaScript a TypeScript y añades un campo siguiendo los errores del compilador."
+---
+
+Llevas cinco secciones con piezas sueltas: genéricos, tipos derivados, _utility types_, Zod y errores tipados. En un proyecto real, todas trabajan juntas a lo largo de un **viaje** que hace cada dato: el usuario lo escribe en un formulario de React, viaja como JSON hasta un _endpoint_, se guarda en MongoDB, se lee, se convierte en la respuesta de la API y vuelve al navegador para pintarse en una lista. En cada salto el dato puede deformarse: un número que llega como texto, una fecha que se convierte en _string_, un `_id` que el cliente no entiende o un `userId` que no debería salir nunca del servidor. En esta sección vas a construir ese viaje completo en la app de entrenamiento con **un solo esquema** como fuente de verdad, de forma que, si cambias un campo, el compilador te lleve de la mano por todos los sitios que deben cambiar.
+
+**Lo que tendrás al terminar:** una app Astro con un formulario de React para registrar entrenos, un _endpoint_ `GET`/`POST` que valida y guarda en MongoDB, y un listado. Todo comparte los mismos tipos, derivados de un esquema de Zod.
+
+**Requisitos:** las secciones I1.1–I1.5, un MongoDB al que conectarte (el de B5: Atlas o local) y lo que aprendiste de islas de React en Astro (B6.7).
+
+## Paso 1: el proyecto y dónde vive cada tipo
+
+Crea un proyecto nuevo para la app de entrenamiento:
+
+```bash
+npm create astro@latest entrenos-app -- --template minimal --install --no-git --yes
+cd entrenos-app
+npx astro add react --yes
+npm install mongodb zod
+npm install --save-dev @types/node @astrojs/check typescript
+mkdir -p src/schemas src/server src/lib src/components src/pages/api scripts
+```
+
+Y un archivo `.env` en la raíz con tu conexión de B5 (para una base local sin usuario, `mongodb://127.0.0.1:27017`):
+
+```bash
+MONGODB_URI=mongodb+srv://usuario:contraseña@tu-cluster.mongodb.net/
+MONGODB_DB=entrenos_lab
+```
+
+La organización de carpetas responde a una pregunta: **¿quién puede importar cada archivo?**
+
+| Carpeta           | Contenido                             | Quién lo importa                                       |
+| ----------------- | ------------------------------------- | ------------------------------------------------------ |
+| `src/schemas/`    | Esquemas de Zod y tipos derivados     | Servidor **y** cliente: es el contrato compartido      |
+| `src/server/`     | Acceso a MongoDB                      | Solo el servidor (_endpoints_, páginas)                |
+| `src/lib/`        | Utilidades (`mongo.ts`, `errores.ts`) | `mongo.ts`, solo el servidor; `errores.ts`, cualquiera |
+| `src/components/` | Componentes de React                  | El cliente (y Astro, al renderizar)                    |
+
+Sustituye `astro.config.mjs` por este, que añade la validación de las variables de entorno de B5.2:
+
+```js
+// @ts-check
+import { defineConfig, envField } from "astro/config";
+import react from "@astrojs/react";
+
+export default defineConfig({
+  integrations: [react()],
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "entrenos_lab" }),
+    },
+  },
+});
+```
+
+Crea `src/lib/mongo.ts`, el módulo de conexión de B5.2:
+
+```ts
+// Archivo: src/lib/mongo.ts (el de B5.2)
+import { MongoClient, type Db } from "mongodb";
+import { MONGODB_DB, MONGODB_URI } from "astro:env/server";
+
+declare global {
+  var __mongoClient: MongoClient | undefined;
+}
+
+export const mongoClient: MongoClient =
+  globalThis.__mongoClient ??
+  new MongoClient(MONGODB_URI, {
+    appName: "mi-entreno",
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5_000,
+  });
+
+if (import.meta.env.DEV) globalThis.__mongoClient = mongoClient;
+
+export const db: Db = mongoClient.db(MONGODB_DB);
+```
+
+Y copia el `errores.ts` final de I1.5 a `src/lib/errores.ts`. Es el mismo archivo; solo cambia el comentario de la primera línea:
+
+```ts
+// Archivo: src/lib/errores.ts (el de I1.5)
+// Solo declaraciones: importar este módulo no ejecuta nada
+import { z } from "zod";
+
+// Clase base: un error con su código HTTP
+export class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+    options?: ErrorOptions, // { cause }: el error original que lo provocó
+  ) {
+    super(message, options);
+    this.name = new.target.name; // "NoEncontradoError", etc., sin repetirlo en cada subclase
+  }
+}
+
+export class NoEncontradoError extends HttpError {
+  constructor(recurso: string, id: string) {
+    super(404, `${recurso} ${id} no existe`);
+  }
+}
+
+export class NoAutorizadoError extends HttpError {
+  constructor(message = "Inicia sesión para continuar") {
+    super(401, message);
+  }
+}
+
+export class ConflictoError extends HttpError {
+  constructor(message: string, options?: ErrorOptions) {
+    super(409, message, options);
+  }
+}
+
+/** Datos que no cumplen el esquema: lleva los errores por campo para el formulario */
+export class ValidacionError extends HttpError {
+  constructor(
+    public readonly campos: Record<string, string[] | undefined>,
+    message = "Revisa los datos del formulario",
+  ) {
+    super(422, message);
+  }
+
+  static desdeZod(error: z.ZodError): ValidacionError {
+    return new ValidacionError(z.flattenError(error).fieldErrors);
+  }
+}
+
+/** Valida un dato externo y devuelve su tipo, o lanza un ValidacionError con los errores por campo */
+export function validar<T>(esquema: z.ZodType<T>, dato: unknown): T {
+  const resultado = esquema.safeParse(dato);
+  if (!resultado.success) throw ValidacionError.desdeZod(resultado.error);
+  return resultado.data;
+}
+
+/** El único punto que convierte cualquier error en una respuesta HTTP */
+export function aRespuesta(e: unknown): Response {
+  if (e instanceof ValidacionError) {
+    return Response.json({ error: e.message, campos: e.campos }, { status: e.status });
+  }
+  if (e instanceof HttpError) {
+    return Response.json({ error: e.message }, { status: e.status });
+  }
+  if (e instanceof z.ZodError) {
+    // Un parse() que se escapó: también es culpa de los datos, no del servidor
+    return aRespuesta(ValidacionError.desdeZod(e));
+  }
+  // Cualquier otra cosa es un fallo nuestro: se registra entero y al cliente no se le cuenta nada
+  console.error("[api] Error no controlado:", e);
+  return Response.json({ error: "Error interno" }, { status: 500 });
+}
+```
+
+<Callout type="risk">
+
+- **Un componente de React nunca debe importar de `src/server/` ni de `src/lib/mongo.ts`:** Astro intentaría enviar el _driver_ de MongoDB al navegador, con un error de compilación en el mejor caso y tu cadena de conexión expuesta en el peor. `astro:env/server` te protege: si un archivo del cliente lo importa, el build falla. Por eso las variables secretas siempre se leen por `astro:env/server`.
+- **`src/schemas/` debe ser "puro":** solo Zod y tipos, sin `import` de nada del servidor. Si un esquema importa `db` para comprobar algo en la base de datos, ya no se puede usar en el cliente.
+- **El `.env` nunca va a Git:** el `.gitignore` de la plantilla de Astro ya lo excluye; compruébalo antes del primer commit (B2).
+
+</Callout>
+
+## Paso 2: el esquema compartido, el contrato
+
+Crea `src/schemas/entreno.ts`. Es el archivo más importante de la sección: todo lo demás se deriva de él.
+
+```ts
+// Archivo: src/schemas/entreno.ts
+// La única fuente de verdad: la usan el formulario (cliente), el endpoint y la base de datos (servidor)
+import { z } from "zod";
+
+export const TIPOS_ENTRENO = ["fuerza", "running", "movilidad"] as const;
+
+// Un campo de formulario vacío ("") significa "no lo he rellenado", no 0
+const vacioComoAusente = (v: unknown) => (v === "" ? undefined : v);
+
+// Campos comunes a la entrada y al DTO
+const campos = {
+  tipo: z.enum(TIPOS_ENTRENO, "Elige un tipo de entreno"),
+  minutos: z.coerce.number("Indica los minutos").int("Minutos enteros").min(1, "Mínimo 1 minuto").max(600, "Máximo 600 minutos"),
+  km: z.preprocess(vacioComoAusente, z.coerce.number().positive("Los km deben ser mayores que 0").max(100).optional()),
+  fecha: z.coerce.date("Fecha no válida"),
+  notas: z.preprocess(vacioComoAusente, z.string().trim().max(200, "Máximo 200 caracteres").optional()),
+};
+
+/** Lo que envía el formulario y valida el endpoint */
+export const EntrenoSchema = z
+  .object(campos)
+  .refine((e) => e.tipo === "running" || e.km === undefined, {
+    message: "Solo los entrenos de running llevan km",
+    path: ["km"],
+  });
+
+/** Lo que devuelve la API: el entreno más su id y su fecha de creación */
+export const EntrenoDTOSchema = z.object({
+  ...campos,
+  id: z.string(),
+  creado: z.coerce.date(), // en el JSON llega como texto ISO; al validar vuelve a ser Date
+});
+
+export const ListaEntrenosSchema = z.object({ entrenos: z.array(EntrenoDTOSchema) });
+
+// Los tipos se derivan; ninguno se escribe a mano
+export type TipoEntreno = (typeof TIPOS_ENTRENO)[number];
+export type EntrenoInput = z.output<typeof EntrenoSchema>;
+export type EntrenoDTO = z.output<typeof EntrenoDTOSchema>;
+/** Estado del formulario: los mismos campos, todos como texto (así los dan los <input>) */
+export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
+```
+
+Hay **dos esquemas**, uno por cada dirección del viaje:
+
+- **`EntrenoSchema`**, lo que **entra**: lo que envía el formulario y valida el _endpoint_. Usa `z.coerce` porque los `<input>` dan texto, y `vacioComoAusente` para que un campo vacío (`""`) cuente como "no rellenado" y no como `0` (la trampa de I1.4). El `.refine()` añade una regla de negocio que afecta a dos campos: solo los entrenos de running llevan km.
+- **`EntrenoDTOSchema`**, lo que **sale**: lo que devuelve la API. Reutiliza los mismos `campos` y añade `id` y `creado`. DTO significa _Data Transfer Object_: la forma pensada para viajar al cliente, que no tiene por qué coincidir con la de la base de datos.
+
+Y **cuatro tipos**, todos derivados:
+
+| Tipo                | Qué es                                                     | Dónde se usa                        |
+| ------------------- | ---------------------------------------------------------- | ----------------------------------- |
+| `EntrenoInput`      | Un entreno validado (con `Date`, números…)                 | El servidor, al guardar             |
+| `EntrenoDTO`        | Un entreno con `id` y `creado`, tal como lo usa el cliente | La respuesta de la API y el listado |
+| `EntrenoFormulario` | Los mismos campos, todos como texto                        | El estado del formulario de React   |
+| `TipoEntreno`       | `"fuerza" \| "running" \| "movilidad"`                     | Donde haga falta el tipo suelto     |
+
+`EntrenoFormulario = Record<keyof EntrenoInput, string>` combina dos herramientas de este curso: `keyof` (I1.2) saca los nombres de los campos del esquema, y `Record` (I1.3) les da a todos el tipo `string`. Si añades un campo al esquema, el estado del formulario lo exige al momento.
+
+<Callout type="risk">
+
+- **Una fecha no sobrevive a JSON:** `JSON.stringify(new Date())` produce un texto (`"2026-10-08T00:00:00.000Z"`). Por eso el DTO usa `z.coerce.date()`: al validar la respuesta en el cliente, el texto vuelve a ser un `Date`. Sin eso, `e.fecha.toISOString()` fallaría en el navegador con `toISOString is not a function`, porque `fecha` sería un `string` aunque el tipo dijera `Date`.
+- **Las fechas sin hora se guardan a medianoche UTC:** `z.coerce.date()` convierte `"2026-10-08"` en `2026-10-08T00:00:00.000Z`. Si lo muestras con la hora local de alguien en América (UTC−6), verá el día **anterior**. Muestra estas fechas siempre en UTC (como hace el listado, con `toISOString().slice(0, 10)`) o guarda el día como texto `"AAAA-MM-DD"`.
+- **El `.refine()` solo se evalúa si los campos tienen el tipo correcto:** si la fecha es `"ayer"`, Zod no ejecuta la regla de los km y el error de km aparece cuando el usuario corrige la fecha. Es el comportamiento correcto (la regla no tiene sentido con datos rotos), pero conviene saberlo para no pensar que la regla no funciona.
+
+</Callout>
+
+## Paso 3: MongoDB y el paso de documento a DTO
+
+Crea `src/server/entrenos.ts`, la capa de datos:
+
+```ts
+// Archivo: src/server/entrenos.ts
+// Capa de datos: el único sitio que sabe que existe MongoDB
+import type { ObjectId, WithId } from "mongodb";
+import { db } from "../lib/mongo";
+import type { EntrenoDTO, EntrenoInput } from "../schemas/entreno";
+
+/** El documento tal como se guarda: lo validado más lo que pone el servidor */
+export interface EntrenoDoc extends EntrenoInput {
+  _id?: ObjectId;
+  userId: string;
+  creado: Date;
+}
+
+const entrenos = db.collection<EntrenoDoc>("entrenos");
+
+/** Documento de BD → DTO para el cliente: _id pasa a id y userId no sale nunca */
+export function aDTO(doc: WithId<EntrenoDoc>): EntrenoDTO {
+  return {
+    id: doc._id.toHexString(),
+    tipo: doc.tipo,
+    minutos: doc.minutos,
+    km: doc.km,
+    fecha: doc.fecha,
+    notas: doc.notas,
+    creado: doc.creado,
+  };
+}
+
+export async function listarEntrenos(userId: string, limite = 20): Promise<EntrenoDTO[]> {
+  const docs = await entrenos.find({ userId }).sort({ fecha: -1, creado: -1 }).limit(limite).toArray();
+  return docs.map(aDTO);
+}
+
+export async function crearEntreno(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+  const doc: EntrenoDoc = { ...datos, userId, creado: new Date() };
+  const { insertedId } = await entrenos.insertOne(doc);
+  return aDTO({ ...doc, _id: insertedId });
+}
+```
+
+- **`EntrenoDoc extends EntrenoInput`**: el documento es lo validado **más** lo que pone el servidor (`_id`, `userId`, `creado`). Una `interface` puede extender un tipo derivado de Zod, porque `EntrenoInput` es un tipo de objeto normal.
+- **`db.collection<EntrenoDoc>`**: el genérico de I1.1. `insertOne` exige un `EntrenoDoc` completo y `find` devuelve `WithId<EntrenoDoc>` (el documento con `_id` obligatorio).
+- **`aDTO` construye el objeto campo a campo**, en lugar de devolver `{ ...doc }`: así `userId` no sale nunca (la lección de `Pick` en I1.3) y `_id` (un `ObjectId`, que el navegador no entiende) se convierte en `id`, un texto. El tipo de retorno, `EntrenoDTO`, obliga a incluir cada campo obligatorio del DTO.
+- **`crearEntreno` recibe un `EntrenoInput`**: el compilador garantiza que nadie pueda guardar un entreno sin haberlo validado antes, porque el único sitio de donde sale un `EntrenoInput` es Zod.
+
+<Callout type="risk">
+
+- **`collection<EntrenoDoc>` describe lo que esperas, no lo que hay:** si en la base de datos quedan documentos de una versión anterior del esquema, `find` los devuelve con el tipo nuevo igualmente. Lo verás en el ejercicio, y es la razón por la que el cliente valida también la respuesta.
+- **`aDTO` es el sitio donde decides qué se publica:** cada campo nuevo de la base de datos tiene que añadirse aquí a propósito. Si un día cambias el cuerpo por `return { ...doc, id: … }`, cualquier campo interno que añadas después (una nota privada, un indicador de moderación) saldrá en la API sin que nadie lo decida.
+- **La ordenación necesita un índice con muchos datos:** `find({ userId }).sort({ fecha: -1 })` va bien con cientos de entrenos; con cientos de miles necesitas un índice `{ userId: 1, fecha: -1 }` (B4.4).
+
+</Callout>
+
+## Paso 4: el endpoint
+
+Crea `src/pages/api/entrenos.ts`:
+
+```ts
+// Archivo: src/pages/api/entrenos.ts
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../lib/errores";
+import { EntrenoSchema } from "../../schemas/entreno";
+import { crearEntreno, listarEntrenos } from "../../server/entrenos";
+
+export const prerender = false;
+
+// Sin autenticación todavía (curso I5): todos los entrenos son de un usuario de demostración
+const USUARIO_DEMO = "u_demo";
+
+export const GET: APIRoute = async () => {
+  try {
+    const entrenos = await listarEntrenos(USUARIO_DEMO);
+    return Response.json({ entrenos });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const POST: APIRoute = async ({ request }) => {
+  try {
+    const datos = validar(EntrenoSchema, await request.json().catch(() => null)); // EntrenoInput
+    const creado = await crearEntreno(USUARIO_DEMO, datos);
+    return Response.json(creado, { status: 201 });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+El _endpoint_ es corto porque el trabajo ya está repartido: `validar` (I1.5) convierte el cuerpo `unknown` en un `EntrenoInput` o lanza un `ValidacionError`; `crearEntreno` guarda; y `aRespuesta` convierte cualquier error en su código. Arranca el servidor (`npm run dev`) y pruébalo:
+
+```bash
+curl http://localhost:4321/api/entrenos
+
+curl -X POST http://localhost:4321/api/entrenos -H 'content-type: application/json' \
+  -d '{"tipo":"running","minutos":"52","km":"10","fecha":"2026-10-08","notas":"  Rodaje suave  "}'
+
+curl -X POST http://localhost:4321/api/entrenos -H 'content-type: application/json' \
+  -d '{"tipo":"fuerza","minutos":"0","km":"5","fecha":"ayer"}'
+
+curl -X POST http://localhost:4321/api/entrenos -H 'content-type: application/json' \
+  -d '{"tipo":"fuerza","minutos":45,"fecha":"2026-10-09","userId":"atacante","_id":"x"}'
+
+curl http://localhost:4321/api/entrenos
+```
+
+```text
+{"entrenos":[]}
+{"id":"6ac9d70ffb3dc052e01134a3","tipo":"running","minutos":52,"km":10,"fecha":"2026-10-08T00:00:00.000Z","notas":"Rodaje suave","creado":"2026-10-10T06:11:27.650Z"}
+{"error":"Revisa los datos del formulario","campos":{"minutos":["Mínimo 1 minuto"],"fecha":["Fecha no válida"]}}
+{"id":"6ac9d70ffb3dc052e01134a4","tipo":"fuerza","minutos":45,"fecha":"2026-10-09T00:00:00.000Z","creado":"2026-10-10T06:11:27.686Z"}
+{"entrenos":[{"id":"6ac9d70ffb3dc052e01134a4","tipo":"fuerza","minutos":45,"fecha":"2026-10-09T00:00:00.000Z","creado":"2026-10-10T06:11:27.686Z"},{"id":"6ac9d70ffb3dc052e01134a3","tipo":"running","minutos":52,"km":10,"fecha":"2026-10-08T00:00:00.000Z","notas":"Rodaje suave","creado":"2026-10-10T06:11:27.650Z"}]}
+```
+
+(Tus `id` y tus fechas de `creado` serán otros).
+
+Fíjate en cada salto del viaje:
+
+1. **`"52"` y `"10"` entraron como texto** y salieron como números (`z.coerce`). Las notas perdieron los espacios (`.trim()`).
+2. **El POST inválido** devolvió un 422 con los errores de cada campo, sin tocar la base de datos.
+3. **El `userId: "atacante"` y el `_id: "x"` se descartaron** (`z.object` elimina las claves de más, I1.4): el entreno se guardó para `u_demo` con un `_id` generado por MongoDB.
+4. **En la respuesta no hay `userId` ni `_id`**, solo `id`: es el trabajo de `aDTO`.
+
+Así está guardado en MongoDB (Compass o `mongosh`):
+
+```text
+{
+  _id: ObjectId('6ac9d70ffb3dc052e01134a3'),
+  tipo: 'running',
+  minutos: 52,
+  km: 10,
+  fecha: 2026-10-08T00:00:00.000Z,
+  notas: 'Rodaje suave',
+  userId: 'u_demo',
+  creado: 2026-10-10T06:11:27.650Z
+}
+```
+
+`fecha` y `creado` se guardan como fechas de verdad (`Date`), no como texto, así que puedes ordenarlas y filtrarlas por rangos en MongoDB.
+
+<Callout type="risk">
+
+- **El `USUARIO_DEMO` es provisional:** con autenticación (curso I5), el `userId` sale **siempre de la sesión** (`locals.user.id`), nunca del cuerpo de la petición. Gracias a que `z.object` descarta las claves de más, aunque un cliente envíe un `userId`, no llegará a `crearEntreno`.
+- **Si la base de datos no está disponible al arrancar, el cliente puede quedarse roto:** si la primera operación falla porque MongoDB no responde, el _driver_ puede cerrar la conexión del cliente guardado en `globalThis`, y las peticiones siguientes fallan con `MongoTopologyClosedError: Topology is closed` hasta que reinicies el servidor. Si ves ese error en desarrollo, reinicia `npm run dev` después de levantar la base de datos.
+- **Valida también en `GET` lo que lees por parámetros:** este `GET` no tiene filtros, pero en cuanto añadas `?tipo=running` o `?pagina=2`, pásalos por un esquema (como el `FiltroSchema` de I1.4) antes de usarlos en la consulta.
+
+</Callout>
+
+## Paso 5: el formulario y el listado en React
+
+Crea `src/components/Entrenos.tsx`:
+
+```tsx
+// Archivo: src/components/Entrenos.tsx
+import { useEffect, useState, type FormEvent } from "react";
+import { z } from "zod";
+import {
+  EntrenoDTOSchema,
+  EntrenoSchema,
+  ListaEntrenosSchema,
+  TIPOS_ENTRENO,
+  type EntrenoDTO,
+  type EntrenoFormulario,
+} from "../schemas/entreno";
+
+type Errores = Partial<Record<keyof EntrenoFormulario, string[]>>;
+
+/** "AAAA-MM-DD" de hoy en la zona horaria del navegador (el formato de <input type="date">) */
+const hoy = () => new Date().toLocaleDateString("en-CA");
+
+const VACIO: EntrenoFormulario = { tipo: "running", minutos: "", km: "", fecha: "", notas: "" };
+
+export default function Entrenos() {
+  const [formulario, setFormulario] = useState<EntrenoFormulario>(VACIO);
+  const [errores, setErrores] = useState<Errores>({});
+  const [entrenos, setEntrenos] = useState<EntrenoDTO[]>([]);
+  const [estado, setEstado] = useState<"cargando" | "listo" | "error">("cargando");
+
+  // Al montar: pedir la lista y VALIDAR la respuesta con el mismo esquema que usa el servidor
+  useEffect(() => {
+    // La fecha de hoy se pone al montar, en el navegador: así no difiere del HTML del servidor
+    setFormulario((f) => ({ ...f, fecha: f.fecha || hoy() }));
+    fetch("/api/entrenos")
+      .then((res) => res.json())
+      .then((json) => {
+        setEntrenos(ListaEntrenosSchema.parse(json).entrenos);
+        setEstado("listo");
+      })
+      .catch(() => setEstado("error"));
+  }, []);
+
+  const cambiar = (campo: keyof EntrenoFormulario, valor: string) =>
+    setFormulario((f) => ({ ...f, [campo]: valor }));
+
+  async function enviar(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    // 1. Validación en el cliente: respuesta inmediata, sin ir al servidor
+    const local = EntrenoSchema.safeParse(formulario);
+    if (!local.success) {
+      setErrores(z.flattenError(local.error).fieldErrors);
+      return;
+    }
+    // 2. El servidor vuelve a validar (el cliente se puede saltar)
+    const res = await fetch("/api/entrenos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(local.data), // las Date viajan como texto ISO
+    });
+    const json: unknown = await res.json();
+    if (res.status === 422) {
+      setErrores(z.object({ campos: z.record(z.string(), z.array(z.string())) }).parse(json).campos);
+      return;
+    }
+    if (!res.ok) {
+      setEstado("error");
+      return;
+    }
+    const nuevo = EntrenoDTOSchema.parse(json); // fecha y creado vuelven a ser Date
+    setEntrenos((lista) => [nuevo, ...lista]);
+    setFormulario({ ...VACIO, fecha: hoy() });
+    setErrores({});
+  }
+
+  const error = (campo: keyof EntrenoFormulario) =>
+    errores[campo]?.map((m) => (
+      <p key={m} className="error" data-campo={campo}>
+        {m}
+      </p>
+    ));
+
+  return (
+    <div>
+      <form onSubmit={enviar} noValidate>
+        <label>
+          Tipo
+          <select value={formulario.tipo} onChange={(e) => cambiar("tipo", e.target.value)}>
+            {TIPOS_ENTRENO.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        {error("tipo")}
+        <label>
+          Minutos
+          <input inputMode="numeric" value={formulario.minutos} onChange={(e) => cambiar("minutos", e.target.value)} />
+        </label>
+        {error("minutos")}
+        <label>
+          Km
+          <input inputMode="decimal" value={formulario.km} onChange={(e) => cambiar("km", e.target.value)} />
+        </label>
+        {error("km")}
+        <label>
+          Fecha
+          <input type="date" value={formulario.fecha} onChange={(e) => cambiar("fecha", e.target.value)} />
+        </label>
+        {error("fecha")}
+        <label>
+          Notas
+          <input value={formulario.notas} onChange={(e) => cambiar("notas", e.target.value)} />
+        </label>
+        {error("notas")}
+        <button type="submit">Guardar</button>
+      </form>
+
+      {estado === "cargando" && <p>Cargando…</p>}
+      {estado === "error" && <p className="error">No se pudieron cargar los entrenos</p>}
+      <ul id="lista">
+        {entrenos.map((e) => (
+          <li key={e.id}>
+            {e.fecha.toISOString().slice(0, 10)} · {e.tipo} · {e.minutos} min
+            {e.km !== undefined && ` · ${e.km} km`}
+            {e.notas && ` · ${e.notas}`}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+Y la página, `src/pages/index.astro`:
+
+```astro
+---
+// Archivo: src/pages/index.astro
+import Entrenos from "../components/Entrenos";
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Mis entrenos</title>
+    <!-- is:global: el formulario lo pinta un componente de React, fuera del ámbito de este archivo -->
+    <style is:global>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+      form { display: grid; gap: 0.5rem; margin-bottom: 1.5rem; }
+      label { display: grid; gap: 0.25rem; }
+      .error { color: #b91c1c; margin: 0; font-size: 0.875rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Mis entrenos</h1>
+    <Entrenos client:load />
+  </body>
+</html>
+```
+
+Abre `http://localhost:4321`. Medido en Chrome: con el campo de minutos vacío, el formulario muestra `Mínimo 1 minuto`; con un entreno de fuerza con km, `Solo los entrenos de running llevan km`; y con datos correctos, el entreno aparece el primero de la lista:
+
+```text
+1) vacío → [ 'minutos: Mínimo 1 minuto' ]
+2) fuerza con km → [ 'km: Solo los entrenos de running llevan km' ]
+3) válido → [] [
+  '2026-10-10 · running · 35 min · 6.5 km · Series 6x400',
+  '2026-10-09 · fuerza · 45 min',
+  '2026-10-08 · running · 52 min · 10 km · Rodaje suave'
+]
+peticiones a la API: GET, POST · problemas: ninguno
+```
+
+En la última línea está lo importante: los dos intentos inválidos **no llegaron a hacer una petición**. El mismo `EntrenoSchema` que protege el servidor validó en el navegador, con los mismos mensajes. Las piezas del componente:
+
+- **`useState<EntrenoFormulario>`**: el estado del formulario tiene exactamente los campos del esquema, como texto.
+- **`EntrenoSchema.safeParse(formulario)`** antes de enviar, y **`z.flattenError(...).fieldErrors`** para pintar los errores junto a cada campo. El tipo de `fieldErrors` ya conoce los nombres de los campos.
+- **`ListaEntrenosSchema.parse(json)`** y **`EntrenoDTOSchema.parse(json)`**: el cliente **también valida lo que recibe**, y así las fechas vuelven a ser `Date`. La API es una frontera (I1.4), en las dos direcciones.
+- **La fecha de hoy se pone en un `useEffect`:** el componente se renderiza primero en el servidor; si calculara la fecha al crear el estado, el servidor y el navegador podrían calcular días distintos (zonas horarias) y React avisaría de un error de hidratación.
+
+<Callout type="risk">
+
+- **Los estilos de un `.astro` no llegan a los componentes de React:** el `<style>` de Astro tiene **ámbito** (solo afecta a las etiquetas escritas en ese archivo), y el formulario lo pinta React. Sin `is:global`, el formulario aparece sin ningún estilo. Usa `is:global`, un CSS importado o, en un proyecto con Tailwind, clases en el propio componente.
+- **La validación del cliente es comodidad, no seguridad:** el usuario puede saltársela (por ejemplo, con `curl`, como en el Paso 4). El servidor valida siempre, y el cliente solo ahorra un viaje de ida y vuelta.
+- **Un `.parse()` de la respuesta que falla deja la lista vacía:** si la API devuelve datos que no encajan (lo verás en el ejercicio), `parse` lanza y el `catch` muestra "No se pudieron cargar los entrenos". Es mejor que pintar datos rotos, pero registra el error (`console.error` o un servicio de errores) para enterarte.
+
+</Callout>
+
+## Paso 6: migrar JavaScript a TypeScript poco a poco
+
+No siempre empiezas de cero: a veces heredas un proyecto en JavaScript. No hace falta reescribirlo entero; TypeScript puede comprobar archivos `.js` **uno a uno**, con los tipos escritos en comentarios **JSDoc**. Crea `src/lib/resumen.js`, como si fuera código antiguo, con dos erratas:
+
+```js
+// @ts-check
+// Archivo: src/lib/resumen.js — código antiguo en JavaScript, revisado por TypeScript con JSDoc
+
+/** @typedef {import("../schemas/entreno").EntrenoDTO} EntrenoDTO */
+
+/**
+ * Minutos totales y km de running de una lista de entrenos
+ * @param {EntrenoDTO[]} entrenos
+ * @returns {{ minutos: number; km: number }}
+ */
+export function resumen(entrenos) {
+  let minutos = 0;
+  let km = 0;
+  for (const e of entrenos) {
+    minutos += e.minuto;
+    if (e.tipo === "runing") km += e.km ?? 0;
+  }
+  return { minutos, km };
+}
+```
+
+```bash
+npx astro check
+```
+
+```text
+src/lib/resumen.js:16:9 - error ts(2367): This comparison appears to be unintentional because the types '"fuerza" | "running" | "movilidad"' and '"runing"' have no overlap.
+src/lib/resumen.js:15:18 - error ts(2551): Property 'minuto' does not exist on type '{ id: string; creado: Date; tipo: "fuerza" | "running" | "movilidad"; minutos: number; fecha: Date; km?: number | undefined; notas?: string | undefined; }'. Did you mean 'minutos'?
+- 2 errors
+```
+
+Un archivo JavaScript, revisado con **los tipos del esquema de Zod**: `@typedef {import(…)}` trae `EntrenoDTO` sin convertir el archivo a TypeScript. Ahora borra la primera línea (`// @ts-check`) y vuelve a ejecutar `npx astro check`: **0 errores**. Sin la marca, el archivo no se revisa, y las dos erratas (que darían `NaN` minutos y 0 km siempre) pasan desapercibidas. Vuelve a ponerla y corrige las erratas (`e.minutos` y `"running"`).
+
+La estrategia para un proyecto heredado:
+
+1. **Activa `allowJs`** para que `.js` y `.ts` convivan (Astro ya lo trae activado en su configuración base).
+2. **Archivos nuevos, siempre en `.ts`** y con `strict`.
+3. **`// @ts-check` en los `.js` existentes, uno a uno**, empezando por los más usados (utilidades, acceso a datos). Corrige lo que salga.
+4. **Renombra a `.ts`** cuando un archivo esté limpio, y sustituye los comentarios JSDoc por tipos de verdad.
+5. **Valida con Zod en las fronteras** desde el principio: es la parte que más errores reales evita.
+
+<Callout type="risk">
+
+- **No actives `checkJs` en todo el proyecto de golpe:** en un proyecto grande aparecerán cientos de errores a la vez y la tentación será desactivarlo. `// @ts-check` archivo a archivo permite avanzar en pasos pequeños.
+- **JSDoc es una ayuda, no un sustituto:** comprueba lo mismo que TypeScript, pero los tipos complejos son incómodos de escribir en comentarios. Úsalo como paso intermedio, no como destino final.
+- **Una migración no debe cambiar el comportamiento:** al convertir un archivo, cambia solo los tipos; corrige los bugs que aparezcan en commits separados (B2), para que, si algo se rompe, sepas si fue la migración o la corrección.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade un campo obligatorio `sensacion` (número entero del 1 al 5) a los `campos` de `src/schemas/entreno.ts`.
+2. Ejecuta `npx astro check` y corrige **solo** lo que señale el compilador. Después añade al formulario un selector para el campo y muéstralo en el listado.
+3. Recarga la página: los entrenos que ya tenías guardados no tienen `sensacion`. Observa qué pasa y escribe un _script_ de migración que les dé un valor.
+4. Registra un entreno nuevo con sensación 5 y comprueba que el valor recorre todo el viaje: formulario → _endpoint_ → MongoDB → respuesta → listado.
+
+</Callout>
+
+Al añadir la línea al esquema, `npx astro check` da:
+
+```text
+src/components/Entrenos.tsx:18:7 - error ts(2741): Property 'sensacion' is missing in type '{ tipo: string; minutos: string; km: string; fecha: string; notas: string; }' but required in type 'EntrenoFormulario'.
+src/server/entrenos.ts:18:3 - error ts(2741): Property 'sensacion' is missing in type '{ id: string; tipo: "fuerza" | "running" | "movilidad"; minutos: number; km: number | undefined; fecha: Date; notas: string | undefined; creado: Date; }' but required in type '{ id: string; creado: Date; tipo: "fuerza" | "running" | "movilidad"; minutos: number; fecha: Date; sensacion: number; km?: number | undefined; notas?: string | undefined; }'.
+- 2 errors
+```
+
+Dos errores, en los dos sitios que **tienen** que cambiar: el estado inicial del formulario (`EntrenoFormulario` exige el campo) y `aDTO` (el DTO lo exige). El _endpoint_, `crearEntreno` y la validación no dan error, porque ya funcionan con el tipo nuevo sin tocarlos.
+
+Solución. `src/schemas/entreno.ts` completo:
+
+```ts
+// Archivo: src/schemas/entreno.ts
+// La única fuente de verdad: la usan el formulario (cliente), el endpoint y la base de datos (servidor)
+import { z } from "zod";
+
+export const TIPOS_ENTRENO = ["fuerza", "running", "movilidad"] as const;
+
+// Un campo de formulario vacío ("") significa "no lo he rellenado", no 0
+const vacioComoAusente = (v: unknown) => (v === "" ? undefined : v);
+
+// Campos comunes a la entrada y al DTO
+const campos = {
+  tipo: z.enum(TIPOS_ENTRENO, "Elige un tipo de entreno"),
+  minutos: z.coerce.number("Indica los minutos").int("Minutos enteros").min(1, "Mínimo 1 minuto").max(600, "Máximo 600 minutos"),
+  km: z.preprocess(vacioComoAusente, z.coerce.number().positive("Los km deben ser mayores que 0").max(100).optional()),
+  fecha: z.coerce.date("Fecha no válida"),
+  notas: z.preprocess(vacioComoAusente, z.string().trim().max(200, "Máximo 200 caracteres").optional()),
+  sensacion: z.coerce.number().int().min(1, "De 1 a 5").max(5, "De 1 a 5"), // ← campo nuevo
+};
+
+/** Lo que envía el formulario y valida el endpoint */
+export const EntrenoSchema = z
+  .object(campos)
+  .refine((e) => e.tipo === "running" || e.km === undefined, {
+    message: "Solo los entrenos de running llevan km",
+    path: ["km"],
+  });
+
+/** Lo que devuelve la API: el entreno más su id y su fecha de creación */
+export const EntrenoDTOSchema = z.object({
+  ...campos,
+  id: z.string(),
+  creado: z.coerce.date(), // en el JSON llega como texto ISO; al validar vuelve a ser Date
+});
+
+export const ListaEntrenosSchema = z.object({ entrenos: z.array(EntrenoDTOSchema) });
+
+// Los tipos se derivan; ninguno se escribe a mano
+export type TipoEntreno = (typeof TIPOS_ENTRENO)[number];
+export type EntrenoInput = z.output<typeof EntrenoSchema>;
+export type EntrenoDTO = z.output<typeof EntrenoDTOSchema>;
+/** Estado del formulario: los mismos campos, todos como texto (así los dan los <input>) */
+export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
+```
+
+`src/server/entrenos.ts` completo:
+
+```ts
+// Archivo: src/server/entrenos.ts
+// Capa de datos: el único sitio que sabe que existe MongoDB
+import type { ObjectId, WithId } from "mongodb";
+import { db } from "../lib/mongo";
+import type { EntrenoDTO, EntrenoInput } from "../schemas/entreno";
+
+/** El documento tal como se guarda: lo validado más lo que pone el servidor */
+export interface EntrenoDoc extends EntrenoInput {
+  _id?: ObjectId;
+  userId: string;
+  creado: Date;
+}
+
+const entrenos = db.collection<EntrenoDoc>("entrenos");
+
+/** Documento de BD → DTO para el cliente: _id pasa a id y userId no sale nunca */
+export function aDTO(doc: WithId<EntrenoDoc>): EntrenoDTO {
+  return {
+    id: doc._id.toHexString(),
+    tipo: doc.tipo,
+    minutos: doc.minutos,
+    km: doc.km,
+    fecha: doc.fecha,
+    notas: doc.notas,
+    sensacion: doc.sensacion,
+    creado: doc.creado,
+  };
+}
+
+export async function listarEntrenos(userId: string, limite = 20): Promise<EntrenoDTO[]> {
+  const docs = await entrenos.find({ userId }).sort({ fecha: -1, creado: -1 }).limit(limite).toArray();
+  return docs.map(aDTO);
+}
+
+export async function crearEntreno(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+  const doc: EntrenoDoc = { ...datos, userId, creado: new Date() };
+  const { insertedId } = await entrenos.insertOne(doc);
+  return aDTO({ ...doc, _id: insertedId });
+}
+```
+
+`src/components/Entrenos.tsx` completo:
+
+```tsx
+// Archivo: src/components/Entrenos.tsx
+import { useEffect, useState, type FormEvent } from "react";
+import { z } from "zod";
+import {
+  EntrenoDTOSchema,
+  EntrenoSchema,
+  ListaEntrenosSchema,
+  TIPOS_ENTRENO,
+  type EntrenoDTO,
+  type EntrenoFormulario,
+} from "../schemas/entreno";
+
+type Errores = Partial<Record<keyof EntrenoFormulario, string[]>>;
+
+/** "AAAA-MM-DD" de hoy en la zona horaria del navegador (el formato de <input type="date">) */
+const hoy = () => new Date().toLocaleDateString("en-CA");
+
+const VACIO: EntrenoFormulario = {
+  tipo: "running",
+  minutos: "",
+  km: "",
+  fecha: "",
+  notas: "",
+  sensacion: "3",
+};
+
+export default function Entrenos() {
+  const [formulario, setFormulario] = useState<EntrenoFormulario>(VACIO);
+  const [errores, setErrores] = useState<Errores>({});
+  const [entrenos, setEntrenos] = useState<EntrenoDTO[]>([]);
+  const [estado, setEstado] = useState<"cargando" | "listo" | "error">("cargando");
+
+  // Al montar: pedir la lista y VALIDAR la respuesta con el mismo esquema que usa el servidor
+  useEffect(() => {
+    // La fecha de hoy se pone al montar, en el navegador: así no difiere del HTML del servidor
+    setFormulario((f) => ({ ...f, fecha: f.fecha || hoy() }));
+    fetch("/api/entrenos")
+      .then((res) => res.json())
+      .then((json) => {
+        setEntrenos(ListaEntrenosSchema.parse(json).entrenos);
+        setEstado("listo");
+      })
+      .catch(() => setEstado("error"));
+  }, []);
+
+  const cambiar = (campo: keyof EntrenoFormulario, valor: string) =>
+    setFormulario((f) => ({ ...f, [campo]: valor }));
+
+  async function enviar(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    // 1. Validación en el cliente: respuesta inmediata, sin ir al servidor
+    const local = EntrenoSchema.safeParse(formulario);
+    if (!local.success) {
+      setErrores(z.flattenError(local.error).fieldErrors);
+      return;
+    }
+    // 2. El servidor vuelve a validar (el cliente se puede saltar)
+    const res = await fetch("/api/entrenos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(local.data), // las Date viajan como texto ISO
+    });
+    const json: unknown = await res.json();
+    if (res.status === 422) {
+      setErrores(z.object({ campos: z.record(z.string(), z.array(z.string())) }).parse(json).campos);
+      return;
+    }
+    if (!res.ok) {
+      setEstado("error");
+      return;
+    }
+    const nuevo = EntrenoDTOSchema.parse(json); // fecha y creado vuelven a ser Date
+    setEntrenos((lista) => [nuevo, ...lista]);
+    setFormulario({ ...VACIO, fecha: hoy() });
+    setErrores({});
+  }
+
+  const error = (campo: keyof EntrenoFormulario) =>
+    errores[campo]?.map((m) => (
+      <p key={m} className="error" data-campo={campo}>
+        {m}
+      </p>
+    ));
+
+  return (
+    <div>
+      <form onSubmit={enviar} noValidate>
+        <label>
+          Tipo
+          <select value={formulario.tipo} onChange={(e) => cambiar("tipo", e.target.value)}>
+            {TIPOS_ENTRENO.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+        </label>
+        {error("tipo")}
+        <label>
+          Minutos
+          <input inputMode="numeric" value={formulario.minutos} onChange={(e) => cambiar("minutos", e.target.value)} />
+        </label>
+        {error("minutos")}
+        <label>
+          Km
+          <input inputMode="decimal" value={formulario.km} onChange={(e) => cambiar("km", e.target.value)} />
+        </label>
+        {error("km")}
+        <label>
+          Fecha
+          <input type="date" value={formulario.fecha} onChange={(e) => cambiar("fecha", e.target.value)} />
+        </label>
+        {error("fecha")}
+        <label>
+          Notas
+          <input value={formulario.notas} onChange={(e) => cambiar("notas", e.target.value)} />
+        </label>
+        {error("notas")}
+        <label>
+          Sensación (1–5)
+          <select value={formulario.sensacion} onChange={(e) => cambiar("sensacion", e.target.value)}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </label>
+        {error("sensacion")}
+        <button type="submit">Guardar</button>
+      </form>
+
+      {estado === "cargando" && <p>Cargando…</p>}
+      {estado === "error" && <p className="error">No se pudieron cargar los entrenos</p>}
+      <ul id="lista">
+        {entrenos.map((e) => (
+          <li key={e.id}>
+            {e.fecha.toISOString().slice(0, 10)} · {e.tipo} · {e.minutos} min
+            {e.km !== undefined && ` · ${e.km} km`}
+            {e.notas && ` · ${e.notas}`} · sensación {e.sensacion}/5
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+Con los errores corregidos, recarga la página:
+
+```text
+mensaje: No se pudieron cargar los entrenos · filas: []
+```
+
+Los entrenos antiguos no tienen `sensacion`; la API los devuelve sin ella y `ListaEntrenosSchema.parse` en el cliente los rechaza. El compilador no podía saberlo: el problema no está en el código, sino en **los datos ya guardados**. La solución es una migración, `scripts/migrar-sensacion.mjs`:
+
+```js
+// Archivo: scripts/migrar-sensacion.mjs
+// Uso: node --env-file=.env scripts/migrar-sensacion.mjs
+// Da un valor a los entrenos guardados antes de que existiera el campo "sensacion"
+import { MongoClient } from "mongodb";
+
+const client = new MongoClient(process.env.MONGODB_URI);
+try {
+  const entrenos = client.db(process.env.MONGODB_DB ?? "entrenos_lab").collection("entrenos");
+  const { matchedCount, modifiedCount } = await entrenos.updateMany(
+    { sensacion: { $exists: false } },
+    { $set: { sensacion: 3 } }, // valor neutro: "ni bien ni mal"
+  );
+  console.log(`Entrenos sin sensación: ${matchedCount}. Actualizados: ${modifiedCount}.`);
+} finally {
+  await client.close();
+}
+```
+
+```bash
+node --env-file=.env scripts/migrar-sensacion.mjs
+node --env-file=.env scripts/migrar-sensacion.mjs
+```
+
+```text
+Entrenos sin sensación: 3. Actualizados: 3.
+Entrenos sin sensación: 0. Actualizados: 0.
+```
+
+La segunda ejecución no cambia nada: la migración es **idempotente** (se puede repetir sin riesgo), porque solo toca los documentos que **no** tienen el campo. Al recargar, y tras registrar un entreno de movilidad con sensación 5:
+
+```text
+'2026-10-10 · movilidad · 20 min · sensación 5/5',
+'2026-10-10 · running · 35 min · 6.5 km · Series 6x400 · sensación 3/5',
+'2026-10-09 · fuerza · 45 min · sensación 3/5',
+'2026-10-08 · running · 52 min · 10 km · Rodaje suave · sensación 3/5'
+```
+
+Las decisiones:
+
+- **Un campo, un cambio en el esquema:** todo lo demás (los tipos del formulario, del _endpoint_, de la base de datos y de la respuesta) se actualizó solo, y el compilador señaló los dos sitios que necesitaban una decisión humana.
+- **El selector del formulario no lo pidió el compilador:** TypeScript sabe que el estado necesita `sensacion`, pero no puede saber que olvidaste **pintar** el campo. Esa parte la cubren las pruebas en el navegador (curso I8).
+- **La migración da un valor neutro (3)**, en lugar de dejar el campo opcional para siempre. Así el tipo sigue diciendo la verdad: todo entreno tiene sensación.
+
+<Callout type="risk">
+
+- **Cambiar el esquema y migrar los datos van juntos:** si despliegas el código nuevo antes de migrar, los usuarios ven "No se pudieron cargar los entrenos" hasta que la migración termine. El orden seguro es: primero un esquema que acepte los dos formatos (`sensacion` opcional o con `.default(3)`), después la migración y, al final, el esquema estricto.
+- **Prueba la migración con una copia de los datos:** un `updateMany` con un filtro mal escrito (por ejemplo, `{ sensacion: { $exists: true } }`) pisa los valores reales de todos los documentos. Ejecútalo antes contra una base de prueba, o con un filtro que limite el alcance.
+- **Hay cambios que el compilador no ve:** renombrar un campo (`km` → `distanciaKm`) en el esquema rompe el código en todos los sitios, que es lo que buscas, pero los documentos guardados siguen teniendo `km`. Cada cambio de forma de los datos necesita su migración, igual que en una base SQL (curso A3).
+
+</Callout>
+
+<Callout type="mastery">
+
+Cambiar un campo del esquema hace fallar al compilador en todos los sitios que deben actualizarse: tienes un único esquema de Zod en `src/schemas/` del que derivas los tipos del formulario, del _endpoint_, de la colección y de la respuesta; validas en las dos direcciones de la API; mapeas documentos a DTOs campo a campo, y acompañas cada cambio de forma con su migración de datos.
+
+</Callout>
+
+## Resumen
+
+- Un esquema compartido en `src/schemas/` es el contrato entre cliente y servidor; los tipos se derivan con `z.output`, `keyof` y `Record`.
+- Dos esquemas, uno por dirección: el de entrada (con coerción y reglas de negocio) y el del DTO (con `id` y fechas que vuelven a ser `Date`).
+- La capa de datos tipa la colección (`collection<EntrenoDoc>`) y convierte documentos en DTOs campo a campo: `_id` → `id`, y nada interno sale.
+- El _endpoint_ valida con `validar()` y responde errores con `aRespuesta()`; el cliente valida antes de enviar y valida lo que recibe.
+- Para migrar JavaScript: `// @ts-check` y JSDoc archivo a archivo; para cambiar datos: esquema tolerante, migración idempotente y después esquema estricto.

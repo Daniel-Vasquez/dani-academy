@@ -1,0 +1,566 @@
+---
+sectionId: "I1.4"
+course: "I1"
+title: "Validación en tiempo de ejecución con Zod"
+order: 4
+minutes: 60
+summary: "Validas datos externos con esquemas de Zod 4: parse y safeParse, tipos con z.infer, errores por campo para un 422, coerción de URLs, claves de más descartadas y una API real sin as."
+---
+
+TypeScript tiene un límite que ya has visto dos veces: en B1.5, un `as TareaApi[]` dejó pasar una lista de usuarios como si fueran tareas; y al final de I1.3, un `JSON.parse` le cambió el dueño a una nota aunque el tipo lo "prohibía". El motivo es siempre el mismo: **los tipos desaparecen al compilar**. Al ejecutarse, tu programa no tiene ni idea de qué es un `Entreno`. Todo lo que cruza una frontera (el cuerpo de una petición, un formulario, la respuesta de una API, un documento de la base de datos) puede tener cualquier forma, y TypeScript solo puede creerte. **Zod** resuelve exactamente eso: describes la forma esperada una vez, como un **esquema**, y Zod la **comprueba al ejecutar** y te da el tipo de TypeScript gratis.
+
+**Lo que tendrás al terminar:** esquemas para entrenos, registro de usuarios, filtros de URL y cambios de notas; un _endpoint_ simulado que responde `422` con errores por campo, y la función de B1.5 validando de verdad lo que devuelve la API.
+
+**Requisitos:** las secciones I1.1–I1.3, y Zod en el `ts-playground`:
+
+```bash
+npm install zod
+```
+
+Esta lección usa **Zod 4** (comprueba la tuya con `npm ls zod`). Muchos tutoriales son de Zod 3 y usan formas que la 4 marca como obsoletas; el primer bloque de riesgos te dice cuáles.
+
+## Paso 1: el problema, en tres líneas de JSON
+
+Crea `src/i1/04-el-problema.ts`:
+
+```ts
+// Archivo: src/i1/04-el-problema.ts
+
+interface Entreno {
+  tipo: "fuerza" | "running";
+  minutos: number;
+  fecha: string;
+}
+
+// Lo que "debería" llegar… y lo que llega de verdad de un formulario o una API
+const textos = [
+  '{"tipo":"running","minutos":30,"fecha":"2026-10-08"}',
+  '{"tipo":"running","minutos":"30","fecha":"2026-10-08"}',
+  '{"tipo":"natacion","minutos":45}',
+];
+
+for (const texto of textos) {
+  const entreno = JSON.parse(texto) as Entreno; // "confía en mí": no comprueba nada
+  const conCalentamiento = entreno.minutos + 15;
+  console.log(`${entreno.tipo}: ${conCalentamiento} min, el ${entreno.fecha}`);
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/04-el-problema.ts
+```
+
+`typecheck` pasa sin un solo error, y al ejecutar:
+
+```text
+running: 45 min, el 2026-10-08
+running: 3015 min, el 2026-10-08
+natacion: 60 min, el undefined
+```
+
+1. **El primero** está bien.
+2. **El segundo** trae `"30"` (texto) en lugar de `30`. `"30" + 15` en JavaScript concatena: **3015 minutos**. Un formulario HTML siempre envía texto, así que este error es muy habitual.
+3. **El tercero** trae un tipo de entreno que no existe y le falta la fecha. Ningún error: un `undefined` que acabará en la pantalla o en la base de datos.
+
+El `as Entreno` le dijo al compilador "confía en mí" y el compilador confió. Necesitas algo que **compruebe al ejecutar**.
+
+<Callout type="risk">
+
+- **Las fronteras de una app web**, donde siempre hay que validar: el cuerpo de una petición (`request.json()`, `formData()`), los parámetros de la URL, las respuestas de APIs externas, `localStorage`, los mensajes de `postMessage` y, sí, la base de datos (otro programa, una migración a medias o una edición a mano en Compass pueden dejar documentos con otra forma).
+- **Dentro de tu código, no hace falta validar:** una vez que un dato pasó la frontera validado, los tipos de TypeScript son fiables. Validar en cada función interna es lento y repetitivo. Valida en el borde, y confía dentro.
+
+</Callout>
+
+## Paso 2: tu primer esquema, `parse` y `safeParse`
+
+Crea `src/i1/04-esquemas.ts`:
+
+```ts
+// Archivo: src/i1/04-esquemas.ts
+import { z } from "zod";
+
+// Un esquema describe la forma Y se comprueba al ejecutar
+const EntrenoSchema = z.object({
+  tipo: z.enum(["fuerza", "running"]),
+  minutos: z.number().int().min(1).max(600),
+  fecha: z.iso.date(), // texto "AAAA-MM-DD"
+  notas: z.string().max(200).optional(),
+  ejercicios: z.array(z.string().min(1)).default([]),
+});
+
+const textos = [
+  '{"tipo":"running","minutos":30,"fecha":"2026-10-08"}',
+  '{"tipo":"running","minutos":"30","fecha":"2026-10-08"}',
+  '{"tipo":"natacion","minutos":45}',
+];
+
+// 1. safeParse: nunca lanza; devuelve { success: true, data } o { success: false, error }
+for (const texto of textos) {
+  const resultado = EntrenoSchema.safeParse(JSON.parse(texto));
+  if (resultado.success) {
+    const e = resultado.data; // ya tipado y comprobado
+    console.log(`✔ ${e.tipo}: ${e.minutos + 15} min, el ${e.fecha}, ejercicios: ${e.ejercicios.length}`);
+  } else {
+    console.log("✘", z.prettifyError(resultado.error).replaceAll("\n", " | "));
+  }
+}
+
+// 2. parse: devuelve el dato si es válido y LANZA un ZodError si no lo es
+try {
+  const valido = EntrenoSchema.parse({ tipo: "fuerza", minutos: 45, fecha: "2026-10-09" });
+  console.log("parse OK:", valido);
+  EntrenoSchema.parse({ tipo: "fuerza", minutos: -5, fecha: "ayer" });
+} catch (error) {
+  if (error instanceof z.ZodError) {
+    console.log(`parse lanzó ZodError con ${error.issues.length} problemas:`);
+    for (const issue of error.issues) console.log(`  ${issue.path.join(".")}: ${issue.message}`);
+  }
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/04-esquemas.ts
+```
+
+```text
+✔ running: 45 min, el 2026-10-08, ejercicios: 0
+✘ ✖ Invalid input: expected number, received string |   → at minutos
+✘ ✖ Invalid option: expected one of "fuerza"|"running" |   → at tipo | ✖ Invalid input: expected string, received undefined |   → at fecha
+parse OK: { tipo: 'fuerza', minutos: 45, fecha: '2026-10-09', ejercicios: [] }
+parse lanzó ZodError con 2 problemas:
+  minutos: Too small: expected number to be >=1
+  fecha: Invalid ISO date
+```
+
+Los mismos tres JSON de antes, ahora con un resultado útil: el bueno pasa (y con `ejercicios: []` rellenado por `.default([])`), y los dos malos se rechazan diciendo **qué campo** falla y **por qué**.
+
+Las piezas del esquema:
+
+| Pieza                                    | Comprueba                                 |
+| ---------------------------------------- | ----------------------------------------- |
+| `z.object({ … })`                        | Que sea un objeto con esas propiedades    |
+| `z.enum(["fuerza", "running"])`          | Que sea exactamente uno de esos textos    |
+| `z.number().int().min(1).max(600)`       | Número entero entre 1 y 600               |
+| `z.iso.date()`                           | Texto con formato de fecha `AAAA-MM-DD`   |
+| `z.string().max(200).optional()`         | Texto de hasta 200 caracteres, o ausente  |
+| `z.array(z.string().min(1)).default([])` | Lista de textos no vacíos; si falta, `[]` |
+
+Y las dos formas de validar:
+
+- **`safeParse(dato)`** **nunca lanza**. Devuelve `{ success: true, data }` o `{ success: false, error }`, una unión discriminada (B1.6): dentro de `if (resultado.success)`, `resultado.data` está tipado. Es la que usarás en _endpoints_ y formularios, donde un dato inválido es algo **esperado**.
+- **`parse(dato)`** devuelve el dato si es válido y **lanza un `ZodError`** si no. Úsala cuando un dato inválido sea un error de verdad (una variable de entorno mal configurada, un archivo de configuración roto), o dentro de un `try/catch` que ya maneje errores.
+
+`error.issues` es la lista de problemas, cada uno con su `path` (el campo) y su `message`. `z.prettifyError(error)` los convierte en un texto legible.
+
+<Callout type="risk">
+
+- **Zod 3 frente a Zod 4.** En Zod 4 están obsoletos `z.string().email()`, `.url()` y `.uuid()` (ahora `z.email()`, `z.url()` y `z.uuid()`), y `error.flatten()` y `error.format()` (ahora `z.flattenError(error)` y `z.treeifyError(error)`). Siguen funcionando, pero el editor los muestra tachados y desaparecerán en una versión futura. Si copias un ejemplo de internet, comprueba de qué versión es.
+- **Los mensajes por defecto están en inglés.** Zod 4 incluye traducciones: `z.config(z.locales.es())` al arrancar la app las cambia a español ("Opción inválida: se esperaba una de…"), aunque alguna frase queda forzada ("Inválido fecha ISO"). Para lo que ve el usuario en un formulario, escribe tus propios mensajes (Paso 4).
+- **`z.iso.date()` comprueba el formato, no que la fecha tenga sentido para tu app:** `"1900-01-01"` es válida. Las reglas de negocio ("no puede ser futura") se añaden con `.refine()`.
+
+</Callout>
+
+## Paso 3: `z.infer`, el tipo sale del esquema
+
+Hasta ahora tenías el tipo `Entreno` **y** el esquema: dos descripciones de lo mismo que se pueden desincronizar. `z.infer` deriva el tipo del esquema, igual que `typeof` derivaba tipos de valores en I1.2. Crea `src/i1/04-infer.ts`:
+
+```ts
+// Archivo: src/i1/04-infer.ts
+import { z } from "zod";
+
+// El esquema es la única fuente de verdad…
+export const EntrenoSchema = z.object({
+  tipo: z.enum(["fuerza", "running"]),
+  minutos: z.number().int().min(1).max(600),
+  fecha: z.iso.date(),
+  notas: z.string().max(200).optional(),
+  ejercicios: z.array(z.string().min(1)).default([]),
+});
+
+// …y el tipo se deriva de él: nunca se escribe una interfaz paralela
+export type Entreno = z.infer<typeof EntrenoSchema>;
+// {
+//   tipo: "fuerza" | "running";
+//   minutos: number;
+//   fecha: string;
+//   notas?: string | undefined;
+//   ejercicios: string[];
+// }
+
+// Con .default() hay DOS tipos: lo que puede entrar y lo que sale tras validar
+export type EntrenoEntrada = z.input<typeof EntrenoSchema>; // ejercicios?: string[] | undefined
+export type EntrenoSalida = z.output<typeof EntrenoSchema>; // ejercicios: string[] (igual que z.infer)
+
+// Los esquemas se componen como los tipos de I1.3
+export const CambiosEntrenoSchema = EntrenoSchema.pick({ minutos: true, notas: true }).partial();
+export type CambiosEntreno = z.infer<typeof CambiosEntrenoSchema>;
+
+// El enum del esquema también sirve en ejecución (para pintar un <select>)
+export const TIPOS = EntrenoSchema.shape.tipo.options; // ["fuerza", "running"]
+
+function resumen(e: Entreno): string {
+  return `${e.tipo} ${e.minutos} min (${e.ejercicios.length} ejercicios)`;
+}
+
+const deFormulario: EntrenoEntrada = { tipo: "fuerza", minutos: 50, fecha: "2026-10-09" };
+const entreno = EntrenoSchema.parse(deFormulario); // tipo Entreno: ejercicios ya es []
+const cambios: CambiosEntreno = CambiosEntrenoSchema.parse({ notas: "Sentadilla 5x5" });
+
+console.log(resumen(entreno));
+console.log({ ...entreno, ...cambios });
+console.log("Opciones del select:", TIPOS);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/04-infer.ts
+```
+
+```text
+fuerza 50 min (0 ejercicios)
+{
+  tipo: 'fuerza',
+  minutos: 50,
+  fecha: '2026-10-09',
+  ejercicios: [],
+  notas: 'Sentadilla 5x5'
+}
+Opciones del select: [ 'fuerza', 'running' ]
+```
+
+- **`z.infer<typeof EntrenoSchema>`**: pasa el ratón por `Entreno` y verás la interfaz completa, sin haberla escrito. Si añades un campo al esquema, el tipo lo tiene al instante.
+- **`z.input` y `z.output`**: con `.default()` (o transformaciones, Paso 5), lo que **entra** y lo que **sale** son distintos. En la entrada, `ejercicios` es opcional; en la salida siempre es un array. `z.infer` es lo mismo que `z.output`.
+- **`.pick()` y `.partial()`** son los `Pick` y `Partial` de I1.3, pero para esquemas: el esquema del PATCH se deriva del completo, igual que los tipos.
+- **`EntrenoSchema.shape.tipo.options`** saca la lista de opciones del `enum` **en ejecución**: la misma fuente de verdad para validar, tipar y pintar el `<select>`.
+
+Añade al final:
+
+```ts
+const sinEjercicios: Entreno = { tipo: "fuerza", minutos: 50, fecha: "2026-10-09" };
+resumen({ ...entreno, tipo: "natacion" });
+```
+
+```text
+src/i1/04-infer.ts(46,7): error TS2741: Property 'ejercicios' is missing in type '{ tipo: "fuerza"; minutos: number; fecha: string; }' but required in type '{ tipo: "fuerza" | "running"; minutos: number; fecha: string; notas?: string | undefined; ejercicios: string[]; }'.
+src/i1/04-infer.ts(47,23): error TS2322: Type '"natacion"' is not assignable to type '"fuerza" | "running"'.
+```
+
+El tipo derivado protege igual que uno escrito a mano. El primer error muestra la diferencia entre entrada y salida: un `Entreno` (salida) siempre tiene `ejercicios`. Borra las dos líneas.
+
+<Callout type="risk">
+
+- **Nunca escribas el tipo a mano "además" del esquema:** `interface Entreno {…}` + `EntrenoSchema` es la duplicación que esta sección quiere eliminar. Si ya tienes la interfaz, sustitúyela por `type Entreno = z.infer<typeof EntrenoSchema>`.
+- **Usa `z.input` para el estado de un formulario:** mientras el usuario escribe, el dato todavía es la **entrada** (campos vacíos, textos). Tipar el estado del formulario con `z.output` te obliga a inventar valores que el usuario aún no ha dado.
+- **Exporta el esquema, no solo el tipo:** el tipo desaparece al compilar; el esquema es lo que valida. Quien necesite comprobar un dato tiene que poder importar el esquema.
+
+</Callout>
+
+## Paso 4: errores por campo y la respuesta 422
+
+En un formulario o un _endpoint_, "el dato no es válido" no basta: hay que decir **qué campo** falla, con un mensaje que entienda una persona. Crea `src/i1/04-registro.ts`:
+
+```ts
+// Archivo: src/i1/04-registro.ts
+import { z } from "zod";
+
+// Mensajes propios: son los que verá el usuario junto a cada campo
+export const RegistroSchema = z.object({
+  nombre: z.string().trim().min(2, "Mínimo 2 caracteres").max(60, "Máximo 60 caracteres"),
+  email: z.string().trim().toLowerCase().pipe(z.email("Correo no válido")),
+  password: z.string().min(8, "Mínimo 8 caracteres").max(128, "Máximo 128 caracteres"),
+});
+
+export type Registro = z.infer<typeof RegistroSchema>;
+
+// Lo que haría un endpoint: validar el cuerpo (unknown) y responder 422 con errores por campo
+export async function registrar(request: Request): Promise<Response> {
+  const cuerpo: unknown = await request.json().catch(() => null);
+  const resultado = RegistroSchema.safeParse(cuerpo);
+  if (!resultado.success) {
+    const { fieldErrors, formErrors } = z.flattenError(resultado.error);
+    return Response.json({ errores: fieldErrors, generales: formErrors }, { status: 422 });
+  }
+  const datos: Registro = resultado.data; // limpio: sin espacios, email en minúsculas
+  return Response.json({ ok: true, usuario: { nombre: datos.nombre, email: datos.email } }, { status: 201 });
+}
+
+// Simulamos tres peticiones
+const cuerpos = [
+  { nombre: "  Dani ", email: " Dani@Example.COM ", password: "secreto-largo" },
+  { nombre: "D", email: "no-es-un-correo", password: "123" },
+  "esto no es un objeto",
+];
+
+for (const cuerpo of cuerpos) {
+  const peticion = new Request("http://localhost/api/registro", {
+    method: "POST",
+    body: JSON.stringify(cuerpo),
+  });
+  const respuesta = await registrar(peticion);
+  console.log(respuesta.status, JSON.stringify(await respuesta.json()));
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/04-registro.ts
+```
+
+```text
+201 {"ok":true,"usuario":{"nombre":"Dani","email":"dani@example.com"}}
+422 {"errores":{"nombre":["Mínimo 2 caracteres"],"email":["Correo no válido"],"password":["Mínimo 8 caracteres"]},"generales":[]}
+422 {"errores":{},"generales":["Invalid input: expected object, received string"]}
+```
+
+- **El segundo argumento de `.min()`, `.max()` o `z.email()`** es el mensaje. Es el que se muestra bajo cada campo.
+- **`.trim()` y `.toLowerCase()`** limpian el dato **antes** de validarlo: `"  Dani "` llega como `"Dani"` y `" Dani@Example.COM "` como `"dani@example.com"`. Sin esto, `"dani@example.com"` y `"Dani@example.com"` serían dos cuentas distintas.
+- **`.pipe(z.email(…))`**: primero se limpia el texto y después se valida como correo (la validación se aplica sobre el texto ya limpio).
+- **`z.flattenError(error)`** separa los errores en `fieldErrors` (un array de mensajes por campo, listo para pintarlo junto a cada `<input>`) y `formErrors` (los que no son de un campo, como "esto no es un objeto").
+- **422** (_Unprocessable Content_) es el código para "entendí la petición, pero los datos no son válidos". 400 se reserva para peticiones mal formadas.
+
+Esta plataforma valida así su registro: `src/schemas/auth.ts` usa la misma cadena `z.string().trim().toLowerCase().pipe(z.email(…))`, y el formulario de React y la validación comparten el esquema.
+
+<Callout type="risk">
+
+- **Valida en el servidor siempre, aunque el formulario ya valide:** la validación del navegador es para la comodidad del usuario; cualquiera puede saltársela enviando la petición con `curl`. El servidor es el único sitio donde la validación es una protección.
+- **No devuelvas los datos recibidos en el error:** un 422 que repite la contraseña enviada, o el valor completo de cada campo, puede acabar en los logs o en la caché de un proxy. Devuelve solo los mensajes.
+- **`request.json()` lanza si el cuerpo no es JSON válido:** por eso `.catch(() => null)`. Así, un cuerpo roto llega a Zod como `null` y se responde con un 422 controlado en lugar de un 500. El _endpoint_ de latidos de esta plataforma (`src/pages/api/study-sessions/heartbeat.ts`) usa este mismo patrón.
+
+</Callout>
+
+## Paso 5: transformaciones y coerción
+
+Los parámetros de una URL y los campos de un `FormData` son **siempre texto**: `?pagina=2` llega como `"2"`. La **coerción** convierte el texto al tipo correcto antes de validar, y las **transformaciones** cambian el dato después de validarlo. Crea `src/i1/04-coercion.ts`:
+
+```ts
+// Archivo: src/i1/04-coercion.ts
+import { z } from "zod";
+
+// Todo lo que llega en la URL o en un FormData es TEXTO, aunque represente números o fechas
+const FiltroSchema = z.object({
+  pagina: z.coerce.number().int().min(1).default(1),
+  limite: z.coerce.number().int().min(1).max(50).default(10),
+  desde: z.coerce.date().optional(),
+  soloFijadas: z.stringbool().default(false), // "true"/"false", "1"/"0", "yes"/"no", "on"/"off"
+  tipos: z
+    .string()
+    .transform((s) => s.split(",").map((t) => t.trim()).filter(Boolean))
+    .pipe(z.array(z.enum(["fuerza", "running", "movilidad"])))
+    .optional(),
+});
+
+type FiltroEntrada = z.input<typeof FiltroSchema>; // lo que entra: textos (y unknown en los coerce)
+type Filtro = z.output<typeof FiltroSchema>; // lo que sale: números, Date, boolean, string[]
+
+function leerFiltro(url: string): Filtro | string {
+  const params = Object.fromEntries(new URL(url).searchParams);
+  const r = FiltroSchema.safeParse(params);
+  return r.success ? r.data : z.prettifyError(r.error).replaceAll("\n", " ");
+}
+
+const urls = [
+  "http://localhost/entrenos",
+  "http://localhost/entrenos?pagina=2&limite=20&desde=2026-10-01&soloFijadas=false&tipos=running,%20fuerza",
+  "http://localhost/entrenos?pagina=abc&tipos=natacion",
+];
+for (const url of urls) console.log(leerFiltro(url));
+
+// Las trampas de la coerción
+console.log("coerce.number(''):", z.coerce.number().parse("")); // 0, no un error
+console.log("coerce.boolean('false'):", z.coerce.boolean().parse("false")); // true: Boolean("false")
+console.log("stringbool('false'):", z.stringbool().parse("false")); // false
+
+const ejemplo: FiltroEntrada = { pagina: "2" };
+console.log(ejemplo);
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/04-coercion.ts
+```
+
+```text
+{ pagina: 1, limite: 10, soloFijadas: false }
+{
+  pagina: 2,
+  limite: 20,
+  desde: 2026-10-01T00:00:00.000Z,
+  soloFijadas: false,
+  tipos: [ 'running', 'fuerza' ]
+}
+✖ Invalid input: expected number, received NaN   → at pagina ✖ Invalid option: expected one of "fuerza"|"running"|"movilidad"   → at tipos[0]
+coerce.number(''): 0
+coerce.boolean('false'): true
+stringbool('false'): false
+{ pagina: '2' }
+```
+
+- **`z.coerce.number()`** aplica `Number(valor)` y después valida: `"20"` pasa a `20`, y `"abc"` pasa a `NaN`, que se rechaza.
+- **`.default(1)`**: sin `?pagina`, la primera URL obtiene `pagina: 1` y `limite: 10`.
+- **`z.coerce.date()`** convierte `"2026-10-01"` en un `Date`.
+- **`.transform()`** convierte `"running, fuerza"` en un array, y **`.pipe()`** valida ese array con otro esquema. Por eso `tipos=natacion` falla en `tipos[0]`.
+- **`z.input` frente a `z.output`**: `FiltroEntrada` acepta textos (`{ pagina: "2" }`), y `Filtro` tiene números, fechas y booleanos.
+
+<Callout type="risk">
+
+- **`z.coerce.number()` convierte `""` en `0`:** un campo de formulario vacío pasa la validación como un cero, no como un error. Si cero no tiene sentido, añade `.min(1)`; si el campo es opcional, trata `""` como ausente antes (`z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().optional())`).
+- **`z.coerce.boolean()` convierte `"false"` en `true`:** aplica `Boolean(valor)`, y cualquier texto no vacío es `true` en JavaScript. Para textos de URL o de formulario, usa **`z.stringbool()`**, que entiende `"true"`/`"false"`, `"1"`/`"0"`, `"yes"`/`"no"` y `"on"`/`"off"` (no `"si"`: cualquier otro texto es un error)
+- **Una transformación hace que el esquema deje de ser "invertible":** `tipos` entra como texto y sale como array. Si necesitas volver a construir la URL a partir del filtro, tendrás que hacer el camino inverso a mano.
+
+</Callout>
+
+## Paso 6: las claves de más se descartan
+
+Vuelve al ataque del final de I1.3: un cuerpo de PATCH con un `usuarioId` colado. Crea `src/i1/04-claves-de-mas.ts`:
+
+```ts
+// Archivo: src/i1/04-claves-de-mas.ts
+import { z } from "zod";
+
+// El cuerpo del PATCH de I1.3, ahora validado en ejecución
+const CambiosNotaSchema = z.object({
+  titulo: z.string().trim().min(1).max(120).optional(),
+  contenido: z.string().max(5000).optional(),
+  categoria: z.enum(["trabajo", "personal", "salud", "estudio"]).optional(),
+  fijada: z.boolean().optional(),
+});
+
+// La misma petición maliciosa del final de I1.3
+const cuerpo: unknown = JSON.parse('{"titulo":"Correr 12 km","usuarioId":"atacante"}');
+
+// z.object: las claves que no están en el esquema se DESCARTAN
+const limpio = CambiosNotaSchema.parse(cuerpo);
+console.log("z.object →", limpio);
+
+// z.strictObject: las claves de más son un ERROR (útil para detectar clientes mal hechos)
+const estricto = z.strictObject(CambiosNotaSchema.shape).safeParse(cuerpo);
+console.log("z.strictObject →", estricto.success ? estricto.data : z.prettifyError(estricto.error));
+
+// z.looseObject: las conserva sin validarlas (casi nunca es lo que quieres con datos externos)
+console.log("z.looseObject →", z.looseObject(CambiosNotaSchema.shape).parse(cuerpo));
+```
+
+```bash
+npm start -- src/i1/04-claves-de-mas.ts
+```
+
+```text
+z.object → { titulo: 'Correr 12 km' }
+z.strictObject → ✖ Unrecognized key: "usuarioId"
+z.looseObject → { titulo: 'Correr 12 km', usuarioId: 'atacante' }
+```
+
+Por defecto, **`z.object` descarta** las propiedades que no están en el esquema: el dato que sale de `parse` solo tiene lo que declaraste. El _mass assignment_ de I1.3 desaparece sin escribir nada más. **`z.strictObject`** las convierte en error (útil en APIs internas, para detectar un cliente que envía campos que no debería), y **`z.looseObject`** las conserva sin validar.
+
+<Callout type="risk">
+
+- **Usa siempre el `data` validado, nunca el original:** `const r = Schema.safeParse(cuerpo); if (r.success) guardar(cuerpo)` valida bien y luego guarda el objeto **sin limpiar**, con el `usuarioId` dentro. Lo que se guarda es `r.data`.
+- **Descartar no es avisar:** si un cliente envía `titulo` con una errata (`titlo`), `z.object` la descarta en silencio y el cambio "no hace nada". En formularios propios, `z.strictObject` ayuda a encontrar esos fallos durante el desarrollo.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Copia la función `obtenerTareas` de B1.5 a `src/i1/04-ejercicio.ts` y sustituye el `as TareaApi[]` por un esquema de Zod.
+2. Haz que la conversión a la forma de la app (`id`, `titulo`, `hecha`) ocurra dentro del esquema, con `.transform()`, y deriva el tipo `Tarea` del esquema.
+3. Si la API devuelve datos con otra forma, lanza un error que diga cuántos problemas hay y cuáles son los primeros.
+4. Pruébala con `/todos?userId=1&_limit=3` y con `/users?_limit=2`, la ruta que en B1.5 imprimía `undefined` sin ningún error.
+
+</Callout>
+
+Solución completa, `src/i1/04-ejercicio.ts`:
+
+```ts
+// Archivo: src/i1/04-ejercicio.ts
+import { z } from "zod";
+
+const API = "https://jsonplaceholder.typicode.com";
+
+// El esquema sustituye a la interfaz TareaApi de B1.5…
+const TareaApiSchema = z.object({
+  userId: z.number(),
+  id: z.number(),
+  title: z.string(),
+  completed: z.boolean(),
+});
+
+// …y la conversión a la forma de la app se hace en el propio esquema
+const TareasSchema = z
+  .array(TareaApiSchema)
+  .transform((lista) => lista.map((t) => ({ id: t.id, titulo: t.title, hecha: t.completed })));
+
+type Tarea = z.output<typeof TareasSchema>[number]; // { id: number; titulo: string; hecha: boolean }
+
+async function obtenerTareas(ruta: string): Promise<Tarea[]> {
+  const url = `${API}${ruta}`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} al pedir ${url}`);
+  }
+  const resultado = TareasSchema.safeParse(await res.json()); // en vez de "as TareaApi[]"
+  if (!resultado.success) {
+    const primeros = resultado.error.issues.slice(0, 3).map((i) => `${i.path.join(".")}: ${i.message}`);
+    throw new Error(
+      `La API devolvió datos con otra forma (${resultado.error.issues.length} problemas). ` +
+        `Primeros: ${primeros.join("; ")}`,
+    );
+  }
+  return resultado.data;
+}
+
+for (const ruta of ["/todos?userId=1&_limit=3", "/users?_limit=2"]) {
+  try {
+    const tareas = await obtenerTareas(ruta);
+    for (const t of tareas) console.log(`${t.hecha ? "[x]" : "[ ]"} #${t.id} ${t.titulo}`);
+  } catch (error) {
+    console.error("No se pudieron cargar las tareas:", error instanceof Error ? error.message : error);
+  }
+}
+```
+
+```bash
+npm run typecheck
+npm start -- src/i1/04-ejercicio.ts
+```
+
+```text
+[ ] #1 delectus aut autem
+[ ] #2 quis ut nam facilis et officia qui
+[ ] #3 fugiat veniam minus
+No se pudieron cargar las tareas: La API devolvió datos con otra forma (6 problemas). Primeros: 0.userId: Invalid input: expected number, received undefined; 0.title: Invalid input: expected string, received undefined; 0.completed: Invalid input: expected boolean, received undefined
+```
+
+En B1.5, `/users` producía `[ ] #1 undefined` sin un solo error; ahora la función se niega a devolver datos falsos y explica qué ha cambiado en la API: 3 campos que faltan en cada uno de los 2 usuarios, es decir, 6 problemas.
+
+Las decisiones:
+
+- **`TareasSchema`** valida y convierte en un solo paso: quien llama a `obtenerTareas` nunca ve la forma en inglés de la API.
+- **`z.output<typeof TareasSchema>[number]`**: el tipo `Tarea` sale del resultado de la transformación (con el `[number]` de I1.2), no de una interfaz escrita aparte.
+- **`safeParse` + `throw`**: dentro de la función se usa `safeParse` para construir un mensaje claro, y se lanza un `Error` normal; quien llama solo necesita un `try/catch`, sin saber nada de Zod.
+- **`AbortSignal.timeout(5000)`**: la mejora que proponía el bloque de riesgos de B1.5. Si la API no responde en 5 segundos, `fetch` se cancela.
+
+<Callout type="risk">
+
+- **Valida solo lo que usas de una API externa:** el esquema declara 4 campos y la API podría enviar 20. Como `z.object` descarta el resto, si la API añade campos nuevos, tu app sigue funcionando; si **quita** uno que usas, falla con un mensaje claro. Validar campos que no usas solo hace que tu app se rompa por cambios que no le afectan.
+- **Una validación que falla en producción debe registrarse:** el mensaje "la API cambió de forma" es oro para depurar, pero solo si llega a tus logs. En un _endpoint_, regístralo en el servidor y devuelve al usuario un mensaje genérico (lo verás en I1.5).
+- **Validar listas grandes cuesta tiempo:** para miles de elementos, Zod recorre cada uno. Para datos de tu propia base de datos ya validados al escribir, a veces basta con validar en la escritura y confiar en la lectura; para datos externos, valida siempre.
+
+</Callout>
+
+<Callout type="mastery">
+
+Validas todo dato que cruza una frontera (petición, formulario, URL, API externa, base de datos) con un esquema de Zod; derivas los tipos con `z.infer`, `z.input` y `z.output` sin escribir interfaces paralelas; eliges `safeParse` cuando un dato inválido es algo esperado y `parse` cuando es un error; y usas siempre el `data` validado, que llega sin claves de más.
+
+</Callout>
+
+## Resumen
+
+- Los tipos de TypeScript no existen al ejecutar: `as` y `JSON.parse` dejan pasar cualquier forma.
+- Un esquema de Zod describe la forma y la comprueba al ejecutar: `z.object`, `z.enum`, `z.number().min()`, `z.email()`, `z.array`.
+- `safeParse` devuelve `{ success, data | error }` y nunca lanza; `parse` lanza un `ZodError`.
+- `z.infer` (o `z.output`) da el tipo del esquema; `z.input` el de la entrada antes de transformar.
+- `z.coerce.*` y `z.stringbool()` convierten textos de URL y formularios; `z.object` descarta las claves que no declaraste.
