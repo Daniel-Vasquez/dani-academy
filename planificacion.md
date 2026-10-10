@@ -1194,7 +1194,7 @@ Bloques destacados del contenido (Ejercicio, Lo dominas si…, Nota…). Se usan
 
 ```astro
 ---
-type CalloutType = "note" | "tip" | "warning" | "exercise" | "mastery";
+type CalloutType = "note" | "tip" | "warning" | "exercise" | "mastery" | "risk";
 interface Props {
   type?: CalloutType;
   title?: string;
@@ -1207,6 +1207,8 @@ const styles: Record<CalloutType, { label: string; border: string }> = {
   warning: { label: "Cuidado", border: "border-warning" },
   exercise: { label: "Ejercicio", border: "border-accent" },
   mastery: { label: "Lo dominas si…", border: "border-accent-strong" },
+  // Obligatorio después de cada bloque de código importante (formato "receta", §8.6)
+  risk: { label: "Complicaciones y riesgos", border: "border-danger" },
 };
 const style = styles[type];
 const heading = title ?? style.label;
@@ -1715,7 +1717,9 @@ return Astro.redirect("/cursos/typescript-desde-cero");
 
 > Los campos `title` y `summary` son **texto plano** (sin Markdown: nada de acentos graves ni asteriscos), porque se muestran tal cual en títulos, índices y metadatos. Escríbelos entre comillas en el YAML.
 
-**Estructura obligatoria de cada sección** (para que todas se lean igual):
+> ⚠️ **Sustituida desde el 9 de octubre de 2026 por el formato "receta" de §8.6.** La estructura de abajo y la sección de referencia `01-que-es-typescript.mdx` describen el formato original; se conservan como historial. Todos los cursos básicos (B1–B7) ya están reescritos en el formato nuevo.
+
+**Estructura original de cada sección:**
 
 1. Párrafo de entrada: el problema que resuelve la sección (2–4 frases).
 2. 3–5 apartados `##` con la teoría del **Contenido** del temario, cada uno con al menos un bloque de código.
@@ -4485,13 +4489,14 @@ const avg = summary.averageScore === null ? "—" : `${summary.averageScore.toLo
 
 1. **Leer** el curso en `temario.md` (tabla de datos, secciones, proyecto, evaluación final y referencias).
 2. **Crear la carpeta** `src/content/sections/<slug>/` (slug de `courses.json`).
-3. **Crear un `.mdx` por sección**: `NN-slug-corto.mdx` con el frontmatter de §1.18 (`sectionId`, `course`, `title`, `order`, `minutes: 60`, `summary` en texto plano) y la **estructura obligatoria** de §1.18.
+3. **Crear un `.mdx` por sección**: `NN-slug-corto.mdx` con el frontmatter de §1.18 (`sectionId`, `course`, `title`, `order`, `minutes: 60`, `summary` en texto plano) y el **formato "receta" de §8.6** (obligatorio).
 4. **Crear `src/content/quizzes/<id en minúsculas>.yaml`** con 5 preguntas, una por cada tema de la "Evaluación final" del temario, en el formato de `b1.yaml`:
    - 4 opciones plausibles; la correcta repartida entre posiciones (no siempre la misma).
    - `explanation` que enseñe, no que solo confirme.
    - Al menos 2 preguntas con `code` cuando el curso sea de programación.
 5. **Publicar**: `"published": true` en `courses.json`.
-6. **Verificar**: `npm run check && npm run build`, y revisar en el navegador la portada, 2 secciones al azar y la evaluación.
+6. **Verificar**: `npm run check && npm run build`, y revisar en el navegador la portada, **todas** las secciones del curso y la evaluación (§8.6, "Verificación").
+7. **Revisión del usuario**: un curso cada vez. Tras el commit, se informa y se espera su confirmación antes de empezar el siguiente.
 
 ### 8.3 Lista de control de calidad del contenido
 
@@ -4501,6 +4506,8 @@ const avg = summary.averageScore === null ? "—" : `${summary.averageScore.toLo
 - [ ] Ejercicios conectados con los proyectos reales del alumno (Planificador 2026, app de entrenamiento o esta plataforma) siempre que tenga sentido.
 - [ ] Español claro, frases cortas, términos técnicos en inglés en cursiva la primera vez.
 - [ ] Sin HTML crudo en el MDX salvo componentes del proyecto (`Callout`).
+- [ ] Formato "receta" de §8.6: `## Paso N`, archivos completos sin `// ...`, un `<Callout type="risk">` tras cada bloque de código importante, ejercicio con solución completa y salidas reales.
+- [ ] `summary` de 220 caracteres como máximo (el esquema lo exige y el build falla si se supera).
 
 ### 8.4 (Opcional) Proyecto y referencias en la portada del curso
 
@@ -4540,13 +4547,114 @@ schema: z.discriminatedUnion("mode", [
 - `submitQuiz` acepta un `mode` y, en `self`, calcula `score` como la suma de "Cumple" (no hay respuesta correcta que ocultar). El texto de las reflexiones **no** se guarda (no está en el alcance); si lo quieres, añade `notes: string[]` al documento y al validador.
 - Añade `mode: choice` explícito a los YAML existentes o confía en el `default`.
 
+### 8.6 Formato "receta" de las lecciones (obligatorio desde el 9 de octubre de 2026)
+
+Todas las lecciones, las ya reescritas (B1–B7) y las que se escriban a partir de ahora (I1–I8, A1–A8, P1), siguen este formato. `temario.md` define **qué** se enseña; esta sección define **cómo** se maqueta cada `.mdx`.
+
+**Regla de oro:** la ruta de aprendizaje, los títulos, el orden y los temas de cada sección son los de `temario.md` y no se cambian. Solo cambia la forma de explicarlos.
+
+**Los cuatro requisitos:**
+
+1. **Receta paso a paso:** la teoría se convierte en una secuencia de acciones (`## Paso 1: …`, `## Paso 2: …`) que va desde cero hasta una implementación final que funciona, sin saltos.
+2. **Detalle exhaustivo:** cada paso explica el *por qué* y el *cómo*, con analogías y ejemplos reales (Planificador 2026, app de entrenamiento o esta plataforma, cuando tenga sentido).
+3. **Código literal para copiar y pegar:** archivos **completos** y funcionales, con la ruta en un comentario de la primera línea (`// Archivo: src/...`). Prohibido `// ... resto del código` y los fragmentos sueltos que el alumno tenga que completar.
+4. **Complicaciones y riesgos:** después de **cada** bloque de código importante, un `<Callout type="risk">` con errores comunes, problemas de rendimiento o de seguridad y trampas de la tecnología.
+
+**Estructura de cada `.mdx`:**
+
+````mdx
+---
+sectionId: "I1.1"
+course: "I1"
+title: "Título exacto del temario"
+order: 1
+minutes: 60
+summary: "Texto plano de 220 caracteres como máximo: qué construye y qué comprueba el alumno."
+---
+
+Párrafo de entrada: el problema que resuelve la sección y qué se va a construir (3–5 frases).
+
+**Lo que tendrás al terminar:** el resultado concreto (archivos, páginas, comandos).
+
+**Requisitos:** versiones, cursos previos o el proyecto de laboratorio de la sección anterior.
+
+## Paso 1: verbo + resultado
+
+Explicación del por qué y el cómo.
+
+```ts
+// Archivo: src/lib/ejemplo.ts
+(archivo completo)
+```
+
+Salida real o medida obtenida al ejecutarlo:
+
+```text
+(salida literal)
+```
+
+<Callout type="risk">
+
+- **Trampa concreta:** qué pasa, por qué y cómo evitarla.
+- **Rendimiento o seguridad:** lo mismo.
+
+</Callout>
+
+## Paso 2: …
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Enunciado en pasos numerados (el del temario, ampliable).
+
+</Callout>
+
+Solución completa (todos los archivos), su salida real y las decisiones explicadas.
+
+<Callout type="risk">
+
+- Riesgos propios de la solución.
+
+</Callout>
+
+<Callout type="mastery">
+
+Criterio "Lo dominas si…" del temario, redactado como lo que el alumno ya sabe hacer.
+
+</Callout>
+
+## Resumen
+
+- 4–6 viñetas.
+````
+
+**Reglas de maquetación del MDX:**
+
+- **`Callout`**: el contenido va **sin sangría** y con una **línea en blanco** después de la etiqueta de apertura y antes de la de cierre. Sin ellas, MDX no interpreta las listas y Prettier las aplasta en un párrafo.
+- Tipos de `Callout` en uso: `risk` (Complicaciones y riesgos), `exercise`, `mastery` y, solo si hacen falta, `note`, `tip` y `warning`.
+- `summary` y `title` en **texto plano** (sin acentos graves ni asteriscos) y `summary` de **220 caracteres como máximo** (`z.string().max(220)` en `content.config.ts`: si se supera, el build falla con `InvalidContentEntryDataError`).
+- Código en línea que contiene un acento grave (por ejemplo, una plantilla de JavaScript): se delimita con **dos** acentos graves a cada lado y espacios por dentro.
+- Tablas para comparar opciones; bloques `text` para las salidas de consola y las medidas.
+- Referencias a otras lecciones por su ID (`B6.7`, `I1.2`), comprobando antes que esa lección trata de verdad el tema citado.
+- Prettier: el *override* de `*.mdx` en `.prettierrc.json` (`embeddedLanguageFormatting: "off"`, `proseWrap: "preserve"`) no toca el código ni parte las líneas. Se pasa `npx prettier --write` sobre los `.mdx` del curso antes del commit.
+
+**Verificación (antes de publicar cada curso):**
+
+1. **Laboratorio real:** cada curso se construye en un proyecto desechable **fuera del repositorio** (carpeta temporal). Todo el código de la lección se ejecuta ahí, y las salidas, mensajes de error y medidas que se citan son los obtenidos, nunca inventados.
+2. **El código de la lección sale de los archivos verificados:** el borrador usa marcadores (`{{CLAVE}}`) que un *script* sustituye por los archivos del laboratorio. Después se comprueba que no queda ningún marcador.
+3. **Afirmaciones comprobadas:** el comportamiento de librerías y navegadores se comprueba ejecutándolo o en `node_modules`. Lo visual (CSS, *responsive*, estados) se mide en Chrome automatizado (`getComputedStyle`, tamaños a varios anchos, capturas).
+4. **Seguridad de los comandos:** `set -e`, rutas absolutas y `cd "$DIR" || exit 1` antes de cualquier comando que escriba archivos. Un `cd` fallido ya llegó a sobrescribir archivos del repositorio y el `.env`. Nunca se imprimen valores de `.env`.
+5. **En la plataforma:** `npm run check`, `npm run build` y revisión de **todas** las secciones con un usuario de prueba (`@dani-academy.test`, borrado al terminar): sin errores de consola, sin *scroll* horizontal, listas de los `Callout` con su numeración y entradilla con el `summary` nuevo. Si el servidor de desarrollo muestra contenido antiguo o un 504 de Vite, se reinicia (`astro dev stop` y `astro dev --background`).
+6. **Commit por curso** en `main`: `content: curso <ID> reescrito en formato receta` (o `content: curso <ID> · <título>` si el curso es nuevo), y espera de la revisión del usuario antes del siguiente.
+
 ### Notas de implementación (sub-tanda 8a ya ejecutada: B2–B7)
 
 - **Publicados:** B2 (4 secciones), B3 (5), B4 (5), B5 (6), B6 (7) y B7 (5), con sus evaluaciones. Un commit por curso.
 - **Cómo se verificó cada curso** (repetir en 8b–8d):
   1. Los ejemplos se ejecutan antes de escribir la lección: Git en un repositorio de prueba, SQL con `sqlite3`, MongoDB contra Atlas en colecciones temporales (`__lab_*`, borradas después), React con el `tsc` del proyecto y las utilidades de Tailwind con su compilador. Así, los mensajes y salidas que citan las lecciones son reales.
   2. Las afirmaciones sobre el comportamiento de una librería se comprueban en su código en `node_modules`. Esto corrigió, por ejemplo, que Better Auth responde **422** (no 409) a un correo ya registrado, que Astro **no da error** al pasar una función como prop a una isla (llega como `null`) y a qué peticiones aplica `security.checkOrigin`.
-  3. Un verificador en el navegador recorre cada curso: el curso es un enlace en `/temario`, la portada lista N secciones, cada sección tiene ≥ 2 bloques de código, "Ejercicio", "Lo dominas si…", "Errores comunes" y "Resumen" sin MDX sin procesar; después marca todo, responde la evaluación con su clave y espera 5/5 y "Completado".
+  3. Un verificador en el navegador recorre cada curso: el curso es un enlace en `/temario`, la portada lista N secciones, cada sección tiene ≥ 2 bloques de código, "Ejercicio", "Lo dominas si…", "Errores comunes" y "Resumen" sin MDX sin procesar (con el formato de §8.6, "Errores comunes" pasa a ser los bloques "Complicaciones y riesgos" y se comprueban los apartados `Paso N`); después marca todo, responde la evaluación con su clave y espera 5/5 y "Completado".
 - **Reglas para los YAML de evaluación:** `prompt`, `options` y `explanation` solo admiten `` `código` `` en línea (el componente no interpreta `**negrita**` ni otro Markdown). Repartir la posición de la respuesta correcta.
 - **`@source not "../content"` en `global.css`:** Tailwind escaneaba las lecciones y generaba CSS para las clases de los ejemplos (`bg-slate-900`, `bg-amber-50`…). El MDX no necesita utilidades para pintarse (los `Callout` llevan las suyas), así que se excluye: el CSS pasó de 69,9 KB a 62,3 KB sin cambios visuales.
 - Lighthouse (con sesión, claro y oscuro) en lecciones con tablas y mucho código: rendimiento 99–100, accesibilidad 100, CLS 0.
