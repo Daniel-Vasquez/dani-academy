@@ -1,5 +1,6 @@
 import { defineMiddleware, sequence } from "astro:middleware";
 import { auth } from "@/lib/auth";
+import { connectMongo } from "@/lib/mongo";
 
 const AUTH_PAGES = new Set(["/login", "/registro"]);
 const PUBLIC_PREFIXES = ["/api/auth/", "/api/health"];
@@ -25,6 +26,18 @@ const securityHeaders = defineMiddleware(async (ctx, next) => {
     // Algunas respuestas (p. ej. un fetch reenviado) tienen cabeceras inmutables: se dejan tal cual
   }
   return response;
+});
+
+/**
+ * 0b. Asegura la conexión con MongoDB. Si el primer intento falla (Atlas no responde al arrancar
+ * la instancia), la petición sigue y fallará con su propio error, pero la siguiente reintenta
+ * en lugar de quedarse con un cliente cerrado para siempre.
+ */
+const ensureDatabase = defineMiddleware(async (ctx, next) => {
+  if (!ctx.isPrerendered) {
+    await connectMongo().catch((error) => console.error("[mongo] Sin conexión", error));
+  }
+  return next();
 });
 
 /** 1. Carga la sesión en Astro.locals */
@@ -58,4 +71,4 @@ const guard = defineMiddleware(async (ctx, next) => {
   return next();
 });
 
-export const onRequest = sequence(securityHeaders, loadSession, guard);
+export const onRequest = sequence(securityHeaders, ensureDatabase, loadSession, guard);

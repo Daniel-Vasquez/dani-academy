@@ -1,5 +1,6 @@
 import { MongoClient, type Db } from "mongodb";
 import { MONGODB_DB, MONGODB_URI } from "astro:env/server";
+import { createConnector } from "@/lib/mongo-connect";
 
 declare global {
   var __daMongoClient: MongoClient | undefined;
@@ -20,5 +21,8 @@ export const mongoClient: MongoClient =
 
 if (import.meta.env.DEV) globalThis.__daMongoClient = mongoClient;
 
-/** El driver conecta en la primera operación: no hace falta `await client.connect()`. */
+/** El driver conecta en la primera operación; el middleware llama antes a connectMongo() */
 export const db: Db = mongoClient.db(MONGODB_DB);
+
+/** Conecta (o reintenta tras un primer intento fallido). Ver src/lib/mongo-connect.ts */
+export const connectMongo = createConnector(mongoClient);
