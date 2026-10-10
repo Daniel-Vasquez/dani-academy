@@ -4,175 +4,428 @@ course: "B6"
 title: "Estado con useState y eventos"
 order: 3
 minutes: 60
-summary: "Por qué una variable normal no actualiza la interfaz, cómo funciona useState y cómo actualizar arrays y objetos sin mutarlos."
+summary: "Compruebas en el navegador por qué una variable normal no actualiza la pantalla, usas useState con actualizaciones funcionales, tipas eventos de teclado, ratón y formulario, y ves qué ocurre al mutar un array del estado."
 ---
 
-Hasta ahora tus componentes mostraban datos que llegan de fuera. Para que reaccionen a lo que hace el usuario (un clic, un texto escrito) necesitan **memoria propia**: el **estado**. Es el concepto central de React, y entenderlo bien evita la mayoría de bugs extraños.
+Hasta ahora tus componentes pintan siempre lo mismo. Para que una interfaz **cambie** (un contador que sube, un campo que se escribe, una lista que crece) hace falta **estado**: un valor que el componente recuerda entre ejecuciones y que, al cambiar, hace que React vuelva a pintar. En esta sección vas a comprobar en el navegador por qué una variable normal no sirve, vas a usar `useState` correctamente (incluido el error de las actualizaciones encadenadas), vas a tipar los eventos de teclado, ratón y formulario, y vas a ver qué ocurre cuando modificas un array del estado "a mano". Terminarás con el contador de hidratación de tu app de entrenamiento.
 
-## Por qué una variable normal no sirve
+**Lo que tendrás al terminar:** una página `/estado` con cinco componentes que demuestran cada regla del estado, y un componente `Hidratacion` completo.
+
+**Requisitos:** el proyecto `react-lab` de B6.2. Todos los componentes de esta sección necesitan `client:load` (B6.1): sin él, no habría JavaScript que respondiera a los clics.
+
+## Paso 1: por qué una variable normal no sirve
+
+Crea la carpeta `src/components/estado/` y dentro `ContadorRoto.tsx`:
 
 ```tsx
+// Archivo: src/components/estado/ContadorRoto.tsx
+// ❌ Una variable normal: cambia, pero la pantalla no se entera
 export function ContadorRoto() {
   let vasos = 0;
-  return <button onClick={() => (vasos = vasos + 1)}>Vasos: {vasos}</button>;
-}
-```
-
-Pulsas y no pasa nada. Dos motivos:
-
-1. Cambiar una variable **no avisa a React** de que tiene que volver a pintar.
-2. Aunque volviera a pintar, la función del componente se ejecutaría de nuevo y `vasos` volvería a valer `0`.
-
-## `useState`
-
-```tsx
-import { useState } from "react";
-
-export function Contador() {
-  const [vasos, setVasos] = useState(0);
-  return <button onClick={() => setVasos(vasos + 1)}>Vasos de agua: {vasos}</button>;
-}
-```
-
-`useState(valorInicial)` devuelve una **tupla** (curso B1.3):
-
-- `vasos`: el valor actual.
-- `setVasos`: la función para cambiarlo.
-
-Cuando llamas a `setVasos`, React guarda el nuevo valor y **vuelve a ejecutar** el componente (un _render_), que ahora lee el valor actualizado.
-
-### Tipos
-
-TypeScript infiere el tipo del valor inicial (`number`). Cuando el inicial no basta para deducirlo, indícalo:
-
-```tsx
-const [error, setError] = useState<string | null>(null);
-const [secciones, setSecciones] = useState<string[]>([]);
-```
-
-## El estado es una foto
-
-Dentro de un _render_, el estado **no cambia**, aunque llames a la función que lo actualiza:
-
-```tsx
-function sumarTres() {
-  setVasos(vasos + 1);
-  setVasos(vasos + 1);
-  setVasos(vasos + 1);
-  // Las tres leen el mismo `vasos` (por ejemplo, 0): el resultado es 1, no 3
-}
-```
-
-Cuando el nuevo valor depende del anterior, usa la **forma funcional**, que recibe siempre el valor más reciente:
-
-```tsx
-function sumarTres() {
-  setVasos((v) => v + 1);
-  setVasos((v) => v + 1);
-  setVasos((v) => v + 1); // ahora sí: +3
-}
-```
-
-## Eventos
-
-Los manejadores de eventos reciben un objeto con información del evento. TypeScript lo tipa según el elemento:
-
-```tsx
-function Buscador() {
-  const [texto, setTexto] = useState("");
-
-  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
-    setTexto(e.target.value);
-  }
-
-  function handleClick(e: React.MouseEvent<HTMLButtonElement>) {
-    console.log("Buscar", texto, e.shiftKey);
-  }
-
   return (
-    <>
-      <input value={texto} onChange={handleChange} />
-      <button onClick={handleClick}>Buscar</button>
-    </>
+    <button
+      onClick={() => {
+        vasos = vasos + 1;
+        console.log(`ContadorRoto: vasos vale ${vasos}`);
+      }}
+    >
+      Vasos (variable normal): {vasos}
+    </button>
   );
 }
 ```
 
-Si escribes el manejador en línea (`onChange={(e) => setTexto(e.target.value)}`), TypeScript deduce el tipo de `e` solo.
-
-<Callout type="warning">
-  Pasa la función, no su resultado: `onClick={guardar}` o `onClick={() => guardar(id)}`. Con
-  `onClick={guardar()}` la ejecutas en cada render.
-</Callout>
-
-## Inmutabilidad: nunca modifiques el estado
-
-React decide si algo cambió **comparando referencias**. Si modificas el objeto o el array original, la referencia es la misma y React puede no enterarse:
+Y `Contador.tsx`, la versión con estado:
 
 ```tsx
-// ❌ Mutar
-secciones.push("B1.3");
-setSecciones(secciones);
+// Archivo: src/components/estado/Contador.tsx
+// ✅ Estado: al cambiarlo, React vuelve a ejecutar el componente y actualiza la pantalla
+import { useState } from "react";
 
-// ✅ Crear uno nuevo
-setSecciones([...secciones, "B1.3"]); // añadir
-setSecciones(secciones.filter((id) => id !== "B1.3")); // quitar
-setSecciones(secciones.map((id) => (id === "B1.3" ? "B1.4" : id))); // reemplazar
-```
-
-Con objetos, lo mismo:
-
-```tsx
-const [perfil, setPerfil] = useState({ nombre: "Dani", objetivoVasos: 8 });
-
-setPerfil({ ...perfil, objetivoVasos: 10 }); // copia y cambia un campo
-setPerfil((p) => ({ ...p, objetivoVasos: p.objetivoVasos + 1 }));
-```
-
-## Un ejemplo real: el botón de esta plataforma
-
-El botón "Marcar como leído" que estás usando ahora mismo guarda su estado con `useState` y lo cambia **antes** de que responda el servidor (actualización optimista):
-
-```tsx
-const [read, setRead] = useState(initialRead);
-const [error, setError] = useState<string | null>(null);
-
-async function toggle() {
-  const previous = read;
-  setRead(!previous); // la interfaz cambia al instante
-  const res = await fetch(`/api/progress/${sectionId}`, { method: previous ? "DELETE" : "PUT" });
-  if (!res.ok) {
-    setRead(previous); // si falla, se deshace
-    setError("No se pudo guardar.");
-  }
+export function Contador() {
+  const [vasos, setVasos] = useState(0);
+  console.log(`Contador: render con vasos = ${vasos}`);
+  return <button onClick={() => setVasos((v) => v + 1)}>Vasos (estado): {vasos}</button>;
 }
 ```
 
-## Errores comunes
+Crea `src/pages/estado.astro` con todos los componentes de la sección (crearás los que faltan en los pasos siguientes; hasta entonces, comenta sus líneas o créalos antes de abrir la página):
 
-- **Usar una variable normal** para algo que debe redibujar la interfaz.
-- **Mutar arrays u objetos del estado** (`push`, `splice`, asignar propiedades).
-- **Esperar que el estado cambie en la línea siguiente** a llamar a `setX`.
-- **No usar la forma funcional** cuando el nuevo valor depende del anterior.
-- **`onClick={funcion()}`** en lugar de `onClick={funcion}`.
+```astro
+---
+// Archivo: src/pages/estado.astro
+import Base from "../layouts/Base.astro";
+import { ContadorRoto } from "../components/estado/ContadorRoto";
+import { Contador } from "../components/estado/Contador";
+import { SumarTres } from "../components/estado/SumarTres";
+import { Objetivo } from "../components/estado/Objetivo";
+import { ListaMutada } from "../components/estado/ListaMutada";
+---
+
+<Base titulo="B6.3 · Estado y eventos">
+  <h1>Estado y eventos</h1>
+  <p><ContadorRoto client:load /></p>
+  <p><Contador client:load /></p>
+  <SumarTres client:load />
+  <Objetivo client:load />
+  <ListaMutada client:load />
+</Base>
+```
+
+Abre `http://localhost:4321/estado` con la consola abierta y pulsa **tres veces** cada uno de los dos primeros botones:
+
+```text
+ContadorRoto: vasos vale 1
+ContadorRoto: vasos vale 2
+ContadorRoto: vasos vale 3
+Contador: render con vasos = 1
+Contador: render con vasos = 2
+Contador: render con vasos = 3
+```
+
+Y en pantalla:
+
+```text
+Vasos (variable normal): 0
+Vasos (estado): 3
+```
+
+La variable `vasos` de `ContadorRoto` **sí cambia** (la consola lo demuestra), pero la pantalla sigue en 0. La razón está en lo que aprendiste en B6.1: un componente es una **función** que devuelve lo que se ve. React solo la vuelve a ejecutar (vuelve a **renderizar**) cuando tiene un motivo, y cambiar una variable no es un motivo: React no se entera. Además, aunque se volviera a ejecutar, `let vasos = 0` volvería a empezar en 0.
+
+**`useState`** resuelve las dos cosas:
+
+1. **Recuerda el valor** entre ejecuciones de la función: React lo guarda fuera del componente.
+2. **Al cambiarlo con su función** (`setVasos`), React programa un nuevo render: vuelve a ejecutar el componente con el valor nuevo y actualiza solo lo que ha cambiado en la pantalla. Lo ves en la consola: `render con vasos = 1`, `= 2`, `= 3`.
+
+`const [vasos, setVasos] = useState(0)` es la desestructuración de una tupla (B1.3): el valor actual y la función para cambiarlo, con `0` como valor inicial.
+
+<Callout type="risk">
+
+- **Los _hooks_ (funciones `use…`) siempre al principio del componente, nunca dentro de un `if`, un bucle o una función interna.** React identifica cada `useState` por el **orden** en que se llama. Si un `if` hace que a veces se llame y a veces no, los estados se mezclan. La regla la comprueba el _plugin_ de ESLint `react-hooks`.
+- **El valor inicial solo se usa la primera vez:** `useState(objetivoInicial)` ignora los cambios posteriores de `objetivoInicial`. Si la prop cambia y quieres que el estado la siga, no es un estado: es un valor calculado a partir de la prop.
+- **Cada render vuelve a ejecutar todo el componente:** el `console.log` del componente se ejecuta en cada render. No hagas cálculos caros ni efectos (peticiones, temporizadores) directamente en el cuerpo del componente; eso es para B6.6.
+
+</Callout>
+
+## Paso 2: actualizaciones con el valor frente a con una función
+
+Crea `src/components/estado/SumarTres.tsx`. Los dos botones intentan sumar 3 llamando tres veces a la función de actualizar, de dos formas distintas:
+
+```tsx
+// Archivo: src/components/estado/SumarTres.tsx
+// Tres actualizaciones seguidas: con el valor capturado frente a con una función
+import { useState } from "react";
+
+export function SumarTres() {
+  const [conValor, setConValor] = useState(0);
+  const [conFuncion, setConFuncion] = useState(0);
+
+  function sumarTresConValor() {
+    setConValor(conValor + 1);
+    setConValor(conValor + 1);
+    setConValor(conValor + 1);
+  }
+
+  function sumarTresConFuncion() {
+    setConFuncion((v) => v + 1);
+    setConFuncion((v) => v + 1);
+    setConFuncion((v) => v + 1);
+  }
+
+  return (
+    <p>
+      <button id="con-valor" onClick={sumarTresConValor}>
+        +3 con valor: {conValor}
+      </button>{" "}
+      <button id="con-funcion" onClick={sumarTresConFuncion}>
+        +3 con función: {conFuncion}
+      </button>
+    </p>
+  );
+}
+```
+
+Pulsa una vez cada botón:
+
+```text
++3 con valor: 1 | +3 con función: 3
+```
+
+**El primero suma 1, no 3.** Dentro de `sumarTresConValor`, `conValor` es **el valor de este render**, una constante: 0. Las tres llamadas piden lo mismo, "pon `0 + 1`". El estado no cambia hasta el siguiente render: `setConValor` no modifica `conValor` en el momento, sino que **programa** un cambio.
+
+El segundo usa la **actualización funcional**: le pasas a `setConFuncion` una función que recibe el valor **más reciente**, incluidos los cambios pendientes. React encadena `0 → 1 → 2 → 3`.
+
+La regla: **si el nuevo valor depende del anterior, usa la forma funcional** (`set(v => v + 1)`). Es lo que hace `Contador` en el Paso 1.
+
+<Callout type="risk">
+
+- **`setVasos` no actualiza `vasos` inmediatamente:** escribir `setVasos(vasos + 1); console.log(vasos);` imprime el valor **antiguo**. Si necesitas el valor nuevo justo después, calcúlalo en una constante (`const nuevo = vasos + 1; setVasos(nuevo);`) y usa la constante.
+- **El error de los clics rápidos:** con `setVasos(vasos + 1)`, dos clics muy seguidos (o un clic mientras llega una respuesta del servidor) pueden leer el mismo valor y perder uno. Con `setVasos(v => v + 1)` no ocurre nunca.
+
+</Callout>
+
+## Paso 3: eventos tipados
+
+Cada interacción del usuario genera un **evento**, y React te lo pasa como argumento del _callback_. TypeScript necesita saber su tipo para que puedas acceder a sus propiedades con seguridad. Crea `src/components/estado/Objetivo.tsx`:
+
+```tsx
+// Archivo: src/components/estado/Objetivo.tsx
+// Eventos tipados: escribir, pulsar Enter y hacer clic con una tecla pulsada
+import { useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from "react";
+
+export function Objetivo() {
+  const [texto, setTexto] = useState("8");
+  const [objetivo, setObjetivo] = useState(8);
+  const [mensaje, setMensaje] = useState("");
+
+  function alEscribir(evento: ChangeEvent<HTMLInputElement>) {
+    setTexto(evento.target.value); // siempre un string, aunque el input sea type="number"
+  }
+
+  function guardar() {
+    const valor = Number(texto);
+    if (!Number.isInteger(valor) || valor < 1 || valor > 20) {
+      setMensaje("El objetivo debe ser un número entero entre 1 y 20");
+      return;
+    }
+    setObjetivo(valor);
+    setMensaje(`Objetivo guardado: ${valor} vasos`);
+  }
+
+  function alPulsarTecla(evento: KeyboardEvent<HTMLInputElement>) {
+    if (evento.key === "Enter") guardar();
+  }
+
+  function alHacerClic(evento: MouseEvent<HTMLButtonElement>) {
+    if (evento.shiftKey) {
+      setTexto("8");
+      setMensaje("Restablecido a 8 (Mayús + clic)");
+      return;
+    }
+    guardar();
+  }
+
+  return (
+    <p>
+      <label htmlFor="objetivo">Objetivo diario (vasos): </label>
+      <input id="objetivo" type="number" value={texto} onChange={alEscribir} onKeyDown={alPulsarTecla} style={{ width: "4rem" }} />{" "}
+      <button onClick={alHacerClic}>Guardar</button>
+      <br />
+      <span id="mensaje">{mensaje}</span> <span id="objetivo-actual">(actual: {objetivo})</span>
+    </p>
+  );
+}
+```
+
+Los tres tipos de evento, con lo que cada uno te da:
+
+| Evento                    | Tipo                              | Propiedades que usas aquí                              |
+| ------------------------- | --------------------------------- | ------------------------------------------------------ |
+| `onChange` del `<input>`  | `ChangeEvent<HTMLInputElement>`   | `evento.target.value`: el texto escrito                |
+| `onKeyDown` del `<input>` | `KeyboardEvent<HTMLInputElement>` | `evento.key`: la tecla (`"Enter"`, `"Escape"`, `"a"`…) |
+| `onClick` del `<button>`  | `MouseEvent<HTMLButtonElement>`   | `evento.shiftKey`: si se pulsó con Mayús               |
+
+El genérico (`<HTMLInputElement>`) indica **qué elemento** produjo el evento, y por eso `evento.target.value` está tipado como `string`. Prueba en la página: escribe `25` y pulsa "Guardar"; escribe `10` y pulsa Enter; después pulsa "Guardar" con la tecla Mayús pulsada:
+
+```text
+El objetivo debe ser un número entero entre 1 y 20 (actual: 8)
+Objetivo guardado: 10 vasos (actual: 10)
+Restablecido a 8 (Mayús + clic) · campo: 8 (actual: 10)
+```
+
+Fíjate en el campo: su contenido lo controla el estado `texto` (`value={texto}` + `onChange`). Por eso "Restablecido" puede cambiar lo que pone el campo desde el código. Es un **input controlado**, y lo verás a fondo en B6.5.
+
+<Callout type="risk">
+
+- **`evento.target.value` es siempre un `string`**, aunque el input sea `type="number"`. Convierte con `Number()` y valida antes de guardar (B1.1). `Number("")` vale `0` y `Number("abc")`, `NaN`: por eso se comprueba con `Number.isInteger` y el rango.
+- **Si declaras la función aparte, tipa el evento:** dentro de `onChange={(e) => …}`, TypeScript deduce el tipo solo (tipado contextual, B1.5); en una función declarada fuera (`function alEscribir(evento)`), sin anotación sería `any`. En la duda, pasa el ratón por encima del `onChange` en VS Code y copia el tipo.
+- **`onKeyDown` frente a `onKeyPress`:** `onKeyPress` está obsoleto. Usa `onKeyDown` (y compara `evento.key`, no los antiguos códigos numéricos).
+
+</Callout>
+
+## Paso 4: inmutabilidad, el estado no se modifica, se sustituye
+
+Crea `src/components/estado/ListaMutada.tsx`:
+
+```tsx
+// Archivo: src/components/estado/ListaMutada.tsx
+// Mutar el estado frente a crear uno nuevo
+import { useState } from "react";
+
+export function ListaMutada() {
+  const [comidas, setComidas] = useState<string[]>(["Avena"]);
+  const [perfil, setPerfil] = useState({ nombre: "Dani", objetivoKcal: 2200 });
+
+  function anadirMutando() {
+    comidas.push("Plátano"); // ❌ modifica el mismo array
+    setComidas(comidas); // ❌ React ve el mismo array y no vuelve a pintar
+    console.log(`Mutando: el array tiene ${comidas.length} elementos`);
+  }
+
+  function anadirBien() {
+    setComidas((anteriores) => [...anteriores, "Yogur"]); // ✅ array nuevo
+  }
+
+  function subirKcal() {
+    setPerfil((anterior) => ({ ...anterior, objetivoKcal: anterior.objetivoKcal + 100 })); // ✅ objeto nuevo
+  }
+
+  return (
+    <div>
+      <p id="comidas">Comidas: {comidas.join(", ")}</p>
+      <button id="mutar" onClick={anadirMutando}>Añadir mutando</button>{" "}
+      <button id="bien" onClick={anadirBien}>Añadir bien</button>
+      <p id="perfil">
+        {perfil.nombre}: {perfil.objetivoKcal} kcal <button onClick={subirKcal}>+100 kcal</button>
+      </p>
+    </div>
+  );
+}
+```
+
+Pulsa "Añadir mutando":
+
+```text
+Mutando: el array tiene 2 elementos
+Comidas: Avena
+```
+
+El array **sí tiene** dos elementos (`push` lo modificó), pero la pantalla sigue diciendo "Avena". Ahora pulsa "Añadir bien":
+
+```text
+Comidas: Avena, Plátano, Yogur
+```
+
+**¡El Plátano aparece de repente!** Esto es lo que hace tan traicioneras las mutaciones:
+
+1. `comidas.push("Plátano")` modificó **el mismo array** que React tiene guardado.
+2. `setComidas(comidas)` le pasó a React **el mismo array**. React compara el valor nuevo con el anterior (con `Object.is`, una comparación de identidad), ve que es el mismo objeto y **decide que no ha cambiado nada**: no vuelve a pintar.
+3. Más tarde, otra actualización correcta provoca un render y React pinta el array... que llevaba un Plátano escondido. Un cambio aparece en un momento que no tiene nada que ver con su causa.
+
+La forma correcta es **crear un valor nuevo**:
+
+| Quieres               | Mutando (mal)           | Inmutable (bien)                                              |
+| --------------------- | ----------------------- | ------------------------------------------------------------- |
+| Añadir al final       | `lista.push(x)`         | `[...lista, x]`                                               |
+| Quitar uno            | `lista.splice(i, 1)`    | `lista.filter((e) => e.id !== id)`                            |
+| Cambiar uno           | `lista[i].hecha = true` | `lista.map((e) => (e.id === id ? { ...e, hecha: true } : e))` |
+| Ordenar               | `lista.sort()`          | `lista.toSorted()` (B1.3)                                     |
+| Cambiar una propiedad | `perfil.kcal = 2300`    | `{ ...perfil, kcal: 2300 }`                                   |
+
+El botón "+100 kcal" hace lo correcto con un objeto: `{ ...anterior, objetivoKcal: anterior.objetivoKcal + 100 }` copia todas las propiedades y sustituye solo una. Resultado: `Dani: 2300 kcal`.
+
+<Callout type="risk">
+
+- **La copia con `...` es superficial:** `{ ...perfil }` copia el primer nivel, pero si `perfil.direccion` es un objeto, la copia **comparte** ese objeto con el original. Para cambiar algo anidado, copia cada nivel: `{ ...perfil, direccion: { ...perfil.direccion, ciudad: "Puebla" } }`.
+- **`sort()` y `reverse()` también mutan:** son la trampa menos evidente, porque parece que solo "lees" la lista. Para ordenar lo que vas a pintar, usa `toSorted()` y `toReversed()`, que devuelven arrays nuevos.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea un contador de hidratación con botones `+` y `−`, que nunca baje de 0. 2. Añade un
-  objetivo diario (8 vasos): cuando se alcance, cambia el color y muestra un mensaje. 3. Añade un
-  botón "+3" usando la forma funcional, y comprueba que con la forma normal solo sumaría 1. 4. Crea
-  una lista de etiquetas en el estado: añadir desde un input y quitar con un botón, sin mutar el
-  array.
+
+1. Crea `src/components/estado/Hidratacion.tsx`: un contador de vasos de agua con botones `+` y `−`, que nunca baje de 0 (el botón `−` debe deshabilitarse en 0).
+2. Añade un objetivo diario elegible (6, 8, 10 o 12 vasos), con un valor inicial que llegue por props.
+3. Cuando se alcance el objetivo, el número y el borde de la tarjeta deben cambiar de color y aparecer "¡Objetivo cumplido!"; si no, el porcentaje alcanzado.
+4. Úsalo en `src/pages/ejercicio-b63.astro` con un objetivo inicial de 6.
+
+</Callout>
+
+Solución. `src/components/estado/Hidratacion.tsx`:
+
+```tsx
+// Archivo: src/components/estado/Hidratacion.tsx
+import { useState } from "react";
+
+interface HidratacionProps {
+  objetivoInicial?: number;
+}
+
+export function Hidratacion({ objetivoInicial = 8 }: HidratacionProps) {
+  const [vasos, setVasos] = useState(0);
+  const [objetivo, setObjetivo] = useState(objetivoInicial);
+
+  const alcanzado = vasos >= objetivo;
+  const porcentaje = Math.min(100, Math.round((vasos / objetivo) * 100));
+
+  return (
+    <section className="tarjeta" style={{ borderColor: alcanzado ? "#0d9488" : "#cbd5e1" }}>
+      <h2 style={{ marginTop: 0 }}>Hidratación de hoy</h2>
+      <p id="vasos" style={{ fontSize: "2rem", margin: 0, color: alcanzado ? "#0d9488" : "#0f172a" }}>
+        {vasos} / {objetivo} vasos
+      </p>
+      <p id="estado-agua">{alcanzado ? "¡Objetivo cumplido!" : `Llevas el ${porcentaje} % de tu objetivo`}</p>
+      <button id="menos" onClick={() => setVasos((v) => Math.max(0, v - 1))} disabled={vasos === 0} aria-label="Quitar un vaso">
+        −
+      </button>{" "}
+      <button id="mas" onClick={() => setVasos((v) => v + 1)} aria-label="Añadir un vaso">
+        +
+      </button>
+      <p>
+        <label htmlFor="objetivo-agua">Objetivo: </label>
+        <select id="objetivo-agua" value={objetivo} onChange={(e) => setObjetivo(Number(e.target.value))}>
+          {[6, 8, 10, 12].map((n) => (
+            <option key={n} value={n}>
+              {n} vasos
+            </option>
+          ))}
+        </select>
+      </p>
+    </section>
+  );
+}
+```
+
+`src/pages/ejercicio-b63.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-b63.astro
+import Base from "../layouts/Base.astro";
+import { Hidratacion } from "../components/estado/Hidratacion";
+---
+
+<Base titulo="Ejercicio B6.3">
+  <Hidratacion client:load objetivoInicial={6} />
+</Base>
+```
+
+Comprobado en el navegador, acción por acción:
+
+```text
+Inicio                 → 0 / 6 vasos · Llevas el 0 % de tu objetivo · color rgb(15, 23, 42) · "−" deshabilitado
+Clic en − (con 0)      → 0 / 6 vasos · Llevas el 0 % de tu objetivo · color rgb(15, 23, 42) · "−" deshabilitado
+4 clics en +           → 4 / 6 vasos · Llevas el 67 % de tu objetivo · color rgb(15, 23, 42) · "−" activo
+2 clics más en +       → 6 / 6 vasos · ¡Objetivo cumplido! · color rgb(13, 148, 136) · "−" activo
+Objetivo a 10          → 6 / 10 vasos · Llevas el 60 % de tu objetivo · color rgb(15, 23, 42) · "−" activo
+Clic en −              → 5 / 10 vasos · Llevas el 50 % de tu objetivo · color rgb(15, 23, 42) · "−" activo
+```
+
+Las decisiones de diseño:
+
+- **Solo dos estados:** `vasos` y `objetivo`. `alcanzado` y `porcentaje` **no** son estado: se **calculan** en cada render a partir de los dos anteriores. Si fueran estado, tendrías que acordarte de actualizarlos cada vez que cambia `vasos` u `objetivo`, y tarde o temprano dejarían de coincidir.
+- **`Math.max(0, v - 1)`** garantiza el mínimo aunque el botón deshabilitado fallara, y `disabled={vasos === 0}` da la pista visual. Dos capas de protección.
+- **`Math.min(100, …)`** evita un "Llevas el 150 %" si superas el objetivo.
+- **`aria-label`** en los botones `+` y `−`: un lector de pantalla diría "menos" y "más", sin contexto; con la etiqueta dice "Quitar un vaso".
+
+<Callout type="risk">
+
+- **El estado se pierde al recargar:** cierra la pestaña y los vasos vuelven a 0. Para que persista, hay que guardarlo en el servidor (una petición a tu API, B6.6) o, si es una preferencia sin importancia, en `localStorage`.
+- **No dupliques en el estado lo que puedes calcular:** es el error de diseño más frecuente con `useState`. Pregúntate siempre: "¿este valor se puede obtener a partir de otros estados o props?". Si la respuesta es sí, no es estado.
+
 </Callout>
 
 <Callout type="mastery">
-  Nunca mutas el estado directamente, usas la forma funcional cuando toca y sabes por qué una
-  variable normal no actualiza la interfaz.
+
+Nunca mutas el estado directamente: sabes que React solo vuelve a pintar cuando llamas a la función de actualizar con un valor **nuevo**, usas la forma funcional (`set(v => …)`) cuando el valor depende del anterior, tipas los eventos (`ChangeEvent`, `KeyboardEvent`, `MouseEvent`) y calculas en cada render lo que se puede deducir del estado en lugar de guardarlo.
+
 </Callout>
 
 ## Resumen
 
-- El estado es la memoria del componente; cambiarlo provoca un nuevo render.
-- `useState` devuelve `[valor, setValor]`; tipa con `useState<T>()` cuando haga falta.
-- Dentro de un render, el estado es una foto: usa `setX((prev) => …)` si dependes del anterior.
-- Los eventos están tipados (`ChangeEvent`, `MouseEvent`).
-- Nunca mutes: crea arrays y objetos nuevos con `...`, `map` y `filter`.
+- Una variable normal cambia, pero React no vuelve a renderizar; `useState` recuerda el valor y, al cambiarlo con su función, programa un nuevo render.
+- `set(valor)` no cambia el valor hasta el siguiente render; si el nuevo depende del anterior, `set(v => v + 1)`.
+- Los eventos se tipan con su elemento: `ChangeEvent<HTMLInputElement>`, `KeyboardEvent<…>`, `MouseEvent<HTMLButtonElement>`. `target.value` es siempre texto.
+- Mutar (`push`, `sort`, asignar una propiedad) no provoca render y los cambios aparecen después, por sorpresa: crea arrays y objetos nuevos (`[...a, x]`, `filter`, `map`, `{ ...o, p }`).
+- Guarda en el estado lo mínimo y calcula el resto en cada render.

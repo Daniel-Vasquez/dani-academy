@@ -4,158 +4,485 @@ course: "B6"
 title: "JSX y componentes"
 order: 1
 minutes: 60
-summary: "Qué es JSX en realidad, cómo se escribe un componente y en qué se diferencia del HTML que ya conoces."
+summary: "Creas un proyecto Astro con React, escribes tus primeros componentes, ves en qué se convierte JSX, conviertes una tarjeta de .astro a .tsx y compruebas que sin directiva no llega ni un byte de JavaScript."
 ---
 
-Ya usas React en tus proyectos, pero probablemente a base de copiar componentes y ajustar. En este curso vamos a construir React desde sus piezas: qué es un componente, cómo fluye la información y cómo se gestiona el estado. Todo con TypeScript y dentro de Astro, que es donde lo usarás.
+React es una librería para construir interfaces a partir de **componentes**: funciones que devuelven lo que se ve en pantalla. En tus proyectos con Astro ya lo usas en las partes interactivas (esta plataforma tiene el formulario de login, el botón "Marcar como leído" y la evaluación hechos con React). En esta sección vas a empezar desde cero: crearás un proyecto Astro con React, escribirás tus primeros componentes, verás **en qué se convierte el JSX** cuando se compila (la clave para entender sus reglas) y convertirás una tarjeta de `.astro` a React atributo por atributo, provocando los errores típicos. Al final comprobarás algo que sorprende: un componente de React en Astro, por defecto, **no envía ni un byte de JavaScript** al navegador.
 
-## Componentes: funciones que devuelven interfaz
+**Lo que tendrás al terminar:** un proyecto `react-lab` (lo usarás en todo el curso B6) con tus primeros componentes `.tsx`, y una tabla mental de las diferencias entre JSX y HTML.
 
-Un componente de React es **una función** que devuelve lo que se debe mostrar:
+**Requisitos:** Node.js 22.12 o superior y lo visto en B1 (TypeScript y Astro).
+
+## Paso 1: crear el proyecto con React
+
+```bash
+npm create astro@latest react-lab -- --template minimal --install --no-git --yes
+cd react-lab
+npx astro add react --yes
+npm install --save-dev @astrojs/check typescript @types/node
+code .
+```
+
+`npx astro add react` hace tres cosas por ti: instala `react`, `react-dom`, `@astrojs/react` y sus tipos (`@types/react`, `@types/react-dom`); registra la integración en `astro.config.mjs`; y configura TypeScript para JSX. Comprueba los dos archivos:
+
+```js
+// @ts-check
+import { defineConfig } from 'astro/config';
+
+import react from '@astrojs/react';
+
+// https://astro.build/config
+export default defineConfig({
+  integrations: [react()]
+});
+```
+
+```json
+{
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "**/*"],
+  "exclude": ["dist"],
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "react"
+  }
+}
+```
+
+- **`integrations: [react()]`**: Astro sabe ahora renderizar componentes `.tsx` de React.
+- **`"jsx": "react-jsx"`** y **`"jsxImportSource": "react"`**: TypeScript transforma el JSX con el _runtime_ automático de React (Paso 3). Por eso no hace falta `import React from "react"` en cada archivo.
+
+Crea un layout sencillo para todas las páginas del curso, `src/layouts/Base.astro`:
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+interface Props {
+  titulo: string;
+}
+const { titulo } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · React lab</title>
+    <style is:global>
+      body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+      .tarjeta { border: 1px solid #cbd5e1; border-radius: 0.75rem; padding: 1rem; margin: 1rem 0; }
+      .insignia { font-size: 0.75rem; padding: 0.1rem 0.5rem; border-radius: 999px; background: #e2e8f0; }
+      button { font: inherit; padding: 0.4rem 0.9rem; border-radius: 0.5rem; border: 1px solid #94a3b8; background: #f8fafc; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .error { color: #b91c1c; }
+    </style>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+```
+
+<Callout type="risk">
+
+- **No mezcles versiones de React:** `react` y `react-dom` deben tener exactamente la misma versión, y `@types/react` la misma versión mayor. Si un día ves errores raros de tipos con `children` o con eventos, revisa `npm ls react react-dom @types/react`.
+- **Una sola librería de componentes por isla:** Astro admite React, Vue, Svelte y otras a la vez, pero cada integración añade su propio _runtime_ al navegador. En un proyecto, elige una.
+
+</Callout>
+
+## Paso 2: tu primer componente
+
+Un componente de React es **una función que devuelve JSX**. Crea `src/components/Saludo.tsx`:
 
 ```tsx
+// Archivo: src/components/Saludo.tsx
 export function Saludo() {
-  return <h1>Hola, Dani</h1>;
-}
-```
-
-- El nombre empieza por **mayúscula** (`Saludo`). Así React distingue tus componentes de las etiquetas HTML (`h1`, `div`).
-- Se usa como si fuera una etiqueta: `<Saludo />`.
-- Un componente puede usar otros componentes: así se construyen interfaces complejas a partir de piezas pequeñas.
-
-## Qué es JSX
-
-Esa sintaxis parecida a HTML dentro de JavaScript se llama **JSX**. No es HTML: el compilador la transforma en llamadas a funciones:
-
-```tsx
-<h1 className="titulo">Hola</h1>;
-// se convierte en algo como:
-jsx("h1", { className: "titulo", children: "Hola" });
-```
-
-Por eso JSX tiene reglas propias.
-
-## Diferencias con HTML
-
-| HTML                  | JSX                        | Por qué                                            |
-| --------------------- | -------------------------- | -------------------------------------------------- |
-| `class="…"`           | `className="…"`            | `class` es palabra reservada en JavaScript         |
-| `for="email"`         | `htmlFor="email"`          | `for` también es reservada                         |
-| `style="color: red"`  | `style={{ color: "red" }}` | Es un objeto, con propiedades en _camelCase_       |
-| `<br>`, `<input>`     | `<br />`, `<input />`      | Toda etiqueta debe cerrarse                        |
-| `onclick="…"`         | `onClick={fn}`             | Los eventos van en _camelCase_ y reciben funciones |
-| `<!-- comentario -->` | `{/* comentario */}`       | Es JavaScript                                      |
-
-```tsx
-export function Campo() {
-  return (
-    <div style={{ marginTop: 8 }}>
-      <label htmlFor="email" className="text-sm">
-        Correo
-      </label>
-      <input id="email" type="email" />
-    </div>
-  );
-}
-```
-
-## Expresiones con llaves
-
-Dentro de JSX, las llaves `{}` abren una ventana a JavaScript. Cualquier **expresión** vale:
-
-```tsx
-export function Resumen() {
   const nombre = "Dani";
-  const leidas = 3;
-  const total = 8;
-
-  return (
-    <p>
-      {nombre}, has leído {leidas} de {total} secciones ({Math.round((leidas / total) * 100)} %).
-    </p>
-  );
-}
-```
-
-Solo expresiones: dentro de `{}` no puedes escribir un `if` ni un `for`. Verás cómo resolverlo en la sección B6.4.
-
-## Un solo elemento raíz: fragmentos
-
-Un componente devuelve **un** elemento. Para devolver varios sin añadir un `div` innecesario, usa un **fragmento**:
-
-```tsx
-export function Cabecera() {
+  const hoy = new Date().toLocaleDateString("es-MX", { timeZone: "America/Mexico_City", dateStyle: "full" });
   return (
     <>
-      <h1 className="text-2xl">TypeScript desde cero</h1>
-      <p>8 secciones · ~8 h</p>
+      <h1>Hola, {nombre}</h1>
+      <p>Hoy es {hoy}</p>
     </>
   );
 }
 ```
 
-`<>…</>` agrupa sin generar ninguna etiqueta en el HTML final.
+Tres reglas que ya aparecen aquí:
 
-## Componer componentes
+1. **El nombre empieza por mayúscula** (`Saludo`). Para JSX, `<saludo>` sería una etiqueta HTML desconocida y `<Saludo>`, tu componente.
+2. **Se exporta con nombre** (`export function`), para importarlo con `import { Saludo } from "…"`.
+3. **Las llaves `{}` insertan expresiones de JavaScript** dentro del JSX: variables (`{nombre}`), llamadas a funciones, operaciones. No sentencias: un `if` o un `for` no caben entre llaves (B6.4).
+
+Úsalo en una página, `src/pages/index.astro` (que ampliarás en el Paso 4):
+
+```astro
+---
+import Base from "../layouts/Base.astro";
+import { Saludo } from "../components/Saludo";
+---
+
+<Base titulo="B6.1 · JSX y componentes">
+  <Saludo />
+</Base>
+```
+
+Arranca con `npm run dev` y abre `http://localhost:4321`. Verás "Hola, Dani" y la fecha de hoy, por ejemplo `Hoy es viernes, 9 de octubre de 2026`.
+
+<Callout type="risk">
+
+- **La fecha se calcula en el servidor:** como el componente no es interactivo (Paso 5), `new Date()` se ejecuta al generar la página. En una página estática (la opción por defecto de Astro), se ejecuta **al compilar**, y "hoy" será siempre el día del último despliegue. Para una fecha que cambie, la página debe renderizarse en cada petición (`prerender = false`) o calcularse en el navegador.
+- **Siempre `timeZone` al formatear fechas** (B5.5): el servidor de Vercel está en UTC, y sin ella la fecha puede ser la del día anterior o la del siguiente.
+
+</Callout>
+
+## Paso 3: qué es JSX de verdad
+
+JSX **no es HTML**. Es una sintaxis que el compilador convierte en llamadas a funciones de JavaScript. Compruébalo compilando tu componente con `esbuild` (el compilador que usa Vite por debajo, ya instalado con Astro):
+
+```bash
+npx esbuild src/components/Saludo.tsx --jsx=automatic --format=esm
+```
+
+```js
+import { Fragment, jsxs } from "react/jsx-runtime";
+function Saludo() {
+  const nombre = "Dani";
+  const hoy = (/* @__PURE__ */ new Date()).toLocaleDateString("es-MX", { timeZone: "America/Mexico_City", dateStyle: "full" });
+  return /* @__PURE__ */ jsxs(Fragment, { children: [
+    /* @__PURE__ */ jsxs("h1", { children: [
+      "Hola, ",
+      nombre
+    ] }),
+    /* @__PURE__ */ jsxs("p", { children: [
+      "Hoy es ",
+      hoy
+    ] })
+  ] });
+}
+export {
+  Saludo
+};
+```
+
+Cada etiqueta se convierte en una llamada a `jsx` o `jsxs` (del _runtime_ de React) con dos argumentos: **el tipo** (`"h1"`, un texto, para HTML; o tu función, para un componente) y **un objeto de propiedades** (las _props_), donde el contenido va en `children`. En versiones antiguas de React, la función se llamaba `React.createElement`; la idea es la misma.
+
+Esto explica **todas** las reglas de JSX:
+
+- **Un solo elemento raíz:** una función solo puede devolver un valor. `return (<h1/> <p/>)` serían dos valores. Por eso se envuelven en un **fragmento**, `<>…</>`, que se compila a `Fragment` y no añade ninguna etiqueta al HTML.
+- **Atributos con nombres de JavaScript:** los atributos son las claves de un objeto, así que usan los nombres de las propiedades del DOM: `className` (porque `class` es una palabra reservada de JavaScript), `htmlFor` (porque `for` también lo es), `tabIndex`, `maxLength`…
+- **Expresiones, no sentencias:** lo que va entre llaves acaba como un valor dentro de un array (`children: ["Hola, ", nombre]`). Un `if` no es un valor; un ternario (`a ? b : c`) sí.
+
+<Callout type="risk">
+
+- **Un fragmento no es un `<div>`:** `<>…</>` no aparece en el HTML. Si necesitas una etiqueta contenedora para dar estilos, usa un elemento real. Al revés, no añadas `<div>` innecesarios solo para cumplir la regla del elemento raíz: rompen el diseño de rejillas y _flexbox_.
+- **JSX escapa el texto automáticamente:** `{textoDelUsuario}` se inserta como texto, nunca como HTML, así que un `<script>` escrito por un usuario no se ejecuta. La única forma de insertar HTML sin escapar es `dangerouslySetInnerHTML`, y su nombre ya avisa: úsala solo con contenido que controlas por completo (B3.1).
+
+</Callout>
+
+## Paso 4: de `.astro` a `.tsx`, atributo por atributo
+
+Para ver las diferencias en la práctica, escribe la misma tarjeta de curso en los dos formatos. Primero en Astro, `src/components/TarjetaCurso.astro`:
+
+```astro
+---
+// Archivo: src/components/TarjetaCurso.astro
+const titulo = "TypeScript desde cero";
+const secciones = 8;
+const leidas = 3;
+---
+
+<article class="tarjeta">
+  <h2>{titulo}</h2>
+  <p>{leidas} de {secciones} secciones leídas</p>
+  <label for="nota-ts">Nota personal</label>
+  <input id="nota-ts" type="text" placeholder="Escribe algo" />
+  <img src="/favicon.svg" alt="" width="16" height="16" style="vertical-align: middle; margin-left: 0.5rem" />
+</article>
+```
+
+Y en React, `src/components/TarjetaCurso.tsx`:
 
 ```tsx
-function Titulo() {
-  return <h2 className="font-serif text-xl">Contenido del curso</h2>;
-}
+// Archivo: src/components/TarjetaCurso.tsx
+export function TarjetaCurso() {
+  const titulo = "TypeScript desde cero";
+  const secciones = 8;
+  const leidas = 3;
+  const porcentaje = Math.round((leidas / secciones) * 100);
 
-function Seccion() {
-  return <li>Qué es TypeScript y por qué existe</li>;
-}
-
-export function Curso() {
   return (
-    <section>
-      <Titulo />
-      <ol>
-        <Seccion />
-        <Seccion />
-      </ol>
-    </section>
+    <article className="tarjeta">
+      <h2>{titulo}</h2>
+      <p>
+        {leidas} de {secciones} secciones leídas ({porcentaje} %)
+      </p>
+      <label htmlFor="nota-ts-react">Nota personal</label>
+      <input id="nota-ts-react" type="text" placeholder="Escribe algo" />
+      <img src="/favicon.svg" alt="" width={16} height={16} style={{ verticalAlign: "middle", marginLeft: "0.5rem" }} />
+    </article>
   );
 }
 ```
 
-Ahora mismo todas las secciones son iguales; en la sección siguiente aprenderás a pasarles datos con **props**.
+Muéstralas una debajo de otra. Sustituye `src/pages/index.astro` por:
 
-## React y `.tsx`
+```astro
+---
+// Archivo: src/pages/index.astro
+import Base from "../layouts/Base.astro";
+import TarjetaCursoAstro from "../components/TarjetaCurso.astro";
+import { Saludo } from "../components/Saludo";
+import { TarjetaCurso } from "../components/TarjetaCurso";
+---
 
-Los componentes de React se escriben en archivos `.tsx` (TypeScript + JSX). En un proyecto de Astro, la integración `@astrojs/react` se encarga de compilarlos. Un componente `.tsx` puede importarse y usarse desde una página `.astro`, como verás en la sección B6.7.
+<Base titulo="B6.1 · JSX y componentes">
+  <Saludo />
+  <TarjetaCursoAstro />
+  <TarjetaCurso />
+</Base>
+```
 
-<Callout type="note">
-  En React 17 y posteriores ya no hace falta `import React from "react"` al principio de cada
-  archivo: el compilador lo resuelve solo (`"jsx": "react-jsx"` en el `tsconfig.json`).
+Las diferencias, una por una:
+
+| En HTML / `.astro`               | En JSX / `.tsx`                       | Por qué                                                                 |
+| -------------------------------- | ------------------------------------- | ----------------------------------------------------------------------- |
+| `class="tarjeta"`                | `className="tarjeta"`                 | `class` es palabra reservada en JavaScript                              |
+| `for="nota-ts"`                  | `htmlFor="nota-ts-react"`             | `for` también lo es                                                     |
+| `<input …>`                      | `<input … />`                         | En JSX, toda etiqueta se cierra                                         |
+| `width="16"`                     | `width={16}`                          | Los números van entre llaves                                            |
+| `style="vertical-align: middle"` | `style={{ verticalAlign: "middle" }}` | `style` es un objeto con propiedades en _camelCase_                     |
+| `stroke-width="2"` (SVG)         | `strokeWidth={2}`                     | Los atributos con guion pasan a _camelCase_ (salvo `aria-*` y `data-*`) |
+
+Las dobles llaves de `style={{ … }}` no son una sintaxis especial: las de fuera significan "aquí va una expresión de JavaScript" y las de dentro son el objeto.
+
+Provoca los errores típicos. Crea temporalmente estos componentes en `src/components/` y ejecuta `npx tsc --noEmit -p .`:
+
+```tsx
+export function Dos() {
+  return (
+    <h1>Hola</h1>
+    <p>Adiós</p>
+  );
+}
+```
+
+```text
+error TS2657: JSX expressions must have one parent element.
+```
+
+```tsx
+export function SinCerrar() {
+  return <img src="/favicon.svg" alt="">;
+}
+```
+
+```text
+error TS17008: JSX element 'img' has no corresponding closing tag.
+```
+
+```tsx
+export function Estilo() {
+  return <p style="color: red">Hola</p>;
+}
+```
+
+```text
+error TS2559: Type 'string' has no properties in common with type 'Properties<string | number, string & {}>'.
+```
+
+```tsx
+export function Clase() {
+  return <p class="tarjeta">Hola</p>;
+}
+```
+
+```text
+error TS2322: Type '{ children: string; class: string; }' is not assignable to type 'DetailedHTMLProps<HTMLAttributes<HTMLParagraphElement>, HTMLParagraphElement>'.
+```
+
+(Los errores de sintaxis de los dos primeros impiden que TypeScript revise el resto de archivos: pruébalos de uno en uno). Borra los cuatro archivos al terminar.
+
+<Callout type="risk">
+
+- **Los atributos con guion no dan error de TypeScript:** `<path stroke-width="2" />` compila sin quejas, porque JSX acepta cualquier atributo con guion (para que funcionen `data-*` y `aria-*`). El aviso solo aparece en la consola del servidor de desarrollo: ``Invalid DOM property `stroke-width`. Did you mean `strokeWidth`?``. Lo mismo con `class` si silencias el error de tipos: ``Invalid DOM property `class`. Did you mean `className`?``. Al copiar SVG de una web de iconos, revisa los atributos con guion.
+- **Los `id` deben ser únicos en la página:** las dos tarjetas usan `nota-ts` y `nota-ts-react`. Si repites un `id` (por ejemplo, al usar dos veces el mismo componente), `htmlFor` apuntará al primero y el clic en la etiqueta enfocará el campo equivocado. React tiene `useId()` para generar identificadores únicos por instancia (B6.5).
+
 </Callout>
 
-## Errores comunes
+## Paso 5: cuánto JavaScript llega al navegador
 
-- **Nombre de componente en minúscula** (`<saludo />`): React lo trata como una etiqueta HTML desconocida.
-- **`class` en lugar de `className`**: funciona a medias y TypeScript avisa.
-- **Devolver dos elementos sin envolver**: `JSX expressions must have one parent element.`
-- **Olvidar cerrar etiquetas** como `<input>` o `<img>`.
-- **Poner un `if` dentro de las llaves.** Usa expresiones (ternario, `&&`) o calcula antes del `return`.
+Compila el proyecto y mira qué ha generado:
+
+```bash
+npm run build
+grep -c "<script" dist/index.html
+```
+
+```text
+0
+```
+
+**Cero etiquetas `<script>`.** Mira el HTML de las dos tarjetas en `dist/index.html`:
+
+```html
+<article class="tarjeta"><h2>TypeScript desde cero</h2><p>3 de 8 secciones leídas</p><label for="nota-ts">Nota personal</label><input id="nota-ts" type="text" placeholder="Escribe algo"><img src="/favicon.svg" alt="" width="16" height="16" style="vertical-align: middle; margin-left: 0.5rem"></article>
+<article class="tarjeta"><h2>TypeScript desde cero</h2><p>3<!-- --> de <!-- -->8<!-- --> secciones leídas (<!-- -->38<!-- --> %)</p><label for="nota-ts-react">Nota personal</label><input id="nota-ts-react" type="text" placeholder="Escribe algo"/><img src="/favicon.svg" alt="" width="16" height="16" style="vertical-align:middle;margin-left:0.5rem"/></article>
+```
+
+(Se han eliminado los atributos `data-astro-cid` que añade Astro para los estilos). El componente de React se ha convertido en **HTML puro**, casi idéntico al de Astro. Los comentarios `<!-- -->` los usa React para separar los fragmentos de texto. Astro ejecuta tus componentes de React **en el servidor** (o al compilar) y solo envía el resultado.
+
+Para que un componente sea **interactivo** en el navegador (que responda a clics, que cambie), hay que pedirlo con una **directiva** `client:*`. Crea `src/pages/isla.astro`:
+
+```astro
+---
+// Archivo: src/pages/isla.astro
+import Base from "../layouts/Base.astro";
+import { Saludo } from "../components/Saludo";
+---
+
+<Base titulo="Saludo como isla">
+  <Saludo client:load />
+</Base>
+```
+
+```bash
+npm run build
+ls -l dist/_astro/*.js
+```
+
+Ahora `dist/isla/index.html` contiene una etiqueta `<astro-island … client="load">` y el navegador descarga:
+
+| Archivo       | Tamaño        | Comprimido (gzip) | Qué es            |
+| ------------- | ------------- | ----------------- | ----------------- |
+| `client.*.js` | 220 735 bytes | 68 264 bytes      | React y React DOM |
+| `Saludo.*.js` | 671 bytes     | 449 bytes         | Tu componente     |
+
+**Unos 68 KB comprimidos solo para que React exista en el navegador**, aunque el componente no haga nada interactivo. Esa es la idea de la arquitectura de **islas** de Astro (la verás a fondo en B6.7): la página es HTML estático y solo las "islas" que lo necesitan cargan JavaScript.
+
+<Callout type="risk">
+
+- **No pongas `client:load` "por si acaso":** un componente que solo muestra datos (como `Saludo` o `TarjetaCurso`) no necesita JavaScript. Cada isla innecesaria hace la página más pesada y más lenta en el móvil.
+- **Un componente sin directiva no reacciona a nada:** si le pones un `onClick` y lo usas sin `client:*`, el botón se pinta pero el clic no hace nada, sin ningún error. Si algo "no responde" en Astro, lo primero que debes mirar es la directiva.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. En un proyecto de Astro con React, crea `src/components/TarjetaCurso.tsx` que muestre el
-  título, el nivel y el número de secciones de un curso (de momento, escritos dentro del
-  componente). 2. Úsala tres veces desde una página `.astro`. 3. Convierte un componente `.astro`
-  sencillo de uno de tus proyectos (una tarjeta, un aviso) en un componente de React. 4. Provoca a
-  propósito los errores de "un solo elemento raíz" y de `class`, y lee los mensajes.
+
+1. Crea `src/components/AvisoAgua.astro` con un aviso de hidratación que incluya un icono SVG con atributos con guion (`stroke-width`, `stroke-linecap`), un estilo en línea, un `label` con `for` y un `input` con `maxlength` y `autocomplete`.
+2. Conviértelo en `src/components/AvisoAgua.tsx` sin cambiar el resultado visual.
+3. Muéstralos los dos en una página `src/pages/ejercicio-b61.astro`, ejecuta `npm run check` y compara el HTML generado de ambos.
+
+</Callout>
+
+Solución. La versión de Astro:
+
+```astro
+---
+// Archivo: src/components/AvisoAgua.astro
+const vasos = 5;
+const objetivo = 8;
+const faltan = objetivo - vasos;
+---
+
+<aside class="tarjeta" style="border-color: #0284c7">
+  <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+    <path d="M12 2.7c-3 4-6 7.3-6 11.3a6 6 0 0 0 12 0c0-4-3-7.3-6-11.3z"></path>
+  </svg>
+  <p>Llevas <strong>{vasos}</strong> vasos. Te faltan {faltan} para tu objetivo de {objetivo}.</p>
+  <label for="nota-agua">¿Cómo te sientes?</label>
+  <input id="nota-agua" type="text" maxlength="40" autocomplete="off" />
+</aside>
+```
+
+La versión de React:
+
+```tsx
+// Archivo: src/components/AvisoAgua.tsx
+export function AvisoAgua() {
+  const vasos = 5;
+  const objetivo = 8;
+  const faltan = objetivo - vasos;
+
+  return (
+    <aside className="tarjeta" style={{ borderColor: "#0284c7" }}>
+      <svg
+        viewBox="0 0 24 24"
+        width={24}
+        height={24}
+        fill="none"
+        stroke="#0284c7"
+        strokeWidth={2}
+        strokeLinecap="round"
+        aria-hidden="true"
+      >
+        <path d="M12 2.7c-3 4-6 7.3-6 11.3a6 6 0 0 0 12 0c0-4-3-7.3-6-11.3z" />
+      </svg>
+      <p>
+        Llevas <strong>{vasos}</strong> vasos. Te faltan {faltan} para tu objetivo de {objetivo}.
+      </p>
+      <label htmlFor="nota-agua-react">¿Cómo te sientes?</label>
+      <input id="nota-agua-react" type="text" maxLength={40} autoComplete="off" />
+    </aside>
+  );
+}
+```
+
+La página:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-b61.astro
+import Base from "../layouts/Base.astro";
+import AvisoAguaAstro from "../components/AvisoAgua.astro";
+import { AvisoAgua } from "../components/AvisoAgua";
+---
+
+<Base titulo="Ejercicio B6.1">
+  <AvisoAguaAstro />
+  <AvisoAgua />
+</Base>
+```
+
+```bash
+npm run check
+npm run build
+```
+
+```text
+Result (11 files):
+- 0 errors
+- 0 warnings
+```
+
+El HTML generado para cada versión (en `dist/ejercicio-b61/index.html`, sin los atributos de Astro):
+
+```html
+<aside class="tarjeta" style="border-color: #0284c7"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 2.7c-3 4-6 7.3-6 11.3a6 6 0 0 0 12 0c0-4-3-7.3-6-11.3z"></path></svg><p>Llevas <strong>5</strong> vasos. Te faltan 3 para tu objetivo de 8.</p><label for="nota-agua">¿Cómo te sientes?</label><input id="nota-agua" type="text" maxlength="40" autocomplete="off"></aside>
+<aside class="tarjeta" style="border-color:#0284c7"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 2.7c-3 4-6 7.3-6 11.3a6 6 0 0 0 12 0c0-4-3-7.3-6-11.3z"></path></svg><p>Llevas <strong>5</strong> vasos. Te faltan <!-- -->3<!-- --> para tu objetivo de <!-- -->8<!-- -->.</p><label for="nota-agua-react">¿Cómo te sientes?</label><input id="nota-agua-react" type="text" maxLength="40" autoComplete="off"/></aside>
+```
+
+React escribe `strokeWidth={2}` como `stroke-width="2"` en el HTML: tú usas los nombres de JavaScript y React los traduce. Los cambios del ejercicio: `class` → `className`; `style` como objeto (`borderColor`); los atributos del SVG en _camelCase_ (`strokeWidth`, `strokeLinecap`), salvo `aria-hidden`, que conserva el guion; números entre llaves; `<path>` y `<input>` cerrados con `/>`; `for` → `htmlFor`; `maxlength` → `maxLength`; `autocomplete` → `autoComplete`.
+
+<Callout type="risk">
+
+- **`viewBox` ya es _camelCase_ en HTML** y se queda igual. No todo atributo cambia: los que ya tienen mayúsculas en SVG (`viewBox`, `preserveAspectRatio`) se escriben tal cual.
+- **Convertir a React no siempre es buena idea:** un componente sin interactividad está mejor en `.astro`, que es más simple y nunca envía JavaScript. Convierte a React solo lo que vaya a necesitar estado o eventos (B6.3).
+
 </Callout>
 
 <Callout type="mastery">
-  Escribes JSX válido sin errores de sintaxis y entiendes que un componente es una función que
-  devuelve interfaz.
+
+Escribes JSX válido sin errores de sintaxis: sabes que se compila a llamadas `jsx(tipo, props)`, y de ahí deduces sus reglas (un elemento raíz o un fragmento, `className` y `htmlFor`, `style` como objeto, atributos en _camelCase_, todo cerrado y expresiones entre llaves). También sabes que en Astro un componente de React sin directiva es solo HTML.
+
 </Callout>
 
 ## Resumen
 
-- Un componente es una función con nombre en mayúscula que devuelve JSX.
-- JSX se compila a llamadas de funciones: no es HTML.
-- `className`, `htmlFor`, `style` como objeto y etiquetas siempre cerradas.
-- `{}` inserta expresiones de JavaScript.
-- Los fragmentos `<>…</>` agrupan sin añadir etiquetas.
+- Un componente es una función con nombre en mayúscula que devuelve JSX; `npx astro add react` configura el proyecto.
+- JSX se compila a `jsx(tipo, props)` del _runtime_ de React: un solo elemento raíz (`<>…</>`) y expresiones, no sentencias, entre llaves.
+- Diferencias con HTML: `className`, `htmlFor`, `style={{ … }}`, atributos en _camelCase_, números entre llaves y todas las etiquetas cerradas.
+- Los atributos con guion no dan error de TypeScript, pero React avisa en la consola del servidor.
+- Sin directiva `client:*`, React en Astro genera HTML y 0 KB de JavaScript; con `client:load` se descargan unos 68 KB comprimidos de React.

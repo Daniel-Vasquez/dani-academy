@@ -4,152 +4,493 @@ course: "B6"
 title: "useEffect y llamadas a APIs"
 order: 6
 minutes: 60
-summary: "Qué es un efecto, cuándo no hace falta useEffect, cómo funcionan las dependencias y la limpieza, y cómo cargar datos sin condiciones de carrera."
+summary: "Distingues cuándo no necesitas un efecto, provocas temporizadores fantasma y dependencias olvidadas, cargas datos con estados loading/ok/error y demuestras con una API lenta por qué hace falta AbortController."
 ---
 
-`useEffect` es el hook más usado y el más malentendido. Mucha gente lo usa para todo, y acaba con renders infinitos, peticiones duplicadas y datos que llegan en el orden equivocado. En esta sección vas a aprender **qué es** un efecto, **cuándo no lo necesitas** y cómo cargar datos de una API de forma robusta.
+Un componente es una función que **calcula** lo que se ve (B6.1). Pero a veces hay que hacer algo **fuera** de ese cálculo: pedir datos a una API, poner un temporizador, suscribirse a un evento del navegador. Eso es un **efecto**, y `useEffect` es la herramienta de React para hacerlo de forma segura. También es el _hook_ que más errores provoca: temporizadores que siguen vivos cuando el componente ya no existe, datos que no se actualizan y, el más traicionero, una respuesta lenta que pisa a una más reciente. En esta sección vas a provocar los tres en el navegador, con una API de prueba en la que **tú decides** cuánto tarda cada respuesta, y vas a ver antes cuándo **no** necesitas un efecto, que es el error más común de todos.
 
-## Qué es un efecto
+**Lo que tendrás al terminar:** el componente `Progreso`, que carga datos con sus tres estados y cancela las peticiones obsoletas, y `Usuarios`, que consume una API real con reintento.
 
-Un componente debería ser una función "pura": recibe props y estado, devuelve JSX. Pero a veces necesitas **sincronizarte con algo de fuera de React**: el título de la pestaña, un temporizador, una suscripción, una petición de red. Eso es un **efecto**:
+**Requisitos:** el proyecto `react-lab` de B6.5, lo visto en B1.6 (uniones discriminadas) y en B3.3 (`fetch` y códigos de estado).
 
-```tsx
-import { useEffect } from "react";
+## Paso 1: cuándo NO necesitas un efecto
 
-function TituloPestaña({ leidas }: { leidas: number }) {
-  useEffect(() => {
-    document.title = `${leidas} secciones leídas · Dani Academy`;
-  }, [leidas]);
-
-  return null;
-}
-```
-
-`useEffect(función, dependencias)` ejecuta la función **después** de que React haya pintado la pantalla.
-
-## Las dependencias
-
-El segundo argumento indica **cuándo** volver a ejecutar el efecto:
-
-| Dependencias | Se ejecuta…                                               |
-| ------------ | --------------------------------------------------------- |
-| `[leidas]`   | Al montar y cada vez que `leidas` cambia                  |
-| `[]`         | Solo al montar el componente                              |
-| (sin array)  | Después de **cada** render (casi nunca es lo que quieres) |
-
-Incluye **todo** valor del componente que uses dentro del efecto (props, estado, funciones). Si falta una dependencia, el efecto trabaja con un valor antiguo; el _linter_ de React (`react-hooks/exhaustive-deps`) te avisa.
-
-## La limpieza
-
-Si el efecto crea algo que hay que deshacer (un temporizador, un _listener_), devuelve una función de **limpieza**. React la ejecuta antes de volver a ejecutar el efecto y al desmontar el componente:
+Antes de aprender a usar `useEffect`, aprende a no usarlo. El error más frecuente es usar un efecto para **calcular** un valor a partir de otro. Crea `src/components/efectos/BuscadorCursos.tsx`, con el mismo buscador hecho de las dos formas:
 
 ```tsx
-useEffect(() => {
-  const id = window.setInterval(() => setSegundos((s) => s + 1), 1000);
-  return () => window.clearInterval(id); // limpieza
-}, []);
-```
+// Archivo: src/components/efectos/BuscadorCursos.tsx
+// Un valor derivado: con un efecto (innecesario) y calculado al renderizar (correcto)
+import { useEffect, useState } from "react";
 
-Sin limpieza, cada vez que el componente se monta deja un intervalo vivo: se acumulan.
+const CURSOS = ["TypeScript desde cero", "Git y flujo de trabajo", "Cómo funciona la web", "MongoDB esencial", "React esencial"];
 
-<Callout type="note">
-  En desarrollo, con `StrictMode`, React monta, desmonta y vuelve a montar cada componente para que
-  detectes efectos sin limpieza. Si ves que un efecto se ejecuta dos veces solo en desarrollo, es
-  eso.
-</Callout>
-
-## Cuándo NO necesitas `useEffect`
-
-**Para calcular datos a partir de otros**: calcula directamente durante el render.
-
-```tsx
-// ❌ Estado duplicado y un render extra
-const [porcentaje, setPorcentaje] = useState(0);
-useEffect(() => setPorcentaje(Math.round((leidas / total) * 100)), [leidas, total]);
-
-// ✅ Se calcula en cada render; es instantáneo
-const porcentaje = Math.round((leidas / total) * 100);
-```
-
-**Para reaccionar a una acción del usuario**: hazlo en el manejador del evento.
-
-```tsx
-// ❌ Un efecto que "detecta" que se pulsó un botón
-// ✅ El fetch va dentro del onClick, como en el botón "Marcar como leído"
-```
-
-**Para cargar datos que ya tienes en el servidor**: en Astro, lo habitual es leerlos en el _frontmatter_ de la página y pasarlos como props. Así no hay _spinner_ ni petición extra. Esta plataforma lo hace así: la página consulta MongoDB y el botón recibe `initialRead`.
-
-## Cargar datos de una API
-
-Cuando de verdad necesitas pedir datos desde el navegador:
-
-```tsx
-type Estado<T> = { s: "loading" } | { s: "ok"; data: T } | { s: "error"; msg: string };
-
-interface Usuario {
-  id: number;
-  name: string;
-  email: string;
-}
-
-export function PerfilUsuario({ id }: { id: number }) {
-  const [estado, setEstado] = useState<Estado<Usuario>>({ s: "loading" });
+export function BuscadorConEfecto() {
+  const [texto, setTexto] = useState("");
+  const [filtrados, setFiltrados] = useState(CURSOS);
+  console.log("render: buscador con efecto");
 
   useEffect(() => {
-    const ctrl = new AbortController();
-    setEstado({ s: "loading" });
+    setFiltrados(CURSOS.filter((c) => c.toLowerCase().includes(texto.toLowerCase()))); // ❌ provoca un segundo render
+  }, [texto]);
 
-    fetch(`https://jsonplaceholder.typicode.com/users/${id}`, { signal: ctrl.signal })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((data: Usuario) => setEstado({ s: "ok", data }))
-      .catch((e: unknown) => {
-        if (!ctrl.signal.aborted) setEstado({ s: "error", msg: String(e) });
-      });
-
-    return () => ctrl.abort(); // cancela la petición si cambia `id` o se desmonta
-  }, [id]);
-
-  if (estado.s === "loading") return <p>Cargando…</p>;
-  if (estado.s === "error") return <p role="alert">Error: {estado.msg}</p>;
   return (
     <p>
-      {estado.data.name} · {estado.data.email}
+      <input id="buscar-efecto" value={texto} onChange={(e) => setTexto(e.target.value)} placeholder="Con efecto" />{" "}
+      <span className="resultado">{filtrados.join(", ")}</span>
+    </p>
+  );
+}
+
+export function BuscadorSinEfecto() {
+  const [texto, setTexto] = useState("");
+  console.log("render: buscador sin efecto");
+  const filtrados = CURSOS.filter((c) => c.toLowerCase().includes(texto.toLowerCase())); // ✅ se calcula y ya
+
+  return (
+    <p>
+      <input id="buscar-sin-efecto" value={texto} onChange={(e) => setTexto(e.target.value)} placeholder="Sin efecto" />{" "}
+      <span className="resultado">{filtrados.join(", ")}</span>
     </p>
   );
 }
 ```
 
-### Por qué el `AbortController`
+Crea `src/pages/ejercicio-b66.astro` (la usarás también en el ejercicio):
 
-Si `id` cambia de 1 a 2 rápidamente, se lanzan dos peticiones. Si la del 1 llega **después** que la del 2, sin cancelar mostrarías el usuario equivocado: una **condición de carrera**. La limpieza aborta la petición anterior y el `if (!ctrl.signal.aborted)` evita actualizar el estado con una respuesta obsoleta.
+```astro
+---
+// Archivo: src/pages/ejercicio-b66.astro
+import Base from "../layouts/Base.astro";
+import { Usuarios } from "../components/efectos/Usuarios";
+import { BuscadorConEfecto, BuscadorSinEfecto } from "../components/efectos/BuscadorCursos";
+---
 
-## Errores comunes
+<Base titulo="Ejercicio B6.6">
+  <h2>Usuarios</h2>
+  <Usuarios client:load />
+  <h2>Con una URL que no existe</h2>
+  <Usuarios client:load url="https://jsonplaceholder.typicode.com/no-existe" />
+  <h2>Buscadores</h2>
+  <BuscadorConEfecto client:load />
+  <BuscadorSinEfecto client:load />
+</Base>
+```
 
-- **Efectos sin array de dependencias** que hacen `setState`: render infinito.
-- **Dependencias incompletas**: el efecto usa valores viejos.
-- **Olvidar la limpieza** de intervalos, _listeners_ o peticiones.
-- **Usar un efecto para calcular datos derivados** en lugar de calcularlos en el render.
-- **No manejar los estados de carga y error.**
+Con la consola abierta, carga la página y escribe `ese` en los dos buscadores. Contando los mensajes `render: …`:
+
+```text
+al cargar → renders con efecto: 2 · sin efecto: 1
+tras escribir «ese» (3 letras) → renders con efecto: 5 · sin efecto: 3
+resultados: [ 'MongoDB esencial, React esencial', 'MongoDB esencial, React esencial' ]
+```
+
+**El mismo resultado, con casi el doble de renders.** Con el efecto, cada letra provoca un render (el texto cambia), **después** se ejecuta el efecto, que cambia `filtrados`, y eso provoca **otro** render. Además, durante un instante la pantalla muestra el texto nuevo con la lista antigua. Sin efecto, la lista se calcula en el mismo render que el texto: un solo paso, siempre coherente.
+
+La regla: **si algo se puede calcular a partir de las props o del estado, calcúlalo al renderizar.** `useEffect` es solo para **sincronizar con algo externo a React**: una API, un temporizador, el título de la pestaña, `localStorage`, un evento de `window`.
+
+<Callout type="risk">
+
+- **Señal de alarma:** un efecto cuyo único trabajo es llamar a un `set…` con un valor calculado a partir de otro estado. Casi siempre sobra el efecto y sobra el segundo estado.
+- **Los efectos no se ejecutan en el servidor:** Astro renderiza las islas primero en el servidor (B6.1), y ahí `useEffect` **no** se ejecuta. Por eso un efecto puede usar `window` o `localStorage` sin romper el render del servidor, mientras que el cuerpo del componente no puede.
+- **Lo que calcules al renderizar debe dar lo mismo en el servidor y en el navegador.** Al preparar esta lección, una primera versión del buscador contaba los renders en una variable **del módulo**: el servidor la incrementó al renderizar, el navegador empezó desde otro número, y React lanzó `Hydration failed because the server rendered text didn't match the client`. Pasa lo mismo con `Math.random()`, `new Date()` o `localStorage` en el cuerpo del componente. Lo que dependa del navegador, en un efecto.
+
+</Callout>
+
+## Paso 2: un efecto con limpieza, y uno sin ella
+
+Un temporizador es el ejemplo perfecto de efecto: algo que vive **fuera** de React y que hay que **parar** cuando el componente desaparece. Crea `src/components/efectos/Reloj.tsx`:
+
+```tsx
+// Archivo: src/components/efectos/Reloj.tsx
+// Un efecto con limpieza (el bueno) y otro sin ella (el que acumula temporizadores)
+import { useEffect, useState } from "react";
+
+export function RelojBien() {
+  const [segundos, setSegundos] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => {
+      console.log("tic (con limpieza)");
+      setSegundos((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(id); // limpieza: se ejecuta al desmontar el componente
+  }, []);
+  return <p>Con limpieza: {segundos} s</p>;
+}
+
+export function RelojMal() {
+  const [segundos, setSegundos] = useState(0);
+  useEffect(() => {
+    setInterval(() => {
+      console.log("tic (sin limpieza)");
+      setSegundos((s) => s + 1);
+    }, 1000);
+    // ❌ sin return: el temporizador sigue vivo aunque el componente desaparezca
+  }, []);
+  return <p>Sin limpieza: {segundos} s</p>;
+}
+
+export function Relojes() {
+  const [visibles, setVisibles] = useState(true);
+  return (
+    <div className="tarjeta">
+      <button id="alternar-relojes" onClick={() => setVisibles((v) => !v)}>
+        {visibles ? "Ocultar relojes" : "Mostrar relojes"}
+      </button>
+      {visibles && (
+        <>
+          <RelojBien />
+          <RelojMal />
+        </>
+      )}
+    </div>
+  );
+}
+```
+
+La anatomía de `useEffect`:
+
+```tsx
+useEffect(() => {
+  // 1. El efecto: se ejecuta DESPUÉS de que React pinta el componente
+  const id = setInterval(() => console.log("tic"), 1000);
+  // 2. La limpieza: React la ejecuta antes de volver a ejecutar el efecto y al desmontar
+  return () => clearInterval(id);
+}, []); // 3. Las dependencias: [] = solo al montar
+```
+
+Crea `src/pages/efectos.astro`, con todas las demostraciones de los pasos 2 a 4:
+
+```astro
+---
+// Archivo: src/pages/efectos.astro
+import Base from "../layouts/Base.astro";
+import { Relojes } from "../components/efectos/Reloj";
+import { SelectorCurso } from "../components/efectos/SelectorCurso";
+import { DependenciaOlvidada } from "../components/efectos/DependenciaOlvidada";
+---
+
+<Base titulo="B6.6 · Efectos">
+  <h1>Efectos</h1>
+  <Relojes client:load />
+  <DependenciaOlvidada client:load />
+  <SelectorCurso client:load cancelar={false} />
+  <SelectorCurso client:load cancelar={true} />
+</Base>
+```
+
+En `http://localhost:4321/efectos`, con la consola abierta, cuenta los mensajes `tic` durante unos 3 segundos; después pulsa "Ocultar relojes", espera otros 3 y vuelve a mostrarlos:
+
+```text
+Relojes visibles 3 s → tics con limpieza: 5 · sin limpieza: 5
+Relojes ocultos 3 s → tics con limpieza: 0 · sin limpieza: 3
+Mostrados otra vez 3 s → tics con limpieza: 3 · sin limpieza: 6
+```
+
+(La primera cifra puede variar en uno según cuánto tarde la página en cargar).
+
+- **Con limpieza:** al ocultar, React ejecuta `clearInterval`, y el temporizador se detiene (0 tics).
+- **Sin limpieza:** el componente ha desaparecido, pero **su temporizador sigue funcionando** (3 tics en 3 segundos), llamando a un `setSegundos` que ya no sirve para nada. Al volver a mostrarlo se crea un temporizador **nuevo**, y el viejo sigue ahí: **6 tics en 3 segundos**. Cada vez que el componente aparezca y desaparezca, se acumulará uno más.
+
+<Callout type="risk">
+
+- **Todo lo que un efecto "abre", su limpieza lo "cierra":** `setInterval` → `clearInterval`, `addEventListener` → `removeEventListener`, una conexión → `close()`, un `fetch` → `abort()` (Paso 4). Un efecto sin limpieza que abre algo es una fuga de memoria.
+- **En desarrollo, con `<StrictMode>`, React monta, desmonta y vuelve a montar cada componente** para ayudarte a detectar efectos sin limpieza. Las islas de Astro no lo usan por defecto, pero en una app de React normal (y en tests) verás los efectos ejecutarse dos veces al cargar. Si eso rompe algo, el problema es tu limpieza, no React.
+
+</Callout>
+
+## Paso 3: las dependencias
+
+El segundo argumento de `useEffect` es la **lista de dependencias**: los valores que, si cambian, hacen que el efecto se vuelva a ejecutar (después de su limpieza). Crea `src/components/efectos/DependenciaOlvidada.tsx`:
+
+```tsx
+// Archivo: src/components/efectos/DependenciaOlvidada.tsx
+// El efecto usa "objetivo", pero no lo declara como dependencia
+import { useEffect, useState } from "react";
+
+export function DependenciaOlvidada() {
+  const [objetivo, setObjetivo] = useState(8);
+  const [aviso, setAviso] = useState("");
+  const [avisoBien, setAvisoBien] = useState("");
+
+  useEffect(() => {
+    setAviso(`Recuerda: tu objetivo es ${objetivo} vasos`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // ❌ falta objetivo: el efecto solo se ejecuta al montar
+
+  useEffect(() => {
+    setAvisoBien(`Recuerda: tu objetivo es ${objetivo} vasos`);
+  }, [objetivo]); // ✅ se vuelve a ejecutar cada vez que cambia objetivo
+
+  return (
+    <div className="tarjeta">
+      <button id="subir-objetivo" onClick={() => setObjetivo((o) => o + 2)}>
+        Objetivo: {objetivo}
+      </button>
+      <p id="aviso-mal">Sin dependencia: {aviso}</p>
+      <p id="aviso-bien">Con dependencia: {avisoBien}</p>
+    </div>
+  );
+}
+```
+
+Pulsa dos veces "Objetivo" (sube de 8 a 12):
+
+```text
+Objetivo: 12 · Sin dependencia: Recuerda: tu objetivo es 8 vasos · Con dependencia: Recuerda: tu objetivo es 12 vasos
+```
+
+El primer efecto usa `objetivo`, pero su lista es `[]`: solo se ejecutó al montar, con el valor de entonces (8), y nunca más. Se ha quedado con un valor **viejo**. El segundo declara `[objetivo]` y se vuelve a ejecutar cada vez que cambia.
+
+| Lista de dependencias                | Cuándo se ejecuta el efecto                  |
+| ------------------------------------ | -------------------------------------------- |
+| Sin lista: `useEffect(fn)`           | Después de **cada** render                   |
+| Vacía: `useEffect(fn, [])`           | Solo al montar (y la limpieza, al desmontar) |
+| Con valores: `useEffect(fn, [a, b])` | Al montar y cada vez que cambie `a` o `b`    |
+
+La regla: **todo valor del componente (props, estado o algo calculado a partir de ellos) que use el efecto debe estar en la lista.** El _plugin_ de ESLint `react-hooks/exhaustive-deps` lo comprueba por ti; en el ejemplo se ha desactivado a propósito con un comentario.
+
+<Callout type="risk">
+
+- **Este ejemplo también es un efecto innecesario (Paso 1):** el aviso se puede calcular al renderizar. Se usa aquí solo para que el fallo de la dependencia sea visible. En código real, ``const aviso = `Recuerda: tu objetivo es ${objetivo} vasos`;`` y ningún efecto.
+- **Sin lista de dependencias y con un `set…` dentro, bucle infinito:** el efecto se ejecuta tras cada render, cambia el estado, eso provoca un render, que vuelve a ejecutar el efecto… La pestaña se congela.
+- **Objetos y funciones en la lista:** un objeto o una función creados en el cuerpo del componente son **nuevos en cada render**, así que el efecto se ejecutaría siempre. Pon en la lista valores simples (textos, números) o crea el objeto dentro del efecto.
+
+</Callout>
+
+## Paso 4: cargar datos y cancelar lo que ya no interesa
+
+Ahora el uso más habitual de un efecto: **pedir datos a una API**. Para provocar los problemas a voluntad, crea una API de prueba donde cada curso tarda un tiempo distinto en responder, `src/pages/api/cursos/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/cursos/[id].ts
+// API de prueba: el progreso de un curso, con un retraso distinto por curso para simular la red
+import type { APIRoute } from "astro";
+
+export const prerender = false;
+
+const CURSOS: Record<string, { titulo: string; porcentaje: number; retrasoMs: number }> = {
+  B1: { titulo: "TypeScript desde cero", porcentaje: 100, retrasoMs: 1500 }, // lento
+  B2: { titulo: "Git y flujo de trabajo", porcentaje: 50, retrasoMs: 200 }, // rápido
+  B6: { titulo: "React esencial", porcentaje: 71, retrasoMs: 400 },
+};
+
+export const GET: APIRoute = async ({ params }) => {
+  const curso = CURSOS[params.id ?? ""];
+  if (!curso) return Response.json({ error: "Curso no encontrado" }, { status: 404 });
+  await new Promise((resolver) => setTimeout(resolver, curso.retrasoMs));
+  return Response.json({ id: params.id, titulo: curso.titulo, porcentaje: curso.porcentaje });
+};
+```
+
+(Si al crear este archivo el servidor de desarrollo responde con un error `GetStaticPathsRequired`, reinícialo: a veces no detecta el `prerender = false` de una ruta dinámica nueva).
+
+El componente que la consume, `src/components/efectos/Progreso.tsx`:
+
+```tsx
+// Archivo: src/components/efectos/Progreso.tsx
+// Carga el progreso de un curso: estados loading/ok/error y cancelación con AbortController
+import { useEffect, useState } from "react";
+
+type Estado<T> = { s: "loading" } | { s: "ok"; data: T } | { s: "error"; msg: string };
+
+interface DatosProgreso {
+  id: string;
+  titulo: string;
+  porcentaje: number;
+}
+
+export function Progreso({ cursoId, cancelar = true }: { cursoId: string; cancelar?: boolean }) {
+  const [estado, setEstado] = useState<Estado<DatosProgreso>>({ s: "loading" });
+
+  useEffect(() => {
+    setEstado({ s: "loading" });
+    const ctrl = new AbortController();
+
+    fetch(`/api/cursos/${cursoId}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data: DatosProgreso) => {
+        console.log(`Progreso: llega ${data.id}`);
+        setEstado({ s: "ok", data });
+      })
+      .catch((e: unknown) => {
+        if (ctrl.signal.aborted) return; // cancelada a propósito: no es un error
+        setEstado({ s: "error", msg: e instanceof Error ? e.message : String(e) });
+      });
+
+    return () => {
+      if (cancelar) ctrl.abort(); // al cambiar de curso, la petición anterior ya no interesa
+    };
+  }, [cursoId, cancelar]);
+
+  if (estado.s === "loading") return <p className="progreso">Cargando…</p>;
+  if (estado.s === "error") return <p className="progreso error">Error: {estado.msg}</p>;
+  return (
+    <p className="progreso">
+      {estado.data.titulo}: {estado.data.porcentaje} % completado
+    </p>
+  );
+}
+```
+
+Y un selector para cambiar de curso, `src/components/efectos/SelectorCurso.tsx`:
+
+```tsx
+// Archivo: src/components/efectos/SelectorCurso.tsx
+// Cambia de curso rápido: con y sin cancelar la petición anterior
+import { useState } from "react";
+import { Progreso } from "./Progreso";
+
+export function SelectorCurso({ cancelar }: { cancelar: boolean }) {
+  const [cursoId, setCursoId] = useState("B6");
+  return (
+    <div className="tarjeta" data-cancelar={cancelar}>
+      <strong>{cancelar ? "Con AbortController" : "Sin cancelar"}</strong>{" "}
+      {["B1", "B2", "B6", "B9"].map((id) => (
+        <button key={id} onClick={() => setCursoId(id)} aria-pressed={cursoId === id}>
+          {id}
+        </button>
+      ))}
+      <p className="seleccionado">Seleccionado: {cursoId}</p>
+      <Progreso cursoId={cursoId} cancelar={cancelar} />
+    </div>
+  );
+}
+```
+
+La página `efectos.astro` del Paso 2 ya incluye dos selectores: uno **sin cancelar** las peticiones anteriores y otro **con `AbortController`**. En cada uno, pulsa **B1** (tarda 1,5 segundos) e inmediatamente **B2** (tarda 0,2):
+
+```text
+Sin cancelar a los 0,5 s → Seleccionado: B2 · Git y flujo de trabajo: 50 % completado
+Sin cancelar a los 2 s   → Seleccionado: B2 · TypeScript desde cero: 100 % completado · llegadas: Progreso: llega B2, Progreso: llega B1
+Con AbortController a los 0,5 s → Seleccionado: B2 · Git y flujo de trabajo: 50 % completado
+Con AbortController a los 2 s   → Seleccionado: B2 · Git y flujo de trabajo: 50 % completado · llegadas: Progreso: llega B2
+```
+
+**Sin cancelar, la pantalla acaba mintiendo:** dice "Seleccionado: B2" pero muestra los datos de **B1**. La respuesta de B2 llegó primero y se pintó bien; medio segundo después llegó la de B1 (que ya no interesaba) y **sobrescribió** el estado. Es una **condición de carrera**, la misma de B4.1, ahora en la interfaz. En la vida real pasa cuando el usuario cambia rápido de pestaña, de filtro o de página con una conexión irregular.
+
+**Con `AbortController`**, al cambiar a B2, la limpieza del efecto anterior ejecuta `ctrl.abort()`: la petición de B1 se cancela, su `fetch` termina con un error de cancelación y el `catch` lo ignora (`if (ctrl.signal.aborted) return`). La única respuesta que se pinta es la de B2.
+
+Fíjate también en cómo se modela el estado: la **unión discriminada** de B1.6, `{ s: "loading" } | { s: "ok"; data } | { s: "error"; msg }`. Es imposible tener a la vez datos y un error, o datos mientras se carga. Pulsa **B9** (no existe):
+
+```text
+B9: Error: HTTP 404
+```
+
+`fetch` no lanza un error con un 404 (B3.3): por eso el código comprueba `r.ok` y lo convierte en un error.
+
+<Callout type="risk">
+
+- **El error de cancelación no es un error:** sin el `if (ctrl.signal.aborted) return`, cada cambio rápido de curso mostraría durante un instante el mensaje del error de cancelación (un `AbortError`) en lugar de "Cargando…". Distingue siempre la cancelación de un fallo real.
+- **`AbortController` cancela la petición, no el trabajo del servidor:** el servidor puede haber recibido la petición y seguir trabajando. Para lecturas da igual; para operaciones que modifican datos, cancelar en el cliente no garantiza que no se hayan aplicado.
+- **Cargar datos en efectos es la opción más básica:** funciona, pero no guarda en caché, no deduplica peticiones iguales ni reintenta. En aplicaciones grandes se usan librerías como TanStack Query (curso I2). En Astro, además, muchos datos se pueden cargar **en el servidor**, en el _frontmatter_ de la página, y pasar a la isla como props, sin efecto ni estado de carga.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea un componente que muestre los usuarios de `https://jsonplaceholder.typicode.com/users` con
-  estados de carga, error y lista. 2. Añade un selector de usuario que cargue el detalle con
-  `useEffect` y `AbortController`; cambia rápido de usuario y comprueba en la pestaña Network que
-  las peticiones anteriores aparecen como canceladas. 3. Crea un cronómetro con `setInterval` y
-  limpieza; móntalo y desmóntalo con un botón y comprueba que no se acumulan intervalos. 4. Busca en
-  tus proyectos un `useEffect` que calcule datos derivados y sustitúyelo por un cálculo directo.
+
+1. Crea `src/components/efectos/Usuarios.tsx`, que cargue los usuarios de `https://jsonplaceholder.typicode.com/users` y muestre nombre, correo y ciudad de cada uno.
+2. Debe tener los estados de carga, error (con un botón "Reintentar") y lista vacía, y cancelar la petición si el componente desaparece.
+3. Acepta la URL como prop opcional, y úsalo dos veces en `ejercicio-b66.astro`: con la URL buena y con una que no existe.
+
+</Callout>
+
+Solución. `src/components/efectos/Usuarios.tsx`:
+
+```tsx
+// Archivo: src/components/efectos/Usuarios.tsx
+import { useEffect, useState } from "react";
+
+interface Usuario {
+  id: number;
+  name: string;
+  email: string;
+  address: { city: string };
+}
+
+type Estado = { s: "loading" } | { s: "ok"; usuarios: Usuario[] } | { s: "error"; msg: string };
+
+export function Usuarios({ url = "https://jsonplaceholder.typicode.com/users" }: { url?: string }) {
+  const [estado, setEstado] = useState<Estado>({ s: "loading" });
+  const [intento, setIntento] = useState(0); // cambiarlo vuelve a ejecutar el efecto
+
+  useEffect(() => {
+    setEstado({ s: "loading" });
+    const ctrl = new AbortController();
+
+    async function cargar() {
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const usuarios = (await res.json()) as Usuario[];
+        setEstado({ s: "ok", usuarios });
+      } catch (e) {
+        if (ctrl.signal.aborted) return;
+        setEstado({ s: "error", msg: e instanceof Error ? e.message : "Error desconocido" });
+      }
+    }
+
+    cargar();
+    return () => ctrl.abort();
+  }, [url, intento]);
+
+  if (estado.s === "loading") return <p className="usuarios">Cargando usuarios…</p>;
+  if (estado.s === "error") {
+    return (
+      <p className="usuarios error">
+        No se pudieron cargar los usuarios ({estado.msg}).{" "}
+        <button onClick={() => setIntento((n) => n + 1)}>Reintentar</button>
+      </p>
+    );
+  }
+  if (estado.usuarios.length === 0) return <p className="usuarios">No hay usuarios.</p>;
+
+  return (
+    <ul className="usuarios">
+      {estado.usuarios.map((u) => (
+        <li key={u.id}>
+          {u.name} · {u.email} · {u.address.city}
+        </li>
+      ))}
+    </ul>
+  );
+}
+```
+
+La página `ejercicio-b66.astro` es la del Paso 1. Comprobado en el navegador:
+
+```text
+al poco de cargar: [ 'Cargando usuarios…', 'Cargando usuarios…' ]
+usuarios: 10 · primero: Leanne Graham · Sincere@april.biz · Gwenborough · último: Clementina DuBuque · Rey.Padberg@karina.biz · Lebsackbury
+error: No se pudieron cargar los usuarios (HTTP 404). Reintentar
+tras pulsar Reintentar: Cargando usuarios…
+```
+
+Las decisiones:
+
+- **Una función `async` dentro del efecto:** la función que recibe `useEffect` no puede ser `async` (devolvería una promesa, y React espera una función de limpieza o nada). Se declara una `async function cargar()` dentro y se llama.
+- **`intento` como dependencia:** el botón "Reintentar" solo incrementa un número. Como `intento` está en la lista de dependencias, el efecto se vuelve a ejecutar. Es la forma idiomática de "volver a cargar".
+- **`url` como dependencia:** si la prop cambia, se cancela la petición anterior y se carga la nueva.
+- **Cuatro salidas con retorno temprano** (B6.4): cargando, error, vacío y lista.
+
+<Callout type="risk">
+
+- **El `as Usuario[]` sigue siendo una promesa al compilador** (B1.5): si la API cambia de forma, la isla se romperá en el navegador del usuario. Valida los datos externos (Zod, curso I1).
+- **Una URL externa en el navegador depende de CORS** (B3.5): JSONPlaceholder lo permite, pero muchas APIs no. Y nunca llames desde el navegador a una API que necesite una clave secreta: la clave quedaría a la vista de cualquiera. Esas llamadas se hacen desde tu servidor (un endpoint de Astro) y la isla llama a tu endpoint.
+
 </Callout>
 
 <Callout type="mastery">
-  Sabes qué pasa si olvidas una dependencia o la limpieza de un efecto, y distingues cuándo un
-  efecto es necesario y cuándo no.
+
+Sabes qué pasa si olvidas una dependencia del efecto (se queda con valores viejos), si olvidas la limpieza (temporizadores y peticiones que sobreviven al componente y se acumulan) y si no cancelas las peticiones obsoletas (una respuesta lenta pisa a la más reciente). Y sabes cuándo no usar un efecto: lo que se puede calcular, se calcula al renderizar.
+
 </Callout>
 
 ## Resumen
 
-- Un efecto sincroniza tu componente con algo externo, después del render.
-- Las dependencias deciden cuándo se repite; incluye todo lo que uses dentro.
-- La limpieza deshace lo que el efecto creó (intervalos, _listeners_, peticiones).
-- No uses efectos para datos derivados ni para reaccionar a clics.
-- Al cargar datos: estados de carga y error, y `AbortController` contra las condiciones de carrera.
+- `useEffect` sincroniza con el exterior (APIs, temporizadores, el navegador); lo que se puede calcular de props o estado se calcula al renderizar.
+- La función que devuelve el efecto es su limpieza: se ejecuta antes de repetir el efecto y al desmontar. Sin ella, un temporizador sigue vivo y se acumula.
+- Dependencias: `[]` solo al montar; `[a, b]` cuando cambian; todo lo que use el efecto debe estar en la lista.
+- Cargar datos: estado como unión discriminada (cargando / ok / error), comprobar `res.ok` y cancelar con `AbortController` en la limpieza para que una respuesta vieja no pise a la nueva.
+- Lo que se renderiza debe coincidir en el servidor y en el navegador; lo que depende del navegador va en un efecto.

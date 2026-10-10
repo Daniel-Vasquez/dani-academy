@@ -4,172 +4,424 @@ course: "B6"
 title: "Props tipadas y composición"
 order: 2
 minutes: 60
-summary: "Pasar datos a los componentes con props tipadas, usar children para componer y comunicar hijos con padres mediante funciones."
+summary: "Construyes Badge, Button y Card con props tipadas, valores por defecto y children, los compones en un catálogo de cursos con callbacks y descubres por qué una función pasada desde Astro llega como null."
 ---
 
-Un componente que siempre muestra lo mismo sirve de poco. Las **props** son los parámetros de un componente: lo que lo hace reutilizable. En esta sección vas a tiparlas con TypeScript, a usar `children` para componer piezas y a pasar funciones para que un hijo avise a su padre.
+Un componente que siempre muestra lo mismo sirve de poco. Las **props** son sus parámetros: los datos que recibe de quien lo usa, igual que los atributos de una etiqueta HTML o los argumentos de una función. En esta sección vas a construir tres componentes reutilizables con sus props tipadas (`Badge`, `Button` y `Card`), vas a aprender a **componerlos** pasando contenido con `children` en lugar de multiplicar props, y vas a hacer que una tarjeta avise a su padre cuando se pulsa un botón, con una prop de tipo función. Por el camino descubrirás un error de Astro que no da ningún aviso.
 
-## Props: los parámetros del componente
+**Lo que tendrás al terminar:** una pequeña librería de interfaz en `src/components/ui/` y un catálogo de cursos construido componiendo sus piezas.
 
-Las props llegan como **un objeto** en el primer parámetro de la función. Lo habitual es desestructurarlo y tiparlo con una interfaz:
+**Requisitos:** el proyecto `react-lab` de B6.1 y lo visto en B1.4 (interfaces) y B1.5 (funciones como tipos).
+
+## Paso 1: props tipadas y valores por defecto
+
+Empieza por el componente más pequeño, una etiqueta de estado. Crea `src/components/ui/Badge.tsx`:
 
 ```tsx
-interface TarjetaCursoProps {
-  id: string;
-  titulo: string;
-  secciones: number;
+// Archivo: src/components/ui/Badge.tsx
+import type { ReactNode } from "react";
+
+type Tono = "neutro" | "exito" | "aviso";
+
+interface BadgeProps {
+  tono?: Tono;
+  children: ReactNode;
 }
 
-export function TarjetaCurso({ id, titulo, secciones }: TarjetaCursoProps) {
+const COLORES: Record<Tono, { fondo: string; texto: string }> = {
+  neutro: { fondo: "#e2e8f0", texto: "#334155" },
+  exito: { fondo: "#ccfbf1", texto: "#115e59" },
+  aviso: { fondo: "#fef3c7", texto: "#92400e" },
+};
+
+export function Badge({ tono = "neutro", children }: BadgeProps) {
+  const { fondo, texto } = COLORES[tono];
   return (
-    <article className="rounded-2xl border p-5">
-      <span className="text-xs text-muted">{id}</span>
-      <h3 className="font-serif text-lg">{titulo}</h3>
-      <p>{secciones} secciones</p>
-    </article>
+    <span className="insignia" style={{ background: fondo, color: texto }}>
+      {children}
+    </span>
   );
 }
 ```
 
-```tsx
-<TarjetaCurso id="B1" titulo="TypeScript desde cero" secciones={8} />
-<TarjetaCurso id="B2" titulo="Git y flujo de trabajo" secciones="4" />
-// ❌ Type 'string' is not assignable to type 'number'.
-```
+Cómo funcionan las props:
 
-Los textos van entre comillas; cualquier otro valor (números, booleanos, objetos, funciones), entre llaves.
+1. **React llama a tu componente con un único argumento**: un objeto con todas las props. `<Badge tono="exito">Completado</Badge>` se convierte en `Badge({ tono: "exito", children: "Completado" })` (recuerda el `jsx(tipo, props)` de B6.1).
+2. **`interface BadgeProps`** describe ese objeto. TypeScript comprobará cada uso: `<Badge tono="peligro">` dará error, porque `"peligro"` no es un `Tono`.
+3. **La desestructuración con valor por defecto** (`{ tono = "neutro", children }`) aplica `"neutro"` cuando no se pasa `tono`. Por eso `tono` es opcional en la interfaz (`tono?:`).
+4. **`Record<Tono, …>`** (B1.4) obliga a tener colores para cada tono: si añades uno nuevo a `Tono`, TypeScript te avisará de que falta en `COLORES`.
 
-Las props son de **solo lectura**: un componente nunca debe modificarlas. Si un dato tiene que cambiar, es **estado** (sección B6.3).
+<Callout type="risk">
 
-## Opcionales y valores por defecto
+- **Las props son de solo lectura:** un componente nunca debe modificar sus props (`props.tono = "exito"`). Son del padre. Si un componente necesita cambiar un valor, ese valor es **estado** (B6.3).
+- **`?` y valor por defecto van juntos:** si declaras `tono?: Tono` pero no le das valor por defecto, dentro del componente `tono` puede ser `undefined`, y `COLORES[tono]` fallaría. TypeScript te avisa con `noUncheckedIndexedAccess`; sin esa opción, el error aparece en ejecución.
 
-```tsx
-interface BadgeProps {
-  texto: string;
-  tono?: "neutral" | "accent" | "warning";
-}
+</Callout>
 
-export function Badge({ texto, tono = "neutral" }: BadgeProps) {
-  return <span data-tono={tono}>{texto}</span>;
-}
+## Paso 2: `children`, el contenido entre etiquetas
 
-<Badge texto="En curso" />                       // tono = "neutral"
-<Badge texto="Completado" tono="accent" />
-<Badge texto="Hecho" tono="verde" />            // ❌ no es uno de los tonos permitidos
-```
-
-La unión de literales (curso B1.2) convierte `tono` en un conjunto cerrado de opciones con autocompletado.
-
-## `children`: componer en lugar de configurar
-
-`children` es una prop especial: lo que pones **entre** la etiqueta de apertura y la de cierre.
+`children` es una prop especial: lo que escribes **entre** la etiqueta de apertura y la de cierre. Su tipo es **`ReactNode`**, que admite texto, números, elementos JSX, listas de elementos, `null` o `undefined`. Crea `src/components/ui/Card.tsx`:
 
 ```tsx
+// Archivo: src/components/ui/Card.tsx
 import type { ReactNode } from "react";
 
 interface CardProps {
   titulo: string;
+  nivel?: "basico" | "intermedio" | "avanzado";
+  acciones?: ReactNode;
   children: ReactNode;
 }
 
-export function Card({ titulo, children }: CardProps) {
+export function Card({ titulo, nivel = "basico", acciones, children }: CardProps) {
   return (
-    <section className="rounded-2xl border p-6">
-      <h2 className="font-serif text-xl">{titulo}</h2>
-      <div className="mt-3">{children}</div>
+    <section className="tarjeta" data-nivel={nivel}>
+      <h2 style={{ marginTop: 0 }}>{titulo}</h2>
+      {children}
+      {acciones && <footer style={{ marginTop: "1rem", display: "flex", gap: "0.5rem" }}>{acciones}</footer>}
     </section>
   );
 }
 ```
 
-```tsx
-<Card titulo="Evaluación final">
-  <p>5 preguntas. Se aprueba con 4/5.</p>
-  <Badge texto="Disponible" tono="accent" />
-</Card>
-```
+`Card` no sabe qué va a contener: un párrafo, una lista o un formulario. Solo pone el marco (borde, título y una zona de acciones). Además de `children`, recibe **`acciones`**, otra prop de tipo `ReactNode`: un segundo "hueco" donde el padre puede poner lo que quiera (en el Paso 4, un botón). Si no se pasa, el `<footer>` no se pinta (`{acciones && …}`).
 
-`ReactNode` acepta cualquier cosa que React sepa mostrar: texto, números, elementos, listas, `null`.
+Esta es la idea central de React: **composición**. En lugar de un componente con veinte props (`mostrarBoton`, `textoBoton`, `colorBoton`, `mostrarInsignia`…), un componente pequeño con huecos donde el padre pone otros componentes.
 
-### Composición frente a muchas props
+<Callout type="risk">
 
-Es tentador añadir una prop por cada variante: `mostrarBoton`, `textoBoton`, `iconoBoton`, `colorBoton`… Con `children`, el que usa el componente decide qué va dentro, y el componente solo se ocupa del marco:
+- **Composición frente a configuración:** si te encuentras añadiendo props del tipo `mostrarX`, `textoX` o `colorX`, probablemente ese "X" debería ser un hueco (`children` o una prop `ReactNode`) donde el padre pone su propio componente. Las props de configuración crecen sin límite; los huecos, no.
+- **`{acciones && …}` con valores falsos:** funciona bien con `ReactNode`, porque si no se pasa es `undefined`. Pero con números es una trampa clásica: `{cantidad && <p>…</p>}` pinta un `0` en pantalla cuando la cantidad es 0. Lo verás en B6.4.
 
-```tsx
-// ❌ Configuración: el componente debe prever cada caso
-<Card titulo="Evaluación" mostrarBoton textoBoton="Empezar" hrefBoton="/evaluacion" />
+</Callout>
 
-// ✅ Composición: el contenido lo decide quien lo usa
-<Card titulo="Evaluación">
-  <a href="/evaluacion">Empezar</a>
-</Card>
-```
+## Paso 3: heredar las props de una etiqueta HTML
 
-## Props de tipo función: que el hijo avise al padre
-
-Los datos bajan de padre a hijo con props. Para que un hijo **comunique algo** hacia arriba, el padre le pasa una función:
+Un botón necesita **todas** las props de un `<button>` normal: `onClick`, `disabled`, `type`, `aria-label`… No las vas a declarar una a una. Crea `src/components/ui/Button.tsx`:
 
 ```tsx
-interface BotonLeidoProps {
-  seccionId: string;
-  onCambio: (seccionId: string, leido: boolean) => void;
-}
-
-export function BotonLeido({ seccionId, onCambio }: BotonLeidoProps) {
-  return <button onClick={() => onCambio(seccionId, true)}>Marcar como leído</button>;
-}
-```
-
-```tsx
-<BotonLeido seccionId="B1.3" onCambio={(id, leido) => console.log(id, leido)} />
-```
-
-Por convención, estas props empiezan por `on` (`onCambio`, `onGuardar`).
-
-## Heredar los atributos de HTML
-
-Si tu componente envuelve un elemento HTML, puedes aceptar todos sus atributos:
-
-```tsx
+// Archivo: src/components/ui/Button.tsx
 import type { ButtonHTMLAttributes } from "react";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variante?: "primario" | "secundario";
+  variante?: "principal" | "secundario";
 }
 
-export function Button({ variante = "primario", className, ...resto }: ButtonProps) {
-  return <button data-variante={variante} className={className} {...resto} />;
+export function Button({ variante = "secundario", type = "button", style, ...resto }: ButtonProps) {
+  const principal = variante === "principal";
+  return (
+    <button
+      type={type}
+      style={{
+        background: principal ? "#0f766e" : "#f8fafc",
+        color: principal ? "#ffffff" : "#0f172a",
+        ...style,
+      }}
+      {...resto}
+    />
+  );
 }
-
-<Button type="submit" disabled aria-label="Guardar">
-  Guardar
-</Button>; // ✅ todos los atributos de <button>
 ```
 
-## Errores comunes
+- **`extends ButtonHTMLAttributes<HTMLButtonElement>`**: `ButtonProps` hereda todas las props de un `<button>` de HTML (con sus tipos, incluido el del evento de `onClick`), y añade la suya, `variante`.
+- **`...resto`** recoge todas las props que no has desestructurado (`onClick`, `disabled`, `children`, `aria-label`…) y **`{...resto}`** las pasa tal cual al `<button>`. El componente añade estilo sin perder ninguna capacidad del botón original.
+- **`type = "button"`** por defecto (Paso 6 explica por qué).
+- **`...style`** al final del objeto permite que quien usa el botón añada o sobrescriba estilos.
 
-- **Modificar una prop** (`props.titulo = "…"`): las props son de solo lectura.
-- **Pasar números entre comillas** (`secciones="8"`): llega un texto.
-- **Diez props booleanas** para controlar variantes de contenido: usa `children`.
-- **Olvidar tipar `children`** como `ReactNode`.
-- **Usar `any` en las props** "para que funcione": pierdes todas las comprobaciones.
+<Callout type="risk">
+
+- **El orden de `{...resto}` importa:** si lo pones **antes** de una prop (`<button {...resto} type={type}>`), tu valor gana; si lo pones **después**, gana el de quien usa el componente. Aquí va al final para que el padre pueda personalizarlo todo, salvo lo que se calcula antes (`style` se combina a mano).
+- **No pases props propias al DOM:** si desestructuras mal y `variante` acaba dentro de `resto`, React la pinta en el HTML como un atributo más, `<button variante="principal">`, sin ningún aviso. Es un atributo inválido que ensucia el HTML. Saca siempre de `resto` las props propias del componente.
+
+</Callout>
+
+## Paso 4: componer las piezas y pasar funciones como props
+
+Ahora usa las tres piezas juntas. Crea `src/components/CatalogoCursos.tsx`, una lista de tarjetas de curso:
+
+```tsx
+// Archivo: src/components/CatalogoCursos.tsx
+import { Badge } from "./ui/Badge";
+import { Button } from "./ui/Button";
+import { Card } from "./ui/Card";
+
+interface Curso {
+  id: string;
+  titulo: string;
+  nivel: "basico" | "intermedio" | "avanzado";
+  leidas: number;
+  total: number;
+}
+
+interface CatalogoCursosProps {
+  cursos: Curso[];
+  onEmpezar?: (cursoId: string) => void; // prop de tipo función (callback)
+}
+
+export function CatalogoCursos({ cursos, onEmpezar }: CatalogoCursosProps) {
+  return (
+    <div>
+      {cursos.map((curso) => {
+        const completado = curso.leidas === curso.total;
+        return (
+          <Card
+            key={curso.id}
+            titulo={`${curso.id} · ${curso.titulo}`}
+            nivel={curso.nivel}
+            acciones={
+              <Button variante={completado ? "secundario" : "principal"} onClick={() => onEmpezar?.(curso.id)}>
+                {completado ? "Repasar" : curso.leidas > 0 ? "Continuar" : "Empezar"}
+              </Button>
+            }
+          >
+            <p>
+              {curso.leidas} de {curso.total} secciones{" "}
+              <Badge tono={completado ? "exito" : curso.leidas > 0 ? "aviso" : "neutro"}>
+                {completado ? "Completado" : curso.leidas > 0 ? "En curso" : "Sin empezar"}
+              </Badge>
+            </p>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+Y la isla que lo usa, `src/components/CatalogoInteractivo.tsx`:
+
+```tsx
+// Archivo: src/components/CatalogoInteractivo.tsx
+// Una isla que decide qué hacer cuando se pulsa un botón de la tarjeta
+import { CatalogoCursos } from "./CatalogoCursos";
+
+const CURSOS = [
+  { id: "B1", titulo: "TypeScript desde cero", nivel: "basico" as const, leidas: 8, total: 8 },
+  { id: "B2", titulo: "Git y flujo de trabajo", nivel: "basico" as const, leidas: 2, total: 4 },
+  { id: "B6", titulo: "React esencial", nivel: "basico" as const, leidas: 0, total: 7 },
+];
+
+export function CatalogoInteractivo() {
+  return (
+    <CatalogoCursos
+      cursos={CURSOS}
+      onEmpezar={(cursoId) => {
+        console.log(`Ir al curso ${cursoId}`);
+      }}
+    />
+  );
+}
+```
+
+Fíjate en la prop **`onEmpezar`**: su tipo es una función, `(cursoId: string) => void` (B1.5). `CatalogoCursos` no sabe qué hacer cuando se pulsa un botón (¿navegar?, ¿guardar?, ¿abrir un diálogo?): eso lo decide **el padre**, que le pasa la función. Es la forma en que un componente hijo **avisa** a su padre. Por convención, estas props empiezan por `on`.
+
+Úsalo en `src/pages/props.astro`:
+
+```astro
+---
+// Archivo: src/pages/props.astro
+import Base from "../layouts/Base.astro";
+import { CatalogoInteractivo } from "../components/CatalogoInteractivo";
+---
+
+<Base titulo="B6.2 · Props y composición">
+  <h1>Mis cursos</h1>
+  <CatalogoInteractivo client:load />
+</Base>
+```
+
+Abre `http://localhost:4321/props` con la consola del navegador abierta. Verás tres tarjetas:
+
+```text
+B1 · TypeScript desde cero · 8 de 8 secciones Completado · Repasar
+B2 · Git y flujo de trabajo · 2 de 4 secciones En curso · Continuar
+B6 · React esencial · 0 de 7 secciones Sin empezar · Empezar
+```
+
+Pulsa los tres botones:
+
+```text
+Ir al curso B1
+Ir al curso B2
+Ir al curso B6
+```
+
+Cada pieza decide una sola cosa: `Badge`, el color según el tono; `Button`, el estilo según la variante; `Card`, el marco; y `CatalogoCursos`, qué texto y qué tono corresponden a cada curso. Fíjate también en el `key={curso.id}` del `.map()`: lo explicaré en B6.4.
+
+<Callout type="risk">
+
+- **`onEmpezar?.()` con `?.`:** como `onEmpezar` es opcional, puede ser `undefined`, y llamarlo sin comprobar lanzaría `TypeError: onEmpezar is not a function`. El encadenamiento opcional (B1.3) lo llama solo si existe.
+- **Una función nueva en cada render:** `onClick={() => onEmpezar?.(curso.id)}` crea una función nueva cada vez que se pinta la tarjeta. Es completamente normal y no es un problema de rendimiento en la inmensa mayoría de casos. No la "optimices" hasta que una medición te diga que hace falta.
+
+</Callout>
+
+## Paso 5: la trampa de las funciones desde Astro
+
+¿Y si pasas la función **desde la página `.astro`** directamente a la isla? Crea temporalmente `src/pages/funcion.astro`:
+
+```astro
+---
+import Base from "../layouts/Base.astro";
+import { CatalogoCursos } from "../components/CatalogoCursos";
+import { Card } from "../components/ui/Card";
+
+const cursos = [{ id: "B1", titulo: "TypeScript desde cero", nivel: "basico" as const, leidas: 0, total: 8 }];
+---
+
+<Base titulo="Función como prop">
+  <CatalogoCursos client:load cursos={cursos} onEmpezar={(id: string) => console.log(id)} />
+  <Card client:load titulo="Con children desde Astro"><p>Este párrafo viene de Astro.</p></Card>
+</Base>
+```
+
+Abre `http://localhost:4321/funcion` y pulsa "Empezar": **no ocurre nada**. Ni el `console.log`, ni un error. Mira el código fuente de la página (`Cmd` + `Option` + `U`) y busca `props=` en la etiqueta `<astro-island>` del catálogo. Descodificado, contiene:
+
+```json
+{"cursos":[1,[[0,{"id":[0,"B1"],"titulo":[0,"TypeScript desde cero"],"nivel":[0,"basico"],"leidas":[0,0],"total":[0,8]}]]],"onEmpezar":[0,null]}
+```
+
+**`"onEmpezar":[0,null]`**. Para que la isla funcione en el navegador, Astro tiene que **enviarle las props como texto** dentro del HTML (serializarlas). Los datos (textos, números, arrays, objetos, fechas) se pueden convertir en texto; **una función, no**: Astro la sustituye por `null` sin avisar. La segunda isla, en cambio, sí muestra "Este párrafo viene de Astro.": los `children` que escribes en Astro se envían como HTML ya renderizado.
+
+La regla: **de Astro a una isla, solo datos**. Las funciones se definen **dentro** de la isla, como hace `CatalogoInteractivo`. Borra `src/pages/funcion.astro` al terminar.
+
+<Callout type="risk">
+
+- **El fallo silencioso depende de cómo llames a la función:** con `onEmpezar?.()` no pasa nada; con `onEmpezar()` (sin `?.`), el clic lanza `TypeError: onEmpezar is not a function` en el navegador. En ninguno de los dos casos hay un aviso al compilar ni en `npm run check`.
+- **Tampoco se serializan:** instancias de clases propias, `Map`/`Set` con valores complejos, símbolos ni referencias circulares. Astro admite tipos de JavaScript como `Date`, `Map`, `Set`, `URL` o `BigInt`, pero lo más seguro es pasar objetos simples y convertir en la isla lo que haga falta.
+- **Todo lo que pasas a una isla es visible en el HTML:** las props quedan escritas en el código fuente de la página. Nunca pases a una isla datos que el usuario no deba ver (el documento entero de la base de datos, con campos internos). Es el mismo principio que los DTO de B5.5.
+
+</Callout>
+
+## Paso 6: el `type="button"` que evita envíos fantasma
+
+Un último detalle del `Button`: el valor por defecto `type = "button"`. En HTML, un `<button>` dentro de un `<form>` es de tipo **`submit` por defecto**. Sin ese valor, cualquier botón que pongas en un formulario (un "Mostrar contraseña", un "Añadir otro campo") **enviaría el formulario** al pulsarlo. Con `type="button"` por defecto, el envío solo ocurre si lo pides expresamente: `<Button type="submit">Guardar</Button>`.
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea `Card`, `Badge` y `Button` tipados como en esta sección. 2. Compón con ellos una tarjeta
-  de curso: título, badge de estado y botón "Continuar". 3. Añade a `Badge` una prop `tono` con tres
-  valores y comprueba que TypeScript rechaza uno inventado. 4. Crea un componente hijo que reciba
-  una función `onSeleccionar` y avise al padre de qué curso se ha elegido.
+
+1. Crea `src/components/TarjetaEntreno.tsx`, que muestre un entreno (tipo, minutos y, si los tiene, kilómetros) usando `Card`, `Badge` (con el texto "Intenso" si dura 60 minutos o más) y `Button`, con una prop `onEliminar(id)`.
+2. Crea una isla `ListaEntrenos.tsx` con tres entrenos de ejemplo que registre en la consola qué entreno se quiere eliminar.
+3. Úsala en `src/pages/ejercicio-b62.astro` y comprueba que no hay errores con `npm run check`.
+
+</Callout>
+
+Solución. `src/components/TarjetaEntreno.tsx`:
+
+```tsx
+// Archivo: src/components/TarjetaEntreno.tsx
+import { Badge } from "./ui/Badge";
+import { Button } from "./ui/Button";
+import { Card } from "./ui/Card";
+
+export interface Entreno {
+  id: string;
+  tipo: "running" | "fuerza" | "yoga";
+  minutos: number;
+  km?: number;
+}
+
+interface TarjetaEntrenoProps {
+  entreno: Entreno;
+  onEliminar: (id: string) => void;
+}
+
+const ETIQUETAS: Record<Entreno["tipo"], string> = { running: "Running", fuerza: "Fuerza", yoga: "Yoga" };
+
+export function TarjetaEntreno({ entreno, onEliminar }: TarjetaEntrenoProps) {
+  const intenso = entreno.minutos >= 60;
+  return (
+    <Card
+      titulo={ETIQUETAS[entreno.tipo]}
+      acciones={
+        <Button onClick={() => onEliminar(entreno.id)} aria-label={`Eliminar entreno ${entreno.id}`}>
+          Eliminar
+        </Button>
+      }
+    >
+      <p>
+        {entreno.minutos} min
+        {entreno.km !== undefined && ` · ${entreno.km} km`}{" "}
+        {intenso && <Badge tono="aviso">Intenso</Badge>}
+      </p>
+    </Card>
+  );
+}
+```
+
+`src/components/ListaEntrenos.tsx`:
+
+```tsx
+// Archivo: src/components/ListaEntrenos.tsx
+import { TarjetaEntreno, type Entreno } from "./TarjetaEntreno";
+
+const ENTRENOS: Entreno[] = [
+  { id: "e1", tipo: "running", minutos: 32, km: 6 },
+  { id: "e2", tipo: "fuerza", minutos: 65 },
+  { id: "e3", tipo: "yoga", minutos: 0 },
+];
+
+export function ListaEntrenos() {
+  return (
+    <>
+      {ENTRENOS.map((entreno) => (
+        <TarjetaEntreno key={entreno.id} entreno={entreno} onEliminar={(id) => console.log(`Eliminar ${id}`)} />
+      ))}
+    </>
+  );
+}
+```
+
+`src/pages/ejercicio-b62.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-b62.astro
+import Base from "../layouts/Base.astro";
+import { ListaEntrenos } from "../components/ListaEntrenos";
+---
+
+<Base titulo="Ejercicio B6.2">
+  <h1>Mis entrenos</h1>
+  <ListaEntrenos client:load />
+</Base>
+```
+
+En `http://localhost:4321/ejercicio-b62`, las tarjetas y los clics en "Eliminar":
+
+```text
+Running · 32 min · 6 km · Eliminar
+Fuerza · 65 min Intenso · Eliminar
+Yoga · 0 min · Eliminar
+Eliminar e1
+Eliminar e2
+Eliminar e3
+```
+
+Los detalles que importan:
+
+- **`export interface Entreno`** en `TarjetaEntreno.tsx`, importado con `type` en la lista (B1.7): el tipo vive junto al componente que lo usa.
+- **`entreno.km !== undefined`** en lugar de `entreno.km &&`: si un entreno tuviera `km: 0`, la segunda opción pintaría un `0` suelto (B6.4).
+- **`Entreno["tipo"]`** (B1.4) reutiliza la unión de tipos sin repetirla en `ETIQUETAS`.
+- **`aria-label`** pasa por `...resto` hasta el `<button>`: tres botones con el mismo texto "Eliminar" se distinguen para un lector de pantalla.
+
+<Callout type="risk">
+
+- **Este "eliminar" todavía no elimina:** solo avisa al padre. Para que la tarjeta desaparezca, el padre tiene que guardar la lista en **estado** y quitarla de ahí. Es exactamente lo que harás en B6.3 y B6.4.
+- **No uses el índice como `id` del entreno:** los identificadores (`e1`, `e2`…) son estables y únicos. Si usaras la posición en la lista, al eliminar uno cambiarían los de todos los siguientes.
+
 </Callout>
 
 <Callout type="mastery">
-  Tipas las props de cualquier componente, usas `children` en lugar de multiplicar props y sabes
-  comunicar un hijo con su padre mediante funciones.
+
+Usas `children` (y props de tipo `ReactNode`) en lugar de multiplicar props: tipas las props con una `interface`, das valores por defecto en la desestructuración, heredas las props de una etiqueta HTML con `extends` y `...resto`, avisas al padre con props de función `on…`, y sabes que de Astro a una isla solo viajan datos, nunca funciones.
+
 </Callout>
 
 ## Resumen
 
-- Las props son un objeto tipado que recibe el componente; son de solo lectura.
-- Opcionales con `?` y valores por defecto al desestructurar.
-- `children: ReactNode` permite componer en lugar de configurar.
-- Los datos bajan con props; los avisos suben con funciones (`onAlgo`).
-- `extends ButtonHTMLAttributes<…>` hereda los atributos del elemento HTML.
+- Las props llegan como un único objeto; se tipan con una `interface` y se desestructuran con valores por defecto. Son de solo lectura.
+- `children: ReactNode` (y otras props `ReactNode`) crean huecos: composición en lugar de configuración.
+- `extends ButtonHTMLAttributes<HTMLButtonElement>` + `{...resto}` heredan todas las props nativas de un `<button>`.
+- Una prop de función (`onEmpezar`) permite al hijo avisar al padre; se llama con `?.` si es opcional.
+- De `.astro` a una isla, las funciones llegan como `null` sin aviso; `children` sí llega, como HTML. Botones con `type="button"` por defecto.

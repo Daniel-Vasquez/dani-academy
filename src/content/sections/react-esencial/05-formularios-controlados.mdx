@@ -4,173 +4,478 @@ course: "B6"
 title: "Formularios controlados"
 order: 5
 minutes: 60
-summary: "Inputs controlados y no controlados, un estado para todo el formulario, envío con onSubmit y validación con mensajes accesibles."
+summary: "Comparas formularios controlados y no controlados con FormData, provocas los dos avisos clásicos de React, validas un formulario de entreno de forma accesible y construyes un registro sin librerías."
 ---
 
-Los formularios son el punto donde el usuario te da datos, y donde más cosas pueden salir mal: valores vacíos, formatos incorrectos, dobles envíos. En esta sección vas a construirlos con React sin librerías, para entender lo que después hacen por ti herramientas como `react-hook-form` (curso I2), que es la que usan el registro y el login de esta plataforma.
+Los formularios son el punto donde el usuario **escribe datos en tu app**: registrarse, apuntar un entreno, cambiar un objetivo. En React hay dos formas de manejarlos, y elegir mal (o mezclarlas) produce errores difíciles de seguir. En esta sección vas a construir el mismo formulario de las dos formas para ver la diferencia, vas a provocar los dos avisos que React muestra cuando algo está mal montado, vas a hacer un formulario de entreno con un único estado y mensajes de error accesibles, y terminarás con un formulario de registro que valida cada campo sin ninguna librería.
 
-## Controlado vs no controlado
+**Lo que tendrás al terminar:** una página `/formularios` con las demostraciones, `FormEntreno` (reutilizable, con validación) y `Registro`.
 
-Hay dos formas de manejar un `input` en React:
+**Requisitos:** el proyecto `react-lab` de B6.4.
 
-**No controlado**: el navegador guarda el valor y tú lo lees cuando lo necesitas (al enviar).
+## Paso 1: controlado frente a no controlado
 
-```tsx
-function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-  e.preventDefault();
-  const datos = new FormData(e.currentTarget);
-  console.log(datos.get("email"));
-}
+Un campo de formulario guarda un valor (lo que has escrito). La pregunta es **quién es el dueño** de ese valor:
 
-<form onSubmit={handleSubmit}>
-  <input name="email" type="email" defaultValue="" />
-</form>;
-```
+- **Controlado:** el dueño es **React**. El valor vive en un estado, el campo lo muestra (`value={estado}`) y cada pulsación lo actualiza (`onChange`). En todo momento sabes qué hay escrito.
+- **No controlado:** el dueño es **el navegador** (el DOM), como en un formulario HTML de toda la vida. React no se entera de lo que escribes; lees el valor al final, normalmente al enviar.
 
-**Controlado**: React guarda el valor en el estado y el input muestra lo que dice el estado.
+Crea `src/components/formularios/DosFormularios.tsx` con el mismo formulario de las dos formas:
 
 ```tsx
-const [email, setEmail] = useState("");
+// Archivo: src/components/formularios/DosFormularios.tsx
+// El mismo formulario, controlado (React guarda el valor) y no controlado (lo guarda el DOM)
+import { useState, type FormEvent } from "react";
 
-<input value={email} onChange={(e) => setEmail(e.target.value)} />;
-```
+export function Controlado() {
+  const [nombre, setNombre] = useState("");
+  const [enviado, setEnviado] = useState("");
 
-El controlado te permite reaccionar **mientras** se escribe (validar, formatear, habilitar un botón). Para formularios sencillos que solo se leen al enviar, el no controlado es más simple.
-
-<Callout type="warning">
-  Si pones `value` sin `onChange`, el input queda bloqueado (React avisa: *You provided a `value`
-  prop to a form field without an `onChange` handler*). Usa `defaultValue` si quieres un valor
-  inicial en un input no controlado.
-</Callout>
-
-## Un estado para todo el formulario
-
-Con varios campos, un objeto en el estado y un único manejador:
-
-```tsx
-interface Registro {
-  nombre: string;
-  email: string;
-  password: string;
-}
-
-export function FormRegistro() {
-  const [datos, setDatos] = useState<Registro>({ nombre: "", email: "", password: "" });
-
-  function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const { name, value } = e.target;
-    setDatos((d) => ({ ...d, [name]: value }));
+  function enviar(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    setEnviado(nombre);
   }
 
   return (
-    <form>
-      <input name="nombre" value={datos.nombre} onChange={handleChange} />
-      <input name="email" type="email" value={datos.email} onChange={handleChange} />
-      <input name="password" type="password" value={datos.password} onChange={handleChange} />
+    <form onSubmit={enviar} id="controlado">
+      <label htmlFor="nombre-c">Nombre (controlado): </label>
+      <input id="nombre-c" value={nombre} onChange={(e) => setNombre(e.target.value.toUpperCase())} />{" "}
+      <button type="submit">Enviar</button>
+      <p>
+        Mientras escribes: <span className="eco">{nombre}</span> · Enviado: <span className="enviado">{enviado}</span>
+      </p>
+    </form>
+  );
+}
+
+export function NoControlado() {
+  const [enviado, setEnviado] = useState("");
+
+  function enviar(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    const datos = new FormData(evento.currentTarget); // lee los campos por su atributo name
+    setEnviado(String(datos.get("nombre") ?? ""));
+  }
+
+  return (
+    <form onSubmit={enviar} id="no-controlado">
+      <label htmlFor="nombre-nc">Nombre (no controlado): </label>
+      <input id="nombre-nc" name="nombre" defaultValue="" />{" "}
+      <button type="submit">Enviar</button>
+      <p>
+        Enviado: <span className="enviado">{enviado}</span>
+      </p>
     </form>
   );
 }
 ```
 
-`[name]: value` usa el atributo `name` del input como clave: un solo manejador sirve para todos los campos.
+Y la página `src/pages/formularios.astro`, con todos los componentes de la sección (los demás los crearás en los pasos siguientes):
 
-## Enviar: `onSubmit` y `preventDefault`
+```astro
+---
+// Archivo: src/pages/formularios.astro
+import Base from "../layouts/Base.astro";
+import { Controlado, NoControlado } from "../components/formularios/DosFormularios";
+import { AvisosFormulario } from "../components/formularios/AvisosFormulario";
+import { RegistroEntrenos } from "../components/formularios/RegistroEntrenos";
+---
 
-```tsx
-async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
-  e.preventDefault(); // sin esto, el navegador recarga la página
-  setEnviando(true);
-  try {
-    await guardar(datos);
-  } finally {
-    setEnviando(false);
-  }
-}
-
-<form onSubmit={handleSubmit}>
-  …
-  <button type="submit" disabled={enviando}>
-    {enviando ? "Guardando…" : "Guardar"}
-  </button>
-</form>;
+<Base titulo="B6.5 · Formularios">
+  <h1>Formularios</h1>
+  <Controlado client:load />
+  <NoControlado client:load />
+  <AvisosFormulario client:load />
+  <RegistroEntrenos client:load />
+</Base>
 ```
 
-- Usa `onSubmit` en el formulario, no `onClick` en el botón: así también funciona al pulsar Enter.
-- Deshabilita el botón mientras se envía para evitar dobles envíos.
+En `http://localhost:4321/formularios`, escribe `dani` en los dos campos y pulsa los dos "Enviar":
 
-## Validación con mensajes
-
-```tsx
-type Errores = Partial<Record<keyof Registro, string>>;
-
-function validar(d: Registro): Errores {
-  const errores: Errores = {};
-  if (d.nombre.trim().length < 2) errores.nombre = "Mínimo 2 caracteres";
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) errores.email = "Introduce un correo válido";
-  if (d.password.length < 8) errores.password = "Mínimo 8 caracteres";
-  return errores;
-}
+```text
+Controlado:     campo: DANI · mientras escribes: DANI · enviado: DANI
+No controlado:  campo: dani · enviado: dani
 ```
 
-```tsx
-const errores = validar(datos);
-const esValido = Object.keys(errores).length === 0;
-```
+- **En el controlado, el texto aparece en mayúsculas mientras escribes**, porque `onChange` hace `toUpperCase()` antes de guardarlo y el campo muestra lo que hay en el estado. Como el valor está en el estado, puedes transformarlo, validarlo letra a letra o mostrarlo en otra parte de la página ("Mientras escribes: DANI").
+- **En el no controlado, React no sabe nada hasta el envío.** Al enviar, `new FormData(evento.currentTarget)` lee **todos** los campos del formulario por su atributo **`name`**. `defaultValue` da el valor inicial, pero después el navegador manda.
 
-`Partial<Record<…>>` es un _utility type_ (curso I1.3): "un objeto con, como mucho, una clave por campo del formulario".
+|                     | Controlado                                                             | No controlado                                                 |
+| ------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Dónde vive el valor | Estado de React (`value` + `onChange`)                                 | El DOM (`defaultValue` + `name`)                              |
+| Lo lees             | En cualquier momento, del estado                                       | Al enviar, con `FormData`                                     |
+| Ideal para          | Validar mientras se escribe, transformar, campos que dependen de otros | Formularios simples, envíos al servidor sin lógica intermedia |
 
-### Mostrar los errores de forma accesible
+<Callout type="risk">
 
-```tsx
-<label htmlFor="email">Correo</label>
-<input
-  id="email"
-  name="email"
-  type="email"
-  value={datos.email}
-  onChange={handleChange}
-  onBlur={() => setTocados((t) => ({ ...t, email: true }))}
-  aria-invalid={Boolean(tocados.email && errores.email)}
-  aria-describedby={errores.email ? "email-error" : undefined}
-/>
-{tocados.email && errores.email && <p id="email-error">{errores.email}</p>}
-```
+- **`FormData` necesita el atributo `name`:** un campo sin `name` no aparece en `FormData`, sin ningún error. Si al enviar te falta un dato, lo primero que debes comprobar es el `name`.
+- **`FormData.get` devuelve `FormDataEntryValue | null`** (un texto, un archivo o `null`), nunca un número. Convierte y valida igual que con `target.value` (B6.3).
+- **`evento.currentTarget` frente a `evento.target`:** en `onSubmit`, `currentTarget` es siempre el `<form>` (donde está el manejador); `target` puede ser otro elemento. Para `FormData`, usa `currentTarget`.
 
-- Muestra el error **después** de que el usuario haya salido del campo (`onBlur`), no mientras escribe la primera letra.
-- `aria-invalid` y `aria-describedby` hacen que un lector de pantalla anuncie el error al llegar al campo. Es exactamente lo que hace el formulario de registro de esta plataforma.
-- Usa `autoComplete="email"`, `"new-password"` o `"current-password"`: ayuda a los gestores de contraseñas.
-
-<Callout type="note">
-  La validación del cliente es para la **experiencia de usuario**. El servidor debe validar
-  **siempre** otra vez, porque cualquiera puede saltarse tu formulario y llamar a la API
-  directamente. Lo harás con Zod en el curso I1.
 </Callout>
 
-## Errores comunes
+## Paso 2: los dos avisos clásicos
 
-- **Olvidar `e.preventDefault()`**: la página se recarga y se pierde todo.
-- **`value` sin `onChange`**: input bloqueado.
-- **Validar solo en el cliente.**
-- **Mostrar errores antes de que el usuario haya escrito nada.**
-- **Errores sin `aria-describedby`**: un lector de pantalla no los relaciona con el campo.
+Crea `src/components/formularios/AvisosFormulario.tsx`, con dos errores típicos a propósito:
+
+```tsx
+// Archivo: src/components/formularios/AvisosFormulario.tsx
+// Dos errores que React avisa en la consola
+import { useState } from "react";
+
+export function AvisosFormulario() {
+  const [apodo, setApodo] = useState<string | undefined>(undefined); // ❌ empieza sin valor
+  return (
+    <p>
+      <label htmlFor="apodo">Apodo: </label>
+      <input id="apodo" value={apodo} onChange={(e) => setApodo(e.target.value)} />{" "}
+      <label htmlFor="solo-lectura">Bloqueado: </label>
+      <input id="solo-lectura" value="no puedes cambiarme" /> {/* ❌ value sin onChange */}
+    </p>
+  );
+}
+```
+
+Con la consola abierta, carga la página: aparece el primer aviso. Escribe una letra en "Apodo": aparece el segundo.
+
+```text
+You provided a `value` prop to a form field without an `onChange` handler. This will render a read-only field. If the field should be mutable use `defaultValue`. Otherwise, set either `onChange` or `readOnly`.
+A component is changing an uncontrolled input to be controlled. This is likely caused by the value changing from undefined to a defined value, which should not happen. Decide between using a controlled or uncontrolled input element for the lifetime of the component.
+```
+
+1. **`value` sin `onChange`:** el campo "Bloqueado" muestra un valor fijo y **no puedes escribir en él** (pruébalo). React lo controla, pero nadie actualiza el estado. Si querías un valor inicial editable, es `defaultValue`; si querías un campo de solo lectura, añade `readOnly` para dejarlo claro.
+2. **De no controlado a controlado:** `apodo` empieza como `undefined`, y `value={undefined}` es lo mismo que no poner `value`, así que el campo empieza **no controlado**. Al escribir, `apodo` pasa a ser un texto y el campo se vuelve **controlado**. React no sabe quién es el dueño. La solución: empezar siempre con un texto, `useState("")`.
+
+<Callout type="risk">
+
+- **El caso más frecuente es con datos que llegan de una API:** `value={usuario.nombre}` cuando `usuario` todavía no ha cargado (o el campo es opcional y viene como `undefined`). Usa `value={usuario.nombre ?? ""}`.
+- **Estos avisos solo salen en desarrollo:** en producción, React no muestra nada y el campo simplemente se comporta mal. Revisa la consola mientras desarrollas.
+
+</Callout>
+
+## Paso 3: un formulario real, con un estado y validación accesible
+
+Para un formulario con varios campos, lo práctico es **un solo estado con un objeto**, en lugar de un `useState` por campo. Crea `src/components/formularios/FormEntreno.tsx`:
+
+```tsx
+// Archivo: src/components/formularios/FormEntreno.tsx
+import { useState, type FormEvent } from "react";
+
+interface Entreno {
+  tipo: "running" | "fuerza" | "yoga";
+  minutos: number;
+  km: number | null;
+}
+
+interface FormEntrenoProps {
+  onGuardar: (entreno: Entreno) => void;
+}
+
+// Un solo estado con todos los campos, como texto (así llegan de los inputs)
+const VACIO = { tipo: "running", minutos: "", km: "" };
+type Campos = typeof VACIO;
+type Errores = Partial<Record<keyof Campos, string>>;
+
+function validar(campos: Campos): Errores {
+  const errores: Errores = {};
+  const minutos = Number(campos.minutos);
+  if (campos.minutos.trim() === "" || !Number.isInteger(minutos) || minutos < 1 || minutos > 600) {
+    errores.minutos = "Indica los minutos: un número entero entre 1 y 600";
+  }
+  if (campos.tipo === "running") {
+    const km = Number(campos.km.replace(",", "."));
+    if (campos.km.trim() === "" || Number.isNaN(km) || km <= 0 || km > 100) {
+      errores.km = "Indica los kilómetros: un número mayor que 0";
+    }
+  }
+  return errores;
+}
+
+export function FormEntreno({ onGuardar }: FormEntrenoProps) {
+  const [campos, setCampos] = useState<Campos>(VACIO);
+  const [errores, setErrores] = useState<Errores>({});
+
+  function cambiar(campo: keyof Campos, valor: string) {
+    setCampos((anteriores) => ({ ...anteriores, [campo]: valor }));
+  }
+
+  function enviar(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    const encontrados = validar(campos);
+    setErrores(encontrados);
+    if (Object.keys(encontrados).length > 0) return;
+
+    onGuardar({
+      tipo: campos.tipo as Entreno["tipo"],
+      minutos: Number(campos.minutos),
+      km: campos.tipo === "running" ? Number(campos.km.replace(",", ".")) : null,
+    });
+    setCampos(VACIO);
+  }
+
+  return (
+    <form onSubmit={enviar} noValidate>
+      <p>
+        <label htmlFor="tipo">Tipo: </label>
+        <select id="tipo" value={campos.tipo} onChange={(e) => cambiar("tipo", e.target.value)}>
+          <option value="running">Running</option>
+          <option value="fuerza">Fuerza</option>
+          <option value="yoga">Yoga</option>
+        </select>
+      </p>
+      <p>
+        <label htmlFor="minutos">Minutos: </label>
+        <input
+          id="minutos"
+          inputMode="numeric"
+          value={campos.minutos}
+          onChange={(e) => cambiar("minutos", e.target.value)}
+          aria-invalid={errores.minutos ? true : undefined}
+          aria-describedby={errores.minutos ? "error-minutos" : undefined}
+        />
+        {errores.minutos && (
+          <span id="error-minutos" role="alert" className="error">
+            {" "}
+            {errores.minutos}
+          </span>
+        )}
+      </p>
+      {campos.tipo === "running" && (
+        <p>
+          <label htmlFor="km">Kilómetros: </label>
+          <input
+            id="km"
+            inputMode="decimal"
+            value={campos.km}
+            onChange={(e) => cambiar("km", e.target.value)}
+            aria-invalid={errores.km ? true : undefined}
+            aria-describedby={errores.km ? "error-km" : undefined}
+          />
+          {errores.km && (
+            <span id="error-km" role="alert" className="error">
+              {" "}
+              {errores.km}
+            </span>
+          )}
+        </p>
+      )}
+      <button type="submit">Guardar</button>
+    </form>
+  );
+}
+```
+
+Y el componente que lo usa y muestra lo guardado, `src/components/formularios/RegistroEntrenos.tsx`:
+
+```tsx
+// Archivo: src/components/formularios/RegistroEntrenos.tsx
+import { useState } from "react";
+import { FormEntreno } from "./FormEntreno";
+
+interface Guardado {
+  id: string;
+  texto: string;
+}
+
+export function RegistroEntrenos() {
+  const [guardados, setGuardados] = useState<Guardado[]>([]);
+  return (
+    <section className="tarjeta">
+      <h2 style={{ marginTop: 0 }}>Nuevo entreno</h2>
+      <FormEntreno
+        onGuardar={(e) =>
+          setGuardados((anteriores) => [
+            ...anteriores,
+            { id: crypto.randomUUID(), texto: `${e.tipo} · ${e.minutos} min${e.km !== null ? ` · ${e.km} km` : ""}` },
+          ])
+        }
+      />
+      <ul id="guardados">
+        {guardados.map((g) => (
+          <li key={g.id}>{g.texto}</li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+```
+
+Prueba en la página: pulsa "Guardar" con todo vacío; después escribe `30` minutos y `5,5` km y guarda; cambia el tipo a "Fuerza" (el campo de kilómetros desaparece) y prueba con `700` minutos y después con `45`:
+
+```text
+Vacío:            Indica los minutos: un número entero entre 1 y 600 · Indica los kilómetros: un número mayor que 0
+30 min y 5,5 km:  guardados: running · 30 min · 5.5 km · errores: 0 · campos vaciados
+Fuerza:           el campo de kilómetros desaparece
+700 minutos:      Indica los minutos: un número entero entre 1 y 600 · aria-invalid="true"
+45 minutos:       guardados: running · 30 min · 5.5 km | fuerza · 45 min
+```
+
+Las decisiones del componente:
+
+- **Un estado `campos` con todos los valores como texto**, que es como llegan de los inputs. Se convierten a números **solo al guardar**. Así, el usuario puede escribir `5,` sin que el campo "salte".
+- **`cambiar(campo, valor)`** actualiza una sola propiedad con `[campo]: valor` (una propiedad calculada) sobre una copia del objeto (B6.3).
+- **`validar` es una función pura**, fuera del componente: recibe los campos y devuelve los errores. Se puede probar sola (curso A3) y reutilizar.
+- **`noValidate`** en el `<form>` desactiva los globos de validación del navegador, para mostrar tus mensajes de forma coherente.
+- **Accesibilidad:** cada error tiene un `id`, y el campo apunta a él con `aria-describedby`; `aria-invalid` marca el campo erróneo; y `role="alert"` hace que los lectores de pantalla anuncien el mensaje en cuanto aparece.
+- **`inputMode="numeric"` y `"decimal"`** muestran el teclado numérico en el móvil, sin las rarezas de `type="number"` (que acepta `e` y cambia el valor con la rueda del ratón).
+- **`replace(",", ".")`** acepta la coma decimal que escribe cualquier persona en México o en España.
+
+<Callout type="risk">
+
+- **La validación del navegador no es seguridad:** cualquiera puede enviar datos a tu API sin pasar por el formulario (B3.3). Valida también en el servidor. Lo ideal es **un mismo esquema** compartido por el cliente y el servidor, que es lo que hace esta plataforma con Zod (`src/schemas/auth.ts`) y lo que verás en el curso I1.
+- **Los campos que desaparecen conservan su valor:** al cambiar a "Fuerza", el campo de kilómetros se oculta, pero `campos.km` sigue teniendo lo que escribiste. Por eso `enviar` solo usa `km` si el tipo es running. Ten en cuenta los valores de campos ocultos al guardar.
+- **Para formularios grandes, una librería ayuda:** con veinte campos, validación entre campos y envíos asíncronos, `react-hook-form` (la que usan el login y el registro de esta plataforma) ahorra mucho código. Pero entender cómo se hace a mano es lo que te permite usarla bien.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Construye un formulario de registro (nombre, correo y contraseña) controlado, con un único
-  estado y un único `handleChange`. 2. Añade validación con mensajes bajo cada campo, mostrados solo
-  después de salir del campo. 3. Deshabilita el botón mientras el formulario no sea válido y
-  mientras se envía. 4. Simula el envío con una promesa de 1 segundo y muestra "Creando cuenta…". 5.
-  Comprueba con el teclado (Tab y Enter) que puedes rellenarlo y enviarlo sin ratón.
+
+1. Crea `src/components/formularios/Registro.tsx`, un formulario de registro con nombre (mínimo 2 caracteres), correo (con formato válido) y contraseña (mínimo 8 caracteres).
+2. Cada error debe aparecer **solo cuando el usuario sale del campo** (no mientras escribe por primera vez), y desaparecer en cuanto lo corrige.
+3. El botón "Crear cuenta" debe estar deshabilitado mientras haya algún campo no válido.
+4. Usa `useId` para que el formulario se pueda poner dos veces en la misma página sin `id` repetidos, y los `autoComplete` adecuados para que el gestor de contraseñas funcione.
+5. Al enviar, muestra "Cuenta lista para crear: Nombre &lt;correo&gt;" (todavía sin llamar a ninguna API).
+
+</Callout>
+
+Solución. `src/components/formularios/Registro.tsx`:
+
+```tsx
+// Archivo: src/components/formularios/Registro.tsx
+import { useId, useState, type FormEvent } from "react";
+
+interface Campos {
+  nombre: string;
+  correo: string;
+  contrasena: string;
+}
+type Campo = keyof Campos;
+
+const CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function validar({ nombre, correo, contrasena }: Campos): Partial<Record<Campo, string>> {
+  const errores: Partial<Record<Campo, string>> = {};
+  if (nombre.trim().length < 2) errores.nombre = "Mínimo 2 caracteres";
+  if (!CORREO.test(correo.trim())) errores.correo = "Introduce un correo válido";
+  if (contrasena.length < 8) errores.contrasena = "Mínimo 8 caracteres";
+  return errores;
+}
+
+export function Registro() {
+  const id = useId(); // prefijo único: el formulario se puede usar varias veces en la misma página
+  const [campos, setCampos] = useState<Campos>({ nombre: "", correo: "", contrasena: "" });
+  const [tocados, setTocados] = useState<Partial<Record<Campo, boolean>>>({});
+  const [resultado, setResultado] = useState("");
+
+  const errores = validar(campos); // se calcula en cada render: no es estado
+  const valido = Object.keys(errores).length === 0;
+
+  const cambiar = (campo: Campo, valor: string) => setCampos((a) => ({ ...a, [campo]: valor }));
+  const tocar = (campo: Campo) => setTocados((a) => ({ ...a, [campo]: true }));
+
+  function enviar(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    if (!valido) return;
+    setResultado(`Cuenta lista para crear: ${campos.nombre.trim()} <${campos.correo.trim().toLowerCase()}>`);
+  }
+
+  function campo(nombre: Campo, etiqueta: string, tipo: string, autoComplete: string) {
+    const visible = tocados[nombre] && errores[nombre];
+    return (
+      <p>
+        <label htmlFor={`${id}-${nombre}`}>{etiqueta}</label>
+        <br />
+        <input
+          id={`${id}-${nombre}`}
+          name={nombre}
+          type={tipo}
+          autoComplete={autoComplete}
+          value={campos[nombre]}
+          onChange={(e) => cambiar(nombre, e.target.value)}
+          onBlur={() => tocar(nombre)}
+          aria-invalid={visible ? true : undefined}
+          aria-describedby={visible ? `${id}-${nombre}-error` : undefined}
+        />
+        {visible && (
+          <span id={`${id}-${nombre}-error`} className="error" role="alert">
+            {" "}
+            {errores[nombre]}
+          </span>
+        )}
+      </p>
+    );
+  }
+
+  return (
+    <form onSubmit={enviar} noValidate className="tarjeta">
+      <h2 style={{ marginTop: 0 }}>Crear cuenta</h2>
+      {campo("nombre", "Nombre", "text", "name")}
+      {campo("correo", "Correo", "email", "email")}
+      {campo("contrasena", "Contraseña", "password", "new-password")}
+      <button type="submit" disabled={!valido}>
+        Crear cuenta
+      </button>
+      {resultado && <p id="resultado">{resultado}</p>}
+    </form>
+  );
+}
+```
+
+`src/pages/ejercicio-b65.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-b65.astro
+import Base from "../layouts/Base.astro";
+import { Registro } from "../components/formularios/Registro";
+---
+
+<Base titulo="Ejercicio B6.5">
+  <Registro client:load />
+</Base>
+```
+
+Comprobado en el navegador:
+
+```text
+ids: _r1R_0_-nombre, _r1R_0_-correo, _r1R_0_-contrasena
+Inicio                           → errores: [] · botón deshabilitado
+Escribe «D» (sin salir)          → errores: [] · botón deshabilitado
+Sale del nombre                  → errores: [Mínimo 2 caracteres] · botón deshabilitado
+Correo «dani@» y sale            → errores: [Mínimo 2 caracteres | Introduce un correo válido] · botón deshabilitado
+Corrige; contraseña de 4         → errores: [Mínimo 8 caracteres] · botón deshabilitado
+Contraseña de 8                  → errores: [] · botón activo
+resultado: Cuenta lista para crear: Dani <dani@ejemplo.com>
+```
+
+Las claves:
+
+- **Los errores no son estado:** `validar(campos)` se calcula en cada render (B6.3). El único estado nuevo es `tocados`, que recuerda qué campos ha abandonado el usuario (`onBlur`). Un error se muestra si el campo está tocado **y** tiene error.
+- **El botón usa `valido`**, que no depende de `tocados`: está deshabilitado desde el principio, aunque todavía no se vea ningún mensaje.
+- **`useId()`** genera un prefijo único por cada uso del componente (aquí `_r1R_0_`, aunque el formato exacto puede cambiar entre versiones de React). Úsalo como prefijo, nunca lo escribas a mano en el código.
+- **La función `campo(…)`** pinta los tres campos con la misma estructura sin repetir el JSX.
+- **`autoComplete="new-password"`** le dice al gestor de contraseñas que proponga una nueva; `"email"` y `"name"` permiten el autocompletado. Es lo que hace el formulario de registro de esta plataforma.
+
+<Callout type="risk">
+
+- **Un botón deshabilitado no explica por qué:** si el usuario no sabe qué falta, se frustra. Por eso, aquí los errores aparecen al salir de cada campo. Otra opción común es dejar el botón siempre activo y, al pulsarlo, marcar todos los campos como tocados para mostrar todos los errores a la vez.
+- **La expresión del correo es deliberadamente sencilla:** comprueba que hay algo, una `@` y un dominio con punto. Ninguna expresión regular valida de verdad un correo; la única comprobación real es enviar un correo de confirmación.
+- **Nunca guardes la contraseña en `localStorage` ni la registres en la consola**, ni siquiera en desarrollo: viaja en el cuerpo de la petición (por HTTPS) y el servidor guarda solo su _hash_ (B3.4).
+
 </Callout>
 
 <Callout type="mastery">
-  Construyes un formulario con validación y mensajes accesibles sin librerías, y sabes cuándo
-  conviene controlado o no controlado.
+
+Construyes un formulario con validación sin librerías: eliges entre controlado (`value` + `onChange`, el estado es el dueño) y no controlado (`defaultValue` + `name` + `FormData`), nunca empiezas un campo controlado con `undefined`, guardas los campos en un objeto y calculas los errores en cada render, y los muestras de forma accesible (`aria-invalid`, `aria-describedby`, `role="alert"`).
+
 </Callout>
 
 ## Resumen
 
-- Controlado: el estado manda (`value` + `onChange`). No controlado: lo lees al enviar (`FormData`).
-- Un objeto en el estado y `[name]: value` manejan formularios de varios campos.
-- `onSubmit` + `preventDefault`, y botón deshabilitado mientras se envía.
-- Valida en el cliente para guiar al usuario y en el servidor para protegerte.
-- `aria-invalid` y `aria-describedby` hacen los errores accesibles.
+- Controlado: React es el dueño del valor (`value` + `onChange`). No controlado: el DOM es el dueño (`defaultValue`, y se lee con `FormData` por el `name`).
+- `value` sin `onChange` deja el campo bloqueado; pasar de `undefined` a un texto mezcla los dos modos. Empieza siempre con `""`.
+- Un formulario con varios campos: un estado con un objeto de textos, convertido a números solo al guardar, y `evento.preventDefault()` en `onSubmit`.
+- Los errores se calculan con una función pura; `tocados` decide cuándo mostrarlos. Errores accesibles con `aria-invalid`, `aria-describedby` y `role="alert"`.
+- `useId` para identificadores únicos y `autoComplete` para el gestor de contraseñas. La validación del cliente es comodidad; la seguridad está en el servidor.

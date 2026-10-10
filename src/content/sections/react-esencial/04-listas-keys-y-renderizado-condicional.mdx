@@ -4,177 +4,384 @@ course: "B6"
 title: "Listas, keys y renderizado condicional"
 order: 4
 minutes: 60
-summary: "Mostrar listas con map, elegir bien las keys y decidir qué se muestra con ternarios, && y retornos tempranos."
+summary: "Pintas listas con map, demuestras en el navegador por qué el índice como key cambia las notas de tarea, eliges entre &&, ternario y retorno temprano evitando el 0 fantasma, y construyes una lista de tareas completa."
 ---
 
-Casi todas las interfaces muestran **listas** (secciones, cursos, entrenos) y deciden **qué mostrar según el estado** (cargando, vacío, error). En JSX no hay `for` ni `if` dentro de las llaves, pero JavaScript ya tiene todo lo necesario. En esta sección aprenderás los patrones que usarás a diario y el porqué de la famosa `key`.
+Casi todas las pantallas de una app son **listas** (cursos, secciones, entrenos, tareas) con **variantes**: vacía, cargando, con datos, con un aviso si algo está pendiente. En esta sección vas a pintar listas con `map` y a entender de verdad para qué sirve la prop `key`, provocando en el navegador el error más típico: usar el índice del array como `key`. Después verás las tres formas de mostrar algo "solo si…" y la trampa del `0` que aparece en pantalla. Terminarás con una lista de tareas completa: añadir, marcar como hecha, borrar y un mensaje cuando no hay nada.
 
-## Listas con `map`
+**Lo que tendrás al terminar:** una página `/listas` con las demostraciones y un componente `ListaTareas` reutilizable.
 
-Para mostrar una lista, transforma cada dato en un elemento con `map`:
+**Requisitos:** el proyecto `react-lab` de B6.3.
+
+## Paso 1: pintar una lista con `map`
+
+En JSX no hay bucles `for` (B6.1: solo expresiones). Para pintar una lista, **transformas** un array de datos en un array de elementos con `map`. Crea `src/components/listas/ListaSecciones.tsx`:
 
 ```tsx
-interface Seccion {
+// Archivo: src/components/listas/ListaSecciones.tsx
+export interface Seccion {
   id: string;
   titulo: string;
   leida: boolean;
 }
 
 export function ListaSecciones({ secciones }: { secciones: Seccion[] }) {
+  if (secciones.length === 0) return <p>No hay secciones.</p>; // retorno temprano: estado vacío
+
+  const leidas = secciones.filter((s) => s.leida).length;
   return (
-    <ul>
-      {secciones.map((s) => (
-        <li key={s.id}>
-          {s.leida ? "✓" : "○"} {s.titulo}
+    <>
+      <p>
+        {leidas} de {secciones.length} leídas {leidas === secciones.length && <strong>· ¡Curso completado!</strong>}
+      </p>
+      <ul>
+        {secciones.map((s) => (
+          <li key={s.id}>
+            {s.leida ? "✓" : "○"} {s.titulo}
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+```
+
+Y la página `src/pages/listas.astro`, con todas las demostraciones de la sección (crearás los demás componentes en los pasos siguientes):
+
+```astro
+---
+// Archivo: src/pages/listas.astro
+import Base from "../layouts/Base.astro";
+import { ListaSecciones } from "../components/listas/ListaSecciones";
+import { TareasConNotas } from "../components/listas/TareasConNotas";
+import { SinKey } from "../components/listas/SinKey";
+import { CeroFantasma } from "../components/listas/CeroFantasma";
+
+const secciones = [
+  { id: "B6.1", titulo: "JSX y componentes", leida: true },
+  { id: "B6.2", titulo: "Props tipadas y composición", leida: true },
+  { id: "B6.3", titulo: "Estado con useState y eventos", leida: false },
+];
+---
+
+<Base titulo="B6.4 · Listas y condicionales">
+  <h2>Secciones</h2>
+  <ListaSecciones secciones={secciones} />
+  <ListaSecciones secciones={[]} />
+  <h2>Keys</h2>
+  <TareasConNotas client:load />
+  <SinKey client:load />
+  <h2>Condicionales</h2>
+  <CeroFantasma pendientes={0} />
+</Base>
+```
+
+En `http://localhost:4321/listas`, la primera lista y el estado vacío:
+
+```text
+2 de 3 leídas
+✓ JSX y componentes
+✓ Props tipadas y composición
+○ Estado con useState y eventos
+No hay secciones.
+```
+
+- **`secciones.map((s) => <li key={s.id}>…</li>)`** devuelve un array de elementos `<li>`, y React sabe pintar arrays.
+- **El retorno temprano** (`if (secciones.length === 0) return <p>No hay secciones.</p>;`) resuelve el caso especial al principio y deja el caso normal limpio debajo. Es la forma más legible de manejar estados vacíos, de carga o de error.
+- **`ListaSecciones` no tiene estado ni eventos**, así que se usa sin `client:*`: Astro la convierte en HTML (B6.1).
+
+<Callout type="risk">
+
+- **Una lista vacía sin mensaje parece un error:** si el usuario no tiene entrenos, una pantalla en blanco no le dice si está cargando, si ha fallado o si simplemente no hay nada. Diseña siempre el estado vacío, con una indicación de qué hacer ("¡Añade el primero!").
+- **No filtres ni ordenes con `sort` dentro del JSX:** `secciones.sort(…).map(…)` **muta** la prop (B6.3). Para mostrar una lista ordenada, `toSorted(…)`.
+
+</Callout>
+
+## Paso 2: para qué sirve `key`, demostrado
+
+Cuando una lista cambia (se añade, se quita o se reordena un elemento), React tiene que decidir qué elementos de la pantalla se corresponden con qué datos, para **conservar** lo que ya existe (el texto escrito en un campo, el foco, una animación) en lugar de destruirlo y crearlo de nuevo. Esa correspondencia la da la **`key`**: un identificador **único y estable** de cada elemento.
+
+Para verlo, crea `src/components/listas/TareasConNotas.tsx`. Pinta la misma lista de tareas dos veces, cada tarea con un campo para escribir una nota: una lista usa el **índice** como `key` y la otra, el **`id`** de la tarea:
+
+```tsx
+// Archivo: src/components/listas/TareasConNotas.tsx
+// La misma lista dos veces: con key={índice} y con key={tarea.id}
+import { useState } from "react";
+
+interface Tarea {
+  id: string;
+  titulo: string;
+}
+
+const INICIALES: Tarea[] = [
+  { id: "t1", titulo: "Correr 5 km" },
+  { id: "t2", titulo: "Leer B6.4" },
+  { id: "t3", titulo: "Preparar la comida" },
+];
+
+function Lista({ usarIndice }: { usarIndice: boolean }) {
+  const [tareas, setTareas] = useState(INICIALES);
+  const quitar = (id: string) => setTareas((actuales) => actuales.filter((t) => t.id !== id));
+
+  return (
+    <ul data-lista={usarIndice ? "indice" : "id"}>
+      {tareas.map((tarea, indice) => (
+        <li key={usarIndice ? indice : tarea.id}>
+          <span className="titulo">{tarea.titulo}</span>{" "}
+          <input placeholder="Nota" aria-label={`Nota de ${tarea.titulo}`} /> {/* no controlado: su texto lo guarda el DOM */}
+          <button onClick={() => quitar(tarea.id)}>Quitar</button>
         </li>
       ))}
     </ul>
   );
 }
-```
 
-`map` devuelve un array de elementos JSX, y React sabe mostrar arrays.
-
-## `key`: identidad en una lista
-
-Cada elemento de una lista necesita una prop `key` **única y estable**. Sin ella, React avisa en la consola:
-
-```text
-Each child in a list should have a unique "key" prop.
-```
-
-React usa la `key` para saber **qué elemento es cuál** entre un render y el siguiente. Si añades, quitas o reordenas, la `key` le permite conservar el estado de cada elemento y tocar solo lo que cambió.
-
-### Por qué no el índice
-
-```tsx
-{
-  tareas.map((t, i) => <TareaEditable key={i} tarea={t} />);
-} // ❌ si la lista cambia de orden
-{
-  tareas.map((t) => <TareaEditable key={t.id} tarea={t} />);
-} // ✅
-```
-
-Si borras la primera tarea, todas se desplazan una posición: la tarea que antes tenía `key={1}` ahora tiene `key={0}`. React cree que es **la misma** que antes ocupaba la posición 0 y le asigna su estado interno (lo que estabas escribiendo en ella, por ejemplo). Resultado: el texto aparece en la tarea equivocada.
-
-Usa un identificador del dato: el `id` de la base de datos, el `sectionId` (`B1.3`)… El índice solo es aceptable si la lista nunca cambia de orden ni de tamaño.
-
-## Renderizado condicional
-
-### Ternario: una cosa u otra
-
-```tsx
-<span>{s.leida ? "Leída" : "Pendiente"}</span>
-```
-
-### `&&`: algo o nada
-
-```tsx
-{
-  error && <p role="alert">{error}</p>;
+export function TareasConNotas() {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+      <div>
+        <h3>key = índice</h3>
+        <Lista usarIndice />
+      </div>
+      <div>
+        <h3>key = tarea.id</h3>
+        <Lista usarIndice={false} />
+      </div>
+    </div>
+  );
 }
 ```
 
-Si `error` es `null` o una cadena vacía, no se muestra nada.
+En la página, escribe en cada campo de **las dos listas** la nota de su tarea (por ejemplo, `nota de «Correr 5 km»` junto a "Correr 5 km") y pulsa **"Quitar"** en la primera tarea de cada lista. Resultado:
 
-<Callout type="warning">
-  Cuidado con los números: `{secciones.length && <Lista />}` muestra un **0** cuando la lista está
-  vacía, porque `0` es un valor que React sí pinta. Usa una comparación explícita: `
-  {secciones.length > 0 && <Lista />}`.
-</Callout>
+```text
+key=indice tras quitar «Correr 5 km»: [
+  'Leer B6.4 → nota de «Correr 5 km»',
+  'Preparar la comida → nota de «Leer B6.4»'
+]
+key=id tras quitar «Correr 5 km»: [
+  'Leer B6.4 → nota de «Leer B6.4»',
+  'Preparar la comida → nota de «Preparar la comida»'
+]
+```
 
-### Retorno temprano: casos especiales primero
+**Con el índice, las notas se han desplazado**: "Leer B6.4" tiene ahora la nota de "Correr 5 km". Por qué:
 
-Cuando un caso cambia todo el componente, sal antes del `return` principal:
+1. Antes de quitar, las `key` eran `0`, `1` y `2`. Después de quitar la primera tarea, la lista tiene dos elementos, con `key` `0` y `1`.
+2. React compara: "el elemento `0` sigue existiendo, el `1` también, el `2` ha desaparecido". Así que **conserva los dos primeros `<li>` (con sus campos y lo que tenían escrito)** y elimina el tercero.
+3. Pero ahora el `<li>` con `key` `0` muestra "Leer B6.4"… con el campo que antes era de "Correr 5 km".
+
+Con `key={tarea.id}`, React sabe que ha desaparecido **`t1`** y elimina exactamente ese `<li>`, con su campo. Las demás notas siguen con su tarea.
+
+Si olvidas la `key`, React avisa. Crea `src/components/listas/SinKey.tsx`:
 
 ```tsx
-export function ListaSecciones({ secciones }: { secciones: Seccion[] }) {
-  if (secciones.length === 0) {
-    return <p className="text-muted">Este curso aún no tiene secciones.</p>;
-  }
-
+// Archivo: src/components/listas/SinKey.tsx
+export function SinKey() {
+  const dias = ["lunes", "martes", "miércoles"];
   return (
     <ul>
-      {secciones.map((s) => (
-        <li key={s.id}>{s.titulo}</li>
+      {dias.map((dia) => (
+        <li>{dia}</li>
       ))}
     </ul>
   );
 }
 ```
 
-### Variables antes del `return`
+En la consola del navegador (y en la del servidor de desarrollo):
 
-Para lógica más compleja, calcula fuera del JSX:
-
-```tsx
-const leidas = secciones.filter((s) => s.leida).length;
-let mensaje: string;
-if (leidas === 0) mensaje = "Empieza por la primera sección";
-else if (leidas === secciones.length) mensaje = "¡Curso completado!";
-else mensaje = `Llevas ${leidas} de ${secciones.length}`;
-
-return <p>{mensaje}</p>;
+```text
+Each child in a list should have a unique "key" prop.
 ```
 
-## Estados de carga, vacío y error
+<Callout type="risk">
 
-Los cuatro estados que toda lista que viene de un servidor debe contemplar:
+- **El índice como `key` solo es seguro si la lista nunca se reordena, ni se filtra, ni se le quitan o insertan elementos en medio.** Como casi nunca puedes garantizarlo, usa siempre un identificador del dato: el `_id` de MongoDB (como texto), un código (`"B6.4"`), o un `crypto.randomUUID()` generado **al crear** el elemento.
+- **Nunca generes la `key` al pintar** (`key={Math.random()}` o `key={crypto.randomUUID()}` dentro del `map`): en cada render serían claves nuevas, y React destruiría y volvería a crear todos los elementos, perdiendo el foco y lo escrito en cada actualización.
+- **Las `key` solo tienen que ser únicas entre hermanos:** dos listas distintas pueden usar las mismas. Y la `key` no llega al componente como prop: si la necesitas dentro, pásala también con otro nombre (`id={tarea.id}`).
+- **TypeScript no detecta la falta de `key`:** `SinKey` compila sin errores. Solo el aviso en la consola te lo dice, así que tenla abierta mientras desarrollas.
+
+</Callout>
+
+## Paso 3: renderizado condicional y el `0` fantasma
+
+Hay tres formas de mostrar algo "solo si…":
+
+| Forma                    | Cuándo usarla                                        | Ejemplo                                         |
+| ------------------------ | ---------------------------------------------------- | ----------------------------------------------- |
+| **Retorno temprano**     | El componente entero cambia (vacío, cargando, error) | `if (lista.length === 0) return <p>Vacío</p>;`  |
+| **Ternario** `a ? b : c` | Mostrar una cosa **u otra**                          | `{hecha ? "✓" : "○"}`                           |
+| **`&&`**                 | Mostrar algo **o nada**                              | `{completado && <strong>¡Completado!</strong>}` |
+
+`&&` tiene una trampa. Crea `src/components/listas/CeroFantasma.tsx`:
 
 ```tsx
-type Estado =
-  | { status: "loading" }
-  | { status: "error"; mensaje: string }
-  | { status: "ok"; secciones: Seccion[] };
-
-function Contenido({ estado }: { estado: Estado }) {
-  if (estado.status === "loading") return <p>Cargando…</p>;
-  if (estado.status === "error") return <p role="alert">{estado.mensaje}</p>;
-  if (estado.secciones.length === 0) return <p>No hay secciones.</p>;
-  return <ListaSecciones secciones={estado.secciones} />;
+// Archivo: src/components/listas/CeroFantasma.tsx
+// && con un número: si vale 0, React pinta el 0
+export function CeroFantasma({ pendientes }: { pendientes: number }) {
+  return (
+    <div>
+      <p id="mal">Mal: {pendientes && <strong>Tienes {pendientes} pendientes</strong>}</p>
+      <p id="bien">Bien: {pendientes > 0 && <strong>Tienes {pendientes} pendientes</strong>}</p>
+      <p id="ternario">Ternario: {pendientes > 0 ? `Tienes ${pendientes} pendientes` : "Nada pendiente"}</p>
+    </div>
+  );
 }
 ```
 
-Es la unión discriminada del curso B1.6 aplicada a la interfaz.
+Con `pendientes={0}`, en pantalla:
 
-## Filtrar y ordenar antes de mostrar
-
-`map` puede ir encadenado con `filter` y `sort` (sobre una **copia**, porque `sort` modifica el array original):
-
-```tsx
-const pendientes = secciones
-  .filter((s) => !s.leida)
-  .toSorted((a, b) => a.titulo.localeCompare(b.titulo, "es"));
+```text
+Mal: 0
+Bien:
+Ternario: Nada pendiente
 ```
 
-`toSorted` devuelve un array nuevo sin tocar el original (si tu entorno no lo tiene, usa `[...secciones].sort(…)`).
+**Aparece un `0` suelto.** En JavaScript, `a && b` devuelve `a` si `a` es "falso". Con `pendientes = 0`, la expresión `{pendientes && <strong>…</strong>}` vale **`0`**, y React pinta los números (aunque no pinta `false`, `null` ni `undefined`). Con `pendientes > 0 && …`, el lado izquierdo es un booleano (`false`), y `false` no se pinta.
 
-## Errores comunes
+La regla: **el lado izquierdo de `&&` debe ser siempre un booleano**. Compara (`> 0`, `!== undefined`, `.length > 0`) o convierte con `Boolean(…)`.
 
-- **Olvidar la `key`** o usar el índice en listas que cambian.
-- **`key` repetidas**: dos elementos con la misma `key` confunden a React.
-- **`{lista.length && …}`** que pinta un 0.
-- **`sort` directamente sobre el estado o las props**: los muta.
-- **No contemplar el estado vacío.**
+<Callout type="risk">
+
+- **El `0` fantasma es frecuente con `.length`:** `{tareas.length && <Lista … />}` pinta un `0` cuando la lista está vacía. Escribe `{tareas.length > 0 && …}`.
+- **Los ternarios anidados se vuelven ilegibles:** `a ? b : c ? d : e` es difícil de leer y de mantener. Si hay más de dos casos, usa un retorno temprano por caso o extrae un componente pequeño con su propio `if`.
+- **Un texto vacío también se pinta como nada:** `{nota && <p>{nota}</p>}` con `nota = ""` no pinta nada (`""` es falso), lo cual suele ser lo que quieres. Pero con números (`0`) no: es la asimetría que hay que recordar.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea una lista de tareas con estado: añadir desde un input, marcar como hecha y borrar. 2. Usa
-  como `key` un id generado con `crypto.randomUUID()` al crear cada tarea. 3. Cambia la `key` al
-  índice, borra la primera tarea mientras escribes en otra y observa el error; vuelve al id. 4.
-  Muestra un mensaje cuando la lista esté vacía y un contador "N pendientes". 5. Añade un filtro
-  "Todas / Pendientes / Hechas".
+
+1. Crea `src/components/listas/ListaTareas.tsx`: un campo y un botón "Añadir" (que también funcione con Enter), una lista de tareas con una casilla para marcarlas como hechas (tachadas) y un botón "Borrar" en cada una.
+2. Cuando no haya tareas, muestra "No tienes tareas. ¡Añade la primera!".
+3. Debajo de la lista, muestra cuántas quedan pendientes (con el singular y el plural correctos) o "¡Todo hecho!".
+4. El botón "Añadir" debe estar deshabilitado si el campo está vacío o solo tiene espacios.
+5. Úsala en `src/pages/ejercicio-b64.astro`.
+
+</Callout>
+
+Solución. `src/components/listas/ListaTareas.tsx`:
+
+```tsx
+// Archivo: src/components/listas/ListaTareas.tsx
+import { useState, type FormEvent } from "react";
+
+interface Tarea {
+  id: string;
+  titulo: string;
+  hecha: boolean;
+}
+
+export function ListaTareas() {
+  const [tareas, setTareas] = useState<Tarea[]>([]);
+  const [nueva, setNueva] = useState("");
+
+  function anadir(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault(); // sin esto, el formulario recargaría la página
+    const titulo = nueva.trim();
+    if (titulo === "") return;
+    setTareas((actuales) => [...actuales, { id: crypto.randomUUID(), titulo, hecha: false }]);
+    setNueva("");
+  }
+
+  const alternar = (id: string) =>
+    setTareas((actuales) => actuales.map((t) => (t.id === id ? { ...t, hecha: !t.hecha } : t)));
+
+  const borrar = (id: string) => setTareas((actuales) => actuales.filter((t) => t.id !== id));
+
+  const pendientes = tareas.filter((t) => !t.hecha).length;
+
+  return (
+    <section className="tarjeta">
+      <h2 style={{ marginTop: 0 }}>Tareas de hoy</h2>
+      <form onSubmit={anadir}>
+        <label htmlFor="nueva-tarea">Nueva tarea: </label>
+        <input id="nueva-tarea" value={nueva} onChange={(e) => setNueva(e.target.value)} maxLength={80} />{" "}
+        <button type="submit" disabled={nueva.trim() === ""}>
+          Añadir
+        </button>
+      </form>
+
+      {tareas.length === 0 ? (
+        <p id="vacia">No tienes tareas. ¡Añade la primera!</p>
+      ) : (
+        <>
+          <ul id="lista-tareas" style={{ paddingLeft: 0, listStyle: "none" }}>
+            {tareas.map((tarea) => (
+              <li key={tarea.id}>
+                <label style={{ textDecoration: tarea.hecha ? "line-through" : "none" }}>
+                  <input type="checkbox" checked={tarea.hecha} onChange={() => alternar(tarea.id)} /> {tarea.titulo}
+                </label>{" "}
+                <button onClick={() => borrar(tarea.id)} aria-label={`Borrar ${tarea.titulo}`}>
+                  Borrar
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p id="resumen">{pendientes > 0 ? `${pendientes} pendiente${pendientes === 1 ? "" : "s"}` : "¡Todo hecho!"}</p>
+        </>
+      )}
+    </section>
+  );
+}
+```
+
+`src/pages/ejercicio-b64.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-b64.astro
+import Base from "../layouts/Base.astro";
+import { ListaTareas } from "../components/listas/ListaTareas";
+---
+
+<Base titulo="Ejercicio B6.4">
+  <ListaTareas client:load />
+</Base>
+```
+
+Comprobado en el navegador, paso a paso:
+
+```text
+Inicio                     → — · No tienes tareas. ¡Añade la primera! · Añadir deshabilitado
+Solo espacios              → — · No tienes tareas. ¡Añade la primera! · Añadir deshabilitado
+Tres añadidas              → [ ] Correr 5 km | [ ] Leer B6.4 | [ ] Beber 8 vasos · 3 pendientes · Añadir deshabilitado
+Marcar «Leer B6.4»         → [ ] Correr 5 km | [x] Leer B6.4 | [ ] Beber 8 vasos · 2 pendientes · Añadir deshabilitado
+Borrar «Correr 5 km»       → [x] Leer B6.4 | [ ] Beber 8 vasos · 1 pendiente · Añadir deshabilitado
+Marcar «Beber 8 vasos»     → [x] Leer B6.4 | [x] Beber 8 vasos · ¡Todo hecho! · Añadir deshabilitado
+Borrar las dos             → — · No tienes tareas. ¡Añade la primera! · Añadir deshabilitado
+```
+
+(El botón "Añadir" aparece deshabilitado en todas las líneas porque se comprueba después de cada acción, cuando el campo ya se ha vaciado).
+
+Las piezas, con lo aprendido en las secciones anteriores:
+
+- **Un `<form>` con `onSubmit`** hace que Enter y el botón `type="submit"` ejecuten lo mismo. `evento.preventDefault()` evita que el navegador recargue la página (B6.5).
+- **`crypto.randomUUID()`** genera el `id` **una vez, al crear** la tarea: es la `key` estable del Paso 2.
+- **Las tres operaciones son inmutables** (B6.3): añadir con `[...actuales, nueva]`, alternar con `map` + `{ ...t, hecha: !t.hecha }`, y borrar con `filter`. Todas con la forma funcional, `setTareas((actuales) => …)`.
+- **`pendientes` se calcula**, no se guarda: se deduce de `tareas` en cada render.
+- **El ternario** elige entre la lista y el mensaje vacío; dentro, otro ternario elige entre "N pendientes" y "¡Todo hecho!".
+
+<Callout type="risk">
+
+- **`crypto.randomUUID()` solo existe en contextos seguros:** HTTPS o `localhost`. Si abres tu servidor de desarrollo desde el móvil con la IP de tu Mac (`http://192.168.1.20:4321`), fallará con `crypto.randomUUID is not a function`. En producción (HTTPS) no hay problema.
+- **Un `<label>` que envuelve la casilla** hace que un clic en el texto también la marque, y que los lectores de pantalla la anuncien con su texto. Es mejor que una casilla suelta con el texto al lado.
+- **Estas tareas solo existen en el navegador:** al recargar, desaparecen. En una app real, cada acción llamaría a la API (B6.6) y el `id` vendría de la base de datos.
+
 </Callout>
 
 <Callout type="mastery">
-  Puedes explicar qué falla si usas el índice del array como `key` al reordenar, y manejas sin dudar
-  los estados de carga, vacío y error.
+
+Explicas qué falla si usas el índice del array como `key` al reordenar o quitar elementos: React asocia cada elemento de la pantalla al dato por su `key`, y con el índice, al cambiar las posiciones, el estado de un elemento (como el texto de un campo) pasa a otro. Usas identificadores estables, eliges entre retorno temprano, ternario y `&&`, y pones siempre un booleano a la izquierda de `&&`.
+
 </Callout>
 
 ## Resumen
 
-- `map` convierte datos en elementos; cada uno necesita una `key` única y estable.
-- La `key` da identidad: con el índice, el estado se mezcla al reordenar.
-- Ternario para "esto o aquello", `&&` para "esto o nada", retorno temprano para casos especiales.
-- `{n && …}` pinta un 0: compara explícitamente.
-- Contempla siempre los estados de carga, vacío y error.
+- Las listas se pintan con `map`, que convierte datos en elementos; el estado vacío se resuelve con un retorno temprano o un ternario.
+- `key` asocia cada elemento de la pantalla a su dato. Con el índice, al quitar uno, los campos y su texto se desplazan al elemento equivocado. Usa un `id` estable, generado al crear el dato.
+- React avisa si falta la `key` (en la consola, no en TypeScript); nunca la generes al pintar.
+- Retorno temprano para casos completos, ternario para "esto o aquello", `&&` para "esto o nada".
+- `{0 && …}` pinta un `0`: el lado izquierdo de `&&` siempre booleano (`> 0`, `.length > 0`).
