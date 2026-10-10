@@ -4,158 +4,379 @@ course: "B7"
 title: "Filosofía utility-first y configuración v4"
 order: 1
 minutes: 60
-summary: "Por qué Tailwind usa clases de utilidad, cómo se configura la versión 4 desde CSS y qué cambió respecto a la versión 3."
+summary: "Creas un proyecto Astro con Tailwind v4, comparas CSS semántico con utilidades, defines tu tema en @theme, miras el CSS que genera Tailwind y provocas la trampa de las clases construidas con texto."
 ---
 
-Usas Tailwind v4 en tus proyectos, pero gran parte de lo que circula por internet sigue siendo de la versión 3: archivos `tailwind.config.js`, `bg-opacity-50`, `@tailwind base`… y no funciona igual. En este curso vas a dominar Tailwind v4 desde su lógica, empezando por cómo se configura de verdad hoy.
+Tailwind CSS es la forma de escribir estilos que usan esta plataforma y casi todos tus proyectos: en lugar de inventar nombres de clase y escribir sus reglas en un archivo aparte, pones en el HTML **clases pequeñas que hacen una sola cosa** (`p-6`, `rounded-xl`, `bg-white`). La versión 4 cambió por completo la configuración: ya no hay `tailwind.config.js`, todo se configura en CSS. En esta sección vas a crear un proyecto desde cero, vas a comparar las dos formas de escribir estilos, vas a definir tu propio tema, vas a abrir **el CSS que genera Tailwind** para entender qué hace por dentro y vas a provocar la trampa que más confunde a todo el mundo: las clases que "no existen" porque construiste su nombre con texto.
 
-## Utility-first: estilos con clases pequeñas
+**Lo que tendrás al terminar:** un proyecto `tw-lab` (lo usarás en todo el curso B7) con Tailwind v4, un tema propio con colores y fuentes, y la explicación de por qué a veces una clase "no funciona".
 
-Tailwind no te da componentes (`.btn`, `.card`). Te da **utilidades**: clases que hacen una sola cosa.
+**Requisitos:** Node.js 22.12 o superior y CSS básico (selectores, propiedades, `margin`, `padding`, `display`).
 
-```html
-<!-- CSS tradicional -->
-<button class="btn-primario">Guardar</button>
-<style>
-  .btn-primario {
-    background: #0f766e;
-    color: white;
-    padding: 0.5rem 1.25rem;
-    border-radius: 0.75rem;
-  }
-</style>
-
-<!-- Tailwind -->
-<button class="rounded-xl bg-accent-strong px-5 py-2 text-white">Guardar</button>
-```
-
-¿Por qué funciona mejor de lo que parece?
-
-- **No inventas nombres** (`.btn-primario`, `.btn-primario-grande`…).
-- **El estilo está donde está el elemento**: al leer el componente sabes cómo se ve.
-- **El CSS no crece sin control**: las mismas utilidades se reutilizan en todo el proyecto, y Tailwind solo genera las que usas.
-- **Valores coherentes**: `p-4` siempre es lo mismo; no hay 37 márgenes ligeramente distintos.
-
-El precio son las listas de clases largas. Se resuelven extrayendo **componentes** (sección B7.5), no volviendo a las clases semánticas.
-
-## Instalación en Astro (v4)
-
-En Tailwind v4 no hay `tailwind.config.js` ni PostCSS que configurar. Con Astro y Vite:
+## Paso 1: crear el proyecto con Tailwind v4
 
 ```bash
-npm i tailwindcss @tailwindcss/vite
+npm create astro@latest tw-lab -- --template minimal --install --no-git --yes
+cd tw-lab
+npx astro add tailwind --yes
+npm install @fontsource-variable/inter
+npm install --save-dev @astrojs/check typescript @types/node
+code .
 ```
 
-```js
-// astro.config.mjs
-import { defineConfig } from "astro/config";
-import tailwindcss from "@tailwindcss/vite";
+`npx astro add tailwind` instala `tailwindcss` y `@tailwindcss/vite`, y deja así `astro.config.mjs`:
 
+```js
+// @ts-check
+import { defineConfig } from 'astro/config';
+
+import tailwindcss from '@tailwindcss/vite';
+
+// https://astro.build/config
 export default defineConfig({
-  vite: { plugins: [tailwindcss()] },
+  vite: {
+    plugins: [tailwindcss()]
+  }
 });
 ```
 
-```css
-/* src/styles/global.css */
-@import "tailwindcss";
-```
+En Tailwind v4, la integración es un **plugin de Vite** (el compilador que usa Astro), no una integración de Astro. También crea `src/styles/global.css` con una sola línea, `@import "tailwindcss";`, y te recuerda que hay que importar ese archivo en un layout. Instala también la **extensión _Tailwind CSS IntelliSense_** en VS Code: autocompleta las clases, muestra al pasar el ratón el CSS que genera cada una y avisa de clases que se contradicen.
 
-Importa `global.css` en tu layout y listo.
+<Callout type="risk">
 
-## La configuración vive en CSS: `@theme`
+- **Los tutoriales de Tailwind 3 ya no sirven tal cual:** si ves `tailwind.config.js`, `@tailwind base;` o `npx tailwindcss init`, es la versión 3. En v4 no existen. La mayoría de las **clases** siguen siendo las mismas, pero la configuración es completamente distinta.
+- **El CSS de Tailwind solo funciona si lo importas:** sin `import "../styles/global.css"` en un layout, las clases están en el HTML pero no hay ninguna regla CSS detrás, y todo se ve sin estilos.
 
-Los colores, fuentes, espaciados y demás _tokens_ se definen con **variables CSS** dentro de `@theme`. Cada variable genera sus utilidades:
-
-```css
-@import "tailwindcss";
-
-@theme {
-  --color-accent: #0d9488; /* → bg-accent, text-accent, border-accent… */
-  --font-serif: "Source Serif 4 Variable", Georgia, serif; /* → font-serif */
-  --breakpoint-3xl: 120rem; /* → 3xl:… */
-}
-```
-
-El prefijo de la variable decide qué utilidades crea: `--color-*` para colores, `--font-*` para familias, `--breakpoint-*` para _breakpoints_, `--spacing` para la escala de espaciado…
-
-Y como son variables CSS de verdad, puedes usarlas en tu propio CSS: `color: var(--color-accent)`.
-
-### `@theme inline` y los temas claro/oscuro
-
-Esta plataforma define sus colores como variables normales que cambian con el tema, y luego las conecta con Tailwind usando `@theme inline`:
-
-```css
-:root {
-  --surface: #eaedf2;
-}
-[data-theme="dark"] {
-  --surface: #161b22;
-}
-
-@theme inline {
-  --color-surface: var(--surface); /* bg-surface usa var(--surface) */
-}
-```
-
-`inline` hace que la utilidad use directamente `var(--surface)`, así que cambia sola al cambiar de tema. Lo verás a fondo en el curso I7.
-
-## Detección de clases y `@source`
-
-Tailwind escanea tus archivos y genera CSS **solo** para las clases que encuentra. En v4 lo hace automáticamente (ignora `node_modules` y lo que esté en `.gitignore`). Si una librería trae clases que también quieres generar, añade su carpeta:
-
-```css
-@source "../node_modules/mi-libreria-ui";
-```
-
-<Callout type="warning">
-  Tailwind busca clases **completas** en el texto de tus archivos. Si las construyes a trozos (`` `bg-${color}-500` ``), no las encuentra y no las genera. Escribe siempre la clase entera, por ejemplo con un objeto: `{ verde: "bg-green-500", rojo: "bg-red-500" }[color]`.
 </Callout>
 
-## Qué cambió respecto a v3
+## Paso 2: el tema, en CSS
 
-| v3                                                           | v4                                 |
-| ------------------------------------------------------------ | ---------------------------------- |
-| `tailwind.config.js`                                         | `@theme` en el CSS                 |
-| `@tailwind base; @tailwind components; @tailwind utilities;` | `@import "tailwindcss";`           |
-| `content: [...]`                                             | Detección automática (+ `@source`) |
-| `bg-opacity-50`                                              | `bg-black/50` (opacidad con barra) |
-| `shadow-sm` / `shadow`                                       | `shadow-xs` / `shadow-sm`          |
-| `rounded-sm` / `rounded`                                     | `rounded-xs` / `rounded-sm`        |
-| `outline-none` (para ocultar el contorno)                    | `outline-hidden`                   |
-| `darkMode: "class"`                                          | `@custom-variant dark (…)`         |
+Sustituye `src/styles/global.css` por:
 
-Si copias un ejemplo y "no hace nada", revisa esta tabla.
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
 
-## Tu editor
+@theme {
+  --color-accent: #0d9488;
+  --color-accent-strong: #0f766e;
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+}
+```
 
-Instala la extensión **Tailwind CSS IntelliSense** de VS Code: autocompleta clases (incluidos tus `--color-*`), muestra el CSS que genera cada una al pasar el ratón y avisa de conflictos. Y con `prettier-plugin-tailwindcss` (configurado en este proyecto), Prettier ordena las clases automáticamente al guardar.
+- **`@import "tailwindcss"`** trae todo Tailwind: los estilos base (que eliminan los márgenes por defecto del navegador, entre otras cosas) y el generador de utilidades.
+- **`@import "@fontsource-variable/inter"`** incluye la fuente Inter desde tu propio proyecto, sin depender de Google Fonts.
+- **`@theme`** es donde vive tu tema. Cada variable sigue un **espacio de nombres** que Tailwind entiende: una variable `--color-accent` crea **todas** las utilidades de color con ese nombre (`bg-accent`, `text-accent`, `border-accent`, `ring-accent`…); `--font-sans` cambia la fuente de `font-sans`.
 
-## Errores comunes
+Crea el layout que importa el CSS, `src/layouts/Layout.astro`:
 
-- **Seguir tutoriales de v3** y crear un `tailwind.config.js` que v4 no lee.
-- **Construir nombres de clase dinámicamente**: no se generan.
-- **`bg-opacity-*`**: ya no existe; usa `bg-color/50`.
-- **Definir colores sueltos** (`bg-[#0d9488]`) por todo el código en lugar de un _token_ en `@theme`.
+```astro
+---
+// Archivo: src/layouts/Layout.astro
+import "../styles/global.css";
+
+interface Props {
+  titulo: string;
+}
+const { titulo } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · Tailwind lab</title>
+  </head>
+  <body class="bg-slate-50 font-sans text-slate-900">
+    <slot />
+  </body>
+</html>
+```
+
+Esta plataforma tiene un `@theme` más largo (en `src/styles/global.css`): define sus colores (`accent`, `info`, `warning`, `danger`…) como variables que cambian entre el modo claro y el oscuro, y sus tres fuentes (Inter, Source Serif 4 y JetBrains Mono). Lo verás a fondo en el curso I7.
+
+<Callout type="risk">
+
+- **El nombre de la variable decide la utilidad:** `--color-accent` crea `bg-accent`; `--accent` (sin el espacio de nombres `color-`) no crea nada. Los espacios de nombres principales son `--color-*`, `--font-*`, `--text-*`, `--spacing`, `--radius-*`, `--shadow-*` y `--breakpoint-*`.
+- **`@theme` añade, no sustituye:** tu `--color-accent` se suma a toda la paleta de Tailwind (`slate`, `emerald`, `rose`…). Si quisieras **solo** tus colores, empezarías con `--color-*: initial;` dentro de `@theme`.
+
+</Callout>
+
+## Paso 3: semántico frente a utilidades
+
+Sustituye `src/pages/index.astro` por esta página, con la misma tarjeta hecha de las dos formas:
+
+```astro
+---
+// Archivo: src/pages/index.astro
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout titulo="B7.1 · Utility-first">
+  <main class="mx-auto max-w-2xl p-8">
+    <h1 class="text-3xl font-bold">La misma tarjeta, dos formas</h1>
+
+    <!-- 1. CSS "semántico": un nombre de clase y sus reglas en otro sitio -->
+    <article class="tarjeta-curso">
+      <h2 class="tarjeta-curso__titulo">TypeScript desde cero</h2>
+      <p class="tarjeta-curso__texto">3 de 8 secciones leídas</p>
+    </article>
+
+    <!-- 2. Utilidades: cada clase hace una sola cosa, y se leen en el propio HTML -->
+    <article class="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 class="text-xl font-semibold text-accent-strong">TypeScript desde cero</h2>
+      <p class="mt-2 text-slate-600">3 de 8 secciones leídas</p>
+      <a href="#" class="mt-4 inline-block rounded-lg bg-accent px-4 py-2 font-medium text-white">Continuar</a>
+    </article>
+  </main>
+</Layout>
+
+<style>
+  .tarjeta-curso {
+    margin-top: 1.5rem;
+    padding: 1.5rem;
+    border: 1px solid #e2e8f0;
+    border-radius: 0.75rem;
+    background: white;
+  }
+  .tarjeta-curso__titulo {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #0f766e;
+  }
+  .tarjeta-curso__texto {
+    margin-top: 0.5rem;
+    color: #475569;
+  }
+</style>
+```
+
+Arranca con `npm run dev`. Las dos tarjetas se ven prácticamente iguales. La diferencia está en cómo se trabaja con ellas:
+
+|                        | CSS semántico                                  | Utilidades                                                     |
+| ---------------------- | ---------------------------------------------- | -------------------------------------------------------------- |
+| Nombres                | Hay que inventarlos (`tarjeta-curso__titulo`)  | No hay que inventar nada                                       |
+| Dónde se lee el estilo | En otro bloque o archivo                       | En el propio elemento                                          |
+| Cambiar un componente  | Riesgo de romper otros que usen la misma clase | Solo afecta a ese elemento                                     |
+| Tamaño del CSS         | Crece con cada componente nuevo                | Las utilidades se reutilizan: crece muy poco                   |
+| Valores                | Cualquiera (`margin-top: 13px`)                | Una escala común (`mt-3`, `mt-4`): diseño más consistente      |
+| Lo malo                | Archivos de CSS que nadie se atreve a tocar    | El HTML se llena de clases; se resuelve con componentes (B7.5) |
+
+<Callout type="risk">
+
+- **Una lista larga de clases no es un problema en sí:** se lee de izquierda a derecha como una descripción del estilo. El problema real es **repetir** la misma lista en muchos sitios; la solución es un componente (B7.5), no volver a las clases semánticas.
+- **Las utilidades no sustituyen al HTML correcto:** un `<div>` con apariencia de botón sigue sin ser un botón para el teclado ni para un lector de pantalla. Usa la etiqueta adecuada (`<button>`, `<a>`, `<nav>`) y estiliza con utilidades.
+
+</Callout>
+
+## Paso 4: qué CSS genera Tailwind
+
+Compila y abre el CSS generado:
+
+```bash
+npm run build
+ls -l dist/_astro/*.css
+```
+
+El archivo pesa unos **10 KB (3 KB comprimido)**. Búscale estas reglas (con _Buscar_ en VS Code, o abriéndolo en el navegador):
+
+```css
+.bg-accent{background-color:var(--color-accent)}
+.text-accent-strong{color:var(--color-accent-strong)}
+.rounded-xl{border-radius:var(--radius-xl)}
+.p-6{padding:calc(var(--spacing) * 6)}
+```
+
+Y estas variables:
+
+```css
+--color-accent:#0d9488;
+--color-slate-600:oklch(44.6% .043 257.281);
+--font-sans:"Inter Variable", system-ui, sans-serif;
+--spacing:.25rem;
+```
+
+Lo que revela:
+
+1. **Cada utilidad es una regla mínima** que lee una variable del tema. `p-6` es `padding: calc(var(--spacing) * 6)`, es decir, 6 × 0,25 rem = **1,5 rem**. Toda la escala de espaciado sale de una sola variable.
+2. **Solo se generan las utilidades que usas.** Busca `bg-red-500`: no está, porque ninguna página la usa. Tailwind **lee tus archivos** (`.astro`, `.tsx`, `.md`…), encuentra los nombres de clase escritos en ellos y genera únicamente esas reglas. De toda la paleta de colores, el CSS solo contiene las 7 variables `--color-*` que de verdad se usan.
+3. **Los colores de Tailwind están en `oklch`**, un formato de color moderno con mejor control del brillo. Tus colores en hexadecimal (`#0d9488`) funcionan igual.
+4. **`.tarjeta-curso` no aparece en ese archivo:** los estilos del bloque `<style>` de Astro van aparte, con selectores de ámbito propio. Tailwind no los toca.
+
+<Callout type="risk">
+
+- **Tailwind no lee archivos ignorados por Git ni `node_modules`:** si usas una librería de componentes instalada con npm que trae clases de Tailwind, añade su carpeta con `@source "../../node_modules/mi-libreria";` en tu CSS. Y al revés: `@source not "../content";` excluye una carpeta. Esta plataforma lo hace con las lecciones, porque sus ejemplos de código contienen clases que no se usan en la interfaz: el CSS bajó de 69,9 KB a 62,3 KB.
+- **Tailwind no ejecuta tu código, solo lee texto:** cualquier palabra que parezca una clase (`flex`, `hidden`, `p-6`) en cualquier archivo que lea, incluso en un comentario o un texto, genera su regla. Es inofensivo, pero explica por qué a veces el CSS tiene clases "de más".
+
+</Callout>
+
+## Paso 5: la trampa de las clases construidas con texto
+
+Como Tailwind solo **lee** tus archivos, no puede saber qué clases se **construirán** al ejecutar el código. Crea `src/components/InsigniaRota.astro`:
+
+```astro
+---
+// Archivo: src/components/InsigniaRota.astro
+// ❌ El nombre de la clase se construye al ejecutar: Tailwind nunca lo ve escrito
+interface Props {
+  color: "emerald" | "amber" | "rose" | "sky";
+  texto: string;
+}
+const { color, texto } = Astro.props;
+---
+
+<span class={`rounded-full px-2 py-0.5 text-sm bg-${color}-100 text-${color}-800`}>{texto}</span>
+```
+
+Y la versión correcta, `src/components/Insignia.astro`:
+
+```astro
+---
+// Archivo: src/components/Insignia.astro
+// ✅ Los nombres completos están escritos en el código: Tailwind los encuentra
+interface Props {
+  color: "emerald" | "amber" | "rose";
+  texto: string;
+}
+const { color, texto } = Astro.props;
+
+const CLASES: Record<Props["color"], string> = {
+  emerald: "bg-emerald-100 text-emerald-800",
+  amber: "bg-amber-100 text-amber-800",
+  rose: "bg-rose-100 text-rose-800",
+};
+---
+
+<span class:list={["rounded-full px-2 py-0.5 text-sm", CLASES[color]]}>{texto}</span>
+```
+
+Úsalas en `src/pages/insignias.astro`:
+
+```astro
+---
+// Archivo: src/pages/insignias.astro
+import Layout from "../layouts/Layout.astro";
+import InsigniaRota from "../components/InsigniaRota.astro";
+import Insignia from "../components/Insignia.astro";
+---
+
+<Layout titulo="Clases dinámicas">
+  <main class="mx-auto max-w-2xl space-y-4 p-8">
+    <p>Rotas: <InsigniaRota color="emerald" texto="Completado" /> <InsigniaRota color="amber" texto="En curso" /> <InsigniaRota color="sky" texto="Nuevo" /></p>
+    <p>Bien: <Insignia color="emerald" texto="Completado" /> <Insignia color="amber" texto="En curso" /></p>
+  </main>
+</Layout>
+```
+
+Compila (`npm run build`), arranca la versión compilada con `npm run preview` y abre `http://localhost:4321/insignias`. Medido en el navegador (color de fondo de cada insignia):
+
+```text
+Completado: fondo oklch(0.95 0.052 163.051)
+En curso: fondo oklch(0.962 0.059 95.617)
+Nuevo: fondo rgba(0, 0, 0, 0)
+```
+
+Las dos primeras insignias "rotas" **se ven bien** y la de "Nuevo" **no tiene fondo**. ¿Por qué?
+
+- El HTML de las tres es correcto: `class="… bg-sky-100 text-sky-800"`. Pero en el CSS generado **no existe** `.bg-sky-100`, porque el texto `bg-sky-100` no aparece escrito en ningún archivo. Solo aparece `bg-${color}-100`.
+- Las de esmeralda y ámbar funcionan **por casualidad**: `Insignia.astro` (la buena) escribe `bg-emerald-100` y `bg-amber-100` completos, así que Tailwind las generó. Si un día borras ese componente, las insignias "rotas" dejarán de funcionar sin que hayas tocado su código.
+
+La regla: **los nombres de clase deben aparecer completos en el código**. Para elegir según una variable, usa un objeto que asocie cada valor a sus clases completas (como `CLASES`).
+
+<Callout type="risk">
+
+- **Este error no aparece en ninguna herramienta:** ni `npm run check`, ni TypeScript, ni la consola dicen nada. La única pista es un estilo que falta. Si una clase "no funciona", lo primero es comprobar si su nombre aparece completo en algún archivo.
+- **`class:list`** (Astro) y `className` con condiciones (React) son seguros siempre que las cadenas sean completas: `class:list={["p-4", leida && "bg-accent"]}` funciona, porque `bg-accent` aparece escrita.
+- **Para valores de verdad dinámicos** (un color que elige el usuario), las clases no sirven: usa una variable CSS en línea, `style={{ "--color": colorElegido }}`, y una clase que la lea, como `bg-(--color)`.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Crea un proyecto Astro nuevo y configura Tailwind v4 con `@tailwindcss/vite`. 2. Define en
-  `@theme` dos colores y una fuente, y úsalos como `bg-…`, `text-…` y `font-…`. 3. Abre el
-  `global.css` de esta plataforma y explica qué hace cada bloque (`@plugin`, `@custom-variant`,
-  `@theme inline`, `@theme`). 4. Escribe un componente que elija el color con una plantilla de texto
-  (`` `bg-${color}-500` ``), comprueba que no funciona y corrígelo con un objeto de clases
-  completas. 5. Instala Tailwind CSS IntelliSense y prueba el autocompletado de tus *tokens*.
+
+1. Añade al `@theme` de `tw-lab` los cuatro colores de las categorías del Planificador 2026 (trabajo `#0284c7`, personal `#d97706`, salud `#0d9488`, estudio `#f25c76`) y una fuente con serifa, Source Serif 4 (`npm install @fontsource-variable/source-serif-4`).
+2. Crea `src/pages/ejercicio-b71.astro` con un título en la fuente con serifa y una leyenda con un punto de color por categoría.
+3. Usa uno de los colores también como color de texto y de borde, para comprobar que se generan todas las utilidades.
+
+</Callout>
+
+Solución. `src/styles/global.css` completo:
+
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/source-serif-4";
+
+@theme {
+  --color-accent: #0d9488;
+  --color-accent-strong: #0f766e;
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+
+  /* Planificador 2026: un color por categoría */
+  --color-trabajo: #0284c7;
+  --color-personal: #d97706;
+  --color-salud: #0d9488;
+  --color-estudio: #f25c76;
+  --font-serif: "Source Serif 4 Variable", Georgia, serif;
+}
+```
+
+`src/pages/ejercicio-b71.astro`:
+
+```astro
+---
+// Archivo: src/pages/ejercicio-b71.astro
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout titulo="Ejercicio B7.1">
+  <main class="mx-auto max-w-2xl p-8">
+    <h1 class="font-serif text-4xl font-semibold">Planificador 2026</h1>
+    <p class="mt-2 text-slate-600">Leyenda de categorías</p>
+    <ul class="mt-6 space-y-2">
+      <li class="flex items-center gap-3"><span class="size-4 rounded-full bg-trabajo"></span> Trabajo</li>
+      <li class="flex items-center gap-3"><span class="size-4 rounded-full bg-personal"></span> Personal</li>
+      <li class="flex items-center gap-3"><span class="size-4 rounded-full bg-salud"></span> Salud</li>
+      <li class="flex items-center gap-3"><span class="size-4 rounded-full bg-estudio"></span> Estudio</li>
+    </ul>
+    <p class="mt-6 border-l-4 border-estudio pl-4 text-estudio">Las clases nuevas existen para todo: bg-, text-, border-…</p>
+  </main>
+</Layout>
+```
+
+Comprobado en el navegador (`npm run build` y `npm run preview`):
+
+```text
+h1: "Source Serif 4 Variable", Georgia, serif · fuente cargada: true
+Trabajo: rgb(2, 132, 199)
+Personal: rgb(217, 119, 6)
+Salud: rgb(13, 148, 136)
+Estudio: rgb(242, 92, 118)
+aviso: rgb(242, 92, 118) · borde rgb(242, 92, 118)
+```
+
+Cuatro variables `--color-*` han creado `bg-trabajo`, `text-estudio`, `border-estudio`… y `--font-serif` ha cambiado `font-serif`, sin tocar ningún otro archivo de configuración. `size-4` es la abreviatura de `w-4 h-4` (1 rem × 1 rem).
+
+<Callout type="risk">
+
+- **Los nombres del tema son parte de tu API:** si usas `bg-salud` en cincuenta sitios y un día renombras la variable a `--color-bienestar`, tendrás que cambiar los cincuenta. Elige nombres que describan el significado (`salud`, `accent`, `danger`) más que el color (`verde`), para poder cambiar el color sin cambiar el nombre.
+- **Fuentes y rendimiento:** cada familia de fuente que importas se descarga (unos 20–60 KB por familia y estilo). Importa solo las que uses. Esta plataforma, además, precarga sus fuentes principales para evitar que el texto "salte" al cargar.
+
 </Callout>
 
 <Callout type="mastery">
-  Sabes dónde se configura cada cosa en Tailwind v4 sin buscar un `tailwind.config.js` y reconoces
-  al instante un ejemplo de la versión 3.
+
+Sabes dónde se configura cada cosa en v4 sin buscar un `tailwind.config.js`: el plugin en `astro.config.mjs`, el tema en `@theme` dentro de tu CSS (con los espacios de nombres `--color-*`, `--font-*`…), y las rutas extra con `@source`. Entiendes que Tailwind genera solo las clases que **lee escritas** en tus archivos, y por eso nunca construyes nombres de clase con plantillas de texto.
+
 </Callout>
 
 ## Resumen
 
-- _Utility-first_: clases pequeñas de una sola responsabilidad, generadas solo si se usan.
-- v4 se instala con `@tailwindcss/vite` y `@import "tailwindcss"`.
-- La configuración vive en `@theme`: cada variable CSS crea sus utilidades.
-- La detección de clases es automática; escribe siempre las clases completas.
-- Muchos ejemplos de internet son de v3: revisa las diferencias.
+- Utility-first: clases pequeñas que hacen una sola cosa, escritas en el HTML, con una escala común; la repetición se resuelve con componentes.
+- Tailwind v4 se configura en CSS: `@import "tailwindcss"`, el tema en `@theme` y el plugin `@tailwindcss/vite` en Astro.
+- `--color-accent` crea `bg-accent`, `text-accent`, `border-accent`…; `--font-sans` y `--font-serif` cambian las fuentes.
+- El CSS generado solo contiene las utilidades cuyos nombres aparecen escritos en tus archivos; `@source` añade o excluye carpetas.
+- `bg-${color}-100` no se genera: usa un objeto con los nombres de clase completos.

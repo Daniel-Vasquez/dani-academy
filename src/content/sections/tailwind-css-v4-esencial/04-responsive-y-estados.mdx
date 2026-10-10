@@ -4,14 +4,18 @@ course: "B7"
 title: "Responsive y estados"
 order: 4
 minutes: 60
-summary: "Diseñar mobile-first con breakpoints y container queries, y estilizar estados como hover, focus, disabled, grupos y atributos."
+summary: "Diseñas mobile-first con breakpoints y container queries, estilizas hover, focus-visible, disabled, group, peer y atributos aria/data midiendo cada estado en Chrome, y adaptas al móvil la página de curso."
 ---
 
-Una misma página debe funcionar en un móvil de 360 px y en un monitor de 1440, y responder visualmente a lo que hace el usuario: pasar el ratón, enfocar con el teclado, desactivar un botón. En Tailwind, todo eso se hace con **variantes**: prefijos que aplican una utilidad solo en ciertas condiciones.
+Una misma página tiene que funcionar en un móvil de 360 px y en un monitor de 1440, y tiene que responder a lo que hace el usuario: pasar el ratón por encima, moverse con el teclado, pulsar un botón que todavía no está disponible. En Tailwind todo eso se resuelve con **variantes**, prefijos que aplican una utilidad solo bajo una condición: `sm:p-8` ("a partir de 640 px"), `hover:bg-accent` ("con el ratón encima"), `disabled:opacity-50` ("si está desactivado"). En esta sección vas a construir cada patrón, lo vas a **medir en Chrome** a distintos anchos y en distintos estados, y vas a terminar adaptando al móvil la página de curso de B7.3, con la misma técnica que usa esta plataforma.
 
-## Mobile-first
+**Lo que tendrás al terminar:** las páginas `/responsive` y `/estados` y una página de curso que funciona igual de bien a 360 px que a 1280 px.
 
-Las utilidades **sin prefijo** se aplican en todas las pantallas. Los prefijos de _breakpoint_ se aplican **a partir de** ese ancho:
+**Requisitos:** el proyecto `tw-lab` de B7.3.
+
+## Paso 1: mobile-first con breakpoints
+
+Las utilidades **sin prefijo** se aplican en todas las pantallas. Un prefijo de _breakpoint_ aplica la utilidad **a partir de** ese ancho:
 
 | Prefijo   | Desde           |
 | --------- | --------------- |
@@ -22,156 +26,440 @@ Las utilidades **sin prefijo** se aplican en todas las pantallas. Los prefijos d
 | `xl:`     | 80rem (1280 px) |
 | `2xl:`    | 96rem (1536 px) |
 
-```html
-<ul class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-  …
-</ul>
+Crea `src/pages/responsive.astro`:
+
+```astro
+---
+// Archivo: src/pages/responsive.astro
+import Layout from "../layouts/Layout.astro";
+const CURSOS = ["TypeScript desde cero", "Git y flujo de trabajo", "Cómo funciona la web", "Fundamentos de bases de datos", "MongoDB esencial", "React esencial"];
+---
+
+<Layout titulo="B7.4 · Responsive">
+  <header class="flex h-14 items-center justify-between border-b border-slate-200 bg-white px-4">
+    <!-- Marca abreviada por debajo de 380 px -->
+    <a href="#" id="marca" class="font-serif text-lg font-semibold">
+      <span class="min-[380px]:hidden">DA</span>
+      <span class="hidden min-[380px]:inline">Dani Academy</span>
+    </a>
+    <nav class="flex gap-1 text-sm text-slate-600 sm:gap-4">
+      <a href="#" class="px-2 py-1">Temario</a>
+      <a href="#" class="px-2 py-1">Progreso</a>
+      <a href="#" class="px-2 py-1">Cuenta</a>
+    </nav>
+  </header>
+
+  <main class="mx-auto max-w-6xl p-4 sm:p-8">
+    <!-- Mobile-first: 1 columna, 2 desde sm (640 px), 3 desde lg (1024 px) -->
+    <ul id="rejilla" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {CURSOS.map((curso, i) => (
+        <li class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <p class="text-xs font-semibold text-slate-500">B{i + 1}</p>
+          <p class="mt-1 font-medium">{curso}</p>
+        </li>
+      ))}
+    </ul>
+
+    <!-- La misma tarjeta en un hueco estrecho y en uno ancho: container queries -->
+    <div class="mt-8 grid gap-4 lg:grid-cols-[16rem_1fr]">
+      <div id="estrecho" class="@container">
+        <article class="grid gap-3 rounded-xl bg-white p-4 shadow-sm @md:grid-cols-[6rem_1fr]">
+          <div class="h-24 rounded-lg bg-accent/20"></div>
+          <div><p class="font-medium">React esencial</p><p class="text-sm text-slate-600">7 secciones</p></div>
+        </article>
+      </div>
+      <div id="ancho" class="@container">
+        <article class="grid gap-3 rounded-xl bg-white p-4 shadow-sm @md:grid-cols-[6rem_1fr]">
+          <div class="h-24 rounded-lg bg-accent/20"></div>
+          <div><p class="font-medium">React esencial</p><p class="text-sm text-slate-600">7 secciones</p></div>
+        </article>
+      </div>
+    </div>
+  </main>
+</Layout>
 ```
 
-Se lee de menor a mayor: **una columna** en móvil, dos desde 640 px, tres desde 1024 px. Por eso se llama _mobile-first_: escribes primero el estilo móvil y vas **añadiendo** cambios para pantallas mayores.
+La rejilla se lee de menor a mayor: `grid gap-4` (una columna, para todos), `sm:grid-cols-2` (dos desde 640 px) y `lg:grid-cols-3` (tres desde 1024 px). Por eso se llama _mobile-first_: escribes primero el estilo del móvil, sin prefijos, y vas **añadiendo** cambios para pantallas mayores. Medido en Chrome a cuatro anchos:
 
-<Callout type="warning">
-  `sm:` no significa "en móvil". Significa "a partir de 640 px". Para algo solo en móvil, escribe el
-  estilo sin prefijo y anúlalo después: `block lg:hidden`.
+```text
+ventana 360px → rejilla 1 col · marca "DA" · tarjeta estrecha 328px → 1 col · tarjeta ancha 328px → 1 col · scroll horizontal: false
+ventana 400px → rejilla 1 col · marca "Dani Academy" · tarjeta estrecha 368px → 1 col · tarjeta ancha 368px → 1 col · scroll horizontal: false
+ventana 700px → rejilla 2 col · marca "Dani Academy" · tarjeta estrecha 636px → 2 col · tarjeta ancha 636px → 2 col · scroll horizontal: false
+ventana 1100px → rejilla 3 col · marca "Dani Academy" · tarjeta estrecha 256px → 1 col · tarjeta ancha 764px → 2 col · scroll horizontal: false
+```
+
+- **La rejilla** pasa de 1 a 2 y a 3 columnas en los puntos previstos.
+- **La marca** usa un _breakpoint_ a medida, `min-[380px]:`: por debajo de 380 px se muestra "DA" y a partir de ahí, "Dani Academy". Es exactamente lo que hace la cabecera de esta plataforma, donde el nombre completo no dejaba sitio a la navegación en los móviles más estrechos.
+- **El relleno** cambia con el ancho: `p-4 sm:p-8` (16 px en el móvil, 32 desde 640 px), y la navegación separa más sus enlaces con `gap-1 sm:gap-4`.
+- **Ningún ancho tiene _scroll_ horizontal**, la comprobación más importante de una página _responsive_.
+
+Para probarlo tú, abre DevTools y activa el **modo dispositivo** (el icono del móvil y la tableta, o `Cmd+Shift+M` / `Ctrl+Shift+M`); puedes arrastrar el borde para ver cada cambio.
+
+<Callout type="risk">
+
+- **`sm:` no significa "en el móvil":** significa "a partir de 640 px". `sm:hidden` oculta algo en las pantallas **grandes**, no en las pequeñas. Para algo que solo se vea en el móvil: sin prefijo, y anulado después (`block lg:hidden`).
+- **Diseñar primero para escritorio sale caro:** si escribes `grid-cols-3` y luego intentas "arreglar" el móvil, acabas con `max-sm:grid-cols-1`, `max-md:…` y excepciones por todas partes. Empieza siempre por el móvil.
+- **El _scroll_ horizontal casi siempre lo causa un solo elemento:** una imagen sin `max-w-full`, un bloque de código o una palabra larga. Para encontrarlo, en la consola de DevTools: `[...document.querySelectorAll("*")].filter((e) => e.scrollWidth > innerWidth)`.
+
 </Callout>
 
-### Mostrar y ocultar
+## Paso 2: container queries
 
-```html
-<aside class="hidden lg:block">Índice lateral</aside>
-<!-- solo desde 1024 px -->
-<details class="lg:hidden">Índice desplegable</details>
-<!-- solo por debajo -->
-```
+Los _breakpoints_ miran el ancho de la **pantalla**. Pero un componente reutilizable no sabe dónde lo pondrán: la misma tarjeta puede ir en una barra lateral de 256 px o en el contenido principal. Las **_container queries_** miran el ancho del **contenedor**:
 
-Es exactamente lo que hace esta plataforma con el índice del curso.
+- **`@container`** marca un elemento como contenedor.
+- **`@md:`** aplica la utilidad cuando **ese contenedor** mide al menos 28rem (448 px), esté donde esté.
 
-### Breakpoints a medida
+En la página de muestras, la misma tarjeta (imagen y texto) aparece en dos huecos, `#estrecho` y `#ancho`. Fíjate en la última línea de la medición: con la ventana a 1100 px, la tarjeta del hueco estrecho (256 px) muestra **una columna** y la del ancho (764 px), **dos**. Con _breakpoints_ eso es imposible, porque las dos están en la misma pantalla. En Tailwind v4, las _container queries_ vienen incluidas, sin _plugins_.
 
-Para un caso puntual, un valor arbitrario:
+<Callout type="risk">
 
-```html
-<span class="min-[380px]:hidden">DA</span>
-<span class="hidden min-[380px]:inline">Dani Academy</span>
-```
+- **`@container` va en el padre, `@md:` en los hijos:** un elemento no puede responder a su propio ancho. Si pones `@container` y `@md:` en el mismo elemento, la variante no se aplica nunca.
+- **El tamaño del contenedor no puede depender de su contenido:** `@container` activa `container-type: inline-size`, y el contenedor pasa a ignorar el ancho de sus hijos al calcular el suyo. En un contenedor sin ancho propio (por ejemplo, un hijo de _flex_ sin `flex-1`), puede quedarse en 0 px.
 
-Así se abrevia la marca de la cabecera de esta plataforma en pantallas de menos de 380 px, donde no cabía la navegación.
-
-## Container queries
-
-Los _breakpoints_ miran el ancho de la **pantalla**. A veces importa el ancho del **contenedor**: la misma tarjeta puede estar en una barra lateral estrecha o en el contenido principal.
-
-```html
-<div class="@container">
-  <article class="grid gap-4 @md:grid-cols-2">…</article>
-</div>
-```
-
-`@container` marca el contenedor; `@md:` aplica cuando **ese contenedor** mide al menos 28rem, esté donde esté. En v4 vienen incluidas, sin plugins.
-
-## Estados
-
-```html
-<button
-  class="rounded-xl bg-accent-strong px-4 py-2 text-white hover:bg-accent-strong/90 focus-visible:outline-2 focus-visible:outline-offset-2 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
->
-  Marcar como leído
-</button>
-```
-
-| Variante         | Se aplica cuando…                                                     |
-| ---------------- | --------------------------------------------------------------------- |
-| `hover:`         | El ratón está encima                                                  |
-| `active:`        | Se está pulsando                                                      |
-| `focus:`         | Tiene el foco (por cualquier medio)                                   |
-| `focus-visible:` | Tiene el foco **y** el navegador cree que hay que mostrarlo (teclado) |
-| `disabled:`      | Tiene el atributo `disabled`                                          |
-
-<Callout type="tip">
-  Usa `focus-visible:` en lugar de `focus:` para los anillos de foco: aparecen al navegar con el
-  teclado, pero no al hacer clic con el ratón. Y nunca quites el contorno de foco sin poner otro:
-  quien navega con el teclado se queda a ciegas.
 </Callout>
 
-## Grupos y hermanos
+## Paso 3: estados de un botón
 
-`group` en un padre permite que los hijos reaccionen a su estado:
+Crea `src/pages/estados.astro`. Contiene todos los ejemplos de los Pasos 3 a 5:
 
-```html
-<a href="/cursos/typescript-desde-cero" class="group block rounded-2xl border p-5">
-  <h3 class="font-serif text-lg group-hover:underline">TypeScript desde cero</h3>
-  <span class="text-slate-500 group-hover:text-teal-700">Continuar →</span>
-</a>
+```astro
+---
+// Archivo: src/pages/estados.astro
+import Layout from "../layouts/Layout.astro";
+const BOTON =
+  "rounded-xl bg-accent-strong px-4 py-2 font-medium text-white transition hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-strong active:scale-95 disabled:cursor-not-allowed disabled:opacity-50";
+---
+
+<Layout titulo="B7.4 · Estados">
+  <main class="mx-auto max-w-2xl space-y-10 p-8">
+    <!-- 1. Estados de un botón -->
+    <div class="flex gap-3">
+      <button id="activo" class={BOTON}>Marcar como leído</button>
+      <button id="desactivado" class={BOTON} disabled>Guardando…</button>
+    </div>
+
+    <!-- 2. group: los hijos reaccionan al hover de toda la tarjeta -->
+    <a id="tarjeta" href="#" class="group block rounded-2xl border border-slate-200 bg-white p-5">
+      <h3 class="font-serif text-lg group-hover:underline">TypeScript desde cero</h3>
+      <span class="text-sm text-slate-500 group-hover:text-accent-strong">Continuar →</span>
+    </a>
+
+    <!-- 3. peer: un interruptor hecho con un checkbox real -->
+    <label class="flex cursor-pointer items-center gap-3">
+      <input id="interruptor" type="checkbox" class="peer sr-only" />
+      <span id="pista" class="h-6 w-11 rounded-full bg-slate-300 transition peer-checked:bg-accent peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-accent-strong"></span>
+      <span>Modo concentración</span>
+    </label>
+
+    <!-- 4. aria-current y data-*: el estado vive en el HTML -->
+    <nav class="flex gap-2 text-sm">
+      <a href="#" class="rounded-lg px-3 py-1.5 text-slate-500 aria-[current=page]:bg-slate-200 aria-[current=page]:font-medium aria-[current=page]:text-slate-900">Tipos primitivos</a>
+      <a href="#" aria-current="page" class="rounded-lg px-3 py-1.5 text-slate-500 aria-[current=page]:bg-slate-200 aria-[current=page]:font-medium aria-[current=page]:text-slate-900">Uniones y narrowing</a>
+    </nav>
+
+    <ul id="lista" class="space-y-2">
+      <li data-read="true" class="group flex items-center gap-3">
+        <span class="flex size-5 shrink-0 items-center justify-center rounded-full border border-slate-300 text-xs group-data-[read=true]:border-accent group-data-[read=true]:bg-accent group-data-[read=true]:text-white">
+          <span class="group-data-[read=true]:hidden">1</span>
+          <span class="hidden group-data-[read=true]:inline">✓</span>
+        </span>
+        Qué es TypeScript
+      </li>
+      <li data-read="false" class="group flex items-center gap-3">
+        <span class="flex size-5 shrink-0 items-center justify-center rounded-full border border-slate-300 text-xs group-data-[read=true]:border-accent group-data-[read=true]:bg-accent group-data-[read=true]:text-white">
+          <span class="group-data-[read=true]:hidden">2</span>
+          <span class="hidden group-data-[read=true]:inline">✓</span>
+        </span>
+        Tipos primitivos e inferencia
+      </li>
+    </ul>
+    <button id="marcar" class={BOTON}>Marcar la 2 como leída</button>
+  </main>
+</Layout>
+
+<script>
+  // El script solo cambia un atributo; las variantes group-data-[read=true]: hacen el resto
+  document.querySelector("#marcar")?.addEventListener("click", () => {
+    document.querySelector('#lista li[data-read="false"]')?.setAttribute("data-read", "true");
+  });
+</script>
 ```
 
-`peer` hace lo mismo con un **hermano anterior**:
+Los dos botones comparten la cadena `BOTON`, guardada en una constante. Cada variante se aplica en una situación:
 
-```html
-<label>
-  <input type="checkbox" class="peer sr-only" />
-  <span class="rounded-full bg-slate-300 peer-checked:bg-teal-600">…</span>
-</label>
+| Variante         | Se aplica cuando…                                                                            |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `hover:`         | El ratón está encima                                                                         |
+| `active:`        | Se está pulsando                                                                             |
+| `focus:`         | Tiene el foco (por cualquier medio)                                                          |
+| `focus-visible:` | Tiene el foco **y** el navegador considera que hay que mostrarlo (al navegar con el teclado) |
+| `disabled:`      | Tiene el atributo `disabled`                                                                 |
+
+Medido en Chrome, simulando ratón y teclado:
+
+```text
+botón en reposo: fondo rgb(15, 118, 110) · opacidad 1 · cursor default · contorno none 3px
+botón con hover: fondo rgb(13, 148, 136) · opacidad 1 · cursor default · contorno none 3px
+botón desactivado: fondo rgb(15, 118, 110) · opacidad 0.5 · cursor not-allowed · contorno none 3px
+tras clic con ratón (foco): fondo rgb(13, 148, 136) · opacidad 1 · cursor default · contorno none 3px
+con Tab (teclado): activo fondo rgb(15, 118, 110) · opacidad 1 · cursor default · contorno solid 2px
+segundo Tab va a: tarjeta (el desactivado se salta)
 ```
 
-## Atributos: `aria-*` y `data-*`
+- **`hover:bg-accent`** cambia el fondo de `accent-strong` (15, 118, 110) a `accent` (13, 148, 136).
+- **`disabled:opacity-50 disabled:cursor-not-allowed`**: medio transparente y con el cursor de "prohibido".
+- **`focus-visible:`** es la clave: después de un **clic** con el ratón, el botón tiene el foco pero **no** muestra el contorno (`none`); al llegar con **Tab**, sí (`solid 2px`). Así, quien navega con el teclado sabe siempre dónde está, y a quien usa el ratón no le aparece un recuadro al hacer clic.
+- **El botón desactivado se salta al tabular:** el segundo Tab va directamente a la tarjeta.
 
-Puedes estilizar según atributos, y así el estado vive en el HTML y no en clases añadidas con JavaScript:
+<Callout type="risk">
 
-```html
-<a
-  aria-current="page"
-  class="text-slate-500 aria-[current=page]:font-medium aria-[current=page]:text-slate-900"
->
-  Uniones y narrowing
-</a>
+- **Nunca quites el contorno de foco sin poner otro:** `outline-none` sin un `focus-visible:` que lo sustituya deja a quien usa el teclado sin saber dónde está. Esta plataforma define un contorno de foco global en su CSS (`:focus-visible` con `outline: 2px solid var(--accent-strong)`), para que ningún elemento se quede sin él.
+- **`hover:` no existe en las pantallas táctiles:** en un móvil, el estilo de _hover_ se queda "pegado" tras tocar, o no aparece. No pongas información **solo** en un _hover_ (un menú que solo se abre al pasar el ratón no funciona en un móvil). Tailwind v4 ya aplica `hover:` solo en dispositivos que admiten _hover_, lo que evita el estilo pegado, pero no la información perdida.
+- **`disabled` mientras se guarda:** desactivar un botón durante una petición evita los envíos dobles de quien pulsa dos veces. Pero un botón desactivado no da explicaciones: si el usuario no entiende por qué no puede pulsar, muestra un texto cerca ("Guardando…", "Completa el correo").
 
-<li data-read="true" class="group">
-  <svg class="hidden group-data-[read=true]:block">…</svg>
-  <!-- icono de "leída" -->
-</li>
+</Callout>
+
+## Paso 4: grupos y hermanos (`group` y `peer`)
+
+`group` en un elemento permite que **sus hijos** reaccionen al estado del padre, con `group-hover:`, `group-focus-visible:`…:
+
+```text
+tarjeta en reposo: h3 subrayado: none · enlace: oklch(0.554 0.046 257.417)
+tarjeta con hover: h3 subrayado: underline · enlace: rgb(15, 118, 110)
 ```
 
-El índice de esta plataforma funciona así: el script solo cambia `data-read="true"`, y Tailwind se encarga de mostrar el icono.
+Con el ratón en **cualquier punto** de la tarjeta, el título se subraya y "Continuar →" pasa al color de acento. Sin `group`, el título solo reaccionaría con el ratón justo encima de sus letras.
 
-## Modo oscuro
+`peer` hace lo mismo con un **hermano anterior**. El interruptor es un `<input type="checkbox">` real, oculto con `sr-only` (invisible, pero accesible para el teclado y los lectores de pantalla); el `<span>` siguiente se pinta según su estado con `peer-checked:` y `peer-focus-visible:`:
 
-La variante `dark:` aplica estilos en modo oscuro. Por defecto sigue la preferencia del sistema (`prefers-color-scheme`); para controlarlo con un botón, se redefine:
+```text
+interruptor: oklch(0.869 0.022 252.894)
+interruptor tras clic: rgb(13, 148, 136) · checked: true
+```
+
+Como el `<input>` es real, el interruptor funciona con el teclado (Tab y espacio) y envía su valor en un formulario sin una línea de JavaScript.
+
+<Callout type="risk">
+
+- **`peer` solo mira hacia atrás:** el elemento con `peer` debe ir **antes** que el que reacciona, porque CSS solo puede seleccionar hermanos posteriores. Si pones el `<input>` después del `<span>`, `peer-checked:` no hace nada.
+- **`sr-only`, no `hidden`:** `hidden` (`display: none`) saca el `<input>` del teclado y de los lectores de pantalla, y el interruptor deja de ser accesible. `sr-only` lo oculta solo a la vista.
+- **Grupos anidados:** si una tarjeta con `group` contiene otra con `group`, `group-hover:` reacciona al más cercano. Para distinguirlos, se les da nombre: `group/tarjeta` y `group-hover/tarjeta:underline`.
+
+</Callout>
+
+## Paso 5: el estado en atributos (`aria-*` y `data-*`)
+
+En lugar de añadir y quitar clases con JavaScript, puedes guardar el estado en un **atributo** del HTML y estilizarlo con una variante:
+
+```text
+nav: Tipos primitivos: 400 rgba(0, 0, 0, 0) | Uniones y narrowing: 500 oklch(0.929 0.013 255.508)
+lista: ✓ Qué es TypeScript (data-read=true) | 2 Tipos primitivos e inferencia (data-read=false)
+tras el botón: ✓ Qué es TypeScript (data-read=true) | ✓ Tipos primitivos e inferencia (data-read=true)
+```
+
+- **`aria-current="page"`** marca el enlace de la página actual, y `aria-[current=page]:font-medium` lo resalta. Lo mejor: ese mismo atributo es el que un lector de pantalla anuncia como "página actual". Un solo atributo sirve para la accesibilidad **y** para el estilo.
+- **`data-read="true"`** en cada `<li>` (con `group`), y los hijos usan `group-data-[read=true]:` para mostrar ✓ en lugar del número. El `<script>` solo cambia el atributo con `setAttribute("data-read", "true")`, y **Tailwind se encarga del resto**: el círculo se rellena y el número se cambia por ✓.
+
+El índice de esta plataforma funciona exactamente así: al marcar una sección como leída, el script cambia `data-read` y las variantes `group-data-[read=true]:` del índice muestran el icono.
+
+<Callout type="risk">
+
+- **Los valores de atributo son texto:** `data-[read=true]:` compara con el texto `"true"`. Astro convierte `data-read={true}` en `data-read="true"` y `{false}` en `"false"` (comprobado al compilar); la plataforma escribe `String(isRead)` para dejarlo explícito. Pero si el atributo vale otra cosa (`"1"`, `"sí"`), la variante no coincide y no se aplica, sin ningún error.
+- **Usa los atributos ARIA para lo que significan:** `aria-current`, `aria-expanded`, `aria-selected` o `aria-invalid` tienen un significado para los lectores de pantalla. No inventes valores ni los uses solo como "ganchos" de estilo; para eso están los `data-*`.
+
+</Callout>
+
+## Paso 6: modo oscuro
+
+La variante `dark:` aplica estilos en el modo oscuro. Crea `src/pages/oscuro.astro`:
+
+```astro
+---
+// Archivo: src/pages/oscuro.astro
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout titulo="B7.4 · Modo oscuro">
+  <main class="p-8">
+    <div id="caja" class="rounded-xl bg-white p-6 text-slate-900 dark:bg-slate-900 dark:text-slate-100">
+      Esta caja sigue la preferencia del sistema.
+    </div>
+  </main>
+</Layout>
+```
+
+Por defecto, `dark:` sigue la preferencia del sistema operativo (`prefers-color-scheme`). Medido en Chrome emulando las dos preferencias (en DevTools: _Rendering_ → _Emulate CSS media feature prefers-color-scheme_):
+
+```text
+sistema en light: fondo rgb(255, 255, 255) · texto oklch(0.208 0.042 265.755)
+sistema en dark: fondo oklch(0.208 0.042 265.755) · texto oklch(0.968 0.007 247.896)
+```
+
+Para controlarlo con un botón (claro / oscuro / sistema), se redefine la variante en el CSS. Esta plataforma lo hace en su `global.css`:
 
 ```css
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 ```
 
-```html
-<div class="bg-white text-slate-900 dark:bg-slate-900 dark:text-slate-100">…</div>
-```
+Así, `dark:` se aplica cuando el `<html>` tiene `data-theme="dark"`, un atributo que pone un pequeño script según lo que elija el usuario. Lo verás a fondo en el curso I7, junto con una técnica mejor: colores del tema que cambian solos, sin repetir `dark:` en cada elemento.
 
-Lo verás a fondo en el curso I7, junto con una técnica mejor: _tokens_ que cambian solos con el tema, sin repetir `dark:` en cada elemento.
+<Callout type="risk">
 
-## Errores comunes
+- **`dark:` en cada elemento no escala:** con veinte componentes, son cientos de pares `bg-white dark:bg-slate-900` que hay que mantener sincronizados. Esta plataforma define variables (`--fg`, `--surface`…) que cambian con el tema, y sus clases (`bg-surface`, `text-fg`) no necesitan `dark:`.
+- **El parpadeo del tema:** si el script que pone `data-theme` se ejecuta tarde, la página se pinta un instante en claro y luego salta a oscuro. Ese script debe ir **en línea** en el `<head>`, antes de que se pinte nada (I7).
 
-- **Pensar en `sm:` como "móvil".**
-- **Diseñar primero para escritorio** y luego "arreglar" el móvil con docenas de excepciones.
-- **Quitar el contorno de foco** sin sustituirlo.
-- **Añadir y quitar clases con JavaScript** cuando un atributo (`aria-*`, `data-*`) y una variante lo resuelven.
-- **Media queries para componentes reutilizables** que deberían usar _container queries_.
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
-  1. Toma el layout de la sección anterior y hazlo responsive: en móvil, el índice lateral se convierte en un `<details>` desplegable bajo la cabecera.
-  2. Crea una rejilla de tarjetas de 1, 2 y 3 columnas según el ancho, y comprueba los cambios con el modo responsive de DevTools.
-  3. Crea un botón con estados `hover`, `active`, `focus-visible` y `disabled`, y recórrelo con el teclado.
-  4. Crea una tarjeta enlazada cuyo título se subraye al pasar el ratón por **toda** la tarjeta (`group`).
-  5. Marca un elemento de una lista con `data-activo="true"` y estilízalo solo con variantes `data-[…]`.
+
+1. Haz _responsive_ la página de curso de B7.3, en un archivo nuevo `src/pages/curso-responsive.astro`: en el móvil, el índice lateral se convierte en un `<details>` desplegable bajo la cabecera; desde 1024 px, vuelve a ser una barra lateral fija.
+2. Para no escribir el índice dos veces, sácalo a un componente `src/components/IndiceCurso.astro`, con la sección actual marcada con `aria-current` y las leídas con `data-read`.
+3. Comprueba con el modo dispositivo de DevTools que a 360, 768 y 1280 px no hay _scroll_ horizontal.
+
+</Callout>
+
+Solución. `src/components/IndiceCurso.astro`:
+
+```astro
+---
+// Archivo: src/components/IndiceCurso.astro
+interface Seccion {
+  id: string;
+  titulo: string;
+  leida: boolean;
+}
+interface Props {
+  secciones: Seccion[];
+  actual: string;
+}
+const { secciones, actual } = Astro.props;
+---
+
+<ol class="space-y-1">
+  {secciones.map((s) => (
+    <li data-read={String(s.leida)} class="group">
+      <a
+        href="#"
+        aria-current={s.id === actual ? "page" : undefined}
+        class="flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm text-slate-600 hover:bg-slate-100 aria-[current=page]:bg-accent/10 aria-[current=page]:font-medium aria-[current=page]:text-accent-strong"
+      >
+        <span class="w-5 shrink-0 text-center">
+          <span class="group-data-[read=true]:hidden">○</span>
+          <span class="hidden group-data-[read=true]:inline">✓</span>
+        </span>
+        <span class="min-w-0 truncate">{s.titulo}</span>
+      </a>
+    </li>
+  ))}
+</ol>
+```
+
+`src/pages/curso-responsive.astro`:
+
+```astro
+---
+// Archivo: src/pages/curso-responsive.astro
+import Layout from "../layouts/Layout.astro";
+import IndiceCurso from "../components/IndiceCurso.astro";
+
+const SECCIONES = [
+  { id: "B1.1", titulo: "Qué es TypeScript y por qué existe", leida: true },
+  { id: "B1.2", titulo: "Tipos primitivos e inferencia", leida: true },
+  { id: "B1.3", titulo: "Arrays, tuplas y objetos", leida: false },
+  { id: "B1.4", titulo: "type vs interface", leida: false },
+  { id: "B1.5", titulo: "Funciones tipadas", leida: false },
+];
+const actual = "B1.3";
+const leidas = SECCIONES.filter((s) => s.leida).length;
+---
+
+<Layout titulo="Ejercicio B7.4 · Página de curso responsive">
+  <header id="barra" class="sticky top-0 z-10 flex h-14 items-center justify-between border-b border-slate-200 bg-white/90 px-4 backdrop-blur sm:px-6">
+    <a href="#" class="font-serif text-lg font-semibold">
+      <span class="min-[380px]:hidden">DA</span>
+      <span class="hidden min-[380px]:inline">Dani Academy</span>
+    </a>
+    <nav class="flex gap-1 text-sm text-slate-600 sm:gap-4">
+      <a href="#" class="rounded-lg px-2 py-1 hover:bg-slate-100">Temario</a>
+      <a href="#" class="rounded-lg px-2 py-1 hover:bg-slate-100">Progreso</a>
+    </nav>
+  </header>
+
+  <!-- Móvil: una sola columna. Desde lg (1024 px): índice de 16rem + contenido -->
+  <div class="mx-auto max-w-7xl lg:grid lg:grid-cols-[16rem_minmax(0,1fr)] lg:gap-12 lg:px-6">
+    <!-- Índice en móvil: desplegable nativo, sin JavaScript -->
+    <details id="indice-movil" class="border-b border-slate-200 bg-white px-4 py-3 lg:hidden">
+      <summary class="flex cursor-pointer items-center justify-between text-sm font-medium">
+        Índice del curso
+        <span class="text-slate-500 tabular-nums">{leidas}/{SECCIONES.length}</span>
+      </summary>
+      <div class="pt-3">
+        <IndiceCurso secciones={SECCIONES} actual={actual} />
+      </div>
+    </details>
+
+    <!-- Índice en escritorio: el aside se estira, y el div de dentro se pega -->
+    <aside id="indice-escritorio" class="hidden lg:block">
+      <div class="sticky top-14 max-h-[calc(100dvh-3.5rem)] overflow-y-auto py-8">
+        <p class="mb-3 px-2 text-xs font-semibold tracking-wide text-slate-500 uppercase">B1 · TypeScript desde cero</p>
+        <IndiceCurso secciones={SECCIONES} actual={actual} />
+      </div>
+    </aside>
+
+    <main id="contenido" class="min-w-0 px-4 py-10 sm:px-6 lg:px-0 lg:py-14">
+      <article class="mx-auto max-w-prose">
+        <h1 class="font-serif text-3xl font-semibold tracking-tight sm:text-4xl">Arrays, tuplas y objetos</h1>
+        <p class="mt-4 text-lg leading-relaxed text-slate-700">Casi todos los datos de una app web son listas de objetos.</p>
+        <div class="h-[150vh]"></div>
+        <div class="flex flex-col gap-3 border-t border-slate-200 pt-6 text-sm sm:flex-row sm:justify-between">
+          <a href="#" class="text-slate-600 hover:text-slate-900">← Tipos primitivos e inferencia</a>
+          <a href="#" class="font-medium text-accent-strong hover:underline">type vs interface →</a>
+        </div>
+      </article>
+    </main>
+  </div>
+</Layout>
+```
+
+Medido a tres anchos, desplegando el índice en el móvil y bajando 800 px en el escritorio:
+
+```text
+ventana 360px → índice móvil x=0 y=56 w=360 · índice escritorio oculto · artículo x=16 y=141 w=328 · scroll horizontal false
+  desplegado: true · filas visibles: 5 · actual: ○ Arrays, tuplas y objetos
+ventana 768px → índice móvil x=0 y=56 w=768 · índice escritorio oculto · artículo x=56 y=141 w=656 · scroll horizontal false
+ventana 1280px → índice móvil oculto · índice escritorio x=24 y=56 w=256 · artículo x=464 y=112 w=656 · scroll horizontal false
+  tras scroll de 800px → lista del índice: x=24 y=56 w=256
+```
+
+Las decisiones:
+
+- **Un solo _breakpoint_, `lg:`:** por debajo de 1024 px, todo es una columna; desde ahí, `lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]`. `minmax(0,1fr)` es la versión de _grid_ de `min-w-0`: la columna del contenido puede encogerse aunque contenga un bloque de código ancho.
+- **`<details>` con `lg:hidden` y `<aside>` con `hidden lg:block`:** el índice existe dos veces en el HTML y cada ancho muestra uno. `<details>` es un desplegable **nativo**: se abre con el ratón, el dedo o el teclado sin una línea de JavaScript.
+- **El _sticky_ va en un `<div>` dentro del `<aside>`:** el `<aside>` se estira a toda la altura de la fila (como en B7.3) y el `<div>` interior se pega dentro de él. Es la otra forma de resolver el problema de `self-start`, y la que usa esta plataforma.
+- **`100dvh`** en lugar de `100vh`: la altura visible real, sin la zona que tapa la barra del navegador en el móvil.
+- **Detalles por ancho:** marca abreviada por debajo de 380 px, título `text-3xl sm:text-4xl` y la navegación anterior/siguiente apilada en el móvil (`flex-col sm:flex-row`).
+
+<Callout type="risk">
+
+- **El índice está dos veces en el HTML:** a los lectores de pantalla no les afecta (el elemento con `display: none` no se lee), pero si el índice tuviera _ids_ fijos, se duplicarían. Por eso el componente no usa ninguno; si los necesitaras, pásale un prefijo como _prop_.
+- **El script que actualiza `data-read` debe tocar las dos copias:** el de esta plataforma busca **todos** los elementos `[data-section-id]` de la página, no solo el primero. Con `querySelector` (singular), el índice del escritorio se actualizaría y el del móvil no.
+- **Prueba en un móvil de verdad antes de publicar:** el modo dispositivo de DevTools simula el ancho, pero no el tacto, la barra del navegador ni el teclado virtual que tapa media pantalla al escribir en un formulario.
+
 </Callout>
 
 <Callout type="mastery">
-  Escribes primero el estilo móvil y después los *breakpoints*, y estilizas estados con variantes en
-  lugar de JavaScript.
+
+Escribes primero el estilo del móvil y añades _breakpoints_ hacia arriba, usas _container queries_ para componentes que viven en huecos de distinto ancho, estilizas los estados con variantes (con `focus-visible:` para el foco), y dejas que el estado viva en el HTML (`aria-current`, `data-*`) en lugar de añadir y quitar clases con JavaScript.
+
 </Callout>
 
 ## Resumen
 
-- Sin prefijo = todas las pantallas; `sm:`, `md:`, `lg:`… = a partir de ese ancho.
-- _Container queries_ (`@container`, `@md:`) responden al tamaño del contenedor.
-- `hover:`, `focus-visible:`, `disabled:` y compañía estilizan estados; cuida el foco.
-- `group` y `peer` estilizan según el estado de un padre o un hermano.
-- `aria-[…]:` y `data-[…]:` permiten que el estado viva en el HTML.
+- Sin prefijo = todas las pantallas; `sm:`, `md:`, `lg:`… = **a partir de** ese ancho; `min-[380px]:` para un ancho a medida.
+- _Container queries_: `@container` en el padre y `@md:` en los hijos, que responden al ancho del contenedor.
+- `hover:`, `active:`, `focus-visible:` y `disabled:` estilizan estados; nunca quites el foco sin sustituirlo.
+- `group`/`group-hover:` reaccionan al padre; `peer`/`peer-checked:`, a un hermano anterior.
+- `aria-[current=page]:` y `group-data-[read=true]:` estilizan según atributos que cambia el script; `dark:` sigue el tema.
