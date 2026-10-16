@@ -47,10 +47,19 @@ const loadSession = defineMiddleware(async (ctx, next) => {
 
   if (ctx.isPrerendered || ctx.url.pathname.startsWith("/api/auth/")) return next();
 
-  const data = await auth.api.getSession({ headers: ctx.request.headers });
+  // returnHeaders: Better Auth devuelve también sus Set-Cookie (sesión renovada, caché nueva o
+  // cookies borradas si caducó). Sin reenviarlos, la renovación solo llega a Mongo: la cookie del
+  // navegador caduca 30 días después del login y la caché de 5 min no se vuelve a crear (temario I5.3).
+  const { headers: authHeaders, response: data } = await auth.api.getSession({
+    headers: ctx.request.headers,
+    returnHeaders: true,
+  });
   ctx.locals.user = data?.user ?? null;
   ctx.locals.session = data?.session ?? null;
-  return next();
+
+  const response = await next();
+  for (const cookie of authHeaders.getSetCookie()) response.headers.append("set-cookie", cookie);
+  return response;
 });
 
 /** 2. Protege todo lo que no sea público */
