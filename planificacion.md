@@ -5223,7 +5223,7 @@ Cambios respecto al plan, descubiertos al verificarla. **El código real del rep
 node --env-file=.env.production.local --import tsx scripts/db-setup.ts
 ```
 
-4. **Backups:** el plan gratuito M0 no incluye *backups* automáticos. Opciones: subir a un plan con *backups*, o programar `mongodump` (temario I6.6). Haz al menos un *backup* y una restauración de prueba antes de depender de los datos.
+4. **Backups:** el plan gratuito M0 no incluye *backups* automáticos. Se hacen desde tu equipo con `npm run db:backup` y se verifican con `npm run db:restore-test` (ver las notas de implementación de esta Tanda). Haz al menos un *backup* y una restauración de prueba antes de depender de los datos.
 
 ### 10.2 Vercel
 
@@ -5251,12 +5251,12 @@ if (process.env.VERCEL) attachDatabasePool(mongoClient);
 
 ### 10.4 Prueba de humo en producción
 
-- [ ] `https://academy.<tu-dominio>/api/health` → `200`.
+- [x] `https://academy.<tu-dominio>/api/health` → `200`.
 - [ ] Registro, login y logout funcionan; la cookie es `Secure`, `HttpOnly` y `SameSite=Lax`.
 - [ ] Marcar como leído persiste tras recargar; la evaluación se guarda; `/progreso` muestra los datos.
 - [ ] Las fechas salen en tu zona horaria.
 - [ ] `https://<proyecto>.vercel.app` redirige al dominio propio (*Settings* → *Domains* → *Redirect*).
-- [ ] Lighthouse móvil en producción: Rendimiento ≥ 90, Accesibilidad ≥ 95, Buenas prácticas ≥ 95.
+- [x] Lighthouse móvil en producción: Rendimiento ≥ 90, Accesibilidad ≥ 95, Buenas prácticas ≥ 95.
 - [ ] (Opcional) Vercel Speed Insights activado para medir Core Web Vitals reales (temario A6.1).
 
 ### Criterios de aceptación — Tanda 10
@@ -5265,6 +5265,37 @@ if (process.env.VERCEL) attachDatabasePool(mongoClient);
 - [ ] Producción y desarrollo usan **bases de datos, usuarios de Mongo y secretos distintos**.
 - [ ] Existe al menos un *backup* restaurado con éxito.
 - [ ] Prueba de humo §10.4 completa.
+
+### Notas de implementación (Tanda 10, en curso)
+
+Estado al 2026-10-15. **El código real del repositorio manda:**
+
+- **En producción:** `https://academy.danielvasquez.lat` (subdominio de Namecheap con CNAME a Vercel, HTTPS activo). Vercel despliega cada *push* a `main`. `/api/health` → `200` con `{"db":"up"}`, y las cabeceras de seguridad (CSP, HSTS, `X-Frame-Options`, `X-Content-Type-Options`) llegan en producción.
+- **El despliegue no espera al CI:** sin ruleset en GitHub (decisión de la Tanda 9), Vercel despliega en cuanto llega el *push*. La garantía es el *hook* `pre-push` (formato, lint, tipos y tests); el CI de GitHub queda como aviso. El primer criterio de aceptación se cumple en esa forma.
+- **Funciones en `iad1`** (Washington, cabecera `x-vercel-id`). El clúster de Atlas debería estar en AWS `us-east-1` para no añadir latencia a cada consulta.
+- **`attachDatabasePool`** (`@vercel/functions` 3.10) en `src/lib/mongo.ts`, solo si `process.env.VERCEL`. Para MongoDB mantiene viva la instancia `maxIdleTimeMS` + 100 ms tras cada consulta. Con el valor por defecto del *driver* (0: las conexiones inactivas no se cierran nunca) solo esperaría 100 ms y no serviría, así que el cliente lleva `maxIdleTimeMS: 5_000`.
+- **Backups sin `mongodump`:** M0 no tiene *backups* y en este equipo no están las Database Tools, así que los *scripts* usan el *driver*:
+  - `npm run db:backup` (`scripts/backup.ts`) escribe `backups/<base>-<fecha>.json.gz`, con permisos `600`: EJSON canónico (conserva `ObjectId` y `Date`), opciones de cada colección (validadores `$jsonSchema`) e índices. `backups/` está en `.gitignore`.
+  - Lee `.env.backup.local`, que debe usar un usuario de Atlas **`academy_backup` con rol `read`** sobre `dani_academy`. `MONGODB_DB` es obligatoria, y una base sin colecciones (una errata en el nombre) se rechaza en lugar de dar una copia vacía.
+  - `npm run db:restore-test` (`scripts/restore-test.ts`) restaura la copia más reciente en un MongoDB temporal en memoria y compara colecciones, número de documentos, *hash* del contenido, índices y validadores; si algo no coincide, termina con código 1. Para un desastre, `RESTORE_URI` y `RESTORE_DB` restauran en una base real, y el *script* se niega si no está vacía.
+  - Probados con datos sembrados (incluida la negativa a restaurar encima de una base con datos y los errores de archivo) y con una copia real de la base de desarrollo de Atlas: 8 colecciones, verificada en 0,5 s.
+- **Lighthouse móvil en producción** (12, sin sesión, porque las demás páginas exigen login):
+
+  | Página | Rendimiento | Accesibilidad | Buenas prácticas | SEO |
+  | --- | --- | --- | --- | --- |
+  | `/login` | 93 | 100 | 96 | 100 |
+  | `/registro` | 98 | 100 | 96 | 100 |
+
+  - El 93 de `/login` incluye un arranque en frío: 2,6 s en la primera petición; en caliente, unos 0,35 s.
+  - Buenas prácticas se quedaba en 96 por una violación de CSP (`script-src` bloquea `eval`): Zod 4 prueba `new Function("")` para compilar los esquemas, captura el error y sigue, pero la CSP lo registra igual. Corregido con `z.config({ jitless: true })` en `src/schemas/auth.ts`, el único módulo de esquemas que llega al navegador. Verificado en local (ninguna llamada a `Function` y la validación de los formularios intacta); la puntuación en producción falta medirla tras el despliegue.
+- **Login en *previews*:** sin cambios. `trustedOrigins` solo acepta `BETTER_AUTH_URL`, así que en las *previews* de Vercel el login no funciona. Se prueba en local y en producción.
+
+**Pendiente para cerrar la Tanda (lo hace el usuario):**
+
+- Crear `academy_backup` (rol `read`) en Atlas y `.env.backup.local`, y ejecutar `npm run db:backup` y `npm run db:restore-test` contra producción.
+- Confirmar que producción usa su propio usuario de Mongo (`academy_prod`) y un `BETTER_AUTH_SECRET` distinto del de desarrollo. **Ojo:** el `.env` de desarrollo usa `MONGODB_DB=dani_academy`, el mismo nombre que producción. Si apunta al mismo clúster, desarrollo y producción comparten datos: hay que cambiar el de desarrollo (por ejemplo, a `dani_academy_dev`).
+- Prueba de humo con sesión: registro, login y logout (cookie `Secure`, `HttpOnly` y `SameSite=Lax`), progreso tras recargar, evaluación, `/progreso` y fechas en la zona horaria correcta.
+- Comprobar que `https://<proyecto>.vercel.app` redirige al subdominio, y que el clúster de Atlas está en `us-east-1`.
 
 ---
 
