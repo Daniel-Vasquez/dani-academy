@@ -5262,7 +5262,7 @@ if (process.env.VERCEL) attachDatabasePool(mongoClient);
 ### Criterios de aceptación — Tanda 10
 
 - [x] Cada *merge* a `main` despliega automáticamente en producción tras pasar el CI.
-- [x] Producción y desarrollo usan **bases de datos, usuarios de Mongo y secretos distintos**.
+- [x] Producción y desarrollo usan **bases de datos y secretos distintos** (el usuario de Mongo es compartido, por decisión del usuario; ver las notas).
 - [x] Existe al menos un *backup* restaurado con éxito.
 - [x] Prueba de humo §10.4 completa.
 
@@ -5290,7 +5290,10 @@ Cerrada el 2026-10-16. **El código real del repositorio manda:**
   - Buenas prácticas se quedaba en 96 por una violación de CSP (`script-src` bloquea `eval`): Zod 4 prueba `new Function("")` para compilar los esquemas, captura el error y sigue, pero la CSP lo registra igual. Corregido con `z.config({ jitless: true })` en `src/schemas/auth.ts`, el único módulo de esquemas que llega al navegador. Verificado en local (ninguna llamada a `Function` y la validación de los formularios intacta) y, tras desplegarlo, en producción: sin violaciones de CSP, y Lighthouse queda en `/login` 97 · 100 · 100 · 100 y `/registro` 98 · 100 · 100 · 100.
 - **Login en *previews*:** sin cambios. `trustedOrigins` solo acepta `BETTER_AUTH_URL`, así que en las *previews* de Vercel el login no funciona. Se prueba en local y en producción.
 
-**Confirmado por el usuario al cerrar:** usuario `academy_backup` (rol `read`) con su copia de producción restaurada con `npm run db:restore-test`; usuario de Mongo y `BETTER_AUTH_SECRET` propios de producción, separados de desarrollo; prueba de humo con sesión (registro, login y logout, progreso, evaluación, `/progreso` y fechas); `<proyecto>.vercel.app` redirige al subdominio. **Tanda 10 cerrada.** Queda opcional Vercel Speed Insights (temario A6.1).
+**Confirmado por el usuario al cerrar:** usuario `academy_backup` (rol `read`) con su copia de producción restaurada con `npm run db:restore-test`; `BETTER_AUTH_SECRET` propio de producción; prueba de humo con sesión (registro, login y logout, progreso, evaluación, `/progreso` y fechas); `<proyecto>.vercel.app` redirige al subdominio. **Tanda 10 cerrada.** Queda opcional Vercel Speed Insights (temario A6.1).
+
+- **Un solo usuario de Mongo para desarrollo y producción (decisión del usuario, 2026-10-16):** `danielvasquezgit_db_user`, con "Read and write to any database". Los entornos se separan por **base de datos**: desarrollo usa `dani_academy_dev` (creada con `npm run db:setup`) y producción `dani_academy`, en el mismo `Cluster0` (M0 permite un solo clúster). Riesgo aceptado: un `.env` con el `MONGODB_DB` equivocado, o un *script* mal dirigido, puede escribir en producción. La red de seguridad es el *backup*, y el criterio de "usuarios de Mongo distintos" se cumple solo en parte. Además existe `academy_backup` (`read` sobre `dani_academy`) para `npm run db:backup`.
+- **Cuenta de la app en desarrollo:** al cambiar a `dani_academy_dev`, la cuenta hay que registrarla otra vez en local (mismo correo y contraseña, nombre "Dani Desarrollo"). El progreso de cada entorno es independiente.
 ---
 
 ## Anexo A · Variables de entorno
