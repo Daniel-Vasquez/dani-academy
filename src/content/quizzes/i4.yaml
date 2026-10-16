@@ -1,0 +1,47 @@
+course: I4
+passingScore: 4
+questions:
+  - prompt: "¿Cuál es la regla principal para diseñar un esquema en MongoDB?"
+    options:
+      - "Una colección por entidad, como las tablas normalizadas de SQL, y referencias entre ellas."
+      - "Los datos que se leen juntos se guardan juntos: el diseño parte de la lista de patrones de acceso (qué se lee y escribe, con qué frecuencia), no de las entidades."
+      - "Guardarlo todo en un solo documento por usuario, para leerlo de una vez."
+      - "Embeber siempre, porque MongoDB no tiene JOIN."
+    answer: 1
+    explanation: "En MongoDB el orden se invierte respecto a SQL: primero la lista de consultas con su frecuencia y después las colecciones. En I4.1, esa lista reveló que la plataforma escribe siete veces más de lo que lee por el latido de estudio, una operación sin pantalla que habría pasado desapercibida."
+
+  - prompt: "¿Cuándo conviene referenciar (documentos aparte) en lugar de embeber?"
+    options:
+      - "Cuando los datos se leen siempre juntos y tienen un máximo pequeño, como las 5 respuestas de un intento."
+      - "Nunca: referenciar obliga a usar $lookup y es siempre más lento."
+      - "Solo cuando el documento ya ocupa más de 16 MB."
+      - "Cuando el lado relacionado crece sin límite (los intentos de un usuario a lo largo de los años, los alumnos de un curso), en relaciones N:M o cuando cada elemento necesita consultarse por separado."
+    answer: 3
+    explanation: "Se embebe lo acotado que se lee junto; se referencia lo que crece sin máximo. En I4.2, guardar los alumnos dentro del curso hizo 22 veces más lentas 200 matrículas simultáneas. Y referenciar tiene su coste: cada $lookup necesita un índice en el campo por el que une."
+
+  - prompt: "¿Qué es un unbounded array (array sin límite)?"
+    options:
+      - "Un array dentro de un documento que crece sin un máximo conocido: cada actualización es más lenta, el documento se convierte en un punto caliente y, al final, choca con el límite de 16 MB."
+      - "Un array declarado sin tipo en TypeScript."
+      - "Un array con más de 100 elementos, que MongoDB no puede indexar."
+      - "Un array que MongoDB divide automáticamente en varios documentos cuando se llena."
+    answer: 0
+    explanation: "En I4.1, guardar cada latido en el documento del usuario hizo que añadir uno pasara de 5 a 64 ms mucho antes de llegar a los 16 MB (440 022 latidos, unos 20 años de estudio). La solución es un documento por evento o un Bucket acotado, como el documento por usuario y día de I4.3."
+
+  - prompt: "¿Qué hace la etapa $group en una pipeline de agregación?"
+    options:
+      - "Ordena los documentos por el campo indicado en _id."
+      - "Une los documentos con los de otra colección."
+      - "Forma un grupo por cada valor distinto de la clave _id (o uno solo con _id: null) y calcula, para cada grupo, los acumuladores indicados: $sum, $avg, $max, $push…"
+      - "Divide un array en un documento por elemento."
+    answer: 2
+    explanation: 'Es el GROUP BY de SQL. La clave puede ser un campo ("$cursoId"), un objeto ({ cursoId, pregunta }) o null. Tras un $group solo quedan _id y los acumuladores. Ordenar es $sort, unir es $lookup y desplegar un array es $unwind.'
+
+  - prompt: "¿Por qué se pone $match al principio de una pipeline?"
+    options:
+      - "Porque MongoDB exige que la primera etapa sea siempre $match."
+      - "Porque así puede usar un índice y todas las etapas siguientes trabajan con menos documentos. Un $match sobre un campo calculado más abajo no puede adelantarse y obliga a recorrer toda la colección."
+      - "Porque $match al final no filtra nada."
+      - "Para que $group pueda usar $first y $last."
+    answer: 1
+    explanation: "Medido en I4.5 con 69 159 lecturas: con $match al principio, 0,36 ms y 46 claves examinadas; filtrando un campo creado con $addFields, 27,5 ms y la colección entera (COLLSCAN). El optimizador adelanta algunos $match por su cuenta, pero no todos: escríbelos al principio y compruébalo con explain."

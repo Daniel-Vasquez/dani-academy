@@ -1,0 +1,535 @@
+---
+sectionId: "I4.4"
+course: "I4"
+title: "Aggregation pipeline I"
+order: 4
+minutes: 75
+summary: "Construyes pipelines etapa a etapa con $match, $project, $addFields, $sort, $limit, $group, $unwind y $count sobre 3038 evaluaciones, descubres qué pregunta falla más en cada curso y calculas tus km por semana."
+---
+
+Con `find` puedes filtrar, ordenar y elegir campos. Pero en cuanto una pantalla necesita **calcular** (la media de cada curso, el porcentaje de aprobados, los km de cada semana), `find` se queda corto: tendrías que traer todos los documentos a la aplicación y sumar en JavaScript. La **agregación** (_aggregation pipeline_) hace ese trabajo dentro de MongoDB. Es una cadena de **etapas**: cada una recibe documentos, los transforma y pasa el resultado a la siguiente, como una cadena de montaje. En esta sección vas a construir _pipelines_ etapa a etapa sobre 3038 evaluaciones, hasta descubrir qué pregunta falla más en cada curso, y terminarás calculando tus km por semana.
+
+**Lo que tendrás al terminar:** `src/i4/04-primera.ts`, `04-proyectar.ts`, `04-agrupar.ts` y `04-unwind.ts` (una etapa nueva en cada uno) y la agregación de km por semana del ejercicio.
+
+**Requisitos:** el proyecto `mongo-academy` con `src/i4/catalogo.ts` (I4.1) y los entrenos de B5 (`npm start -- src/03-sembrar.ts`).
+
+| Etapa                   | Qué hace                                            | Equivalente aproximado                 |
+| ----------------------- | --------------------------------------------------- | -------------------------------------- |
+| `$match`                | Filtra documentos                                   | El filtro de `find`, el `WHERE` de SQL |
+| `$project`              | Elige, quita o calcula campos (y descarta el resto) | La proyección de `find`, el `SELECT`   |
+| `$addFields` (o `$set`) | Añade campos calculados sin quitar los demás        | —                                      |
+| `$sort` / `$limit`      | Ordena / se queda con los N primeros                | `sort()` y `limit()` de `find`         |
+| `$group`                | Agrupa por una clave y calcula con acumuladores     | `GROUP BY`                             |
+| `$unwind`               | Un documento por cada elemento de un array          | —                                      |
+| `$count`                | Cuenta los documentos que llegan                    | `COUNT(*)`                             |
+
+## Paso 1: los datos y la primera _pipeline_
+
+Crea el módulo con la colección, `src/i4/evaluaciones.ts`:
+
+```ts
+// Archivo: src/i4/evaluaciones.ts
+// La colección de evaluaciones que usan las agregaciones de I4.4 e I4.5
+import type { ObjectId } from "mongodb";
+import { db } from "../db";
+
+export interface Evaluacion {
+  _id?: ObjectId;
+  userId: string;
+  cursoId: string;
+  resultados: boolean[]; // acierto o fallo de cada una de las 5 preguntas
+  puntuacion: number; // aciertos (0-5)
+  aprobado: boolean; // 4 o más
+  fecha: Date;
+}
+
+export const evaluaciones = db.collection<Evaluacion>("i4_evaluaciones");
+```
+
+Y `src/i4/04-sembrar.ts`, que genera evaluaciones realistas. Cada pregunta tiene una probabilidad de acierto distinta y la tercera es, a propósito, la más difícil (al final del Paso 4 la agregación tendrá que descubrirlo):
+
+```ts
+// Archivo: src/i4/04-sembrar.ts
+// Evaluaciones de prueba para practicar agregaciones: 300 usuarios, 10 cursos, de 1 a 3 intentos
+import { cliente } from "../db";
+import { CATALOGO } from "./catalogo";
+import { evaluaciones, type Evaluacion } from "./evaluaciones";
+
+let semilla = 7;
+const azar = () => ((semilla = (semilla * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31);
+
+// Probabilidad de acertar cada pregunta: la 3.ª (índice 2) es la difícil en todos los cursos
+const ACIERTO = [0.9, 0.85, 0.45, 0.8, 0.75];
+const CURSOS = CATALOGO.slice(0, 10); // los 10 cursos publicados (B1-I3)
+const inicio = Date.UTC(2026, 6, 1); // 1 de julio de 2026
+
+await evaluaciones.drop().catch(() => {});
+const docs: Evaluacion[] = [];
+for (let u = 1; u <= 300; u++) {
+  for (const curso of CURSOS) {
+    if (azar() > 0.5) continue; // cada usuario hace la mitad de los cursos
+    const veces = 1 + Math.floor(azar() * 3);
+    for (let v = 0; v < veces; v++) {
+      const resultados = ACIERTO.map((p) => azar() < p + v * 0.05); // mejora al repetir
+      const puntuacion = resultados.filter(Boolean).length;
+      docs.push({
+        userId: `u_${String(u).padStart(5, "0")}`, // mismo formato que las lecturas de I4.2
+        cursoId: curso.id,
+        resultados,
+        puntuacion,
+        aprobado: puntuacion >= 4,
+        fecha: new Date(inicio + Math.floor(azar() * 100 * 86_400_000)),
+      });
+    }
+  }
+}
+await evaluaciones.insertMany(docs);
+await evaluaciones.createIndex({ userId: 1, fecha: -1 });
+console.log(`Sembradas ${docs.length} evaluaciones de 300 usuarios en ${CURSOS.length} cursos`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/04-sembrar.ts
+```
+
+```text
+Sembradas 3038 evaluaciones de 300 usuarios en 10 cursos
+```
+
+Una _pipeline_ es un **array de etapas**, y cada etapa, un objeto con una sola clave que empieza por `$`. Crea `src/i4/04-primera.ts`, que ejecuta la _pipeline_ cortada después de cada etapa para ver qué sale de cada una:
+
+```ts
+// Archivo: src/i4/04-primera.ts
+// La primera pipeline, etapa a etapa: cuántos documentos salen de cada una
+import type { Document } from "mongodb";
+import { cliente } from "../db";
+import { evaluaciones } from "./evaluaciones";
+
+const pipeline: Document[] = [
+  { $match: { cursoId: "B5" } }, // 1. solo las evaluaciones de B5
+  { $match: { aprobado: true } }, // 2. de esas, las aprobadas
+  { $count: "aprobadas" }, // 3. cuántas quedan
+];
+
+// Ejecutar la pipeline cortada después de cada etapa enseña qué hace cada una
+console.log(`Entrada: ${await evaluaciones.estimatedDocumentCount()} documentos`);
+for (let i = 1; i <= pipeline.length; i++) {
+  const parcial = pipeline.slice(0, i);
+  const salida = await evaluaciones.aggregate(i < pipeline.length ? [...parcial, { $count: "n" }] : parcial).toArray();
+  console.log(`Tras la etapa ${i} ${JSON.stringify(pipeline[i - 1])}: ${JSON.stringify(salida[0])}`);
+}
+
+// Lo mismo con find: para un filtro y un recuento, no hace falta agregar
+console.log(`countDocuments: ${await evaluaciones.countDocuments({ cursoId: "B5", aprobado: true })}`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/04-primera.ts
+```
+
+```text
+Entrada: 3038 documentos
+Tras la etapa 1 {"$match":{"cursoId":"B5"}}: {"n":307}
+Tras la etapa 2 {"$match":{"aprobado":true}}: {"n":238}
+Tras la etapa 3 {"$count":"aprobadas"}: {"aprobadas":238}
+countDocuments: 238
+```
+
+- **Cada etapa trabaja sobre la salida de la anterior:** 3038 entran, 307 pasan el primer `$match`, 238 el segundo, y `$count` los convierte en un solo documento.
+- **`aggregate` devuelve un cursor**, como `find`: `.toArray()` trae los resultados.
+- **Para filtrar y contar, `countDocuments` basta:** da lo mismo, 238. La agregación es para lo que `find` no sabe hacer.
+
+<Callout type="risk">
+
+- **El orden de las etapas cambia el resultado:** `$limit: 5` antes de `$sort` coge 5 documentos cualesquiera y los ordena; después de `$sort`, coge los 5 primeros. Lee una _pipeline_ de arriba abajo, como una receta.
+- **Una etapa, una clave:** `{ $match: {…}, $sort: {…} }` en el mismo objeto da el error `A pipeline stage specification object must contain exactly one field`. Cada etapa va en su propio objeto del array.
+- **Los resultados de `aggregate` no tienen tipo por sí solos:** sin `aggregate<T>()`, TypeScript los trata como `Document`. Lo verás en todos los _scripts_ de esta sección y a fondo en I4.5.
+
+</Callout>
+
+## Paso 2: `$project`, `$addFields`, `$sort` y `$limit`
+
+La página de evaluación de un usuario muestra sus 5 últimos intentos, con la fecha en su zona horaria, el porcentaje y si aprobó. Crea `src/i4/04-proyectar.ts`:
+
+```ts
+// Archivo: src/i4/04-proyectar.ts
+// $match, $sort, $limit, $project y $addFields: los 5 últimos intentos de un usuario, listos para pintar
+import { cliente } from "../db";
+import { evaluaciones } from "./evaluaciones";
+
+interface FilaIntento {
+  cursoId: string;
+  puntuacion: number;
+  dia: string;
+  porcentaje: number;
+  resultado: "Aprobado" | "Suspendido";
+}
+
+const filas = await evaluaciones
+  .aggregate<FilaIntento>([
+    { $match: { userId: "u_00007" } }, // usa el índice { userId, fecha }
+    { $sort: { fecha: -1 } }, // el más reciente primero
+    { $limit: 5 },
+    {
+      $project: {
+        _id: 0, // sin el _id
+        cursoId: 1, // se queda tal cual
+        puntuacion: 1,
+        dia: { $dateToString: { date: "$fecha", format: "%Y-%m-%d", timezone: "America/Mexico_City" } }, // campo calculado
+      },
+    },
+    {
+      $addFields: {
+        // $addFields añade campos sin quitar los demás
+        porcentaje: { $multiply: [{ $divide: ["$puntuacion", 5] }, 100] },
+        resultado: { $cond: [{ $gte: ["$puntuacion", 4] }, "Aprobado", "Suspendido"] },
+      },
+    },
+  ])
+  .toArray();
+
+for (const f of filas) console.log(`${f.dia}  ${f.cursoId}  ${f.puntuacion}/5  ${String(f.porcentaje).padStart(3)} %  ${f.resultado}`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/04-proyectar.ts
+```
+
+```text
+2026-09-23  I2  4/5   80 %  Aprobado
+2026-09-14  I1  4/5   80 %  Aprobado
+2026-09-05  B7  2/5   40 %  Suspendido
+2026-09-04  I3  4/5   80 %  Aprobado
+2026-08-15  I2  3/5   60 %  Suspendido
+```
+
+- **`$project` decide la forma de la salida:** `1` conserva un campo, `0` lo quita, y una expresión crea uno nuevo (`dia`, con `$dateToString` en la zona de México). Lo que no se menciona, se descarta (excepto `_id`, que hay que quitar a mano).
+- **`$addFields` añade sin quitar:** `porcentaje` y `resultado` se suman a los campos que ya había.
+- **Las expresiones usan `$campo` para leer un campo:** `"$puntuacion"` es el valor de `puntuacion` en cada documento; `"puntuacion"`, sin `$`, sería el texto literal.
+- **`$match` y `$sort` al principio usan el índice `{ userId, fecha }`**: MongoDB solo lee los 5 documentos que necesita. Lo medirás en I4.5.
+
+<Callout type="risk">
+
+- **El `$` que falta es el error más común:** `{ $divide: ["puntuacion", 5] }` falla con `$divide only supports numeric types, not string and int`, porque divide el texto `"puntuacion"`. Si un cálculo da un error de tipos, busca un `$` olvidado.
+- **`$project` después de `$sort`, no antes:** si quitas `fecha` con `$project` y luego ordenas por `fecha`, ordenas por un campo que ya no existe (y MongoDB no avisa: el orden sale arbitrario, como compruebas si pruebas `$project: { cursoId: 1 }` seguido de `$sort: { fecha: 1 }`).
+- **`$dateToString` sin `timezone` usa UTC:** un intento de las 23:00 en México saldría con el día siguiente (B5.5).
+
+</Callout>
+
+## Paso 3: `$group` y los acumuladores
+
+`$group` es la etapa que más se usa y la que más cuesta al principio. Recibe una clave (`_id`) y forma **un grupo por cada valor distinto**; para cada grupo, los **acumuladores** calculan un resultado a partir de todos sus documentos. Crea `src/i4/04-agrupar.ts`:
+
+```ts
+// Archivo: src/i4/04-agrupar.ts
+// $group y sus acumuladores: estadísticas por curso de toda la plataforma y de un usuario
+import { cliente } from "../db";
+import { evaluaciones } from "./evaluaciones";
+
+interface PorCurso {
+  _id: string; // la clave de agrupación: el cursoId
+  intentos: number;
+  media: number;
+  mejor: number;
+  aprobados: number;
+  alumnos: string[];
+}
+
+// Toda la plataforma: un grupo por curso
+const porCurso = await evaluaciones
+  .aggregate<PorCurso>([
+    {
+      $group: {
+        _id: "$cursoId", // un grupo por cada valor distinto de cursoId
+        intentos: { $sum: 1 }, // suma 1 por documento: cuenta
+        media: { $avg: "$puntuacion" },
+        mejor: { $max: "$puntuacion" },
+        aprobados: { $sum: { $cond: ["$aprobado", 1, 0] } }, // cuenta solo los aprobados
+        alumnos: { $addToSet: "$userId" }, // sin repetir (con $push saldrían repetidos)
+      },
+    },
+    { $sort: { _id: 1 } },
+  ])
+  .toArray();
+
+console.log("Curso  intentos  media  mejor  aprobados  alumnos");
+for (const c of porCurso) {
+  console.log(`${c._id.padEnd(6)} ${String(c.intentos).padStart(8)}  ${c.media.toFixed(2)}  ${String(c.mejor).padStart(5)}  ${String(Math.round((c.aprobados / c.intentos) * 100)).padStart(7)} %  ${String(c.alumnos.length).padStart(7)}`);
+}
+
+// Un usuario: $match primero, $push para conservar la secuencia de puntuaciones
+const deUnUsuario = await evaluaciones
+  .aggregate<{ _id: string; media: number; puntuaciones: number[] }>([
+    { $match: { userId: "u_00007" } },
+    { $sort: { fecha: 1 } }, // ordenar ANTES de agrupar: $push respeta este orden
+    { $group: { _id: "$cursoId", media: { $avg: "$puntuacion" }, puntuaciones: { $push: "$puntuacion" } } },
+    { $sort: { _id: 1 } },
+  ])
+  .toArray();
+console.log("\nu_00007:", deUnUsuario.map((c) => `${c._id} ${c.puntuaciones.join("→")} (media ${c.media.toFixed(1)})`).join(" · "));
+
+// _id: null agrupa TODO en un solo grupo
+const [total] = await evaluaciones
+  .aggregate<{ intentos: number; media: number }>([{ $group: { _id: null, intentos: { $sum: 1 }, media: { $avg: "$puntuacion" } } }])
+  .toArray();
+console.log(`\nToda la plataforma: ${total!.intentos} intentos · media ${total!.media.toFixed(2)}`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/04-agrupar.ts
+```
+
+```text
+Curso  intentos  media  mejor  aprobados  alumnos
+B1          298  3.95      5       72 %      149
+B2          307  4.05      5       77 %      148
+B3          275  3.95      5       72 %      135
+B4          339  3.99      5       74 %      168
+B5          307  4.05      5       78 %      152
+B6          329  3.97      5       74 %      165
+B7          314  4.00      5       76 %      151
+I1          281  3.90      5       71 %      145
+I2          282  3.93      5       73 %      144
+I3          306  3.90      5       69 %      158
+
+u_00007: B7 2 (media 2.0) · I1 4→5→4 (media 4.3) · I2 3→4 (media 3.5) · I3 4→4 (media 4.0)
+
+Toda la plataforma: 3038 intentos · media 3.97
+```
+
+| Acumulador           | Qué calcula en cada grupo                        | En el ejemplo               |
+| -------------------- | ------------------------------------------------ | --------------------------- |
+| `$sum: 1`            | Cuenta los documentos                            | `intentos`                  |
+| `$sum: "$campo"`     | Suma un campo                                    | — (en el ejercicio, los km) |
+| `$sum: { $cond: … }` | Cuenta los que cumplen una condición             | `aprobados`                 |
+| `$avg`               | Media                                            | `media`                     |
+| `$max` / `$min`      | Máximo / mínimo                                  | `mejor`                     |
+| `$push`              | Array con todos los valores, en orden de llegada | `puntuaciones`              |
+| `$addToSet`          | Array sin repetidos                              | `alumnos`                   |
+| `$first` / `$last`   | El primero / el último del grupo                 | Paso 4                      |
+
+- **`_id` es la clave, no un identificador:** `_id: "$cursoId"` forma un grupo por curso; `_id: null` forma un solo grupo con todo (el total de la plataforma).
+- **Un `$sort` antes del `$group` decide el orden de `$push`:** por eso las puntuaciones de `u_00007` salen en el orden en que hizo los intentos (`4→5→4`).
+- **Solo salen los campos que calculas:** tras un `$group`, cada documento tiene `_id` y los acumuladores. `userId` o `fecha` ya no existen, salvo que los acumules.
+
+<Callout type="risk">
+
+- **`$addToSet` y `$push` acumulan en memoria:** `alumnos` guarda hasta 168 identificadores por curso; con 100 000 alumnos sería un array enorme en un solo documento de salida, que también tiene el límite de 16 MB. Si solo necesitas cuántos son, cuenta sin acumular la lista (lo harás en I4.5 con dos `$group` seguidos).
+- **Cada etapa tiene un límite de 100 MB de memoria:** un `$group` o un `$sort` sobre millones de documentos lo supera. MongoDB 6 y posteriores pasan a usar disco automáticamente (`allowDiskUse`), que es más lento, y en los clústeres gratuitos de Atlas (M0) esa opción no está disponible: ahí la _pipeline_ falla. Filtra con `$match` antes de agrupar.
+- **`$avg` ignora los documentos sin el campo:** si algunos intentos no tienen `puntuacion`, la media se calcula solo con los que sí la tienen, sin avisar. Compruébalo con `$sum: 1` al lado.
+
+</Callout>
+
+## Paso 4: `$unwind`, un documento por elemento del array
+
+Cada evaluación guarda sus 5 resultados en un array. Para saber qué pregunta falla más, hay que agrupar **por pregunta**, y las preguntas están dentro del array. `$unwind` lo despliega: convierte un documento con un array de 5 elementos en 5 documentos, cada uno con un solo elemento. Crea `src/i4/04-unwind.ts`:
+
+```ts
+// Archivo: src/i4/04-unwind.ts
+// $unwind: un documento por cada elemento de un array. ¿Qué pregunta falla más en cada curso?
+import { cliente } from "../db";
+import { evaluaciones } from "./evaluaciones";
+
+// Así queda UNA evaluación después de $unwind: cinco documentos, uno por pregunta
+const ejemplo = await evaluaciones
+  .aggregate([
+    { $limit: 1 },
+    { $unwind: { path: "$resultados", includeArrayIndex: "pregunta" } },
+    { $project: { _id: 0, cursoId: 1, pregunta: 1, resultados: 1 } },
+  ])
+  .toArray();
+console.log("Una evaluación tras $unwind:");
+for (const d of ejemplo) console.log("  ", JSON.stringify(d));
+
+interface PeorPregunta {
+  _id: string; // cursoId
+  pregunta: number;
+  acierto: number;
+}
+const peores = await evaluaciones
+  .aggregate<PeorPregunta>([
+    { $unwind: { path: "$resultados", includeArrayIndex: "pregunta" } },
+    {
+      $group: {
+        _id: { cursoId: "$cursoId", pregunta: { $add: ["$pregunta", 1] } }, // agrupar por dos campos; preguntas desde 1
+        acierto: { $avg: { $cond: ["$resultados", 1, 0] } }, // fracción de aciertos
+      },
+    },
+    { $sort: { "_id.cursoId": 1, acierto: 1 } }, // dentro de cada curso, la peor primero
+    {
+      $group: {
+        _id: "$_id.cursoId", // un segundo $group, ahora por curso
+        pregunta: { $first: "$_id.pregunta" }, // $first: la primera del grupo, que tras ordenar es la peor
+        acierto: { $first: "$acierto" },
+      },
+    },
+    { $sort: { _id: 1 } },
+  ])
+  .toArray();
+
+console.log("\nLa pregunta con menos aciertos de cada curso:");
+for (const p of peores) console.log(`  ${p._id}: pregunta ${p.pregunta} (${Math.round(p.acierto * 100)} % de aciertos)`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/04-unwind.ts
+```
+
+```text
+Una evaluación tras $unwind:
+   {"cursoId":"B2","resultados":false,"pregunta":0}
+   {"cursoId":"B2","resultados":true,"pregunta":1}
+   {"cursoId":"B2","resultados":false,"pregunta":2}
+   {"cursoId":"B2","resultados":false,"pregunta":3}
+   {"cursoId":"B2","resultados":false,"pregunta":4}
+
+La pregunta con menos aciertos de cada curso:
+  B1: pregunta 3 (51 % de aciertos)
+  B2: pregunta 3 (53 % de aciertos)
+  B3: pregunta 3 (51 % de aciertos)
+  B4: pregunta 3 (53 % de aciertos)
+  B5: pregunta 3 (55 % de aciertos)
+  B6: pregunta 3 (52 % de aciertos)
+  B7: pregunta 3 (54 % de aciertos)
+  I1: pregunta 3 (50 % de aciertos)
+  I2: pregunta 3 (49 % de aciertos)
+  I3: pregunta 3 (49 % de aciertos)
+```
+
+- **`includeArrayIndex: "pregunta"`** guarda la posición de cada elemento (0 a 4) en un campo. Sin él, después de `$unwind` no sabrías de qué pregunta era cada resultado.
+- **`_id` puede ser un objeto:** `{ cursoId, pregunta }` forma un grupo por cada combinación de curso y pregunta (50 grupos).
+- **Dos `$group` seguidos:** el primero calcula el acierto de cada pregunta; el segundo, tras ordenar, se queda con la primera de cada curso (`$first`), que es la peor.
+- **La agregación encuentra lo que sembraste:** la pregunta 3 tiene alrededor del 50 % de aciertos en todos los cursos. Con datos reales, esa es la pregunta que hay que revisar.
+
+<Callout type="risk">
+
+- **`$unwind` multiplica los documentos:** 3038 evaluaciones se convierten en 15 190. Con arrays grandes (I4.2), la agregación puede pasar de miles a millones de documentos intermedios. Filtra antes con `$match`.
+- **Un documento con el array vacío o sin el campo desaparece:** `$unwind` lo descarta. Si necesitas conservarlo (por ejemplo, para contar alumnos sin intentos), usa `preserveNullAndEmptyArrays: true`.
+- **`$first` sin `$sort` antes no significa nada:** el orden de los documentos dentro de un grupo no está garantizado. Ordena siempre justo antes del `$group` que usa `$first` o `$last`.
+
+</Callout>
+
+## Paso 5: probar _pipelines_ en Compass
+
+Escribir una _pipeline_ larga a ciegas es difícil. **MongoDB Compass**, la aplicación gráfica gratuita de MongoDB, tiene un editor que enseña el resultado de cada etapa mientras la escribes, como hace `04-primera.ts`:
+
+1. Descarga Compass desde mongodb.com/products/tools/compass y conéctate con la misma URI de tu `.env`.
+2. Abre `academy_lab` → `i4_evaluaciones` → pestaña **Aggregations**.
+3. Pulsa **Add Stage**, elige la etapa (por ejemplo, `$match`) y escribe su contenido: `{ cursoId: "B5" }`. A la derecha aparecen los primeros documentos que salen de esa etapa.
+4. Añade las siguientes etapas una a una, comprobando la salida de cada una.
+5. Cuando funcione, el botón **Export to Language** la convierte en código para Node.js, listo para pegar en `aggregate([…])`.
+
+<Callout type="risk">
+
+- **La vista previa usa una muestra:** Compass enseña solo unos pocos documentos de la salida de cada etapa. Que la vista previa sea correcta no garantiza que el resultado completo lo sea: ejecútala entera antes de darla por buena.
+- **Cuidado con las etapas que escriben:** `$merge` (I4.3) y `$out` **escriben en la base de datos** al ejecutar la _pipeline_ completa. En Compass, pruébalas contra `academy_lab`, nunca contra producción.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Calcula, con una agregación, los km totales por semana de tus entrenos de running (los de B5, del usuario `u_demo`).
+2. Las semanas deben ir de lunes a domingo en la zona horaria de Ciudad de México y salir en orden.
+3. Para cada semana muestra también el número de salidas, la salida más larga y el primer día con datos. No cuentes los entrenos borrados (el borrado lógico de B5.4).
+
+</Callout>
+
+Solución. `src/i4/04-ejercicio.ts`:
+
+```ts
+// Archivo: src/i4/04-ejercicio.ts
+// Ejercicio I4.4: km totales por semana de running, con los entrenos de B5
+import { cliente } from "../db";
+import { entrenos } from "../colecciones";
+
+const ZONA = "America/Mexico_City";
+
+interface Semana {
+  _id: { anio: number; semana: number };
+  km: number;
+  salidas: number;
+  masLarga: number;
+  primerDia: Date;
+}
+
+const semanas = await entrenos
+  .aggregate<Semana>([
+    // 1. Filtrar primero: solo running con km y sin borrar (el borrado lógico de B5.4)
+    { $match: { userId: "u_demo", tipo: "running", km: { $exists: true }, borradoEn: { $exists: false } } },
+    // 2. Agrupar por semana ISO (de lunes a domingo) en la zona del usuario
+    {
+      $group: {
+        _id: {
+          anio: { $isoWeekYear: { date: "$fecha", timezone: ZONA } },
+          semana: { $isoWeek: { date: "$fecha", timezone: ZONA } },
+        },
+        km: { $sum: "$km" },
+        salidas: { $sum: 1 },
+        masLarga: { $max: "$km" },
+        primerDia: { $min: "$fecha" },
+      },
+    },
+    // 3. Ordenar por semana: _id es un objeto, así que se ordena por sus dos campos
+    { $sort: { "_id.anio": 1, "_id.semana": 1 } },
+  ])
+  .toArray();
+
+const dia = (d: Date) => d.toLocaleDateString("es-MX", { timeZone: ZONA, day: "numeric", month: "short" });
+console.log("Semana       km  salidas  más larga  desde");
+for (const s of semanas) {
+  console.log(`${s._id.anio}-S${String(s._id.semana).padStart(2, "0")}  ${String(s.km).padStart(5)}  ${String(s.salidas).padStart(7)}  ${String(s.masLarga).padStart(6)} km  ${dia(s.primerDia)}`);
+}
+const total = semanas.reduce((t, s) => t + s.km, 0);
+console.log(`Total: ${total} km en ${semanas.length} semanas`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/04-ejercicio.ts
+```
+
+```text
+Semana       km  salidas  más larga  desde
+2026-S36      4        1       4 km  1 sep
+2026-S37     12        2       7 km  7 sep
+2026-S38      8        1       8 km  19 sep
+2026-S39      6        1       6 km  25 sep
+2026-S40      4        1       4 km  1 oct
+2026-S41      7        1       7 km  7 oct
+2026-S42      5        1       5 km  13 oct
+2026-S43     14        2       8 km  19 oct
+Total: 60 km en 8 semanas
+```
+
+- **`$isoWeek` y `$isoWeekYear`** numeran las semanas según la norma ISO 8601: de lunes a domingo, y la semana 1 es la que contiene el primer jueves del año. Los dos aceptan `timezone`, así que una salida del domingo a las 23:00 en México cuenta para esa semana y no para la siguiente.
+- **El año va en la clave:** solo con `$isoWeek`, la semana 1 de 2026 y la de 2027 se mezclarían en un grupo. Y debe ser `$isoWeekYear`, no `$year`: el 1 de enero puede pertenecer a la última semana ISO del año anterior.
+- **`$match` primero:** filtra running, con km y sin borrar, antes de agrupar. `km: { $exists: true }` deja fuera las salidas sin km, que `$sum` trataría como 0.
+- **El total cuadra con B5:** 10 salidas de running y 60 km en 8 semanas.
+
+<Callout type="risk">
+
+- **Las semanas sin entrenos no aparecen:** `$group` solo crea grupos para los valores que existen. Una gráfica semanal necesita también las semanas a cero: rellénalas en la aplicación, o con la etapa `$densify`.
+- **"Semana" depende del país:** en Estados Unidos empiezan en domingo (`$week`, de 0 a 53); en México y en España, en lunes (`$isoWeek`). Usa el mismo criterio en la base de datos y en la interfaz.
+
+</Callout>
+
+<Callout type="mastery">
+
+Construyes un `$group` sin mirar ejemplos: eliges la clave (un campo, un objeto o `null`), los acumuladores (`$sum`, `$avg`, `$max`, `$push`, `$addToSet`, `$first`) y el orden de las etapas, filtras con `$match` al principio, despliegas arrays con `$unwind` y compruebas cada etapa por separado antes de dar la _pipeline_ por buena.
+
+</Callout>
+
+## Resumen
+
+- Una _pipeline_ es un array de etapas; cada una transforma la salida de la anterior.
+- `$match` filtra, `$project` da forma (y descarta), `$addFields` añade, `$sort` y `$limit` ordenan y cortan, `$count` cuenta.
+- `$group` forma un grupo por cada valor de `_id` y calcula con acumuladores; `_id: null` agrupa todo.
+- `$unwind` despliega un array (con `includeArrayIndex` para saber la posición) y multiplica los documentos.
+- Prueba las _pipelines_ etapa a etapa, en código o con Compass, y nunca ejecutes `$merge` u `$out` contra producción para probar.

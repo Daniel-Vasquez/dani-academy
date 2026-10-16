@@ -1,0 +1,602 @@
+---
+sectionId: "I4.2"
+course: "I4"
+title: "Embeber vs referenciar"
+order: 2
+minutes: 75
+summary: "Guardas el mismo progreso embebido y referenciado y mides espacio y tiempos, ves cómo un array sin límite frena las escrituras simultáneas 22 veces y cómo un $lookup sin índice pasa de 38 ms a 16 s."
+---
+
+Cada relación de tu modelo tiene dos formas de guardarse en MongoDB. **Embeber** es meter los datos relacionados dentro del mismo documento: un pedido con sus líneas dentro. **Referenciar** es guardarlos en documentos aparte, con un campo que apunta al otro (`userId`, `cursoId`), como una clave foránea de SQL pero sin que MongoDB la compruebe. Ninguna es mejor en general: la buena es la que sirve a tus patrones de acceso (I4.1) sin crear documentos que crecen sin límite. En esta sección vas a guardar el mismo progreso de lectura de las dos formas y a medir cuánto ocupa cada una y cuánto tarda cada patrón. También medirás los dos costes que deciden la mayoría de diseños: el de un array sin límite y el de un `$lookup`.
+
+**Lo que tendrás al terminar:** `src/i4/02-modelos.ts` y `src/i4/02-comparar.ts` (los dos diseños, medidos), `src/i4/02-sin-limite.ts` (el antipatrón), `src/i4/02-lookup.ts` (el coste de unir colecciones) y el modelo completo de Dani Academy en MongoDB.
+
+**Requisitos:** el proyecto `mongo-academy` con `src/i4/catalogo.ts` (I4.1).
+
+## Paso 1: el mismo progreso, embebido y referenciado
+
+El temario propone dos formas de guardar qué secciones ha leído cada usuario:
+
+- **Opción A, embeber:** un documento por usuario y curso, con las secciones leídas en un array. Es lo que hiciste en B5.4.
+- **Opción B, referenciar:** un documento por sección leída, con `userId`, `cursoId` y `seccionId`. Es lo que hace esta plataforma (`section_progress`).
+
+Crea `src/i4/02-modelos.ts` con los dos modelos y sus índices:
+
+```ts
+// Archivo: src/i4/02-modelos.ts
+// Los dos diseños del progreso de lectura, con sus colecciones e índices
+import type { ObjectId } from "mongodb";
+import { db } from "../db";
+
+/** Opción A (embeber): un documento por usuario y curso, con las secciones leídas dentro */
+export interface ProgresoCurso {
+  _id?: ObjectId;
+  userId: string;
+  cursoId: string;
+  seccionesLeidas: string[]; // acotado: como mucho, las secciones del curso (≤ 8)
+  actualizado: Date;
+}
+
+/** Opción B (referenciar): un documento por sección leída (lo que hace la plataforma) */
+export interface Lectura {
+  _id?: ObjectId;
+  userId: string;
+  cursoId: string;
+  seccionId: string;
+  leidaEn: Date;
+}
+
+export const progresoA = db.collection<ProgresoCurso>("i4_progreso_a");
+export const lecturasB = db.collection<Lectura>("i4_lecturas_b");
+
+export async function crearIndices() {
+  await progresoA.createIndex({ userId: 1, cursoId: 1 }, { unique: true });
+  await lecturasB.createIndex({ userId: 1, cursoId: 1, seccionId: 1 }, { unique: true });
+  await lecturasB.createIndex({ userId: 1, leidaEn: -1 }); // "continuar donde lo dejaste"
+}
+```
+
+Y `src/i4/02-sembrar.ts`, que llena las dos colecciones con **los mismos datos**: 2000 usuarios que han empezado, al azar, un tercio de los cursos:
+
+```ts
+// Archivo: src/i4/02-sembrar.ts
+// Los MISMOS datos en los dos diseños: 2000 usuarios que han leído secciones al azar
+import { cliente } from "../db";
+import { CATALOGO, seccionesDe } from "./catalogo";
+import { crearIndices, lecturasB, progresoA, type Lectura, type ProgresoCurso } from "./02-modelos";
+
+const USUARIOS = 2000;
+
+// Generador pseudoaleatorio con semilla: los mismos datos en cada ejecución
+let semilla = 42;
+const azar = () => ((semilla = (semilla * 1_103_515_245 + 12_345) % 2 ** 31) / 2 ** 31);
+
+await Promise.all([progresoA.drop().catch(() => {}), lecturasB.drop().catch(() => {})]);
+await crearIndices();
+
+const docsA: ProgresoCurso[] = [];
+const docsB: Lectura[] = [];
+const inicio = Date.UTC(2026, 0, 1);
+
+for (let u = 1; u <= USUARIOS; u++) {
+  const userId = `u_${String(u).padStart(5, "0")}`;
+  for (const curso of CATALOGO) {
+    if (azar() > 0.35) continue; // cada usuario empieza un 35 % de los cursos
+    const leidas = seccionesDe(curso).filter(() => azar() < 0.7);
+    if (leidas.length === 0) continue;
+    const fechas = leidas.map(() => new Date(inicio + Math.floor(azar() * 280) * 86_400_000));
+    docsA.push({ userId, cursoId: curso.id, seccionesLeidas: leidas, actualizado: new Date(Math.max(...fechas.map(Number))) });
+    leidas.forEach((seccionId, i) => docsB.push({ userId, cursoId: curso.id, seccionId, leidaEn: fechas[i]! }));
+  }
+}
+
+await progresoA.insertMany(docsA);
+await lecturasB.insertMany(docsB);
+console.log(`Sembrado: ${USUARIOS} usuarios · A: ${docsA.length} documentos · B: ${docsB.length} documentos`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/02-sembrar.ts
+```
+
+```text
+Sembrado: 2000 usuarios · A: 17641 documentos · B: 69159 documentos
+```
+
+Ahora compara las dos opciones en espacio y en cada patrón de acceso. Crea `src/i4/02-comparar.ts`:
+
+```ts
+// Archivo: src/i4/02-comparar.ts
+// Opción A (embeber) frente a opción B (referenciar): espacio y tiempo de cada patrón de acceso
+import type { Collection, Document } from "mongodb";
+import { cliente, db } from "../db";
+import { CATALOGO, seccionesDe } from "./catalogo";
+import { lecturasB, progresoA } from "./02-modelos";
+
+const N = 500;
+const kb = (bytes: number) => `${(bytes / 1024).toFixed(0)} KB`;
+
+async function espacio(col: Collection<Document>) {
+  const [s] = await col
+    .aggregate<{ storageStats: { count: number; size: number; storageSize: number; totalIndexSize: number } }>([
+      { $collStats: { storageStats: {} } },
+    ])
+    .toArray();
+  return s!.storageStats;
+}
+
+/** Ejecuta `fn` N veces con usuarios y cursos al azar y devuelve la media en ms */
+async function medir(fn: (userId: string, cursoId: string, seccionId: string) => Promise<unknown>) {
+  const casos = Array.from({ length: N }, (_, i) => {
+    const curso = CATALOGO[(i * 7) % CATALOGO.length]!;
+    const secciones = seccionesDe(curso);
+    return [`u_${String(((i * 37) % 2000) + 1).padStart(5, "0")}`, curso.id, secciones[i % secciones.length]!] as const;
+  });
+  for (const c of casos.slice(0, 20)) await fn(...c); // calentamiento
+  const t = performance.now();
+  for (const c of casos) await fn(...c);
+  return ((performance.now() - t) / N).toFixed(2).padStart(5);
+}
+
+// WiredTiger escribe en disco cada 60 s; fsync fuerza ese punto de control para medir el espacio real
+await db.admin().command({ fsync: 1 });
+const [a, b] = await Promise.all([espacio(progresoA as never), espacio(lecturasB as never)]);
+console.log("Espacio            A (embeber)      B (referenciar)");
+console.log(`  documentos       ${String(a.count).padEnd(16)} ${b.count}`);
+console.log(`  datos (BSON)     ${kb(a.size).padEnd(16)} ${kb(b.size)}`);
+console.log(`  en disco         ${kb(a.storageSize).padEnd(16)} ${kb(b.storageSize)}`);
+console.log(`  índices          ${kb(a.totalIndexSize).padEnd(16)} ${kb(b.totalIndexSize)}`);
+
+const ahora = new Date();
+const patrones: [string, () => Promise<string>, () => Promise<string>][] = [
+  [
+    "#1 leídas de un curso",
+    () => medir((userId, cursoId) => progresoA.findOne({ userId, cursoId }, { projection: { _id: 0, seccionesLeidas: 1 } })),
+    () => medir((userId, cursoId) => lecturasB.find({ userId, cursoId }, { projection: { _id: 0, seccionId: 1 } }).toArray()),
+  ],
+  [
+    "#2 temario (todos los cursos)",
+    () => medir((userId) => progresoA.find({ userId }, { projection: { _id: 0, cursoId: 1, seccionesLeidas: 1 } }).toArray()),
+    () => medir((userId) => lecturasB.find({ userId }, { projection: { _id: 0, seccionId: 1 } }).toArray()),
+  ],
+  [
+    "#3 marcar como leída",
+    () =>
+      medir((userId, cursoId, seccionId) =>
+        progresoA.updateOne(
+          { userId, cursoId },
+          { $addToSet: { seccionesLeidas: seccionId }, $set: { actualizado: ahora } },
+          { upsert: true },
+        ),
+      ),
+    () =>
+      medir((userId, cursoId, seccionId) =>
+        lecturasB.updateOne({ userId, cursoId, seccionId }, { $setOnInsert: { leidaEn: ahora } }, { upsert: true }),
+      ),
+  ],
+  [
+    "#3 desmarcar",
+    () => medir((userId, cursoId, seccionId) => progresoA.updateOne({ userId, cursoId }, { $pull: { seccionesLeidas: seccionId } })),
+    () => medir((userId, cursoId, seccionId) => lecturasB.deleteOne({ userId, cursoId, seccionId })),
+  ],
+];
+
+console.log(`\nTiempo medio (ms, ${N} operaciones)   A        B`);
+for (const [nombre, fa, fb] of patrones) {
+  console.log(`  ${nombre.padEnd(32)} ${await fa()}    ${await fb()}`);
+}
+
+// Un patrón que solo permite B: cada lectura tiene su fecha
+const continuar = await medir((userId) => lecturasB.find({ userId }).sort({ leidaEn: -1 }).limit(1).next());
+console.log(`  ${"continuar donde lo dejaste".padEnd(32)}   —    ${continuar}`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/02-comparar.ts
+```
+
+```text
+Espacio            A (embeber)      B (referenciar)
+  documentos       17641            69159
+  datos (BSON)     2550 KB          6416 KB
+  en disco         708 KB           1620 KB
+  índices          1508 KB          7852 KB
+
+Tiempo medio (ms, 500 operaciones)   A        B
+  #1 leídas de un curso             0.12     0.08
+  #2 temario (todos los cursos)     0.09     0.10
+  #3 marcar como leída              6.08     4.60
+  #3 desmarcar                      6.07     6.14
+  continuar donde lo dejaste         —     0.14
+```
+
+- **En tiempo, empate:** las dos opciones responden a todos los patrones en menos de un milisegundo para leer y unos 5 ms para escribir (la escritura espera a que el dato quede guardado en el diario de MongoDB, por eso tarda más). Con un índice adecuado, buscar 1 documento o 4 cuesta lo mismo.
+- **En espacio, gana A:** B tiene cuatro veces más documentos, cada uno repitiendo `userId` y `cursoId`, y sus índices ocupan 7,9 MB frente a 1,5 MB. Con 512 MB en Atlas M0, es una diferencia que importa.
+- **En posibilidades, gana B:** cada lectura tiene su fecha, así que "continuar donde lo dejaste" es una consulta de 0,14 ms. En A, la fecha es del curso entero (`actualizado`), y no se sabe qué sección se leyó la última.
+
+Por eso las dos opciones son válidas aquí: el array de A está **acotado** (como mucho, 8 secciones por curso). La plataforma eligió B porque necesita la fecha de cada lectura, para "continuar donde lo dejaste" y para las estadísticas por día. Si solo hiciera falta saber qué está leído, A sería la elección más barata.
+
+<Callout type="risk">
+
+- **Un empate con 2000 usuarios no es un empate con 2 millones:** los tiempos se mantienen mientras los índices quepan en la memoria del servidor. Ahí, el espacio de B (cuatro veces más índice) puede convertirse en lentitud. Por eso se mide el espacio aunque los tiempos coincidan.
+- **`$addToSet` y el índice único hacen lo mismo de dos formas:** en A, `$addToSet` evita repetir una sección dentro del array; en B, el índice único `{ userId, cursoId, seccionId }` evita dos documentos para la misma lectura (lo demostraste en B5.4 con 100 peticiones simultáneas). Sin él, B acumularía duplicados.
+- **`$collStats` mide después del punto de control:** WiredTiger escribe en disco cada 60 s. Sin el `fsync` del _script_, el espacio "en disco" de una colección recién creada sale en 4 KB.
+
+</Callout>
+
+## Paso 2: el antipatrón, un array sin límite
+
+La pregunta clave antes de embeber es: **¿este array tiene un máximo?** Las secciones de un curso, sí (8). Los cursos de un usuario, sí (24). Los alumnos de un curso, **no**: crecen con cada usuario de la plataforma. El mismo dato ("quién estudia qué curso") puede guardarse en los dos lados, y solo uno es seguro. Crea `src/i4/02-sin-limite.ts`:
+
+```ts
+// Archivo: src/i4/02-sin-limite.ts
+// El mismo dato ("quién estudia qué curso") en el lado que crece sin límite y en el lado acotado
+import { BSON } from "mongodb";
+import { cliente, db } from "../db";
+
+interface CursoConAlumnos {
+  _id: string;
+  titulo: string;
+  alumnos: string[]; // ✗ crece con cada usuario de la plataforma
+}
+interface UsuarioConCursos {
+  _id: string;
+  nombre: string;
+  cursos: string[]; // ✓ acotado: como mucho, los 24 cursos del catálogo
+}
+
+const cursos = db.collection<CursoConAlumnos>("i4_cursos_alumnos");
+const usuarios = db.collection<UsuarioConCursos>("i4_usuarios_cursos");
+await Promise.all([cursos.drop().catch(() => {}), usuarios.drop().catch(() => {})]);
+await cursos.insertOne({ _id: "B5", titulo: "MongoDB esencial", alumnos: [] });
+
+const id = (n: number) => `u_${String(n).padStart(7, "0")}`;
+const ms = (t: number, veces: number) => ((performance.now() - t) / veces).toFixed(2).padStart(6);
+
+console.log("✗ curso.alumnos (crece con los usuarios)");
+let n = 0;
+for (const objetivo of [1_000, 10_000, 50_000, 100_000, 200_000]) {
+  // Crece hasta el tamaño objetivo en lotes
+  while (n < objetivo) {
+    const lote = Array.from({ length: Math.min(10_000, objetivo - n) }, (_, i) => id(n + i));
+    await cursos.updateOne({ _id: "B5" }, { $push: { alumnos: { $each: lote } } });
+    n += lote.length;
+  }
+
+  // $addToSet tiene que comprobar que el valor no está: recorre el array entero
+  let t = performance.now();
+  for (let i = 0; i < 20; i++) await cursos.updateOne({ _id: "B5" }, { $addToSet: { alumnos: id(5_000_000 + n + i) } });
+  const nuevo = ms(t, 20);
+  n += 20;
+
+  t = performance.now();
+  for (let i = 0; i < 20; i++) await cursos.findOne({ _id: "B5" }, { projection: { titulo: 1 } });
+  const titulo = ms(t, 20);
+
+  const doc = await cursos.findOne({ _id: "B5" });
+  const mb = (BSON.calculateObjectSize(doc!) / 1024 / 1024).toFixed(2);
+  console.log(`  ${String(n).padStart(7)} alumnos · ${mb.padStart(5)} MB · $addToSet: ${nuevo} ms · leer el título: ${titulo} ms`);
+}
+
+console.log("\n✓ usuario.cursos (como mucho, 24)");
+await usuarios.insertOne({ _id: "u_ana", nombre: "Ana", cursos: [] });
+const catalogo = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "P1"];
+const t = performance.now();
+for (const c of catalogo) await usuarios.updateOne({ _id: "u_ana" }, { $addToSet: { cursos: c } });
+const doc = await usuarios.findOne({ _id: "u_ana" });
+console.log(`  ${doc!.cursos.length} cursos · ${BSON.calculateObjectSize(doc!)} bytes · $addToSet: ${ms(t, catalogo.length)} ms`);
+
+// 200 matrículas a la vez: todas sobre el MISMO documento del curso, o cada una sobre su usuario
+console.log("\n200 matrículas simultáneas");
+await usuarios.insertMany(Array.from({ length: 200 }, (_, i) => ({ _id: id(9_000_000 + i), nombre: `U${i}`, cursos: [] })));
+let t2 = performance.now();
+await Promise.all(Array.from({ length: 200 }, (_, i) => cursos.updateOne({ _id: "B5" }, { $addToSet: { alumnos: id(8_000_000 + i) } })));
+console.log(`  ✗ en curso.alumnos (un documento):   ${(performance.now() - t2).toFixed(0).padStart(5)} ms en total`);
+t2 = performance.now();
+await Promise.all(Array.from({ length: 200 }, (_, i) => usuarios.updateOne({ _id: id(9_000_000 + i) }, { $addToSet: { cursos: "B5" } })));
+console.log(`  ✓ en usuario.cursos (200 documentos): ${(performance.now() - t2).toFixed(0).padStart(5)} ms en total`);
+
+await Promise.all([cursos.drop(), usuarios.drop()]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/02-sin-limite.ts
+```
+
+```text
+✗ curso.alumnos (crece con los usuarios)
+     1020 alumnos ·  0.02 MB · $addToSet:   4.89 ms · leer el título:   0.27 ms
+    10020 alumnos ·  0.19 MB · $addToSet:   5.05 ms · leer el título:   0.24 ms
+    50020 alumnos ·  0.99 MB · $addToSet:   8.30 ms · leer el título:   0.29 ms
+   100020 alumnos ·  1.99 MB · $addToSet:   9.79 ms · leer el título:   0.22 ms
+   200020 alumnos ·  4.09 MB · $addToSet:  14.10 ms · leer el título:   0.29 ms
+
+✓ usuario.cursos (como mucho, 24)
+  24 cursos · 303 bytes · $addToSet:   4.23 ms
+
+200 matrículas simultáneas
+  ✗ en curso.alumnos (un documento):    3277 ms en total
+  ✓ en usuario.cursos (200 documentos):   151 ms en total
+```
+
+- **`$addToSet` se encarece con el tamaño:** para no repetir un valor, MongoDB recorre el array entero. Con 200 000 alumnos tarda el triple que con 1000 (14 ms frente a 4,9 ms), y seguirá creciendo. A unos 21 bytes por `userId`, el curso llegará a 16 MB con unos 780 000 alumnos y, a partir de ahí, nadie más podrá matricularse.
+- **Leer el título no empeora** porque la proyección no envía el array por la red y el documento está en memoria. No lo tomes como un alivio: el servidor sigue cargando 4 MB por cada lectura del curso.
+- **El coste que más duele es la concurrencia:** 200 matrículas a la vez tardan 3,3 s cuando todas escriben en el mismo documento, y 0,15 s cuando cada una escribe en su usuario. MongoDB no puede modificar un documento en dos escrituras a la vez: las pone en fila. Un documento que todos actualizan es un **punto caliente**.
+
+La regla práctica: **embebe en el lado acotado**. Si necesitas la lista de alumnos de un curso, no la guardes en el curso: búscala con una consulta sobre los usuarios (o sobre las lecturas), con un índice por `cursoId`.
+
+<Callout type="risk">
+
+- **"Pocos" tiene que ser un máximo, no una estimación:** "un usuario tendrá pocas notificaciones" no es un límite; "un intento tiene 5 respuestas" sí lo es. Si no puedes escribir el número máximo, no embebas.
+- **Los arrays sin límite no avisan:** con 1000 elementos, todo es rápido. El problema aparece meses después, primero en los usuarios o cursos más populares, que son justo los que no quieres que fallen.
+- **Los índices sobre arrays multiplican:** un índice sobre `alumnos` (multiclave) tendría una entrada por elemento, 200 000 para este curso. Y MongoDB no permite que un índice compuesto tenga dos campos de array.
+
+</Callout>
+
+## Paso 3: el coste de referenciar, `$lookup`
+
+Referenciar resuelve el crecimiento, pero tiene un coste al leer: si una pantalla necesita datos de dos colecciones, hay que unirlas. MongoDB lo hace con **`$lookup`**, la etapa de agregación que busca, para cada documento, los relacionados en otra colección (el equivalente a un `LEFT JOIN`). La otra opción es unir en la aplicación, con dos consultas. Crea `src/i4/02-lookup.ts`, un informe de los intentos de la última semana con el nombre de cada alumno:
+
+```ts
+// Archivo: src/i4/02-lookup.ts
+// Referenciar tiene un coste al leer: $lookup con y sin índice, frente a unir en la aplicación
+import type { Document } from "mongodb";
+import { cliente, db } from "../db";
+import { CATALOGO } from "./catalogo";
+
+interface Alumno {
+  userId: string; // referencia "natural" (no es el _id)
+  nombre: string;
+}
+interface Intento {
+  userId: string;
+  cursoId: string;
+  puntuacion: number;
+  fecha: Date;
+}
+
+const alumnos = db.collection<Alumno>("i4_alumnos");
+const intentos = db.collection<Intento>("i4_intentos");
+const id = (n: number) => `u_${String(n).padStart(5, "0")}`;
+const inicio = Date.UTC(2026, 9, 1);
+const desde = new Date(inicio + 7 * 86_400_000);
+
+// El informe: intentos de la última semana con el nombre de cada alumno
+const informe: Document[] = [
+  { $match: { fecha: { $gte: desde } } },
+  { $lookup: { from: "i4_alumnos", localField: "userId", foreignField: "userId", as: "alumno" } },
+  { $project: { _id: 0, cursoId: 1, puntuacion: 1, nombre: { $first: "$alumno.nombre" } } },
+];
+
+/** Busca la estrategia del $lookup dentro del explain (el plan es un árbol de etapas) */
+function estrategia(nodo: unknown): string | undefined {
+  if (!nodo || typeof nodo !== "object") return undefined;
+  const n = nodo as Document;
+  if (n.stage === "EQ_LOOKUP") return n.strategy as string;
+  for (const v of Object.values(n)) {
+    const s = estrategia(v);
+    if (s) return s;
+  }
+  return undefined;
+}
+
+async function medir(nombre: string, fn: () => Promise<unknown[]>) {
+  const t = performance.now();
+  const filas = await fn();
+  const ms = (performance.now() - t).toFixed(0).padStart(6);
+  const plan = nombre.startsWith("$lookup") ? estrategia(await intentos.aggregate(informe).explain("queryPlanner")) : "—";
+  console.log(`  ${nombre.padEnd(38)} ${String(filas.length).padStart(6)} filas · ${ms} ms · estrategia: ${plan}`);
+}
+
+for (const usuarios of [2_000, 20_000]) {
+  await Promise.all([alumnos.drop().catch(() => {}), intentos.drop().catch(() => {})]);
+  await alumnos.insertMany(Array.from({ length: usuarios }, (_, i) => ({ userId: id(i + 1), nombre: `Alumno ${i + 1}` })));
+  await intentos.insertMany(
+    Array.from({ length: 20_000 }, (_, i) => ({
+      userId: id((i % usuarios) + 1),
+      cursoId: CATALOGO[i % CATALOGO.length]!.id,
+      puntuacion: i % 6,
+      fecha: new Date(inicio + (i % 14) * 86_400_000),
+    })),
+  );
+  await intentos.createIndex({ fecha: -1 });
+
+  console.log(`\nInforme de la última semana con ${usuarios} alumnos`);
+  await medir("$lookup SIN índice en alumnos.userId", () => intentos.aggregate(informe).toArray());
+  await alumnos.createIndex({ userId: 1 }, { unique: true });
+  await medir("$lookup CON índice en alumnos.userId", () => intentos.aggregate(informe).toArray());
+  await medir("unir en la aplicación (2 consultas)", async () => {
+    const filas = await intentos
+      .find({ fecha: { $gte: desde } }, { projection: { _id: 0, userId: 1, cursoId: 1, puntuacion: 1 } })
+      .toArray();
+    const ids = [...new Set(filas.map((f) => f.userId))];
+    const nombres = new Map((await alumnos.find({ userId: { $in: ids } }).toArray()).map((a) => [a.userId, a.nombre]));
+    return filas.map((f) => ({ cursoId: f.cursoId, puntuacion: f.puntuacion, nombre: nombres.get(f.userId) }));
+  });
+}
+
+await Promise.all([alumnos.drop(), intentos.drop()]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/02-lookup.ts
+```
+
+```text
+
+Informe de la última semana con 2000 alumnos
+  $lookup SIN índice en alumnos.userId     9997 filas ·     30 ms · estrategia: HashJoin
+  $lookup CON índice en alumnos.userId     9997 filas ·     40 ms · estrategia: IndexedLoopJoin
+  unir en la aplicación (2 consultas)      9997 filas ·     19 ms · estrategia: —
+
+Informe de la última semana con 20000 alumnos
+  $lookup SIN índice en alumnos.userId     9997 filas ·  16323 ms · estrategia: NestedLoopJoin
+  $lookup CON índice en alumnos.userId     9997 filas ·     38 ms · estrategia: IndexedLoopJoin
+  unir en la aplicación (2 consultas)      9997 filas ·     23 ms · estrategia: —
+```
+
+- **Con 2000 alumnos, el índice parece no importar:** sin él, MongoDB 8 usa `HashJoin`. Lee los 2000 alumnos una vez, los guarda en una tabla en memoria y busca en ella. Es rápido, y te hace creer que el diseño está bien.
+- **Con 20 000, se derrumba:** por encima de un umbral (unos 10 000 documentos en la colección unida), MongoDB ya no usa la tabla en memoria y pasa a `NestedLoopJoin`, que recorre los 20 000 alumnos **por cada uno** de los 9997 intentos. Son 16,3 s frente a 38 ms con el índice (`IndexedLoopJoin`), 430 veces más lento.
+- **Unir en la aplicación fue lo más rápido** (19 y 23 ms): una consulta con `$in` trae los alumnos que aparecen y un `Map` hace la unión. Son dos viajes a la base de datos, que en Atlas pesan más que en local, pero es una opción perfectamente válida.
+
+<Callout type="risk">
+
+- **Indexa siempre el `foreignField` de un `$lookup`:** es el campo por el que se busca en la otra colección. Si es `_id`, ya tiene índice; si es otro (`userId`, `slug`, `email`), créalo. Sin él, el `$lookup` funciona en desarrollo y se cae en producción en cuanto la colección crece.
+- **Comprueba la estrategia con `explain`:** `HashJoin` o `IndexedLoopJoin` son aceptables; `NestedLoopJoin` en una colección que va a crecer es un error. Atlas M0 usa MongoDB 8.0, con las mismas tres estrategias.
+- **Un `$lookup` en el patrón más frecuente es una señal:** si la pantalla que más se visita necesita unir colecciones en cada carga, quizá ese dato debería estar embebido o copiado (el patrón _Extended Reference_ de I4.3).
+
+</Callout>
+
+## Paso 4: la decisión, en una tabla
+
+| Relación                               | Ejemplo                                                 | Decisión                                    | Por qué                                                        |
+| -------------------------------------- | ------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------- |
+| 1:1                                    | Usuario y sus preferencias                              | Embeber                                     | Se leen siempre juntos y no crecen                             |
+| 1:pocos (acotado)                      | Intento y sus 5 respuestas                              | Embeber                                     | Hay un máximo y se leen juntos                                 |
+| 1:pocos, pero con datos propios        | Lecturas de un usuario en un curso (con fecha cada una) | Depende del patrón                          | A ocupa menos; B permite consultar por fecha (Paso 1)          |
+| 1:muchos (sin límite)                  | Intentos de un usuario a lo largo de los años           | Referenciar                                 | Crece sin máximo                                               |
+| Muchos:1 desde el lado "muchos"        | Alumnos de un curso                                     | Referenciar (o embeber en el lado acotado)  | El lado del curso crece sin límite (Paso 2)                    |
+| N:M                                    | Usuarios y cursos                                       | Referenciar, con un documento intermedio    | Los dos lados crecen; las lecturas son el documento intermedio |
+| Dato que casi no cambia y se lee mucho | Catálogo de cursos                                      | Fuera de la base de datos, o copiado (I4.3) | Lo publica el autor y se lee en cada página                    |
+
+<Callout type="risk">
+
+- **Referenciar no garantiza la integridad:** MongoDB no tiene claves foráneas. Si borras un curso, nadie borra sus lecturas. La aplicación (o un _script_) debe ocuparse, o validarlo con `$jsonSchema` (I4.6), que comprueba la forma pero no si la referencia existe.
+- **Se puede cambiar de opinión, pero cuesta:** pasar de A a B con la app en producción exige una migración (I4.6). Por eso la decisión se toma con la lista de patrones y con volumen de prueba, no al tuntún.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Toma el diagrama entidad-relación de B4.2 (usuario, curso, sección, lectura e intento de evaluación) y decide, para cada relación, si embebes o referencias. Justifica cada decisión con los patrones de I4.1.
+2. Escribe los tipos de TypeScript de las colecciones resultantes, crea un índice por patrón de acceso y comprueba con `explain` que cada patrón lo usa.
+
+</Callout>
+
+Solución. Las decisiones:
+
+| Relación de B4.2              | Decisión                                      | Justificación                                                                              |
+| ----------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| CURSO tiene SECCION           | Ninguna de las dos: fuera de la base de datos | Lo cambia el autor al publicar y se lee en todas las páginas (I4.1, Paso 1)                |
+| USUARIO lee SECCION (LECTURA) | Referenciar: un documento por lectura         | Patrón "continuar donde lo dejaste" y estadísticas por día: cada lectura necesita su fecha |
+| USUARIO hace INTENTO          | Referenciar                                   | Los intentos crecen con el tiempo y se consultan por curso y por fecha                     |
+| INTENTO tiene respuestas      | Embeber                                       | Siempre 5 y siempre se leen con el intento                                                 |
+| CURSO se evalúa en INTENTO    | Referenciar (`cursoId`)                       | El curso está en el catálogo; el intento solo guarda su identificador                      |
+
+`src/i4/02-ejercicio.ts`:
+
+```ts
+// Archivo: src/i4/02-ejercicio.ts
+// Ejercicio I4.2: el diagrama de B4.2 llevado a MongoDB, y cada patrón de I4.1 comprobado con explain
+import type { Document, ObjectId } from "mongodb";
+import { cliente, db } from "../db";
+
+// CURSO y SECCION: no van a la base de datos (catálogo en archivos, src/i4/catalogo.ts)
+
+/** LECTURA: referenciada (un documento por sección leída). Crece con usuarios × secciones */
+interface Lectura {
+  _id?: ObjectId;
+  userId: string; // referencia a USUARIO
+  cursoId: string; // referencia a CURSO (del catálogo)
+  seccionId: string; // referencia a SECCION (del catálogo)
+  leidaEn: Date;
+}
+
+/** INTENTO_EVALUACION: referenciado. Las respuestas sí van embebidas: 5 por intento, siempre */
+interface Intento {
+  _id?: ObjectId;
+  userId: string;
+  cursoId: string;
+  respuestas: number[]; // embebido y acotado (5)
+  puntuacion: number;
+  total: number;
+  aprobado: boolean;
+  fecha: Date;
+}
+
+const lecturas = db.collection<Lectura>("i4m_lecturas");
+const intentos = db.collection<Intento>("i4m_intentos");
+await Promise.all([lecturas.drop().catch(() => {}), intentos.drop().catch(() => {})]);
+
+// Un índice por patrón de acceso (y no más: cada índice encarece las escrituras)
+await lecturas.createIndex({ userId: 1, cursoId: 1, seccionId: 1 }, { unique: true }); // #1, #2 y #3
+await lecturas.createIndex({ userId: 1, leidaEn: -1 }); // continuar donde lo dejaste
+await intentos.createIndex({ userId: 1, cursoId: 1, fecha: -1 }); // #7 últimos intentos del curso
+
+// Datos de prueba
+const ahora = Date.now();
+await lecturas.insertMany(
+  ["B5.1", "B5.2", "B5.3", "B1.1"].map((seccionId, i) => ({
+    userId: "u_ana",
+    cursoId: seccionId.split(".")[0]!,
+    seccionId,
+    leidaEn: new Date(ahora - i * 3_600_000),
+  })),
+);
+await intentos.insertOne({ userId: "u_ana", cursoId: "B5", respuestas: [1, 0, 3, 2, 1], puntuacion: 4, total: 5, aprobado: true, fecha: new Date() });
+
+/** Resumen del plan: la cadena de etapas y lo examinado frente a lo devuelto */
+function resumen(e: Document) {
+  const etapas: string[] = [];
+  let n: Document | undefined = e.queryPlanner.winningPlan;
+  while (n) {
+    etapas.push(n.indexName ? `${n.stage}(${n.indexName})` : n.stage);
+    n = n.inputStage;
+  }
+  const s = e.executionStats;
+  return `${etapas.join(" ← ")} · ${s.nReturned} devueltos / ${s.totalDocsExamined} documentos examinados`;
+}
+
+const patrones: [string, () => Promise<Document>][] = [
+  ["#1 leídas de un curso", () => lecturas.find({ userId: "u_ana", cursoId: "B5" }, { projection: { _id: 0, seccionId: 1 } }).explain("executionStats")],
+  ["#2 temario", () => lecturas.find({ userId: "u_ana" }, { projection: { _id: 0, seccionId: 1 } }).explain("executionStats")],
+  ["continuar donde lo dejaste", () => lecturas.find({ userId: "u_ana" }).sort({ leidaEn: -1 }).limit(1).explain("executionStats")],
+  ["#7 últimos intentos del curso", () => intentos.find({ userId: "u_ana", cursoId: "B5" }).sort({ fecha: -1 }).limit(5).explain("executionStats")],
+];
+for (const [nombre, fn] of patrones) console.log(`${nombre.padEnd(30)} ${resumen(await fn())}`);
+
+await Promise.all([lecturas.drop(), intentos.drop()]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/02-ejercicio.ts
+```
+
+```text
+#1 leídas de un curso          PROJECTION_COVERED ← IXSCAN(userId_1_cursoId_1_seccionId_1) · 3 devueltos / 0 documentos examinados
+#2 temario                     PROJECTION_COVERED ← IXSCAN(userId_1_cursoId_1_seccionId_1) · 4 devueltos / 0 documentos examinados
+continuar donde lo dejaste     LIMIT ← FETCH ← IXSCAN(userId_1_leidaEn_-1) · 1 devueltos / 1 documentos examinados
+#7 últimos intentos del curso  LIMIT ← FETCH ← IXSCAN(userId_1_cursoId_1_fecha_-1) · 1 devueltos / 1 documentos examinados
+```
+
+- **`PROJECTION_COVERED` y 0 documentos examinados:** el índice `{ userId, cursoId, seccionId }` contiene todo lo que piden #1 y #2, así que MongoDB responde **solo con el índice**, sin leer ningún documento. Es una consulta cubierta, la más barata posible.
+- **Un índice por patrón, y no más:** tres índices para cuatro patrones (#1 y #2 comparten el mismo). Cada índice de más encarece las escrituras, y aquí el patrón más frecuente es una escritura.
+- **Este es el modelo de la plataforma** (`section_progress` y `quiz_attempts` en `src/server/db-types.ts`), con nombres en español. Las sesiones de estudio, que resuelven el latido de I4.1, las verás en I4.3.
+
+<Callout type="risk">
+
+- **Una consulta cubierta deja de serlo con un campo de más:** si añades `leidaEn` a la proyección de #1, MongoDB tiene que leer los documentos (`FETCH`). Pide solo lo que la pantalla necesita.
+- **`_id` rompe la cobertura:** MongoDB lo devuelve siempre salvo que lo excluyas (`_id: 0`). Por eso las proyecciones del ejercicio lo quitan.
+
+</Callout>
+
+<Callout type="mastery">
+
+Antes de embeber, preguntas cuál es el máximo del array: embebes lo acotado que se lee junto (las respuestas de un intento), referencias lo que crece sin límite (lecturas, intentos), identificas el lado acotado de cada relación, indexas el campo por el que une cada `$lookup` y compruebas con `explain` y con volumen real que el diseño aguanta.
+
+</Callout>
+
+## Resumen
+
+- Embeber da lecturas de un documento y ocupa menos; referenciar permite crecer sin límite y consultar cada elemento por separado.
+- Con un array acotado (8 secciones), las dos opciones tienen el mismo rendimiento: decide el espacio y lo que necesiten los patrones.
+- Un array sin límite encarece cada `$addToSet`, acaba en el límite de 16 MB y convierte el documento en un punto caliente (22 veces más lento con 200 escrituras simultáneas).
+- `$lookup` necesita un índice en `foreignField`: sin él, al crecer la colección pasa de `HashJoin` a `NestedLoopJoin` (de 38 ms a 16 s).
+- Unir en la aplicación, con `$in` y un `Map`, es una alternativa válida al `$lookup`.

@@ -1,0 +1,644 @@
+---
+sectionId: "I4.6"
+course: "I4"
+title: "Validación de esquema en la BD"
+order: 6
+minutes: 75
+summary: "Haces que MongoDB rechace documentos inválidos con $jsonSchema, mides qué hacen validationLevel y validationAction con datos antiguos, combinas Zod y la BD y aplicas migraciones versionadas en orden."
+---
+
+MongoDB no obliga a que los documentos de una colección tengan la misma forma. Esa flexibilidad es útil al diseñar (I4.3, _Schema Versioning_), pero tiene un riesgo: un _bug_ en la app, un _script_ de mantenimiento con una errata o un servicio que escribe directamente pueden guardar una puntuación de 50, una fecha como texto o un campo con el nombre mal escrito, y nadie se entera hasta que una pantalla falla meses después. La **validación de esquema** hace que la propia base de datos rechace esos documentos. En esta sección vas a crear validadores con `$jsonSchema`, a medir qué pasa al añadirlos a una colección que ya tiene datos, a combinarlos con Zod y a cambiar el esquema con migraciones versionadas.
+
+**Lo que tendrás al terminar:** `src/i4/06-validar.ts` y `06-niveles.ts` (el validador y sus modos), `06-doble.ts` (Zod y la base de datos juntos) y un sistema de migraciones (`src/i4/migrar.ts` y `src/i4/migraciones/`).
+
+**Requisitos:** el proyecto `mongo-academy` con Zod instalado (I4.5).
+
+## Paso 1: `$jsonSchema`, la base de datos dice que no
+
+Un validador es un filtro que cada documento tiene que cumplir para entrar. Se define al crear la colección (`createCollection`) con `$jsonSchema`, una variante de JSON Schema con un campo propio, **`bsonType`**, para los tipos de BSON (`int`, `double`, `date`, `objectId`, `bool`…). Crea `src/i4/06-validar.ts`:
+
+```ts
+// Archivo: src/i4/06-validar.ts
+// $jsonSchema: la base de datos rechaza los documentos que no cumplen el esquema
+import { MongoServerError, type Document } from "mongodb";
+import { cliente, db } from "../db";
+
+const NOMBRE = "i4v_evaluaciones";
+await db.collection(NOMBRE).drop().catch(() => {});
+
+await db.createCollection(NOMBRE, {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["userId", "cursoId", "puntuacion", "fecha"],
+      properties: {
+        userId: { bsonType: "string", minLength: 1 },
+        cursoId: { bsonType: "string", pattern: "^([BIA][1-8]|P1)$" },
+        puntuacion: { bsonType: "int", minimum: 0, maximum: 5 },
+        fecha: { bsonType: "date" },
+      },
+    },
+  },
+});
+const col = db.collection(NOMBRE);
+
+/** Convierte el detalle del error 121 en una línea legible: qué propiedad y qué regla */
+function motivo(error: MongoServerError): string {
+  const detalles = error.errInfo?.details as Document | undefined;
+  const reglas = (detalles?.schemaRulesNotSatisfied ?? []) as Document[];
+  return reglas
+    .flatMap((r) => {
+      if (r.operatorName === "required") return [`faltan: ${r.missingProperties.join(", ")}`];
+      if (r.operatorName === "properties")
+        return (r.propertiesNotSatisfied as Document[]).map((p) => `${p.propertyName}: ${(p.details as Document[]).map((d) => d.reason).join(", ")}`);
+      return [r.operatorName as string];
+    })
+    .join(" · ");
+}
+
+async function probar(nombre: string, fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    console.log(`✓ ${nombre}`);
+  } catch (e) {
+    if (!(e instanceof MongoServerError)) throw e;
+    console.log(`✗ ${nombre} → "${e.message}" (código ${e.code}) · ${motivo(e)}`);
+  }
+}
+
+const valido = { userId: "u_ana", cursoId: "B5", puntuacion: 4, fecha: new Date() };
+await probar("válido", () => col.insertOne({ ...valido }));
+await probar("puntuación 7", () => col.insertOne({ ...valido, puntuacion: 7 }));
+await probar("puntuación 4.5", () => col.insertOne({ ...valido, puntuacion: 4.5 }));
+await probar("fecha como texto", () => col.insertOne({ ...valido, fecha: "2026-10-16" }));
+await probar("sin cursoId", () => col.insertOne({ userId: "u_ana", puntuacion: 3, fecha: new Date() }));
+await probar("cursoId inventado", () => col.insertOne({ ...valido, cursoId: "Z9" }));
+await probar("updateOne con puntuación 9", () => col.updateOne({ userId: "u_ana" }, { $set: { puntuacion: 9 } }));
+await probar("campo extra (no prohibido)", () => col.insertOne({ ...valido, comentario: "un campo que el esquema no menciona" }));
+console.log(`Documentos guardados: ${await col.countDocuments()}`);
+
+await col.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/06-validar.ts
+```
+
+```text
+✓ válido
+✗ puntuación 7 → "Document failed validation" (código 121) · puntuacion: comparison failed
+✗ puntuación 4.5 → "Document failed validation" (código 121) · puntuacion: type did not match
+✗ fecha como texto → "Document failed validation" (código 121) · fecha: type did not match
+✗ sin cursoId → "Document failed validation" (código 121) · faltan: cursoId
+✗ cursoId inventado → "Document failed validation" (código 121) · cursoId: regular expression did not match
+✗ updateOne con puntuación 9 → "Plan executor error during update :: caused by :: Document failed validation" (código 121) · puntuacion: comparison failed
+✓ campo extra (no prohibido)
+Documentos guardados: 2
+```
+
+- **El error siempre es el código 121, `Document failed validation`**, para inserciones y para actualizaciones. El motivo concreto está en `errInfo.details` (desde MongoDB 5): la función `motivo` lo traduce a una línea (`puntuacion: comparison failed`).
+- **`bsonType: "int"` rechaza 4,5:** el _driver_ envía los números enteros de JavaScript como `int` y los decimales como `double`. Si un campo puede tener decimales, usa `"double"` o `"number"` (que acepta los cuatro tipos numéricos).
+- **`pattern` valida el formato:** `^([BIA][1-8]|P1)$` es el mismo que usa la plataforma para los identificadores de curso. `Z9` no pasa.
+- **Los campos que el esquema no menciona se aceptan:** `comentario` entró sin problemas. Para prohibirlos hace falta `additionalProperties: false` (lo usarás en el ejercicio).
+
+<Callout type="risk">
+
+- **El validador no comprueba referencias:** `cursoId: "B5"` cumple el formato aunque el curso no exista. MongoDB no tiene claves foráneas (I4.2): eso lo tiene que comprobar la app.
+- **`errInfo` solo llega si lo lees:** el mensaje del error (`Document failed validation`) no dice qué campo falló. Registra `errInfo.details` en tus errores del servidor, o depurarás a ciegas.
+- **El validador no convierte nada:** si la app envía `"4"` (texto), MongoDB lo rechaza; no lo convierte en `4`. La conversión (como `z.coerce` en I1.4) es trabajo de la app, antes de guardar.
+
+</Callout>
+
+## Paso 2: añadirlo a una colección con datos, `validationLevel` y `validationAction`
+
+Lo normal es añadir el validador cuando la colección ya tiene datos, y algunos de esos datos pueden no cumplirlo. Dos opciones deciden qué pasa con ellos:
+
+- **`validationLevel`:** `strict` (por defecto) valida todas las inserciones y actualizaciones; `moderate` no valida las actualizaciones de documentos que **ya eran inválidos**.
+- **`validationAction`:** `error` (por defecto) rechaza el documento; `warn` lo acepta y escribe un aviso en el registro del servidor.
+
+`collMod` cambia el validador y estas opciones en una colección existente, sin tocar sus documentos. Crea `src/i4/06-niveles.ts`:
+
+```ts
+// Archivo: src/i4/06-niveles.ts
+// Añadir un validador a una colección que YA tiene datos: validationLevel y validationAction
+import { MongoServerError } from "mongodb";
+import { cliente, db } from "../db";
+
+const NOMBRE = "i4v_niveles";
+await db.collection(NOMBRE).drop().catch(() => {});
+const col = db.collection(NOMBRE);
+
+// Datos antiguos, de antes de tener validador: uno de ellos ya es inválido
+await col.insertMany([
+  { _id: "bien" as never, userId: "u_ana", cursoId: "B5", puntuacion: 4 },
+  { _id: "antiguo" as never, userId: "u_ana", cursoId: "B5", puntuacion: "cuatro" }, // texto: inválido
+]);
+
+const esquema = {
+  $jsonSchema: {
+    bsonType: "object",
+    required: ["userId", "cursoId", "puntuacion"],
+    properties: { puntuacion: { bsonType: "int", minimum: 0, maximum: 5 } },
+  },
+};
+
+async function probar(nombre: string, fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    console.log(`  ✓ ${nombre}`);
+  } catch (e) {
+    if (!(e instanceof MongoServerError)) throw e;
+    console.log(`  ✗ ${nombre} → ${e.message}`);
+  }
+}
+
+async function ronda(nivel: "strict" | "moderate", accion: "error" | "warn") {
+  // collMod cambia el validador de una colección existente (sin tocar los documentos)
+  await db.command({ collMod: NOMBRE, validator: esquema, validationLevel: nivel, validationAction: accion });
+  console.log(`validationLevel: ${nivel} · validationAction: ${accion}`);
+  await probar("insertar uno inválido", () => col.insertOne({ userId: "u_bea", cursoId: "B1", puntuacion: 9 }));
+  await probar("actualizar el antiguo (sigue inválido)", () => col.updateOne({ _id: "antiguo" as never }, { $set: { revisado: true } }));
+  await probar("actualizar uno válido dejándolo inválido", () => col.updateOne({ _id: "bien" as never }, { $set: { puntuacion: 8 } }));
+  await col.updateOne({ _id: "bien" as never }, { $set: { puntuacion: 4 } }, { bypassDocumentValidation: true }); // restaurar
+  await col.deleteMany({ userId: "u_bea" });
+}
+
+await ronda("strict", "error");
+await ronda("moderate", "error");
+await ronda("strict", "warn");
+
+// ¿Cuántos documentos incumplen hoy el esquema? $jsonSchema también sirve como filtro
+const invalidos = await col.find({ $nor: [esquema] }, { projection: { _id: 1 } }).toArray();
+console.log(`Documentos que incumplen el esquema: ${invalidos.map((d) => d._id).join(", ")}`);
+
+await col.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/06-niveles.ts
+```
+
+```text
+validationLevel: strict · validationAction: error
+  ✗ insertar uno inválido → Document failed validation
+  ✗ actualizar el antiguo (sigue inválido) → Plan executor error during update :: caused by :: Document failed validation
+  ✗ actualizar uno válido dejándolo inválido → Plan executor error during update :: caused by :: Document failed validation
+validationLevel: moderate · validationAction: error
+  ✗ insertar uno inválido → Document failed validation
+  ✓ actualizar el antiguo (sigue inválido)
+  ✗ actualizar uno válido dejándolo inválido → Plan executor error during update :: caused by :: Document failed validation
+validationLevel: strict · validationAction: warn
+  ✓ insertar uno inválido
+  ✓ actualizar el antiguo (sigue inválido)
+  ✓ actualizar uno válido dejándolo inválido
+Documentos que incumplen el esquema: antiguo
+```
+
+- **`strict` y `error`:** nada inválido entra, ni siquiera una actualización inocente (`revisado: true`) del documento antiguo, que ya era inválido. El efecto es que ese documento queda **bloqueado** hasta que alguien lo arregle.
+- **`moderate` y `error`:** los documentos nuevos y los válidos siguen protegidos, pero el antiguo se puede seguir actualizando. Es el modo para **introducir** un validador en una colección con datos imperfectos.
+- **`warn`:** todo entra. El aviso queda en el registro del servidor:
+
+```text
+W STORAGE 20294 Document would fail validation {"namespace":"academy_lab.i4v_niveles","document":{"_id":"bien","userId":"u_ana","cursoId":"B5","puntuacion":8},"errInfo":{"failingDocumentId":"bien","details":{"operatorName":"$jsonSchema", …
+```
+
+- **`$jsonSchema` también sirve como filtro de consulta:** `find({ $nor: [esquema] })` devuelve los documentos que **no** cumplen el esquema. Así sabes cuántos tienes que migrar antes de pasar a `strict`.
+
+<Callout type="risk">
+
+- **El aviso de `warn` incluye el documento entero**, y los registros se copian y se guardan durante meses. Si el documento tiene datos personales, acaban en el registro (I3.4). Usa `warn` solo un tiempo, para medir.
+- **En Atlas M0 no puedes leer esos avisos:** el plan gratuito no da acceso a los registros del servidor. Para medir sin registros, usa la consulta `$nor` del _script_.
+- **Cambiar el validador necesita permisos de administrador de la base de datos:** `collMod` requiere el rol `dbAdmin`, que `readWrite` no incluye. El _script_ `scripts/db-setup.ts` de esta plataforma lo detecta y avisa (`⚠ … no se actualizó la validación (el usuario necesita el rol dbAdmin para collMod)`) en lugar de fallar.
+- **`bypassDocumentValidation: true` se salta el validador** (el _script_ lo usa para restaurar). Requiere un permiso específico y solo debe aparecer en migraciones y restauraciones de _backup_, nunca en el código de la app.
+
+</Callout>
+
+## Paso 3: doble validación, Zod en la app y `$jsonSchema` en la base de datos
+
+Si la app ya valida con Zod (I1.4), ¿para qué validar otra vez en la base de datos? Porque cada una protege de cosas distintas:
+
+|                 | Zod en la app                          | `$jsonSchema` en la BD                                                   |
+| --------------- | -------------------------------------- | ------------------------------------------------------------------------ |
+| Mensajes        | En español, por campo, para el usuario | Código 121 y detalles técnicos                                           |
+| Convierte tipos | Sí (`z.coerce`, `z.stringbool`)        | No                                                                       |
+| Protege de      | Datos del usuario                      | **Cualquiera** que escriba: la app, un _script_, otro servicio, un _bug_ |
+| Se puede saltar | Sí: basta con no llamarlo              | Solo con un permiso especial                                             |
+
+Crea `src/i4/06-doble.ts`:
+
+```ts
+// Archivo: src/i4/06-doble.ts
+// Doble validación: Zod en la aplicación (mensajes para el usuario) y $jsonSchema en la base de datos
+// (la última barrera, que también protege de scripts, de otros servicios y de los bugs de la app)
+import { MongoServerError } from "mongodb";
+import { z } from "zod";
+import { cliente, db } from "../db";
+
+// 1. Zod: lo que la app acepta, con mensajes en español
+const NuevaEvaluacion = z.object({
+  userId: z.string().min(1),
+  cursoId: z.string().regex(/^([BIA][1-8]|P1)$/, "Curso desconocido"),
+  puntuacion: z.number().int("La puntuación debe ser un número entero").min(0).max(5, "Máximo 5"),
+  fecha: z.date(),
+});
+type NuevaEvaluacion = z.infer<typeof NuevaEvaluacion>;
+
+// 2. $jsonSchema: las mismas reglas, en la base de datos
+const NOMBRE = "i4v_doble";
+await db.collection(NOMBRE).drop().catch(() => {});
+await db.createCollection(NOMBRE, {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["userId", "cursoId", "puntuacion", "fecha"],
+      properties: {
+        userId: { bsonType: "string", minLength: 1 },
+        cursoId: { bsonType: "string", pattern: "^([BIA][1-8]|P1)$" },
+        puntuacion: { bsonType: "int", minimum: 0, maximum: 5 },
+        fecha: { bsonType: "date" },
+      },
+    },
+  },
+});
+const col = db.collection<NuevaEvaluacion>(NOMBRE);
+
+/** La ruta normal de la app: valida con Zod y después guarda */
+async function guardarEvaluacion(datos: unknown) {
+  const r = NuevaEvaluacion.safeParse(datos);
+  if (!r.success) return `Zod: ${r.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(" · ")}`;
+  await col.insertOne(r.data);
+  return "guardada";
+}
+
+/** Un script de mantenimiento con un bug: escribe directamente, sin pasar por Zod */
+async function scriptConBug() {
+  try {
+    await col.insertOne({ userId: "u_ana", cursoId: "B5", puntuacion: 50, fecha: new Date() }); // ×10 por error
+    return "guardada (¡dato corrupto!)";
+  } catch (e) {
+    if (e instanceof MongoServerError && e.code === 121) return `MongoDB: ${e.message}`;
+    throw e;
+  }
+}
+
+console.log("App, datos válidos:     ", await guardarEvaluacion({ userId: "u_ana", cursoId: "B5", puntuacion: 4, fecha: new Date() }));
+console.log("App, puntuación 4.5:    ", await guardarEvaluacion({ userId: "u_ana", cursoId: "B5", puntuacion: 4.5, fecha: new Date() }));
+console.log("App, curso y fecha mal: ", await guardarEvaluacion({ userId: "u_ana", cursoId: "Z9", puntuacion: 3, fecha: "ayer" }));
+console.log("Script sin Zod, ×10:    ", await scriptConBug());
+console.log(`Documentos: ${await col.countDocuments()}`);
+
+await col.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/06-doble.ts
+```
+
+```text
+App, datos válidos:      guardada
+App, puntuación 4.5:     Zod: puntuacion: La puntuación debe ser un número entero
+App, curso y fecha mal:  Zod: cursoId: Curso desconocido · fecha: Invalid input: expected date, received string
+Script sin Zod, ×10:     MongoDB: Document failed validation
+Documentos: 1
+```
+
+- **La ruta normal no llega a la base de datos con datos malos:** Zod los para antes, con mensajes que se pueden enseñar al usuario.
+- **El _script_ con _bug_ se salta Zod**, porque escribe directamente, y es la base de datos la que lo para. Sin el validador, la puntuación de 50 estaría guardada.
+- **El precio es mantener dos esquemas:** las reglas están escritas dos veces. Si cambias el máximo de 5 a 10 en uno y no en el otro, la app aceptará lo que la base de datos rechaza (o al revés).
+
+<Callout type="risk">
+
+- **Mantén los dos esquemas juntos:** en el mismo archivo, o en dos archivos uno al lado del otro, y con un test que intente insertar en la base de datos un documento que Zod da por bueno. Zod 4 puede generar JSON Schema (`z.toJSONSchema`), pero no conoce `bsonType` (no hay `date` ni `objectId` en JSON Schema), así que no sirve tal cual para MongoDB.
+- **El validador de la base de datos debe ser igual de estricto o más permisivo que Zod, nunca más estricto:** si la base de datos rechaza algo que Zod acepta, el usuario recibe un error 500 en lugar de un mensaje claro.
+
+</Callout>
+
+## Paso 4: migraciones de esquema con _scripts_ versionados
+
+En I4.3 migraste documentos con un `updateMany` suelto. En una app real hay muchos cambios a lo largo del tiempo (crear una colección, añadir un campo, cambiar un validador, crear un índice) y cada entorno (tu equipo, el de pruebas, producción) tiene que aplicarlos **todos, en orden y una sola vez**. Un sistema de migraciones lo resuelve con tres piezas: un archivo por cambio, numerado; una colección que apunta cuáles se han aplicado, y un ejecutor que aplica las pendientes.
+
+Crea la carpeta y la primera migración, `src/i4/migraciones/001-crear-evaluaciones.ts`:
+
+```bash
+mkdir -p src/i4/migraciones
+```
+
+```ts
+// Archivo: src/i4/migraciones/001-crear-evaluaciones.ts
+import type { Db } from "mongodb";
+
+export const descripcion = "Crear la colección de evaluaciones con validación e índice";
+
+export async function subir(db: Db) {
+  await db.createCollection("i4m_evaluaciones", {
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["userId", "cursoId", "puntuacion", "fecha"],
+        properties: {
+          userId: { bsonType: "string" },
+          cursoId: { bsonType: "string" },
+          puntuacion: { bsonType: "int", minimum: 0, maximum: 5 },
+          fecha: { bsonType: "date" },
+        },
+      },
+    },
+  });
+  await db.collection("i4m_evaluaciones").createIndex({ userId: 1, fecha: -1 });
+}
+```
+
+La segunda, `src/i4/migraciones/002-anadir-aprobado.ts`, añade un campo obligatorio a una colección que ya tiene datos:
+
+```ts
+// Archivo: src/i4/migraciones/002-anadir-aprobado.ts
+import type { Db } from "mongodb";
+
+export const descripcion = "Añadir «aprobado» a las evaluaciones y exigirlo en el validador";
+
+export async function subir(db: Db) {
+  const col = db.collection("i4m_evaluaciones");
+  // 1. Primero los DATOS: calcular el campo en los documentos que no lo tienen (idempotente)
+  const r = await col.updateMany({ aprobado: { $exists: false } }, [{ $set: { aprobado: { $gte: ["$puntuacion", 4] } } }]);
+  console.log(`    ${r.modifiedCount} evaluaciones actualizadas`);
+  // 2. Después el VALIDADOR: ya puede exigir el campo, porque todos lo tienen
+  await db.command({
+    collMod: "i4m_evaluaciones",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["userId", "cursoId", "puntuacion", "fecha", "aprobado"],
+        properties: {
+          userId: { bsonType: "string" },
+          cursoId: { bsonType: "string" },
+          puntuacion: { bsonType: "int", minimum: 0, maximum: 5 },
+          fecha: { bsonType: "date" },
+          aprobado: { bsonType: "bool" },
+        },
+      },
+    },
+  });
+}
+```
+
+El ejecutor, `src/i4/migrar.ts`:
+
+```ts
+// Archivo: src/i4/migrar.ts
+// Ejecuta, en orden, las migraciones de src/i4/migraciones que aún no se han aplicado.
+// Uso: npm start -- src/i4/migrar.ts             (todas las pendientes)
+//      npm start -- src/i4/migrar.ts --hasta 001 (solo hasta esa)
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import type { Db } from "mongodb";
+import { cliente, db } from "../db";
+
+interface Migracion {
+  descripcion: string;
+  subir: (db: Db) => Promise<void>;
+}
+interface Aplicada {
+  _id: string; // el nombre del archivo, sin extensión: "001-crear-evaluaciones"
+  descripcion: string;
+  aplicada: Date;
+  ms: number;
+}
+
+const CARPETA = join(import.meta.dirname, "migraciones");
+const registro = db.collection<Aplicada>("_migraciones");
+const hasta = process.argv.includes("--hasta") ? process.argv[process.argv.indexOf("--hasta") + 1] : undefined;
+
+const archivos = (await readdir(CARPETA)).filter((f) => /^\d{3}-.+\.ts$/.test(f)).sort(); // 001, 002… en orden
+const aplicadas = new Set((await registro.find({}, { projection: { _id: 1 } }).toArray()).map((m) => m._id));
+
+let ejecutadas = 0;
+try {
+  for (const archivo of archivos) {
+    const id = archivo.replace(/\.ts$/, "");
+    if (hasta && id.slice(0, 3) > hasta) break;
+    if (aplicadas.has(id)) continue;
+
+    const { descripcion, subir } = (await import(pathToFileURL(join(CARPETA, archivo)).href)) as Migracion;
+    console.log(`→ ${id}: ${descripcion}`);
+    const t = performance.now();
+    await subir(db);
+    // Se apunta DESPUÉS de terminar: si falla a mitad, la próxima vez se reintenta
+    await registro.insertOne({ _id: id, descripcion, aplicada: new Date(), ms: Math.round(performance.now() - t) });
+    ejecutadas++;
+  }
+  console.log(ejecutadas ? `✓ ${ejecutadas} migración(es) aplicada(s)` : "✓ Nada que migrar: la base de datos está al día");
+} catch (error) {
+  console.error(`✗ Migración detenida: ${(error as Error).message}`);
+  process.exitCode = 1; // las siguientes no se ejecutan: dependen de esta
+} finally {
+  await cliente.close();
+}
+```
+
+Y un _script_ para probarlo con datos de la "versión 1" entre las dos migraciones, `src/i4/06-probar-migraciones.ts`:
+
+```ts
+// Archivo: src/i4/06-probar-migraciones.ts
+// Inserta evaluaciones "de la versión 1" entre la migración 001 y la 002, y comprueba el resultado
+import { MongoServerError } from "mongodb";
+import { cliente, db } from "../db";
+
+const col = db.collection("i4m_evaluaciones");
+const accion = process.argv[2];
+
+if (accion === "insertar-antiguas") {
+  await col.insertMany([
+    { userId: "u_ana", cursoId: "B1", puntuacion: 4, fecha: new Date("2026-09-01") },
+    { userId: "u_ana", cursoId: "B2", puntuacion: 2, fecha: new Date("2026-09-02") },
+  ]);
+  console.log("Insertadas 2 evaluaciones sin «aprobado»");
+}
+
+if (accion === "comprobar") {
+  console.log("Evaluaciones:", JSON.stringify(await col.find({}, { projection: { _id: 0, cursoId: 1, puntuacion: 1, aprobado: 1 } }).toArray()));
+  try {
+    await col.insertOne({ userId: "u_ana", cursoId: "B3", puntuacion: 5, fecha: new Date() }); // sin aprobado
+  } catch (e) {
+    if (e instanceof MongoServerError) console.log(`Insertar sin «aprobado» ahora falla: ${e.message}`);
+  }
+  console.log("Registro:", JSON.stringify(await db.collection("_migraciones").find({}, { projection: { aplicada: 0 } }).toArray()));
+}
+await cliente.close();
+```
+
+La secuencia completa: aplicar solo la 001, insertar datos antiguos, aplicar las pendientes, repetir y comprobar:
+
+```text
+$ npm start -- src/i4/migrar.ts --hasta 001
+→ 001-crear-evaluaciones: Crear la colección de evaluaciones con validación e índice
+✓ 1 migración(es) aplicada(s)
+$ npm start -- src/i4/06-probar-migraciones.ts insertar-antiguas
+Insertadas 2 evaluaciones sin «aprobado»
+$ npm start -- src/i4/migrar.ts
+→ 002-anadir-aprobado: Añadir «aprobado» a las evaluaciones y exigirlo en el validador
+    2 evaluaciones actualizadas
+✓ 1 migración(es) aplicada(s)
+$ npm start -- src/i4/migrar.ts
+✓ Nada que migrar: la base de datos está al día
+$ npm start -- src/i4/06-probar-migraciones.ts comprobar
+Evaluaciones: [{"cursoId":"B1","puntuacion":4,"aprobado":true},{"cursoId":"B2","puntuacion":2,"aprobado":false}]
+Insertar sin «aprobado» ahora falla: Document failed validation
+Registro: [{"_id":"001-crear-evaluaciones","descripcion":"Crear la colección de evaluaciones con validación e índice","ms":31},{"_id":"002-anadir-aprobado","descripcion":"Añadir «aprobado» a las evaluaciones y exigirlo en el validador","ms":9}]
+```
+
+- **Cada migración se aplica una vez:** la segunda ejecución de `migrar.ts` no hace nada, porque `_migraciones` ya tiene las dos. En producción, ejecuta `migrar.ts` en cada despliegue: solo aplicará las nuevas.
+- **El orden de la 002 importa:** primero los datos (las 2 evaluaciones antiguas reciben `aprobado`) y después el validador que lo exige. Al revés, el `collMod` dejaría dos documentos inválidos y, con `strict`, bloqueados.
+- **Se apunta al terminar:** si una migración falla a mitad, no queda registrada y la próxima ejecución la reintenta. Por eso cada migración debe ser **idempotente**: `{ aprobado: { $exists: false } }` hace que repetirla no estropee nada.
+- **Si una falla, las siguientes no se ejecutan** (`process.exitCode = 1`): dependen de ella.
+
+<Callout type="risk">
+
+- **Nunca edites una migración ya aplicada:** en producción no se volverá a ejecutar (ya está en `_migraciones`), así que tu cambio solo llegaría a los entornos nuevos. Si te equivocaste, escribe la 003 que lo corrija.
+- **Dos despliegues a la vez pueden ejecutar la misma migración:** las dos instancias ven la 002 pendiente y la aplican. Por eso deben ser idempotentes, o el ejecutor debe tomar un "candado" antes (por ejemplo, insertar un documento con `_id` fijo, que solo uno de los dos conseguirá).
+- **Prueba cada migración con una copia de los datos de producción:** el _backup_ de la Tanda 10 restaurado en local (`npm run db:restore-test`) es el sitio para hacerlo. Un `updateMany` con un filtro equivocado sobre millones de documentos no se deshace.
+- **Esta plataforma usa `scripts/db-setup.ts`, no migraciones:** crea colecciones, validadores e índices de forma idempotente, y le basta mientras no haya que transformar datos existentes. Con el primer cambio que lo exija, conviene pasar a migraciones numeradas como estas.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade validación `$jsonSchema` a la colección principal de tu Planificador 2026, las tareas: usuario, título (de 1 a 200 caracteres), fecha, si está hecha, la fecha de creación, una prioridad opcional (`baja`, `media` o `alta`) y la categoría con su nombre y su color (el _Extended Reference_ del ejercicio de I4.1).
+2. Prohíbe los campos que no estén en el esquema, para que una errata en el nombre de un campo no se guarde.
+3. Intenta insertar documentos inválidos y comprueba que la base de datos los rechaza con un motivo claro.
+
+</Callout>
+
+Solución. `src/i4/06-ejercicio.ts`:
+
+```ts
+// Archivo: src/i4/06-ejercicio.ts
+// Ejercicio I4.6: validación $jsonSchema para las tareas del Planificador 2026
+import { MongoServerError, ObjectId, type Document } from "mongodb";
+import { cliente, db } from "../db";
+
+const NOMBRE = "i4p_tareas";
+await db.collection(NOMBRE).drop().catch(() => {});
+
+await db.createCollection(NOMBRE, {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["_id", "userId", "titulo", "fecha", "hecha", "categoria", "creada"],
+      additionalProperties: false, // ningún campo fuera de la lista: atrapa las erratas (fehca, hehca…)
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        titulo: { bsonType: "string", minLength: 1, maxLength: 200 },
+        fecha: { bsonType: "date" },
+        hecha: { bsonType: "bool" },
+        prioridad: { enum: ["baja", "media", "alta"] }, // opcional, pero solo con estos valores
+        categoria: {
+          // Extended Reference (I4.3): el id y una copia del nombre y el color
+          bsonType: "object",
+          required: ["id", "nombre", "color"],
+          additionalProperties: false,
+          properties: {
+            id: { bsonType: "objectId" },
+            nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+            color: { bsonType: "string", pattern: "^#[0-9a-f]{6}$" },
+          },
+        },
+        creada: { bsonType: "date" },
+      },
+    },
+  },
+  validationLevel: "strict",
+  validationAction: "error",
+});
+const tareas = db.collection(NOMBRE);
+await tareas.createIndex({ userId: 1, fecha: 1 }); // patrón #1 de I4.1: "tareas de hoy"
+
+const categoria = { id: new ObjectId(), nombre: "Trabajo", color: "#2563eb" };
+const valida = () => ({ userId: "u_ana", titulo: "Preparar la presentación", fecha: new Date(), hecha: false, categoria: { ...categoria }, creada: new Date() });
+
+/** Las reglas que fallaron, en una línea */
+function motivo(e: MongoServerError) {
+  const fallos: string[] = [];
+  (function visitar(n: unknown, ruta: string) {
+    if (!n || typeof n !== "object") return;
+    const d = n as Document;
+    if (d.propertyName) ruta = ruta ? `${ruta}.${d.propertyName}` : d.propertyName;
+    if (d.operatorName === "required") fallos.push(`${ruta || "documento"}: faltan ${d.missingProperties.join(", ")}`);
+    if (d.operatorName === "additionalProperties") fallos.push(`${ruta || "documento"}: sobran ${d.additionalProperties.join(", ")}`);
+    if (d.reason && !d.details) fallos.push(`${ruta}: ${d.reason}`);
+    for (const v of Object.values(d)) visitar(v, ruta);
+  })(e.errInfo?.details, "");
+  return [...new Set(fallos)].join(" · ");
+}
+
+async function probar(nombre: string, doc: Document) {
+  try {
+    await tareas.insertOne(doc);
+    console.log(`✓ ${nombre}`);
+  } catch (e) {
+    if (!(e instanceof MongoServerError) || e.code !== 121) throw e;
+    console.log(`✗ ${nombre} → ${motivo(e)}`);
+  }
+}
+
+await probar("tarea válida", valida());
+await probar("válida con prioridad", { ...valida(), prioridad: "alta" });
+await probar("prioridad «urgente»", { ...valida(), prioridad: "urgente" });
+await probar("título vacío", { ...valida(), titulo: "" });
+await probar("errata: fehca en vez de fecha", (({ fecha, ...resto }) => ({ ...resto, fehca: fecha }))(valida()));
+await probar("color en mayúsculas y sin #", { ...valida(), categoria: { ...categoria, color: "2563EB" } });
+await probar("categoría sin nombre", { ...valida(), categoria: { id: categoria.id, color: categoria.color } });
+await probar("hecha como texto", { ...valida(), hecha: "no" });
+console.log(`Tareas guardadas: ${await tareas.countDocuments()}`);
+
+await tareas.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/06-ejercicio.ts
+```
+
+```text
+✓ tarea válida
+✓ válida con prioridad
+✗ prioridad «urgente» → prioridad: value was not found in enum
+✗ título vacío → titulo: specified string length was not satisfied
+✗ errata: fehca en vez de fecha → documento: sobran fehca · documento: faltan fecha
+✗ color en mayúsculas y sin # → categoria.color: regular expression did not match
+✗ categoría sin nombre → categoria: faltan nombre
+✗ hecha como texto → hecha: type did not match
+Tareas guardadas: 2
+```
+
+- **`additionalProperties: false` atrapa las erratas:** `fehca` se rechaza dos veces, porque sobra `fehca` y falta `fecha`. Sin esa opción, la tarea se habría guardado sin fecha y no aparecería nunca en "tareas de hoy".
+- **Con `additionalProperties: false`, `_id` tiene que estar en `properties`:** el _driver_ lo añade a cada documento antes de enviarlo. Si no lo declaras, **todas** las inserciones fallan con `sobran _id`.
+- **El objeto embebido se valida igual que el documento:** `categoria` tiene su propio `required`, sus `properties` y su `additionalProperties`. El color debe ser `#` y seis cifras hexadecimales en minúsculas: `2563EB` no pasa.
+- **`enum` limita los valores:** la prioridad es opcional (no está en `required`), pero si viene, solo puede ser uno de los tres valores.
+
+<Callout type="risk">
+
+- **`additionalProperties: false` complica los cambios:** cada campo nuevo exige primero cambiar el validador (una migración) y después desplegar el código que lo escribe. En el orden contrario, el código nuevo falla al guardar.
+- **Normaliza antes de validar:** si la interfaz permite escribir el color como `#2563EB`, conviértelo a minúsculas en la app (Zod con `.toLowerCase()`). El validador de la base de datos solo comprueba, nunca corrige.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tu base de datos rechaza datos corruptos aunque la app tenga un _bug_: defines validadores con `$jsonSchema` y `bsonType`, los introduces en colecciones con datos usando `moderate` o `warn` mientras migras, mantienes Zod en la app para los mensajes y la base de datos como última barrera, y cambias el esquema con migraciones numeradas, idempotentes y aplicadas en orden.
+
+</Callout>
+
+## Resumen
+
+- `$jsonSchema` en `createCollection` (o `collMod`) hace que MongoDB rechace con el código 121 lo que no cumple el esquema; el motivo está en `errInfo.details`.
+- `bsonType` distingue `int` de `double`, `date` de texto y `objectId` de texto; `additionalProperties: false` prohíbe los campos no declarados.
+- `validationLevel: "moderate"` deja actualizar los documentos que ya eran inválidos; `validationAction: "warn"` acepta y avisa en el registro.
+- Zod en la app da los mensajes; `$jsonSchema` en la base de datos protege de todo lo que se salta la app.
+- Las migraciones van numeradas, se registran al terminar, son idempotentes y cambian primero los datos y después el validador.

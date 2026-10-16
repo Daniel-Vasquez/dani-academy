@@ -1,0 +1,688 @@
+---
+sectionId: "I4.3"
+course: "I4"
+title: "Patrones de diseño"
+order: 3
+minutes: 90
+summary: "Aplicas Computed, Bucket, Subset, Extended Reference, Outlier y Schema Versioning a problemas reales de esta plataforma, mides lo que ahorra cada uno y decides qué hacer cuando cambia un dato duplicado."
+---
+
+En I4.2 decidiste entre embeber y referenciar. Con eso se resuelve la mayoría de los casos, pero hay problemas que se repiten tanto que tienen nombre: un dato que se calcula en cada visita, miles de documentos diminutos, un array que solo se necesita a medias, una copia que se queda vieja, un caso raro que rompe el diseño del normal o documentos antiguos con otra forma. MongoDB los llama **patrones de diseño**, y cada uno es una solución probada para un problema concreto. En esta sección vas a aplicar seis a problemas reales de esta plataforma y a medir lo que ahorra cada uno.
+
+**Lo que tendrás al terminar:** un _script_ por patrón (`src/i4/03-computed.ts`, `03-bucket.ts`, `03-subset.ts`, `03-extended.ts`, `03-outlier.ts` y `03-versiones.ts`) y la regla para elegir el adecuado.
+
+**Requisitos:** el proyecto `mongo-academy` con las lecturas sembradas en I4.2 (`npm start -- src/i4/02-sembrar.ts`).
+
+| Patrón               | Problema que resuelve                                      | Paso |
+| -------------------- | ---------------------------------------------------------- | ---- |
+| _Computed_           | Un resultado se calcula una y otra vez en cada lectura     | 1    |
+| _Bucket_             | Miles de documentos diminutos (un evento por documento)    | 2    |
+| _Subset_             | Un array que solo se necesita en parte (los más recientes) | 3    |
+| _Extended Reference_ | Un `$lookup` en cada lectura frecuente                     | 4    |
+| _Outlier_            | Unos pocos casos enormes rompen el diseño del caso normal  | 5    |
+| _Schema Versioning_  | Documentos con formas distintas tras un cambio             | 6    |
+
+## Paso 1: _Computed_, calcular una vez y leer muchas
+
+La página de cada curso podría mostrar "702 alumnos estudian este curso". Es la página más visitada (patrón #1 de I4.1) y el número se calcula recorriendo todas las lecturas. El patrón _Computed_ consiste en **guardar el resultado** en lugar de calcularlo en cada lectura. Crea `src/i4/03-computed.ts`:
+
+```ts
+// Archivo: src/i4/03-computed.ts
+// Computed: "N alumnos estudian este curso", calculado en cada visita o guardado de antemano
+import { cliente, db } from "../db";
+import { lecturasB } from "./02-modelos";
+
+interface EstadisticaCurso {
+  _id: string; // cursoId
+  alumnos: number;
+  lecturas: number;
+  calculado: Date;
+}
+const estadisticas = db.collection<EstadisticaCurso>("i4_estadisticas_curso");
+
+// Opción 1: calcularlo en cada visita (recorre todas las lecturas del curso)
+const calcular = (cursoId: string) =>
+  lecturasB
+    .aggregate<{ alumnos: number; lecturas: number }>([
+      { $match: { cursoId } },
+      { $group: { _id: "$userId", lecturas: { $sum: 1 } } },
+      { $group: { _id: null, alumnos: { $sum: 1 }, lecturas: { $sum: "$lecturas" } } },
+    ])
+    .next();
+
+// Opción 2: recalcular TODOS los cursos de una vez y guardarlo (un script cada pocos minutos)
+async function recalcularTodo() {
+  await lecturasB
+    .aggregate([
+      { $group: { _id: { cursoId: "$cursoId", userId: "$userId" }, lecturas: { $sum: 1 } } },
+      { $group: { _id: "$_id.cursoId", alumnos: { $sum: 1 }, lecturas: { $sum: "$lecturas" } } },
+      { $set: { calculado: "$$NOW" } },
+      { $merge: { into: "i4_estadisticas_curso", whenMatched: "replace", whenNotMatched: "insert" } },
+    ])
+    .toArray();
+}
+
+async function medir(nombre: string, veces: number, fn: () => Promise<unknown>) {
+  await fn();
+  const t = performance.now();
+  for (let i = 0; i < veces; i++) await fn();
+  console.log(`  ${nombre.padEnd(46)} ${((performance.now() - t) / veces).toFixed(2).padStart(7)} ms`);
+}
+
+console.log(`Lecturas en total: ${await lecturasB.countDocuments()}`);
+console.log("B5:", await calcular("B5"));
+
+console.log("\nPágina de un curso (media):");
+await medir("calcular en cada visita ($group sobre lecturas)", 50, () => calcular("B5"));
+await medir("recalcular los 24 cursos y guardarlos ($merge)", 10, recalcularTodo);
+await medir("leer el resultado guardado (findOne)", 500, () => estadisticas.findOne({ _id: "B5" }));
+console.log("Guardado:", await estadisticas.findOne({ _id: "B5" }));
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-computed.ts
+```
+
+```text
+Lecturas en total: 69159
+B5: { _id: null, alumnos: 702, lecturas: 3163 }
+
+Página de un curso (media):
+  calcular en cada visita ($group sobre lecturas)    6.55 ms
+  recalcular los 24 cursos y guardarlos ($merge)   17.30 ms
+  leer el resultado guardado (findOne)              0.10 ms
+Guardado: {
+  _id: 'B5',
+  alumnos: 702,
+  lecturas: 3163,
+  calculado: 2026-10-16T18:33:13.733Z
+}
+```
+
+- **Calcular en cada visita cuesta 6,6 ms**, porque recorre las 69 159 lecturas (no hay índice por `cursoId`). Ese coste crece con la plataforma: con 100 veces más alumnos, 100 veces más.
+- **Recalcular los 24 cursos de golpe cuesta 17 ms.** Si un _script_ lo hace cada 5 minutos, son 17 ms cada 5 minutos, en lugar de 6,6 ms en **cada** visita.
+- **Leer el resultado guardado cuesta 0,1 ms:** 65 veces menos. La última etapa, `$merge`, escribe la salida de la agregación en otra colección: reemplaza los cursos que ya estaban e inserta los nuevos.
+
+Hay una tercera forma: actualizar el contador en cada escritura (`$inc` al marcar una lectura). Es exacta al instante, pero convierte el documento del curso en un **punto caliente**: todos los alumnos de un curso escriben en él, y en I4.2 mediste que eso multiplica por 22 el tiempo con escrituras simultáneas. Para un número que puede ir 5 minutos por detrás, el recálculo periódico es mejor.
+
+<Callout type="risk">
+
+- **El dato guardado va por detrás:** con un recálculo cada 5 minutos, el contador puede mostrar 702 alumnos cuando ya hay 703. Acéptalo solo donde dé igual. Si una cifra tiene que ser exacta (un saldo, un inventario), calcúlala al momento o actualízala en la misma operación que la cambia.
+- **Si actualizas el resumen en cada escritura, puede desincronizarse:** un fallo entre "guardar la lectura" y "sumar 1" deja el contador mal para siempre. Ten siempre un _script_ que lo recalcule desde los datos de origen, como `recalcularTodo`, aunque normalmente uses `$inc`.
+- **Guarda cuándo se calculó** (`calculado: "$$NOW"`): sirve para depurar ("¿por qué no sale mi lectura?") y para detectar que el _script_ de recálculo ha dejado de ejecutarse.
+
+</Callout>
+
+## Paso 2: _Bucket_, agrupar eventos en cubos
+
+El patrón de acceso más frecuente de la plataforma es el latido: 60 por hora de estudio (I4.1). Guardar cada uno como un documento crea millones de documentos diminutos, cada uno con su entrada en cada índice. El patrón _Bucket_ los agrupa en un **cubo** por periodo: un documento por usuario y día, con un array **acotado** (como mucho, los 1440 minutos del día). Crea `src/i4/03-bucket.ts`:
+
+```ts
+// Archivo: src/i4/03-bucket.ts
+// Bucket: un documento por latido frente a un documento por usuario y día
+import type { Collection, Document } from "mongodb";
+import { cliente, db } from "../db";
+
+interface Latido {
+  userId: string;
+  at: Date;
+  seccionId: string;
+}
+interface DiaDeEstudio {
+  userId: string;
+  dia: string; // "2026-10-01" (en la zona horaria del usuario)
+  minutos: number; // calculado al escribir: no hace falta contar el array
+  latidos: { at: Date; seccionId: string }[]; // acotado: como mucho 1440 (los minutos de un día)
+}
+
+const sueltos = db.collection<Latido>("i4_latidos");
+const dias = db.collection<DiaDeEstudio>("i4_dias_estudio");
+await Promise.all([sueltos.drop().catch(() => {}), dias.drop().catch(() => {})]);
+await sueltos.createIndex({ userId: 1, at: -1 });
+await dias.createIndex({ userId: 1, dia: -1 }, { unique: true });
+
+const USUARIOS = 200;
+const DIAS = 30;
+const POR_DIA = 60; // una hora de estudio al día
+const inicio = Date.UTC(2026, 8, 1, 15); // 1 de septiembre, 09:00 en Ciudad de México
+const id = (n: number) => `u_${String(n).padStart(4, "0")}`;
+const diaDe = (fecha: Date) => fecha.toLocaleDateString("sv-SE", { timeZone: "America/Mexico_City" }); // "AAAA-MM-DD"
+
+// Datos de un mes, cargados en bloque (la carga no se mide)
+for (let u = 1; u <= USUARIOS; u++) {
+  const lote: Latido[] = [];
+  const porDia: DiaDeEstudio[] = [];
+  for (let d = 0; d < DIAS; d++) {
+    const latidos = Array.from({ length: POR_DIA }, (_, m) => ({ at: new Date(inicio + d * 86_400_000 + m * 60_000), seccionId: "B5.3" }));
+    lote.push(...latidos.map((l) => ({ userId: id(u), ...l })));
+    porDia.push({ userId: id(u), dia: diaDe(latidos[0]!.at), minutos: POR_DIA, latidos });
+  }
+  await sueltos.insertMany(lote);
+  await dias.insertMany(porDia);
+}
+
+await db.admin().command({ fsync: 1 });
+async function espacio(col: Collection<Document>) {
+  const [s] = await col.aggregate<{ storageStats: Document }>([{ $collStats: { storageStats: {} } }]).toArray();
+  const { count, storageSize, totalIndexSize } = s!.storageStats;
+  return `${String(count).padStart(7)} documentos · ${(storageSize / 1024 / 1024).toFixed(1).padStart(4)} MB en disco + ${(totalIndexSize / 1024 / 1024).toFixed(1).padStart(4)} MB de índices`;
+}
+console.log(`Un mes, ${USUARIOS} usuarios, 1 h al día:`);
+console.log(`  un documento por latido:  ${await espacio(sueltos as never)}`);
+console.log(`  un documento por día:     ${await espacio(dias as never)}`);
+
+async function medir(nombre: string, veces: number, fn: (i: number) => Promise<unknown>) {
+  await fn(-1);
+  const t = performance.now();
+  for (let i = 0; i < veces; i++) await fn(i);
+  console.log(`  ${nombre.padEnd(48)} ${((performance.now() - t) / veces).toFixed(2).padStart(6)} ms`);
+}
+
+const ahora = new Date(inicio + DIAS * 86_400_000);
+console.log("\nEscribir un latido (media de 300):");
+await medir("insertOne en latidos sueltos", 300, (i) => sueltos.insertOne({ userId: id(1), at: new Date(ahora.getTime() + i * 1000), seccionId: "B5.4" }));
+await medir("upsert del día ($inc + $push)", 300, (i) => {
+  const at = new Date(ahora.getTime() + i * 1000);
+  return dias.updateOne(
+    { userId: id(1), dia: diaDe(at) },
+    { $inc: { minutos: 1 }, $push: { latidos: { at, seccionId: "B5.4" } } },
+    { upsert: true },
+  );
+});
+
+console.log("\nMinutos por día de un usuario en el último mes (media de 100):");
+const desde = new Date(inicio);
+await medir("agrupar 1800 latidos sueltos por día", 100, () =>
+  sueltos
+    .aggregate([
+      { $match: { userId: id(7), at: { $gte: desde } } },
+      { $group: { _id: { $dateToString: { date: "$at", format: "%Y-%m-%d", timezone: "America/Mexico_City" } }, minutos: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ])
+    .toArray(),
+);
+await medir("leer 30 documentos de día (solo dia y minutos)", 100, () =>
+  dias.find({ userId: id(7), dia: { $gte: diaDe(desde) } }, { projection: { _id: 0, dia: 1, minutos: 1 } }).sort({ dia: 1 }).toArray(),
+);
+
+await Promise.all([sueltos.drop(), dias.drop()]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-bucket.ts
+```
+
+```text
+Un mes, 200 usuarios, 1 h al día:
+  un documento por latido:   360000 documentos ·  6.1 MB en disco + 19.5 MB de índices
+  un documento por día:        6000 documentos ·  3.6 MB en disco +  0.5 MB de índices
+
+Escribir un latido (media de 300):
+  insertOne en latidos sueltos                       5.90 ms
+  upsert del día ($inc + $push)                      6.60 ms
+
+Minutos por día de un usuario en el último mes (media de 100):
+  agrupar 1800 latidos sueltos por día               1.33 ms
+  leer 30 documentos de día (solo dia y minutos)     0.17 ms
+```
+
+- **De 25,6 MB a 4,1 MB:** 60 veces menos documentos y, sobre todo, 39 veces menos índice (19,5 MB frente a 0,5 MB). Cada documento suelto tenía su entrada en `_id` y en `{ userId, at }`; el cubo, una.
+- **Escribir cuesta lo mismo** (5,9 ms frente a 6,6 ms): un `upsert` con `$inc` y `$push` crea el día si no existe y, si existe, lo actualiza.
+- **Leer es 8 veces más rápido** (0,17 ms frente a 1,33 ms), y sin agregación: los minutos de cada día ya están sumados (`$inc: { minutos: 1 }` es _Computed_ dentro del cubo).
+
+Esta plataforma va un paso más allá: no guarda cada latido ni dentro del cubo. Guarda un documento por **sesión de estudio** (`study_sessions`), con su inicio, su último latido y las secciones vistas. Cada latido solo actualiza `lastSeenAt` (`src/server/repositories/study-sessions.repo.ts`). Si no necesitas cada evento, no lo guardes: guarda el resumen.
+
+<Callout type="risk">
+
+- **El cubo necesita un tope:** "un documento por usuario y día" está acotado porque un día tiene 1440 minutos. "Un documento por usuario" volvería a ser un array sin límite (I4.2). Elige el periodo (hora, día, mes) para que el peor caso quepa con holgura.
+- **El día depende de la zona horaria:** `diaDe` usa `America/Mexico_City`. Si lo calcularas en UTC, la hora de estudio de las 19:00 a las 20:00 en México caería en el día siguiente. Guarda en el cubo el día **del usuario**, como en B5.5.
+- **Los cubos complican las consultas que cruzan cubos:** "los últimos 90 latidos" ya no es un `find().limit(90)`, porque pueden estar repartidos en dos días. Elige el cubo según las consultas frecuentes (aquí, "por día").
+
+</Callout>
+
+## Paso 3: _Subset_, embeber solo la parte que se lee
+
+La página de evaluación muestra los últimos intentos del curso (patrón #7), y la de progreso, cuántos hay en total. El historial completo crece sin límite, así que va en su propia colección (I4.2). Pero la pantalla solo necesita **los tres más recientes**. El patrón _Subset_ embebe ese subconjunto acotado en un documento que ya se lee, y deja el resto aparte. Crea `src/i4/03-subset.ts`:
+
+```ts
+// Archivo: src/i4/03-subset.ts
+// Subset: los 3 últimos intentos, embebidos en el resumen del curso; el historial completo, aparte
+import { cliente, db } from "../db";
+
+interface Intento {
+  userId: string;
+  cursoId: string;
+  puntuacion: number;
+  fecha: Date;
+}
+interface ResumenCurso {
+  userId: string;
+  cursoId: string;
+  intentos: number; // cuántos hay en total (Computed)
+  ultimos: { puntuacion: number; fecha: Date }[]; // Subset: como mucho 3
+}
+
+const intentos = db.collection<Intento>("i4_intentos_historial");
+const resumenes = db.collection<ResumenCurso>("i4_resumen_curso");
+await Promise.all([intentos.drop().catch(() => {}), resumenes.drop().catch(() => {})]);
+await resumenes.createIndex({ userId: 1, cursoId: 1 }, { unique: true });
+
+/** Guardar un intento: el historial recibe el documento; el resumen, una copia recortada */
+async function guardarIntento(intento: Intento) {
+  await intentos.insertOne(intento);
+  await resumenes.updateOne(
+    { userId: intento.userId, cursoId: intento.cursoId },
+    {
+      $inc: { intentos: 1 },
+      $push: {
+        ultimos: {
+          $each: [{ puntuacion: intento.puntuacion, fecha: intento.fecha }],
+          $sort: { fecha: -1 }, // el más reciente primero
+          $slice: 3, // y nunca más de 3: el array está acotado
+        },
+      },
+    },
+    { upsert: true },
+  );
+}
+
+const inicio = Date.UTC(2026, 9, 1);
+for (let i = 0; i < 10; i++) {
+  await guardarIntento({ userId: "u_ana", cursoId: "B5", puntuacion: [2, 3, 3, 4, 2, 5, 4, 3, 5, 4][i]!, fecha: new Date(inicio + i * 86_400_000) });
+}
+
+const resumen = await resumenes.findOne({ userId: "u_ana", cursoId: "B5" }, { projection: { _id: 0 } });
+console.log(`Historial: ${await intentos.countDocuments({ userId: "u_ana" })} intentos`);
+console.log("Resumen:", JSON.stringify(resumen, null, 1).replace(/\n\s*/g, " "));
+
+await Promise.all([intentos.drop(), resumenes.drop()]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-subset.ts
+```
+
+```text
+Historial: 10 intentos
+Resumen: { "userId": "u_ana", "cursoId": "B5", "intentos": 10, "ultimos": [ { "puntuacion": 4, "fecha": "2026-10-10T00:00:00.000Z" }, { "puntuacion": 5, "fecha": "2026-10-09T00:00:00.000Z" }, { "puntuacion": 3, "fecha": "2026-10-08T00:00:00.000Z" } ] }
+```
+
+- **`$push` con `$each`, `$sort` y `$slice`** añade el intento, ordena por fecha y recorta a 3 en la misma operación. El array nunca pasa de 3, aunque haya 10 intentos (o 1000).
+- **El resumen tiene lo que pinta la pantalla:** el total (`intentos: 10`, _Computed_) y los tres últimos. Una sola lectura de un documento pequeño.
+- **El historial sigue completo** en `i4_intentos_historial`, para el "ver todos" (que se usa poco).
+
+<Callout type="risk">
+
+- **Son dos escrituras:** si la segunda falla, el resumen se queda sin el último intento. Para que las dos se apliquen a la vez hace falta una transacción (A2). Si no, vale la regla del Paso 1: un _script_ que reconstruya el resumen desde el historial.
+- **`$slice` sin `$sort` recorta por orden de llegada:** si un intento llega con retraso (una petición lenta), quedaría mal ordenado. `$sort: { fecha: -1 }` garantiza que se quedan los 3 más recientes por fecha.
+- **El subconjunto debe ser lo que la pantalla necesita, ni más ni menos:** si la pantalla muestra 5, guarda 5. Guardar 50 "por si acaso" vuelve a hacer grande el documento que querías mantener pequeño.
+
+</Callout>
+
+## Paso 4: _Extended Reference_ y desnormalizar con cabeza
+
+"Mis últimos intentos" muestra el título de cada curso. Con una referencia normal (`cursoId: "B5"`), cada lectura necesita un `$lookup`, o una segunda consulta, para sacar el título. El patrón _Extended Reference_ guarda junto a la referencia una **copia** de los campos que se leen siempre: `curso: { id: "B5", titulo: "MongoDB esencial" }`. Crea `src/i4/03-extended.ts`:
+
+```ts
+// Archivo: src/i4/03-extended.ts
+// Extended Reference: cada intento guarda una copia del título del curso.
+// Ahorra un $lookup en cada lectura, pero ¿qué pasa cuando el título cambia?
+import { cliente, db } from "../db";
+import { CATALOGO } from "./catalogo";
+
+interface IntentoConCurso {
+  userId: string;
+  curso: { id: string; titulo: string }; // la referencia (id) + la copia (titulo)
+  puntuacion: number;
+  fecha: Date;
+}
+const intentos = db.collection<IntentoConCurso>("i4_intentos_ext");
+await intentos.drop().catch(() => {});
+
+const inicio = Date.UTC(2026, 9, 1);
+await intentos.insertMany(
+  Array.from({ length: 20_000 }, (_, i) => {
+    const c = CATALOGO[i % CATALOGO.length]!;
+    return { userId: `u_${i % 2000}`, curso: { id: c.id, titulo: c.titulo }, puntuacion: i % 6, fecha: new Date(inicio + i * 60_000) };
+  }),
+);
+
+// La lectura frecuente ("mis últimos intentos") ya trae el título: una consulta, sin $lookup
+const ultimos = await intentos.find({ userId: "u_7" }, { projection: { _id: 0, curso: 1, puntuacion: 1 } }).sort({ fecha: -1 }).limit(2).toArray();
+console.log("Últimos intentos:", JSON.stringify(ultimos));
+
+// El autor renombra un curso: hay que actualizar todas las copias
+async function renombrar(cursoId: string, titulo: string) {
+  const t = performance.now();
+  const r = await intentos.updateMany({ "curso.id": cursoId }, { $set: { "curso.titulo": titulo } });
+  return `${r.modifiedCount} copias actualizadas en ${(performance.now() - t).toFixed(0)} ms`;
+}
+console.log(`\nRenombrar B5: ${await renombrar("B5", "MongoDB esencial (2.ª edición)")}`);
+const copia = await intentos.findOne({ "curso.id": "B5" }, { projection: { _id: 0, curso: 1 } });
+console.log("Una copia después:", JSON.stringify(copia));
+
+await intentos.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-extended.ts
+```
+
+```text
+Últimos intentos: [{"curso":{"id":"I1","titulo":"TypeScript intermedio"},"puntuacion":1},{"curso":{"id":"P1","titulo":"Proyecto integrador"},"puntuacion":5}]
+
+Renombrar B5: 834 copias actualizadas en 11 ms
+Una copia después: {"curso":{"id":"B5","titulo":"MongoDB esencial (2.ª edición)"}}
+```
+
+- **La lectura frecuente ya trae el título:** una consulta, sin `$lookup`.
+- **El precio llega cuando el dato cambia:** renombrar un curso actualiza 834 copias, en 11 ms. Como un curso se renombra muy pocas veces (patrón #6 del ejercicio de I4.1: 0,05 veces al día), compensa con creces.
+
+Duplicar un dato (**desnormalizar**) es una decisión con tres respuestas posibles a la pregunta "¿qué pasa cuando cambia?":
+
+| Estrategia                                          | Cuándo                                              | Ejemplo                                                   |
+| --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------- |
+| Actualizar todas las copias (`updateMany`)          | El dato cambia poco y las copias deben estar al día | Título de un curso                                        |
+| No actualizar: la copia es una **foto** del momento | El valor histórico es el correcto                   | El precio de un producto en un pedido ya hecho            |
+| No copiar                                           | El dato cambia a menudo                             | El número de alumnos de un curso, el avatar de un usuario |
+
+<Callout type="risk">
+
+- **Copia solo campos que cambian poco:** el título, sí; el número de alumnos o la fecha de la última lectura, no. Cada copia multiplica las escrituras cuando el original cambia.
+- **Escribe la actualización de las copias junto al cambio del original:** la función que renombra un curso debe hacer también el `updateMany`. Si queda como "un _script_ que alguien ejecutará", alguien se olvidará y los títulos viejos aparecerán meses después.
+- **La foto histórica es una decisión, no un descuido:** si decides no actualizar (como el precio de un pedido), documéntalo junto al tipo (`/** título del curso cuando se hizo el intento */`), para que nadie lo "arregle".
+
+</Callout>
+
+## Paso 5: _Outlier_, el caso raro aparte
+
+Imagina comentarios en las secciones. Casi todas tendrán unos pocos, que caben de sobra embebidos en un documento por sección. Pero alguna sección polémica tendrá cientos, y diseñar todo pensando en ella encarece el caso normal. El patrón _Outlier_ diseña para el caso habitual y trata los casos extremos aparte: aquí, en **páginas de desbordamiento** de 50 comentarios. Crea `src/i4/03-outlier.ts`:
+
+```ts
+// Archivo: src/i4/03-outlier.ts
+// Outlier: casi todas las secciones tienen pocos comentarios y caben embebidos.
+// Las pocas que tienen muchos (los "outliers") continúan en documentos de desbordamiento.
+import { cliente, db } from "../db";
+
+const POR_PAGINA = 50;
+interface PaginaComentarios {
+  seccionId: string;
+  pagina: number;
+  n: number; // comentarios en esta página
+  comentarios: { autor: string; texto: string; fecha: Date }[]; // como mucho POR_PAGINA
+}
+const paginas = db.collection<PaginaComentarios>("i4_comentarios");
+await paginas.drop().catch(() => {});
+await paginas.createIndex({ seccionId: 1, pagina: 1 }, { unique: true });
+
+/** Añade el comentario a la última página con hueco; si está llena, abre la siguiente */
+async function comentar(seccionId: string, autor: string, texto: string) {
+  const comentario = { autor, texto, fecha: new Date() };
+  const ultima = await paginas.findOne({ seccionId }, { sort: { pagina: -1 }, projection: { pagina: 1, n: 1 } });
+  const r = await paginas.updateOne(
+    { seccionId, pagina: ultima?.pagina ?? 1, n: { $lt: POR_PAGINA } },
+    { $push: { comentarios: comentario }, $inc: { n: 1 } },
+  );
+  if (r.matchedCount === 1) return;
+  // No había página o estaba llena: se crea la siguiente (el índice único evita duplicarla)
+  await paginas.insertOne({ seccionId, pagina: (ultima?.pagina ?? 0) + 1, n: 1, comentarios: [comentario] });
+}
+
+for (let i = 0; i < 3; i++) await comentar("B5.2", `alumno${i}`, "Muy claro, gracias");
+for (let i = 0; i < 130; i++) await comentar("B5.3", `alumno${i}`, `Pregunta ${i + 1}`);
+
+for (const seccionId of ["B5.2", "B5.3"]) {
+  const docs = await paginas.find({ seccionId }, { projection: { _id: 0, pagina: 1, n: 1 } }).sort({ pagina: 1 }).toArray();
+  console.log(`${seccionId}: ${docs.length} documento(s) → ${docs.map((d) => `página ${d.pagina}: ${d.n}`).join(" · ")}`);
+}
+
+// La lectura normal pide solo la primera página: el caso habitual sigue siendo un documento
+const primera = await paginas.findOne({ seccionId: "B5.3", pagina: 1 });
+console.log(`Primera página de B5.3: ${primera!.comentarios.length} comentarios (y "ver más" si hay página 2)`);
+
+await paginas.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-outlier.ts
+```
+
+```text
+B5.2: 1 documento(s) → página 1: 3
+B5.3: 3 documento(s) → página 1: 50 · página 2: 50 · página 3: 30
+Primera página de B5.3: 50 comentarios (y "ver más" si hay página 2)
+```
+
+- **El caso normal es un documento:** B5.2, con 3 comentarios, ocupa una página.
+- **El caso extremo no rompe nada:** B5.3, con 130, tiene 3 páginas, ninguna de más de 50 comentarios. Ningún documento crece sin límite.
+- **La pantalla normal lee solo la primera página**, que es lo que se muestra antes de "ver más". El caso raro paga una consulta más solo cuando alguien pide más.
+
+<Callout type="risk">
+
+- **Dos peticiones a la vez pueden abrir la misma página nueva:** las dos ven la página 1 llena e intentan crear la 2. El índice único `{ seccionId, pagina }` hace que la segunda falle con E11000 (B5.5), en lugar de crear dos páginas 2. En una app real, reintenta la operación cuando eso pase.
+- **Elige el tamaño de página por la pantalla:** 50 porque es lo que se muestra antes de "ver más". Si la pantalla muestra 20, usa 20.
+- **No confundas _Outlier_ con _Bucket_:** el cubo agrupa por periodo (todos los usuarios, todos los días). El _outlier_ es una excepción: la inmensa mayoría de los documentos no la necesita nunca.
+
+</Callout>
+
+## Paso 6: _Schema Versioning_, cambiar la forma sin parar la app
+
+Las apps cambian. La primera versión de los intentos solo guardaba la puntuación; la segunda guarda también el total de preguntas y si se aprobó. En SQL, un cambio así es un `ALTER TABLE` que afecta a todas las filas a la vez. En MongoDB pueden convivir documentos con las dos formas, y el patrón _Schema Versioning_ lo hace explícito: un campo `version` en cada documento y una sola función que convierte cualquier versión a la actual. Crea `src/i4/03-versiones.ts`:
+
+```ts
+// Archivo: src/i4/03-versiones.ts
+// Schema Versioning: conviven documentos con dos formas, y la app sabe leer las dos
+import { cliente, db } from "../db";
+
+/** Versión 1 (la primera app): solo la puntuación */
+interface IntentoV1 {
+  version?: undefined; // los documentos antiguos no tienen el campo
+  userId: string;
+  cursoId: string;
+  puntuacion: number;
+}
+/** Versión 2: también el total de preguntas y si aprobó */
+interface IntentoV2 {
+  version: 2;
+  userId: string;
+  cursoId: string;
+  puntuacion: number;
+  total: number;
+  aprobado: boolean;
+}
+type IntentoGuardado = IntentoV1 | IntentoV2;
+
+const intentos = db.collection<IntentoGuardado>("i4_intentos_versiones");
+await intentos.drop().catch(() => {});
+
+// Lo que había en producción antes del cambio
+await intentos.insertMany([
+  { userId: "u_ana", cursoId: "B1", puntuacion: 4 },
+  { userId: "u_ana", cursoId: "B2", puntuacion: 2 },
+  { userId: "u_ana", cursoId: "B3", puntuacion: 5 },
+]);
+// La app nueva ya escribe la versión 2
+await intentos.insertOne({ version: 2, userId: "u_ana", cursoId: "B5", puntuacion: 3, total: 5, aprobado: false });
+
+/** El resto de la app solo ve la versión 2: la conversión está en un único sitio */
+function aV2(doc: IntentoGuardado): IntentoV2 {
+  if (doc.version === 2) return doc;
+  return { version: 2, userId: doc.userId, cursoId: doc.cursoId, puntuacion: doc.puntuacion, total: 5, aprobado: doc.puntuacion >= 4 };
+}
+
+const porVersion = () =>
+  intentos.aggregate([{ $group: { _id: { $ifNull: ["$version", 1] }, documentos: { $sum: 1 } } }, { $sort: { _id: 1 } }]).toArray();
+
+console.log("Antes de migrar:", JSON.stringify(await porVersion()));
+const leidos = (await intentos.find({ userId: "u_ana" }).toArray()).map(aV2);
+console.log("La app lee:", leidos.map((i) => `${i.cursoId} ${i.puntuacion}/${i.total} ${i.aprobado ? "✓" : "✗"}`).join(" · "));
+
+// Migración en segundo plano, por lotes e idempotente: solo toca los que aún no son v2
+const r = await intentos.updateMany({ version: { $exists: false } }, [
+  { $set: { version: 2, total: 5, aprobado: { $gte: ["$puntuacion", 4] } } },
+]);
+console.log(`Migrados: ${r.modifiedCount}. Repetir la migración: ${(await intentos.updateMany({ version: { $exists: false } }, [{ $set: { version: 2 } }])).modifiedCount}`);
+console.log("Después de migrar:", JSON.stringify(await porVersion()));
+
+await intentos.drop();
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-versiones.ts
+```
+
+```text
+Antes de migrar: [{"_id":1,"documentos":3},{"_id":2,"documentos":1}]
+La app lee: B1 4/5 ✓ · B2 2/5 ✗ · B3 5/5 ✓ · B5 3/5 ✗
+Migrados: 3. Repetir la migración: 0
+Después de migrar: [{"_id":2,"documentos":4}]
+```
+
+- **La app funciona antes, durante y después de migrar:** `aV2` convierte los documentos antiguos al leerlos. El resto del código solo ve la versión 2, con TypeScript comprobando cada forma.
+- **La migración es idempotente:** solo toca los documentos sin `version`, así que repetirla no hace nada (0 modificados). Puedes ejecutarla por lotes, en segundo plano, sin parar la app.
+- **`updateMany` con un _pipeline_** (el array `[ { $set: … } ]`) calcula el valor nuevo a partir del documento: `aprobado` sale de `puntuacion` con `$gte`. Es la misma sintaxis de agregación que verás en I4.4.
+
+<Callout type="risk">
+
+- **Los documentos sin `version` son la versión 1:** no hace falta añadir el campo a los antiguos antes de empezar. Basta con que la app nueva siempre lo escriba.
+- **Solo borra el código de conversión cuando no quede ningún documento antiguo:** compruébalo con la agregación `porVersion` en producción, no en tu copia local.
+- **Un valor por defecto en la conversión es una suposición:** `total: 5` es correcto porque todas las evaluaciones de la plataforma tienen 5 preguntas. Si no hubiera forma de saberlo, la migración debería marcar esos documentos (`total: null`) en lugar de inventar.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Aplica el patrón _Bucket_ a los registros de hidratación de tu app: un documento por usuario y día en lugar de uno por vaso.
+2. El documento del día debe guardar el total de mililitros y el número de vasos (para no sumar en cada lectura) y la lista de registros.
+3. Compara el número de documentos y el espacio de los dos diseños con un mes de datos de 100 usuarios (8 vasos al día), y comprueba que un vaso a las 23:30 de Ciudad de México cuenta para ese día.
+
+</Callout>
+
+Solución. `src/i4/03-ejercicio.ts`:
+
+```ts
+// Archivo: src/i4/03-ejercicio.ts
+// Ejercicio I4.3: Bucket para la hidratación. Un documento por usuario y día en lugar de uno por vaso.
+import type { Collection, Document } from "mongodb";
+import { cliente, db } from "../db";
+
+const ZONA = "America/Mexico_City";
+const OBJETIVO_ML = 2000;
+
+/** Antes: un documento por vaso */
+interface Vaso {
+  userId: string;
+  ml: number;
+  at: Date;
+}
+/** Después: un documento por usuario y día (el "cubo") */
+interface DiaHidratacion {
+  userId: string;
+  dia: string; // "AAAA-MM-DD" en la zona del usuario
+  totalMl: number; // Computed: se suma al escribir
+  vasos: number;
+  registros: { ml: number; at: Date }[]; // acotado en la práctica: unos pocos vasos al día
+}
+
+const vasos = db.collection<Vaso>("i4_vasos");
+const dias = db.collection<DiaHidratacion>("i4_hidratacion");
+await Promise.all([vasos.drop().catch(() => {}), dias.drop().catch(() => {})]);
+await vasos.createIndex({ userId: 1, at: -1 });
+await dias.createIndex({ userId: 1, dia: -1 }, { unique: true });
+
+const diaDe = (fecha: Date) => fecha.toLocaleDateString("sv-SE", { timeZone: ZONA });
+
+/** Registrar un vaso: un upsert crea el día si no existe y, si existe, lo actualiza */
+async function registrarVaso(userId: string, ml: number, at = new Date()) {
+  await dias.updateOne(
+    { userId, dia: diaDe(at) },
+    { $inc: { totalMl: ml, vasos: 1 }, $push: { registros: { ml, at } } },
+    { upsert: true },
+  );
+}
+
+// Un mes de 100 usuarios, 8 vasos de 250 ml al día, en los dos diseños
+const inicio = Date.UTC(2026, 8, 1, 14); // 08:00 en Ciudad de México
+for (let u = 1; u <= 100; u++) {
+  const lote: Vaso[] = [];
+  for (let d = 0; d < 30; d++) for (let v = 0; v < 8; v++) lote.push({ userId: `u_${u}`, ml: 250, at: new Date(inicio + d * 86_400_000 + v * 5_400_000) });
+  await vasos.insertMany(lote);
+  for (const vaso of lote) await registrarVaso(vaso.userId, vaso.ml, vaso.at);
+}
+
+await db.admin().command({ fsync: 1 });
+async function espacio(col: Collection<Document>) {
+  const [s] = await col.aggregate<{ storageStats: Document }>([{ $collStats: { storageStats: {} } }]).toArray();
+  const { count, storageSize, totalIndexSize } = s!.storageStats;
+  return `${String(count).padStart(6)} documentos · ${((storageSize + totalIndexSize) / 1024).toFixed(0).padStart(5)} KB (datos + índices)`;
+}
+console.log(`Un vaso por documento: ${await espacio(vasos as never)}`);
+console.log(`Un día por documento:  ${await espacio(dias as never)}`);
+
+// La pantalla "esta semana": total por día y si se cumplió el objetivo, sin agregar
+const semana = await dias
+  .find({ userId: "u_1", dia: { $gte: "2026-09-24" } }, { projection: { _id: 0, dia: 1, totalMl: 1, vasos: 1 } })
+  .sort({ dia: 1 })
+  .toArray();
+for (const d of semana) console.log(`  ${d.dia}: ${d.vasos} vasos · ${d.totalMl} ml ${d.totalMl >= OBJETIVO_ML ? "✓" : "✗"}`);
+
+// El vaso de las 23:30 de Ciudad de México cuenta para ese día, aunque en UTC ya sea el siguiente
+await registrarVaso("u_1", 300, new Date("2026-10-01T05:30:00Z"));
+console.log("Vaso a las 23:30 en México:", JSON.stringify(await dias.findOne({ userId: "u_1", dia: "2026-09-30" }, { projection: { _id: 0, dia: 1, totalMl: 1, vasos: 1 } })));
+
+await Promise.all([vasos.drop(), dias.drop()]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/03-ejercicio.ts
+```
+
+```text
+Un vaso por documento:  24000 documentos ·  3552 KB (datos + índices)
+Un día por documento:    3000 documentos ·  1032 KB (datos + índices)
+  2026-09-24: 8 vasos · 2000 ml ✓
+  2026-09-25: 8 vasos · 2000 ml ✓
+  2026-09-26: 8 vasos · 2000 ml ✓
+  2026-09-27: 8 vasos · 2000 ml ✓
+  2026-09-28: 8 vasos · 2000 ml ✓
+  2026-09-29: 8 vasos · 2000 ml ✓
+  2026-09-30: 8 vasos · 2000 ml ✓
+Vaso a las 23:30 en México: {"dia":"2026-09-30","totalMl":2300,"vasos":9}
+```
+
+- **8 veces menos documentos y 3,4 veces menos espacio** (1032 KB frente a 3552 KB).
+- **La pantalla "esta semana" es un `find` de 7 documentos**, con el total y los vasos ya calculados (_Computed_ dentro del cubo).
+- **`registrarVaso` es un solo `upsert`:** crea el día con su primer vaso o actualiza el existente. No hace falta comprobar antes si el día existe.
+- **El vaso de las 23:30 suma al 30 de septiembre**, aunque en UTC ya sea 1 de octubre, porque `diaDe` usa la zona horaria del usuario.
+
+<Callout type="risk">
+
+- **El índice único `{ userId, dia }` es imprescindible:** sin él, dos vasos registrados a la vez al empezar el día pueden crear dos documentos para el mismo día (la carrera de `upsert` que viste en B5.4).
+- **Si el usuario cambia de zona horaria,** los días antiguos se quedan con la antigua. Es lo correcto (fue su día), pero guarda la zona en las preferencias del usuario para calcular los nuevos.
+
+</Callout>
+
+<Callout type="mastery">
+
+Reconoces qué patrón aplica a un problema concreto: _Computed_ para cálculos repetidos, _Bucket_ para eventos pequeños y muy frecuentes, _Subset_ para la parte de un array que se lee, _Extended Reference_ para evitar un `$lookup` frecuente, _Outlier_ para los casos extremos y _Schema Versioning_ para cambiar la forma de los documentos; y sabes qué hacer con cada dato duplicado cuando cambia el original.
+
+</Callout>
+
+## Resumen
+
+- _Computed_: guarda el resultado (0,1 ms) en lugar de calcularlo en cada visita (6,6 ms y creciendo); recalcúlalo por lotes con `$merge` o con `$inc`, y ten siempre forma de reconstruirlo.
+- _Bucket_: un documento por usuario y día en lugar de uno por evento, con 39 veces menos índice.
+- _Subset_: `$push` con `$each`, `$sort` y `$slice` mantiene los N más recientes; el historial completo, aparte.
+- _Extended Reference_: copia los campos que se leen siempre y cambian poco; decide si las copias se actualizan o son una foto.
+- _Outlier_: diseña para el caso normal y desborda los casos extremos a documentos aparte.
+- _Schema Versioning_: un campo `version`, una función que convierte a la versión actual y migraciones idempotentes.

@@ -1,0 +1,469 @@
+---
+sectionId: "I4.1"
+course: "I4"
+title: "Diseñar a partir de las consultas"
+order: 1
+minutes: 60
+summary: "Listas los patrones de acceso de esta plataforma antes de crear ninguna colección, descubres que escribe siete veces más de lo que lee, mides cuánto ocupa cada documento y llevas un array hasta el límite de 16 MB."
+---
+
+En B4.2 diseñaste el modelo de esta plataforma como se hace en SQL: primero las **entidades** (usuario, curso, sección, lectura, intento de evaluación) y después, ya con las tablas normalizadas, las consultas que hagan falta, con los `JOIN` necesarios. En MongoDB el orden se invierte. No hay `JOIN` baratos, un documento puede contener otros y lo que decide un buen diseño es **cómo se van a leer y escribir los datos**. La regla que resume todo el curso es esta: **los datos que se leen juntos se guardan juntos**. En esta sección vas a aplicarla de la única forma posible: escribiendo la lista de consultas **antes** de crear ninguna colección, midiendo cuánto ocupa cada documento y llevando un array hasta el límite de 16 MB de MongoDB.
+
+**Lo que tendrás al terminar:** `src/i4/01-patrones.ts` (los patrones de acceso de Dani Academy con su frecuencia), `src/i4/01-tamanos.ts` (el tamaño real de cada documento) y `src/i4/01-limite.ts` (un array que crece hasta que MongoDB lo rechaza).
+
+**Requisitos:** el proyecto `mongo-academy` de B5, con su `.env` apuntando a `academy_lab`.
+
+```bash
+mkdir -p src/i4
+```
+
+## Paso 1: la regla, con un ejemplo de esta plataforma
+
+Piensa en la pantalla más visitada de Dani Academy: una sección de un curso, con la lista de secciones a la izquierda y una marca en las que ya leíste. Para pintarla hacen falta **las secciones leídas por ese usuario en ese curso**.
+
+- **En SQL (B4.3)**, esa información sale de cruzar tablas: `lecturas JOIN secciones ON … WHERE usuario = ? AND curso = ?`. El modelo se decide por las entidades, y las consultas se adaptan después.
+- **En MongoDB**, la pregunta es al revés: ¿qué consulta se hace más y qué datos necesita **a la vez**? Si siempre se piden juntos, deben estar en el mismo documento (o, como mínimo, en la misma colección con un índice que los encuentre de una vez).
+
+Una analogía: en una biblioteca normalizada, cada libro está en su estantería y una ficha te dice dónde buscar cada capítulo. En una cocina bien organizada, todo lo que usas para el café (taza, cucharilla, café y azúcar) está en el mismo armario, aunque las cucharillas "pertenezcan" al cajón de los cubiertos. MongoDB es la cocina: se organiza por **uso**, no por categoría.
+
+Hay una consecuencia que conviene ver pronto: **no todos los datos van a la base de datos**. El catálogo de cursos de esta plataforma (títulos, niveles, número de secciones) solo lo cambia el autor, al publicar, y se lee en cada página. Por eso vive en archivos del proyecto (`src/content/courses.json` y las colecciones de contenido de Astro), que se compilan con la web, y no en MongoDB. Para los ejemplos de este curso, crea `src/i4/catalogo.ts` con el catálogo real:
+
+```ts
+// Archivo: src/i4/catalogo.ts
+// El catálogo real de Dani Academy: 24 cursos y 134 secciones (cambia muy poco: lo publica el autor)
+export type Nivel = "basic" | "intermediate" | "advanced" | "final";
+
+export interface CursoCatalogo {
+  id: string;
+  titulo: string;
+  nivel: Nivel;
+  secciones: number;
+}
+
+export const CATALOGO: CursoCatalogo[] = [
+  { id: "B1", titulo: "TypeScript desde cero", nivel: "basic", secciones: 8 },
+  { id: "B2", titulo: "Git y flujo de trabajo", nivel: "basic", secciones: 4 },
+  { id: "B3", titulo: "Cómo funciona la web", nivel: "basic", secciones: 5 },
+  { id: "B4", titulo: "Fundamentos de bases de datos", nivel: "basic", secciones: 5 },
+  { id: "B5", titulo: "MongoDB esencial", nivel: "basic", secciones: 6 },
+  { id: "B6", titulo: "React esencial", nivel: "basic", secciones: 7 },
+  { id: "B7", titulo: "Tailwind CSS v4 esencial", nivel: "basic", secciones: 5 },
+  { id: "I1", titulo: "TypeScript intermedio", nivel: "intermediate", secciones: 6 },
+  { id: "I2", titulo: "React intermedio", nivel: "intermediate", secciones: 6 },
+  { id: "I3", titulo: "Backend con Astro", nivel: "intermediate", secciones: 6 },
+  { id: "I4", titulo: "Modelado de datos con MongoDB", nivel: "intermediate", secciones: 6 },
+  { id: "I5", titulo: "Autenticación y autorización a fondo", nivel: "intermediate", secciones: 5 },
+  { id: "I6", titulo: "Servidores Linux", nivel: "intermediate", secciones: 6 },
+  { id: "I7", titulo: "Sistema de diseño con Tailwind v4", nivel: "intermediate", secciones: 5 },
+  { id: "I8", titulo: "Testing", nivel: "intermediate", secciones: 6 },
+  { id: "A1", titulo: "TypeScript avanzado", nivel: "advanced", secciones: 5 },
+  { id: "A2", titulo: "MongoDB avanzado", nivel: "advanced", secciones: 5 },
+  { id: "A3", titulo: "SQL y PostgreSQL", nivel: "advanced", secciones: 6 },
+  { id: "A4", titulo: "Despliegue en servidores propios", nivel: "advanced", secciones: 6 },
+  { id: "A5", titulo: "Seguridad web", nivel: "advanced", secciones: 5 },
+  { id: "A6", titulo: "Rendimiento y observabilidad", nivel: "advanced", secciones: 4 },
+  { id: "A7", titulo: "CI/CD con GitHub Actions", nivel: "advanced", secciones: 4 },
+  { id: "A8", titulo: "Arquitectura con Astro y React", nivel: "advanced", secciones: 5 },
+  { id: "P1", titulo: "Proyecto integrador", nivel: "final", secciones: 8 },
+];
+
+/** "B5" con 6 secciones → ["B5.1", …, "B5.6"] */
+export const seccionesDe = (curso: CursoCatalogo) =>
+  Array.from({ length: curso.secciones }, (_, i) => `${curso.id}.${i + 1}`);
+
+export const TOTAL_SECCIONES = CATALOGO.reduce((s, c) => s + c.secciones, 0);
+```
+
+<Callout type="risk">
+
+- **Diseñar copiando las tablas de SQL es el error más común:** una colección por entidad (`usuarios`, `cursos`, `secciones`, `lecturas`) y referencias entre ellas obliga a hacer en la aplicación, o con `$lookup`, los `JOIN` que MongoDB no hace gratis. Funciona, pero pierdes la ventaja del modelo de documentos y pagas más consultas por pantalla.
+- **"Guardarlo todo junto" tampoco es la regla:** es "lo que se **lee** junto". Si un dato se lee junto a otro solo en una pantalla poco visitada, pero se escribe sin parar, juntarlos puede salir caro. Lo medirás en el Paso 4.
+
+</Callout>
+
+## Paso 2: la lista de patrones de acceso
+
+Un **patrón de acceso** es una operación concreta que hace la aplicación: qué pantalla la provoca, si lee o escribe, cuántas veces ocurre y qué datos necesita. La lista se hace **antes** de diseñar, a partir de las pantallas (o de las historias de usuario). Crea `src/i4/01-patrones.ts` con los de esta plataforma:
+
+```ts
+// Archivo: src/i4/01-patrones.ts
+// Los patrones de acceso de Dani Academy, ANTES de diseñar ninguna colección.
+// Frecuencia: veces por hora de estudio de un usuario (el latido es real: uno por minuto).
+type Tipo = "lectura" | "escritura";
+
+interface Patron {
+  id: number;
+  pantalla: string;
+  operacion: string;
+  tipo: Tipo;
+  porHora: number;
+  datos: string; // qué datos necesita, juntos
+}
+
+const PATRONES: Patron[] = [
+  { id: 1, pantalla: "Sección de un curso", operacion: "secciones leídas del usuario en ese curso", tipo: "lectura", porHora: 6, datos: "userId + cursoId → sectionIds" },
+  { id: 2, pantalla: "Temario", operacion: "secciones leídas en todos los cursos", tipo: "lectura", porHora: 2, datos: "userId → sectionIds de todos los cursos" },
+  { id: 3, pantalla: "Botón «Marcar como leída»", operacion: "marcar o desmarcar una sección", tipo: "escritura", porHora: 6, datos: "userId + sectionId" },
+  { id: 4, pantalla: "Cualquier sección abierta", operacion: "latido de estudio", tipo: "escritura", porHora: 60, datos: "userId + sectionId + hora" },
+  { id: 5, pantalla: "Progreso", operacion: "% por curso, minutos por día, últimas evaluaciones", tipo: "lectura", porHora: 1, datos: "userId → lecturas + sesiones + intentos" },
+  { id: 6, pantalla: "Evaluación", operacion: "guardar un intento", tipo: "escritura", porHora: 0.2, datos: "userId + cursoId + respuestas" },
+  { id: 7, pantalla: "Evaluación", operacion: "últimos intentos del curso", tipo: "lectura", porHora: 0.5, datos: "userId + cursoId → intentos recientes" },
+];
+
+const total = (tipo: Tipo) => PATRONES.filter((p) => p.tipo === tipo).reduce((s, p) => s + p.porHora, 0);
+
+console.log("Patrones por frecuencia (por hora de estudio):");
+for (const p of [...PATRONES].sort((a, b) => b.porHora - a.porHora)) {
+  console.log(`  ${String(p.porHora).padStart(4)}  ${p.tipo.padEnd(9)} #${p.id} ${p.operacion}  [${p.datos}]`);
+}
+const lecturas = total("lectura");
+const escrituras = total("escritura");
+const sinLatido = escrituras - 60;
+console.log(`\nLecturas: ${lecturas}/h · escrituras: ${escrituras}/h · proporción L:E = 1:${(escrituras / lecturas).toFixed(1)}`);
+console.log(`Sin el latido: ${lecturas}/h frente a ${sinLatido.toFixed(1)}/h · L:E = ${(lecturas / sinLatido).toFixed(1)}:1`);
+```
+
+```bash
+npm start -- src/i4/01-patrones.ts
+```
+
+```text
+Patrones por frecuencia (por hora de estudio):
+    60  escritura #4 latido de estudio  [userId + sectionId + hora]
+     6  lectura   #1 secciones leídas del usuario en ese curso  [userId + cursoId → sectionIds]
+     6  escritura #3 marcar o desmarcar una sección  [userId + sectionId]
+     2  lectura   #2 secciones leídas en todos los cursos  [userId → sectionIds de todos los cursos]
+     1  lectura   #5 % por curso, minutos por día, últimas evaluaciones  [userId → lecturas + sesiones + intentos]
+   0.5  lectura   #7 últimos intentos del curso  [userId + cursoId → intentos recientes]
+   0.2  escritura #6 guardar un intento  [userId + cursoId + respuestas]
+
+Lecturas: 9.5/h · escrituras: 66.2/h · proporción L:E = 1:7.0
+Sin el latido: 9.5/h frente a 6.2/h · L:E = 1.5:1
+```
+
+- **La frecuencia no tiene que ser exacta:** basta con el orden de magnitud. Lo que importa es distinguir lo que pasa 60 veces por hora de lo que pasa una vez a la semana.
+- **El latido es real:** la plataforma envía uno por minuto mientras tienes una sección abierta y visible (`HEARTBEAT_INTERVAL_SECONDS = 60` en `src/lib/constants.ts`), para contar tus minutos de estudio. El resto son estimaciones razonables para una hora de estudio.
+- **La sorpresa:** esta app **escribe siete veces más de lo que lee**, y todo por una operación que no aparece en ninguna pantalla. Sin la lista, habrías diseñado pensando en las lecturas (que son las que se ven) y la colección más cargada sería otra.
+
+Con la lista delante, cada decisión tiene una justificación:
+
+| Patrón                                  | Qué pide al diseño                                                                                 |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| #4 latido (60/h, escritura)             | Una escritura muy barata y que **no** haga crecer un documento sin límite                          |
+| #1 y #3 secciones leídas (6/h cada una) | Encontrar las lecturas de un usuario en un curso de una sola vez: índice por `userId` y `courseId` |
+| #2 temario (2/h)                        | Las lecturas de todos los cursos del usuario en una consulta                                       |
+| #5 progreso (1/h)                       | Combinar tres fuentes (lecturas, sesiones e intentos): puede costar más, porque es poco frecuente  |
+| #6 y #7 evaluaciones (≤ 0,5/h)          | Casi cualquier diseño sirve                                                                        |
+
+<Callout type="risk">
+
+- **Olvidar las operaciones invisibles:** latidos, registros de actividad, contadores de visitas, límites de peticiones (`rate_limits` en esta plataforma). No tienen pantalla, pero suelen ser las escrituras más frecuentes.
+- **Diseñar para el patrón raro:** si la página de estadísticas (una vez por hora) pide una estructura que encarece el latido (60 por hora), gana el latido. Las páginas raras pueden pagar una agregación más lenta (I4.4 e I4.5).
+- **La lista cambia con la app:** cada pantalla nueva añade patrones. Guárdala junto al código (este archivo, o un `docs/modelo.md`) y revísala cuando el diseño cambie.
+
+</Callout>
+
+## Paso 3: cuánto ocupa cada documento y cuánto crecen los datos
+
+El segundo dato que necesita el diseño es el **tamaño**: de cada documento y de lo que acumula un usuario con el tiempo. `BSON.calculateObjectSize` del _driver_ mide el tamaño exacto en BSON (el formato en el que MongoDB guarda los documentos, B5.1) sin tocar la base de datos. Crea `src/i4/01-tamanos.ts`:
+
+```ts
+// Archivo: src/i4/01-tamanos.ts
+// ¿Cuánto ocupa cada documento y cuánto crecen los datos de un usuario?
+// BSON.calculateObjectSize mide el tamaño REAL en BSON, sin tocar la base de datos.
+import { BSON, ObjectId } from "mongodb";
+import { CATALOGO, TOTAL_SECCIONES } from "./catalogo";
+
+const kb = (bytes: number) => `${(bytes / 1024).toFixed(1)} KB`;
+const tamano = (doc: object) => BSON.calculateObjectSize(doc);
+
+// Un documento de cada tipo, con la forma que usa la plataforma (src/server/db-types.ts)
+const lectura = { _id: new ObjectId(), userId: "u_6f3a9c2e81b44d0f", courseId: "B5", sectionId: "B5.3", readAt: new Date() };
+const intento = {
+  _id: new ObjectId(),
+  userId: "u_6f3a9c2e81b44d0f",
+  courseId: "B5",
+  answers: [1, 0, 3, 2, 1],
+  results: [true, true, false, true, true],
+  score: 4,
+  total: 5,
+  passed: true,
+  submittedAt: new Date(),
+};
+const sesion = {
+  _id: new ObjectId(),
+  userId: "u_6f3a9c2e81b44d0f",
+  startedAt: new Date(),
+  lastSeenAt: new Date(),
+  sectionIds: ["B5.3", "B5.4"],
+  courseIds: ["B5"],
+};
+const latido = { _id: new ObjectId(), userId: "u_6f3a9c2e81b44d0f", sectionId: "B5.3", at: new Date() };
+
+console.log("Tamaño de un documento (BSON):");
+for (const [nombre, doc] of Object.entries({ lectura, intento, sesion, latido })) {
+  console.log(`  ${nombre.padEnd(8)} ${String(tamano(doc)).padStart(4)} bytes`);
+}
+
+// Un estudiante que termina toda la plataforma: estudia 1 h al día durante un año
+const lecturasTotales = TOTAL_SECCIONES;
+const intentosTotales = CATALOGO.length * 2; // dos intentos de media por evaluación
+const horasDeEstudio = 365;
+const sesionesTotales = horasDeEstudio; // una sesión por día
+const latidosTotales = horasDeEstudio * 60; // un latido por minuto con la pestaña visible
+
+console.log(`\nUn estudiante en un año (${TOTAL_SECCIONES} secciones, ${CATALOGO.length} cursos, 1 h al día):`);
+const filas = [
+  ["lecturas", lecturasTotales, tamano(lectura)],
+  ["intentos", intentosTotales, tamano(intento)],
+  ["sesiones", sesionesTotales, tamano(sesion)],
+  ["latidos (si se guardara cada uno)", latidosTotales, tamano(latido)],
+] as const;
+for (const [nombre, n, bytes] of filas) {
+  console.log(`  ${nombre.padEnd(34)} ${String(n).padStart(6)} docs × ${bytes} B = ${kb(n * bytes).padStart(9)}`);
+}
+```
+
+```bash
+npm start -- src/i4/01-tamanos.ts
+```
+
+```text
+Tamaño de un documento (BSON):
+  lectura   106 bytes
+  intento   205 bytes
+  sesion    159 bytes
+  latido     85 bytes
+
+Un estudiante en un año (134 secciones, 24 cursos, 1 h al día):
+  lecturas                              134 docs × 106 B =   13.9 KB
+  intentos                               48 docs × 205 B =    9.6 KB
+  sesiones                              365 docs × 159 B =   56.7 KB
+  latidos (si se guardara cada uno)   21900 docs × 85 B = 1817.9 KB
+```
+
+- **Las sesiones ocupan más que las lecturas y los intentos juntos:** una por día de estudio. Es el patrón #4, ya resumido como lo hace la plataforma: un documento por **sesión**, que cada latido actualiza, en lugar de un documento por latido.
+- **Guardar cada latido** costaría 21 900 documentos y 1,8 MB por estudiante y año, 23 veces más que todo lo demás junto.
+- **En números de Atlas:** el plan gratuito M0 tiene 512 MB. Con sesiones, un estudiante ocupa unos 80 KB al año (13,9 + 9,6 + 56,7), unos 6500 estudiantes-año. Con un latido por documento, unos 280. Son solo los datos: los índices ocupan aparte (lo medirás en I4.2).
+
+<Callout type="risk">
+
+- **El tamaño en BSON no es el del JSON:** cada documento lleva los nombres de sus campos. `userId` se repite en cada uno de los 134 documentos de lecturas. Los nombres muy largos (`identificadorDelUsuario`) cuestan en cada documento; los crípticos (`u`) hacen el código ilegible. Usa nombres cortos y claros, como hace la plataforma.
+- **Estimar con documentos vacíos engaña:** mide con valores realistas (un `userId` de verdad, textos de longitud real). Un documento de prueba con `userId: "a"` ocupa menos que el real.
+- **El almacenamiento real es otro número:** WiredTiger comprime los datos en disco y los índices ocupan aparte. `calculateObjectSize` sirve para comparar diseños y para el límite de 16 MB, no para la factura de almacenamiento.
+
+</Callout>
+
+## Paso 4: el límite de 16 MB, medido
+
+Un documento de MongoDB no puede pasar de **16 MB**. Parece mucho, y lo es para un documento normal: el intento de evaluación ocupa 205 bytes. El problema aparece cuando un array crece **sin límite**. Prueba la versión extrema del Paso 3: guardar cada latido **dentro** del documento del usuario. Crea `src/i4/01-limite.ts`:
+
+```ts
+// Archivo: src/i4/01-limite.ts
+// ¿Qué pasa si se guardan TODOS los latidos dentro del documento del usuario?
+// Se añaden en lotes de 20 000 hasta que MongoDB lo rechace, midiendo tamaño y tiempos.
+import { BSON } from "mongodb";
+import { cliente, db } from "../db";
+
+interface Latido {
+  at: Date;
+  s: string; // sección
+}
+interface UsuarioConLatidos {
+  _id: string;
+  nombre: string;
+  latidos: Latido[];
+}
+
+const col = db.collection<UsuarioConLatidos>("i4_usuarios_latidos");
+await col.drop().catch(() => {});
+await col.insertOne({ _id: "u_ana", nombre: "Ana", latidos: [] });
+
+const LOTE = 20_000;
+const inicio = Date.UTC(2026, 0, 1);
+let total = 0;
+
+try {
+  for (let lote = 1; ; lote++) {
+    const nuevos = Array.from({ length: LOTE }, (_, i) => ({ at: new Date(inicio + (total + i) * 60_000), s: "B5.3" }));
+
+    let t = performance.now();
+    await col.updateOne({ _id: "u_ana" }, { $push: { latidos: { $each: nuevos } } });
+    const msPush = performance.now() - t;
+    total += LOTE;
+
+    // Un latido más, como haría la app cada minuto
+    t = performance.now();
+    await col.updateOne({ _id: "u_ana" }, { $push: { latidos: { at: new Date(), s: "B5.4" } } });
+    const msUno = performance.now() - t;
+    total += 1;
+
+    // Lo que paga la pantalla que solo quiere el nombre del usuario
+    t = performance.now();
+    const doc = await col.findOne({ _id: "u_ana" });
+    const msLeer = performance.now() - t;
+
+    // Pidiendo solo el nombre: viaja menos por la red, pero el servidor carga el documento entero
+    t = performance.now();
+    await col.findOne({ _id: "u_ana" }, { projection: { nombre: 1 } });
+    const msNombre = performance.now() - t;
+
+    const mb = BSON.calculateObjectSize(doc!) / 1024 / 1024;
+    if (lote % 3 === 1) {
+      console.log(
+        `${String(total).padStart(7)} latidos · ${mb.toFixed(1).padStart(4)} MB · añadir 1: ${msUno.toFixed(1).padStart(5)} ms · leer el usuario: ${msLeer.toFixed(0).padStart(3)} ms · solo el nombre: ${msNombre.toFixed(1).padStart(4)} ms`,
+      );
+    }
+  }
+} catch (error) {
+  const e = error as { code?: number; codeName?: string; message: string };
+  console.log(`\n✗ Con ${total} latidos guardados, el siguiente lote falla:`);
+  console.log(`  código ${e.code}: ${e.message.slice(0, 160)}`);
+  console.log(`  A 60 latidos por hora y 1 h al día: ${(total / 60 / 365).toFixed(1)} años de estudio`);
+} finally {
+  await col.drop();
+  await cliente.close();
+}
+```
+
+```bash
+npm start -- src/i4/01-limite.ts
+```
+
+En el MongoDB local del laboratorio (en Atlas M0, con la red de por medio, los tiempos son mayores):
+
+```text
+  20001 latidos ·  0.7 MB · añadir 1:   4.8 ms · leer el usuario:   8 ms · solo el nombre:  0.7 ms
+  80004 latidos ·  2.7 MB · añadir 1:  10.0 ms · leer el usuario:  17 ms · solo el nombre:  0.7 ms
+ 140007 latidos ·  4.8 MB · añadir 1:  17.0 ms · leer el usuario:  26 ms · solo el nombre:  3.0 ms
+ 200010 latidos ·  7.0 MB · añadir 1:  25.1 ms · leer el usuario:  39 ms · solo el nombre:  0.9 ms
+ 260013 latidos ·  9.1 MB · añadir 1:  26.2 ms · leer el usuario:  52 ms · solo el nombre:  1.2 ms
+ 320016 latidos · 11.2 MB · añadir 1:  42.0 ms · leer el usuario:  55 ms · solo el nombre:  1.1 ms
+ 380019 latidos · 13.3 MB · añadir 1:  32.9 ms · leer el usuario:  68 ms · solo el nombre:  1.2 ms
+ 440022 latidos · 15.4 MB · añadir 1:  63.7 ms · leer el usuario: 112 ms · solo el nombre:  1.4 ms
+
+✗ Con 440022 latidos guardados, el siguiente lote falla:
+  código 10334: Plan executor error during update :: caused by :: Resulting document after update is larger than 16777216
+  A 60 latidos por hora y 1 h al día: 20.1 años de estudio
+```
+
+- **El límite llega tarde:** 440 022 latidos, 20 años de estudio a una hora al día. Si solo miraras el límite, concluirías que no hay problema.
+- **El coste llega mucho antes:** añadir **un** latido pasa de 5 ms a 64 ms, porque MongoDB reescribe el documento entero en cada actualización. Y leer el usuario, aunque la pantalla solo quiera su nombre, trae 15 MB por la red: 112 ms.
+- **La proyección no lo arregla del todo:** pedir solo `nombre` tarda 1,4 ms porque el documento ya está en la memoria del servidor, pero el servidor tiene que cargarlo entero desde el disco cuando no lo está, y en memoria ocupa 15 MB que no caben para otros datos.
+
+Un documento que crece sin límite es el antipatrón **array sin límite** (_unbounded array_), y lo verás a fondo en I4.2. La solución de esta plataforma ya la viste en el Paso 3: un documento por **sesión** de estudio, con un tamaño acotado.
+
+<Callout type="risk">
+
+- **El error llega en producción, no en desarrollo:** con los datos de prueba de tu equipo, el documento ocupa unos KB y todo va rápido. El fallo (`Resulting document after update is larger than 16777216`, código 10334) aparece años después, en el usuario más activo, y esa actualización falla siempre, para ese usuario, a partir de ese momento.
+- **Prueba con volumen:** antes de dar por bueno un diseño con arrays, haz como este _script_: crece el array hasta el peor caso razonable y mide escritura y lectura. 50 líneas de código te ahorran una migración con la app en marcha.
+- **No ejecutes este _script_ en Atlas M0:** escribe unos 16 MB en una sola colección y tarda bastante con la red de por medio. Al final borra la colección (`drop`), pero en un clúster compartido es mejor usar uno local o, como mucho, lotes más pequeños.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe los patrones de acceso de tu Planificador 2026: pantalla, operación, si lee o escribe, frecuencia estimada (por día de un usuario activo) y qué datos necesita juntos.
+2. Calcula la proporción entre lecturas y escrituras y el tamaño aproximado de una tarea y de lo que acumula un usuario en un año.
+3. Identifica las dos lecturas más frecuentes y escribe qué le piden al diseño.
+
+</Callout>
+
+Solución. `src/i4/01-ejercicio.ts`:
+
+```ts
+// Archivo: src/i4/01-ejercicio.ts
+// Ejercicio I4.1: patrones de acceso del Planificador 2026, con frecuencia y tamaño estimados.
+// Frecuencia: veces al DÍA de un usuario activo.
+import { BSON, ObjectId } from "mongodb";
+
+type Tipo = "lectura" | "escritura";
+interface Patron {
+  id: number;
+  pantalla: string;
+  operacion: string;
+  tipo: Tipo;
+  porDia: number;
+  datos: string;
+}
+
+const PATRONES: Patron[] = [
+  { id: 1, pantalla: "Hoy", operacion: "tareas pendientes de hoy, con su categoría (nombre y color)", tipo: "lectura", porDia: 15, datos: "userId + fecha → tareas + categorías" },
+  { id: 2, pantalla: "Semana", operacion: "tareas de la semana agrupadas por día", tipo: "lectura", porDia: 4, datos: "userId + rango de fechas → tareas" },
+  { id: 3, pantalla: "Hoy", operacion: "marcar una tarea como hecha", tipo: "escritura", porDia: 8, datos: "userId + tareaId" },
+  { id: 4, pantalla: "Nueva tarea", operacion: "crear una tarea", tipo: "escritura", porDia: 5, datos: "userId + tarea completa" },
+  { id: 5, pantalla: "Categorías", operacion: "listar y editar categorías", tipo: "lectura", porDia: 0.2, datos: "userId → categorías (≈ 8)" },
+  { id: 6, pantalla: "Categorías", operacion: "renombrar o cambiar el color de una categoría", tipo: "escritura", porDia: 0.05, datos: "userId + categoriaId" },
+  { id: 7, pantalla: "Estadísticas", operacion: "tareas hechas por semana y por categoría", tipo: "lectura", porDia: 0.3, datos: "userId → tareas de los últimos meses" },
+  { id: 8, pantalla: "Ajustes", operacion: "preferencias (zona horaria, primer día de la semana)", tipo: "lectura", porDia: 15, datos: "userId → preferencias (cada carga de página)" },
+];
+
+const tarea = {
+  _id: new ObjectId(),
+  userId: "u_6f3a9c2e81b44d0f",
+  titulo: "Preparar la presentación del jueves",
+  categoriaId: new ObjectId(),
+  fecha: new Date(),
+  hecha: false,
+  creada: new Date(),
+};
+const bytesTarea = BSON.calculateObjectSize(tarea);
+
+const total = (tipo: Tipo) => PATRONES.filter((p) => p.tipo === tipo).reduce((s, p) => s + p.porDia, 0);
+console.log("Patrones del Planificador 2026 (por día):");
+for (const p of [...PATRONES].sort((a, b) => b.porDia - a.porDia)) {
+  console.log(`  ${String(p.porDia).padStart(5)}  ${p.tipo.padEnd(9)} #${p.id} ${p.operacion}`);
+}
+const [l, e] = [total("lectura"), total("escritura")];
+console.log(`\nLecturas ${l.toFixed(1)}/día · escrituras ${e.toFixed(2)}/día · L:E = ${(l / e).toFixed(1)}:1`);
+console.log(`Una tarea: ${bytesTarea} bytes · 5 al día durante un año: ${((bytesTarea * 5 * 365) / 1024).toFixed(0)} KB por usuario`);
+```
+
+```bash
+npm start -- src/i4/01-ejercicio.ts
+```
+
+```text
+Patrones del Planificador 2026 (por día):
+     15  lectura   #1 tareas pendientes de hoy, con su categoría (nombre y color)
+     15  lectura   #8 preferencias (zona horaria, primer día de la semana)
+      8  escritura #3 marcar una tarea como hecha
+      5  escritura #4 crear una tarea
+      4  lectura   #2 tareas de la semana agrupadas por día
+    0.3  lectura   #7 tareas hechas por semana y por categoría
+    0.2  lectura   #5 listar y editar categorías
+   0.05  escritura #6 renombrar o cambiar el color de una categoría
+
+Lecturas 34.5/día · escrituras 13.05/día · L:E = 2.6:1
+Una tarea: 166 bytes · 5 al día durante un año: 296 KB por usuario
+```
+
+Las decisiones:
+
+- **Las dos lecturas más frecuentes son "tareas de hoy" (con el nombre y el color de su categoría) y las preferencias,** cada una 15 veces al día. Las preferencias son pocas y se leen en cada página: van **dentro** del documento del usuario. "Tareas de hoy" pide encontrar las tareas de un usuario por fecha de un tirón (un índice `{ userId: 1, fecha: 1 }`) y, además, el nombre y el color de la categoría sin una segunda consulta.
+- **Eso último es una tensión que resolverás en I4.3:** si cada tarea guarda una copia del nombre y el color de su categoría (_Extended Reference_), "tareas de hoy" es una sola consulta. A cambio, renombrar una categoría (0,05 veces al día) tiene que actualizar todas sus tareas. Con estas frecuencias, compensa.
+- **Aquí la app lee 2,6 veces más de lo que escribe**, al contrario que Dani Academy. Por eso no hay un diseño "correcto" en abstracto: depende de la lista.
+- **Una tarea ocupa 166 bytes:** 296 KB por usuario y año. Ningún documento se acerca a 16 MB mientras las tareas sean documentos separados y no un array dentro del usuario.
+
+<Callout type="risk">
+
+- **Una lista sin frecuencias no sirve para decidir:** "leer tareas" y "renombrar categoría" parecen igual de importantes hasta que escribes 15 y 0,05 al lado.
+- **Cuidado con las pantallas que lo leen "todo":** "Estadísticas" quiere tareas de meses. Es poco frecuente, así que puede ser una agregación (I4.4), pero márcala: si un día se convierte en la portada, el diseño tendrá que cambiar.
+
+</Callout>
+
+<Callout type="mastery">
+
+No empiezas a diseñar colecciones sin la lista de consultas: escribes los patrones de acceso con su frecuencia y los datos que piden juntos, calculas si la app lee o escribe más, mides el tamaño de los documentos y lo que crecen con el tiempo, y compruebas con volumen real que ningún documento crece sin límite.
+
+</Callout>
+
+## Resumen
+
+- En MongoDB, los datos que se leen juntos se guardan juntos: el diseño parte de las consultas, no de las entidades.
+- Un patrón de acceso es pantalla + operación + lectura o escritura + frecuencia + datos que necesita.
+- Las operaciones invisibles cuentan: el latido hace que Dani Academy escriba siete veces más de lo que lee.
+- `BSON.calculateObjectSize` mide el tamaño real de un documento; multiplicado por su crecimiento, dice qué cabe en 512 MB.
+- El límite de 16 MB llega tarde; el coste de un array sin límite (escrituras y lecturas cada vez más lentas) llega mucho antes.

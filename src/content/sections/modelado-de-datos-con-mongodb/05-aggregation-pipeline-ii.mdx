@@ -1,0 +1,542 @@
+---
+sectionId: "I4.5"
+course: "I4"
+title: "Aggregation pipeline II"
+order: 5
+minutes: 75
+summary: "Unes colecciones con $lookup simple y con pipeline, sacas varios resultados con $facet, $bucket y $dateTrunc, mides qué etapas impiden usar un índice y construyes la página de progreso en una agregación."
+---
+
+En I4.4 agregaste sobre una sola colección. Las pantallas reales necesitan más: datos de dos colecciones a la vez, varios resultados distintos (una tabla, un total, una gráfica) y respuesta rápida aunque la colección crezca. En esta sección vas a unir colecciones con `$lookup`, a sacar varios resultados de una sola consulta con `$facet`, a agrupar por rangos y por meses, a medir qué etapas impiden que MongoDB use un índice y a tipar el resultado sin fiarte a ciegas del tipo. Al final construirás la página de progreso de esta plataforma con **una sola agregación**.
+
+**Lo que tendrás al terminar:** `src/i4/05-lookup.ts`, `05-facet.ts`, `05-rendimiento.ts` y `05-tipos.ts`, y el panel de progreso completo del ejercicio.
+
+**Requisitos:** el proyecto `mongo-academy` con las lecturas de I4.2 (`npm start -- src/i4/02-sembrar.ts`) y las evaluaciones de I4.4 (`npm start -- src/i4/04-sembrar.ts`), que usan los mismos usuarios. Y Zod, que ya usaste en I1.4:
+
+```bash
+npm install zod
+```
+
+## Paso 1: `$lookup`, simple y con _pipeline_
+
+En la plataforma, el catálogo vive en archivos (I4.1). Para practicar `$lookup`, cópialo a una colección en la que el identificador del curso es el `_id` (que siempre tiene índice). Crea `src/i4/cursos.ts`:
+
+```ts
+// Archivo: src/i4/cursos.ts
+// El catálogo como colección, para practicar $lookup (en la plataforma vive en archivos: I4.1)
+import { db } from "../db";
+import type { Nivel } from "./catalogo";
+
+export interface CursoDoc {
+  _id: string; // el cursoId es el _id: ya tiene índice
+  titulo: string;
+  nivel: Nivel;
+  secciones: number;
+}
+
+export const cursos = db.collection<CursoDoc>("i4_cursos");
+```
+
+Y `src/i4/05-sembrar.ts`:
+
+```ts
+// Archivo: src/i4/05-sembrar.ts
+// Copia el catálogo a la colección i4_cursos
+import { cliente } from "../db";
+import { CATALOGO } from "./catalogo";
+import { cursos } from "./cursos";
+
+await cursos.drop().catch(() => {});
+await cursos.insertMany(CATALOGO.map((c) => ({ _id: c.id, titulo: c.titulo, nivel: c.nivel, secciones: c.secciones })));
+console.log(`Cursos: ${await cursos.countDocuments()}`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/05-sembrar.ts
+```
+
+`$lookup` tiene dos formas. La **simple** une por igualdad entre un campo local y uno de la otra colección, como un `LEFT JOIN … ON a.cursoId = b._id`. La forma **con _pipeline_** ejecuta una _pipeline_ completa en la otra colección por cada documento, con variables (`let`) para usar los valores del documento actual. Crea `src/i4/05-lookup.ts`:
+
+```ts
+// Archivo: src/i4/05-lookup.ts
+// $lookup simple (por igualdad) y $lookup con pipeline (con condiciones y etapas propias)
+import { cliente } from "../db";
+import { cursos } from "./cursos";
+import { evaluaciones } from "./evaluaciones";
+
+const USUARIO = "u_00007";
+
+// 1. Simple: los últimos intentos con el título del curso (como un LEFT JOIN por cursoId = _id)
+interface IntentoConTitulo {
+  cursoId: string;
+  titulo: string;
+  puntuacion: number;
+}
+const ultimos = await evaluaciones
+  .aggregate<IntentoConTitulo>([
+    { $match: { userId: USUARIO } },
+    { $sort: { fecha: -1 } },
+    { $limit: 3 }, // limitar ANTES del $lookup: solo se buscan 3 cursos
+    { $lookup: { from: "i4_cursos", localField: "cursoId", foreignField: "_id", as: "curso" } },
+    { $project: { _id: 0, cursoId: 1, puntuacion: 1, titulo: { $first: "$curso.titulo" } } }, // "curso" es un array
+  ])
+  .toArray();
+console.log("Últimos intentos:");
+for (const i of ultimos) console.log(`  ${i.cursoId} · ${i.titulo} · ${i.puntuacion}/5`);
+
+// 2. Con pipeline: para cada curso intermedio, la mejor nota de ESE usuario (otro filtro, no solo la igualdad)
+interface CursoConMejor {
+  _id: string;
+  titulo: string;
+  mejor: number | null;
+  intentos: number;
+}
+const intermedios = await cursos
+  .aggregate<CursoConMejor>([
+    { $match: { nivel: "intermediate" } },
+    {
+      $lookup: {
+        from: "i4_evaluaciones",
+        let: { curso: "$_id" }, // variable con el valor del documento de cursos
+        pipeline: [
+          { $match: { userId: USUARIO, $expr: { $eq: ["$cursoId", "$$curso"] } } }, // $$ lee la variable
+          { $group: { _id: null, mejor: { $max: "$puntuacion" }, intentos: { $sum: 1 } } },
+        ],
+        as: "resumen",
+      },
+    },
+    {
+      $project: {
+        titulo: 1,
+        mejor: { $ifNull: [{ $first: "$resumen.mejor" }, null] }, // sin intentos → null
+        intentos: { $ifNull: [{ $first: "$resumen.intentos" }, 0] },
+      },
+    },
+    { $sort: { _id: 1 } },
+  ])
+  .toArray();
+console.log(`\nCursos intermedios de ${USUARIO}:`);
+for (const c of intermedios) console.log(`  ${c._id} ${c.titulo.padEnd(38)} ${c.intentos ? `mejor ${c.mejor}/5 en ${c.intentos} intento(s)` : "sin intentos"}`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/05-lookup.ts
+```
+
+```text
+Últimos intentos:
+  I2 · React intermedio · 4/5
+  I1 · TypeScript intermedio · 4/5
+  B7 · Tailwind CSS v4 esencial · 2/5
+
+Cursos intermedios de u_00007:
+  I1 TypeScript intermedio                  mejor 5/5 en 3 intento(s)
+  I2 React intermedio                       mejor 4/5 en 2 intento(s)
+  I3 Backend con Astro                      mejor 4/5 en 2 intento(s)
+  I4 Modelado de datos con MongoDB          sin intentos
+  I5 Autenticación y autorización a fondo   sin intentos
+  I6 Servidores Linux                       sin intentos
+  I7 Sistema de diseño con Tailwind v4      sin intentos
+  I8 Testing                                sin intentos
+```
+
+- **`$lookup` siempre devuelve un array** en el campo `as`, aunque solo haya un resultado (o ninguno). `$first` lo convierte en un valor.
+- **`$limit` antes del `$lookup`:** solo se buscan 3 cursos, no uno por cada intento del usuario. Cada etapa antes del `$lookup` que reduzca documentos ahorra búsquedas.
+- **Con _pipeline_, el filtro puede ser cualquier cosa:** aquí, "las evaluaciones de **este** usuario en **este** curso", y además se agrupan dentro del propio `$lookup` (`$group` con `$max`). La forma simple solo sabe comparar un campo con otro.
+- **`$$curso` y `$cursoId`:** con dos `$`, la variable definida en `let` (el `_id` del curso); con uno, el campo del documento de la otra colección. Dentro de la _pipeline_, comparar dos campos necesita `$expr`.
+- **`$ifNull` para lo que no existe:** los cursos sin intentos dan un array vacío; `$first` de un array vacío no existe, y `$ifNull` lo convierte en `null` o en `0`.
+
+<Callout type="risk">
+
+- **El `$match` de la _pipeline_ interna debe empezar por igualdades normales:** `{ userId, $expr: … }` usa el índice `{ userId, fecha }` de las evaluaciones. Si lo escribes todo dentro de `$expr`, MongoDB tiene más difícil usar el índice y puede acabar recorriendo la colección una vez por curso.
+- **Un `$lookup` con _pipeline_ se ejecuta una vez por documento de entrada:** 8 cursos son 8 _pipelines_. Con 10 000 documentos de entrada serían 10 000. Reduce la entrada antes (`$match`, `$limit`).
+- **Las dos colecciones deben estar en la misma base de datos** (`academy_lab`). `$lookup` no une bases de datos distintas.
+
+</Callout>
+
+## Paso 2: `$facet`, `$bucket` y `$dateTrunc`
+
+Un panel de estadísticas suele necesitar varios resultados de los mismos datos: una distribución, una serie temporal y unos totales. Con tres agregaciones, MongoDB recorre los documentos tres veces y la aplicación hace tres viajes. **`$facet`** ejecuta varias _sub-pipelines_ sobre la misma entrada, en una consulta, y devuelve un documento con un array por cada una. Crea `src/i4/05-facet.ts`:
+
+```ts
+// Archivo: src/i4/05-facet.ts
+// $facet: varias agregaciones sobre los mismos documentos, en una sola consulta.
+// Dentro: $bucket (agrupar por rangos) y $dateTrunc (agrupar por mes).
+import { cliente } from "../db";
+import { evaluaciones } from "./evaluaciones";
+
+const ZONA = "America/Mexico_City";
+
+interface Panel {
+  distribucion: { _id: number; intentos: number }[]; // _id: el límite inferior de cada rango
+  porMes: { _id: Date; intentos: number; media: number }[];
+  totales: { intentos: number; alumnos: number }[];
+}
+
+const [panel] = await evaluaciones
+  .aggregate<Panel>([
+    { $match: { cursoId: { $in: ["B5", "I1", "I3"] } } }, // el filtro común, una sola vez
+    {
+      $facet: {
+        // 1. Distribución de notas por rangos
+        distribucion: [
+          {
+            $bucket: {
+              groupBy: "$puntuacion",
+              boundaries: [0, 2, 4, 6], // [0,2) [2,4) [4,6): el límite superior no se incluye
+              output: { intentos: { $sum: 1 } },
+            },
+          },
+        ],
+        // 2. Intentos por mes, en la zona horaria de México
+        porMes: [
+          { $group: { _id: { $dateTrunc: { date: "$fecha", unit: "month", timezone: ZONA } }, intentos: { $sum: 1 }, media: { $avg: "$puntuacion" } } },
+          { $sort: { _id: 1 } },
+        ],
+        // 3. Totales: intentos y alumnos DISTINTOS (dos $group: sin acumular la lista)
+        totales: [
+          { $group: { _id: "$userId", intentos: { $sum: 1 } } }, // un grupo por alumno
+          { $group: { _id: null, alumnos: { $sum: 1 }, intentos: { $sum: "$intentos" } } }, // cuenta los grupos
+          { $project: { _id: 0 } },
+        ],
+      },
+    },
+  ])
+  .toArray();
+
+console.log("Distribución de notas (B5, I1, I3):");
+for (const d of panel!.distribucion) console.log(`  ${d._id}-${d._id + 1}: ${d.intentos}`);
+console.log("Por mes:");
+const mes = (d: Date) => d.toLocaleDateString("es-MX", { timeZone: ZONA, month: "long", year: "numeric" });
+for (const m of panel!.porMes) console.log(`  ${mes(m._id).padEnd(18)} ${String(m.intentos).padStart(4)} intentos · media ${m.media.toFixed(2)}`);
+console.log("Totales:", JSON.stringify(panel!.totales[0]));
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/05-facet.ts
+```
+
+```text
+Distribución de notas (B5, I1, I3):
+  0-1: 7
+  2-3: 238
+  4-5: 649
+Por mes:
+  junio de 2026         1 intentos · media 5.00
+```
+
+- **`$bucket` agrupa por rangos:** `boundaries: [0, 2, 4, 6]` forma los rangos `[0, 2)`, `[2, 4)` y `[4, 6)`; el `_id` de cada grupo es su límite inferior. Es un `$group` con la clave calculada por ti.
+- **`$dateTrunc` redondea una fecha hacia abajo** a la unidad que pidas (`day`, `week`, `month`, `year`) y devuelve una fecha. Agrupar por ella da una serie temporal lista para una gráfica.
+- **El intento de "junio" no es un error:** se guardó el 1 de julio a las 00:00 UTC, que en Ciudad de México es todavía el 30 de junio por la tarde. `timezone` en `$dateTrunc` lo pone en el mes que vio el usuario.
+- **Dos `$group` seguidos cuentan valores distintos:** el primero forma un grupo por alumno; el segundo cuenta los grupos (260 alumnos). Es lo que te advertí en I4.4: no hace falta acumular la lista de alumnos con `$addToSet` para saber cuántos son.
+
+<Callout type="risk">
+
+- **El resultado de `$facet` es un solo documento**, y tiene el límite de 16 MB. Si una faceta devuelve miles de filas (una tabla sin `$limit`), el documento entero puede pasarse. Las facetas deben devolver resúmenes, no listados completos.
+- **Las _sub-pipelines_ de `$facet` no usan índices:** reciben los documentos que salen de la etapa anterior. Pon el filtro común en un `$match` **antes** del `$facet`, como hace el ejemplo, para que ese sí lo use.
+- **`$bucket` falla si un valor cae fuera de los rangos** y no hay `default`. Con `boundaries: [0, 2, 4]` y una puntuación de 5, el error es `$switch could not find a matching branch for an input, and no default was specified` (`$bucket` se implementa con un `$switch`). Si los datos pueden tener valores inesperados, añade `default: "otros"`.
+
+</Callout>
+
+## Paso 3: rendimiento, `$match` y `$sort` al principio
+
+En I4.4 te dije que `$match` y `$sort` van al principio para usar los índices. Vamos a medirlo con las 69 159 lecturas de I4.2, escribiendo la misma consulta con las etapas en distinto orden. Crea `src/i4/05-rendimiento.ts`:
+
+```ts
+// Archivo: src/i4/05-rendimiento.ts
+// El mismo resultado con las etapas en distinto orden: ¿cuántos documentos examina cada versión?
+import type { Document } from "mongodb";
+import { cliente } from "../db";
+import { lecturasB } from "./02-modelos";
+
+const USUARIO = "u_00007";
+
+/** Recorre el explain (sin los planes descartados) y resume: índice o recorrido completo, claves y documentos examinados */
+function resumen(e: unknown) {
+  const r = { ixscan: new Set<string>(), collscan: false, claves: 0, docs: 0 };
+  (function visitar(n: unknown) {
+    if (!n || typeof n !== "object") return;
+    const d = n as Document;
+    if (d.stage === "IXSCAN" && d.indexName) r.ixscan.add(d.indexName);
+    if (d.stage === "COLLSCAN") r.collscan = true;
+    if (typeof d.totalKeysExamined === "number") r.claves = Math.max(r.claves, d.totalKeysExamined);
+    if (typeof d.totalDocsExamined === "number") r.docs = Math.max(r.docs, d.totalDocsExamined);
+    for (const [clave, valor] of Object.entries(d)) if (clave !== "rejectedPlans") visitar(valor); // solo el plan ganador
+  })(e);
+  const plan = r.collscan ? "COLLSCAN" : `IXSCAN(${[...r.ixscan].join(", ")})`;
+  return `${plan.padEnd(42)} ${String(r.claves).padStart(6)} claves · ${String(r.docs).padStart(6)} documentos`;
+}
+
+async function probar(nombre: string, pipeline: Document[]) {
+  const t = performance.now();
+  for (let i = 0; i < 20; i++) await lecturasB.aggregate(pipeline).toArray();
+  const ms = ((performance.now() - t) / 20).toFixed(2).padStart(6);
+  const e = await lecturasB.aggregate(pipeline).explain("executionStats");
+  console.log(`${nombre.padEnd(34)} ${ms} ms · ${resumen(e)}`);
+}
+
+const contarPorCurso = { $group: { _id: "$cursoId", leidas: { $sum: 1 } } };
+
+console.log(`Secciones leídas por curso de ${USUARIO} (${await lecturasB.estimatedDocumentCount()} lecturas en total)\n`);
+await probar("✓ $match y después $group", [{ $match: { userId: USUARIO } }, contarPorCurso]);
+await probar("≈ $group de todos y después $match", [
+  { $group: { _id: { userId: "$userId", cursoId: "$cursoId" }, leidas: { $sum: 1 } } },
+  { $match: { "_id.userId": USUARIO } },
+]);
+await probar("≈ $sort y después $match", [{ $sort: { leidaEn: -1 } }, { $match: { userId: USUARIO } }, { $limit: 5 }]);
+await probar("✗ $match sobre un campo calculado", [
+  { $addFields: { usuario: { $toUpper: "$userId" } } },
+  { $match: { usuario: USUARIO.toUpperCase() } },
+  contarPorCurso,
+]);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/05-rendimiento.ts
+```
+
+```text
+Secciones leídas por curso de u_00007 (69159 lecturas en total)
+
+✓ $match y después $group            0.39 ms · IXSCAN(userId_1_cursoId_1_seccionId_1)         46 claves ·      0 documentos
+≈ $group de todos y después $match   0.27 ms · IXSCAN(userId_1_cursoId_1_seccionId_1)         46 claves ·      0 documentos
+≈ $sort y después $match             0.18 ms · IXSCAN(userId_1_leidaEn_-1)                     5 claves ·      5 documentos
+✗ $match sobre un campo calculado   27.39 ms · COLLSCAN                                        0 claves ·  69159 documentos
+```
+
+Hay una sorpresa: **las dos primeras variantes "mal escritas" van igual de rápido que la buena.** El **optimizador** de MongoDB reescribe la _pipeline_ antes de ejecutarla cuando puede demostrar que el resultado no cambia:
+
+- **Un `$match` después de un `$sort` se adelanta:** filtrar antes de ordenar da lo mismo y es más barato. Por eso la tercera variante usa el índice `{ userId, leidaEn }` y lee solo 5 documentos.
+- **Un `$match` sobre la clave de un `$group` se adelanta:** filtrar por `_id.userId` después de agrupar equivale a filtrar por `userId` antes. Las 46 claves examinadas lo demuestran: no recorrió las 69 159 lecturas.
+- **Un `$match` sobre un campo calculado no se puede adelantar:** `usuario` no existe hasta que `$addFields` lo crea, así que MongoDB recorre la colección entera (`COLLSCAN`, 69 159 documentos) y tarda 75 veces más.
+
+La regla sigue siendo escribir `$match` y `$sort` al principio, aunque el optimizador a veces lo arregle. Así no dependes de él, y la _pipeline_ se lee como lo que hace. Y **compruébalo con `explain`**: es lo único que dice qué hizo de verdad.
+
+<Callout type="risk">
+
+- **El optimizador no adelanta un `$match` más allá de lo que no entiende:** campos calculados, campos que crea un `$lookup` o un `$unwind`, o acumuladores de un `$group`. Un `$match` sobre `leidas`, después de contarlas, es legítimo (como el `HAVING` de SQL), pero recorre todo lo anterior.
+- **Un índice solo sirve si el `$match` compara el campo tal cual:** `$match: { userId: "u_00007" }` lo usa; `$match: { $expr: { $eq: [{ $toUpper: "$userId" }, "U_00007"] } }` no, porque transforma cada valor antes de comparar. Si necesitas buscar sin distinguir mayúsculas, guarda el campo ya normalizado.
+- **`explain` con `executionStats` ejecuta la consulta:** tarda y consume lo mismo que ella. En producción, con una agregación pesada, usa `explain("queryPlanner")`, que solo planifica. (Con `$merge`, el `explain` no llega a escribir: comprobado, la colección destino queda vacía.)
+
+</Callout>
+
+## Paso 4: tipar resultados con `aggregate<T>()`
+
+Has usado `aggregate<T>()` en todos los _scripts_. Es importante saber qué garantiza y qué no. Crea `src/i4/05-tipos.ts`:
+
+```ts
+// Archivo: src/i4/05-tipos.ts
+// aggregate<T>() tipa el resultado, pero NO lo comprueba: T es una promesa que hace el programador
+import { z } from "zod";
+import { cliente } from "../db";
+import { evaluaciones } from "./evaluaciones";
+
+interface MediaCurso {
+  _id: string;
+  media: number;
+  intentos: number;
+}
+
+// 1. La pipeline y el tipo coinciden: TypeScript ayuda (autocompletado, errores de tipo)
+const bien = await evaluaciones
+  .aggregate<MediaCurso>([{ $group: { _id: "$cursoId", media: { $avg: "$puntuacion" }, intentos: { $sum: 1 } } }, { $sort: { _id: 1 } }, { $limit: 2 }])
+  .toArray();
+console.log("Con el tipo correcto:", bien.map((c) => `${c._id} ${c.media.toFixed(2)}`).join(" · "));
+
+// 2. Alguien renombra "media" a "promedio" en la pipeline y olvida el tipo: compila sin errores…
+const mal = await evaluaciones
+  .aggregate<MediaCurso>([{ $group: { _id: "$cursoId", promedio: { $avg: "$puntuacion" }, intentos: { $sum: 1 } } }, { $sort: { _id: 1 } }, { $limit: 2 }])
+  .toArray();
+try {
+  console.log(mal.map((c) => `${c._id} ${c.media.toFixed(2)}`).join(" · "));
+} catch (e) {
+  console.log("…y falla al ejecutar:", (e as Error).message);
+}
+
+// 3. Validar con Zod en el borde: el error dice exactamente qué campo falta
+const MediaCursoSchema = z.object({ _id: z.string(), media: z.number(), intentos: z.number().int() });
+const resultado = z.array(MediaCursoSchema).safeParse(mal);
+if (!resultado.success) console.log("Zod:", resultado.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join(" · "));
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/05-tipos.ts
+```
+
+```text
+Con el tipo correcto: B1 3.95 · B2 4.05
+…y falla al ejecutar: Cannot read properties of undefined (reading 'toFixed')
+Zod: 0.media: Invalid input: expected number, received undefined · 1.media: Invalid input: expected number, received undefined
+```
+
+- **`T` es una promesa del programador, no una comprobación:** TypeScript cree que los documentos tienen `media` porque se lo dices. Si la _pipeline_ produce `promedio`, compila igual y falla al ejecutar, lejos de la causa.
+- **Validar con Zod en el borde** (I1.4) convierte ese fallo en un error claro y en el sitio correcto: `0.media: Invalid input: expected number, received undefined`. Cuesta una validación por consulta.
+- **¿Cuándo validar?** En las agregaciones complejas o que cambian a menudo, como la del ejercicio, sí. En un `$group` de tres líneas que no va a cambiar, `aggregate<T>()` basta.
+
+<Callout type="risk">
+
+- **Los nombres de `T` deben coincidir con los de la _pipeline_, y nada lo comprueba:** si renombras un campo en una, búscalo en la otra. Tener la _pipeline_ y su tipo en el mismo archivo, uno junto al otro, ayuda.
+- **Las fechas llegan como `Date`:** el _driver_ convierte las fechas de BSON en objetos `Date`, así que en Zod son `z.date()`, no `z.string()`. Al enviarlas al navegador como JSON se convierten en texto (B5.5).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Construye con una sola agregación los datos de la página de progreso de un usuario:
+
+1. El porcentaje de secciones leídas de cada curso que haya empezado (leído alguna sección o hecho alguna evaluación).
+2. El total de secciones leídas de toda la plataforma, y su porcentaje.
+3. La última evaluación de cada curso: puntuación, si aprobó y la fecha.
+
+Tipa el resultado con un esquema de Zod que lo valide.
+
+</Callout>
+
+Solución. `src/i4/05-ejercicio.ts`:
+
+```ts
+// Archivo: src/i4/05-ejercicio.ts
+// Ejercicio I4.5: la página de progreso completa con UNA agregación
+import type { Document } from "mongodb";
+import { z } from "zod";
+import { cliente } from "../db";
+import { cursos } from "./cursos";
+
+const ZONA = "America/Mexico_City";
+
+const DashboardSchema = z.object({
+  porCurso: z.array(
+    z.object({
+      _id: z.string(),
+      titulo: z.string(),
+      leidas: z.number(),
+      secciones: z.number(),
+      porcentaje: z.number(),
+      ultima: z.object({ puntuacion: z.number(), aprobado: z.boolean(), fecha: z.date() }).nullable(),
+    }),
+  ),
+  total: z.array(z.object({ leidas: z.number(), secciones: z.number(), porcentaje: z.number() })),
+});
+type Dashboard = z.infer<typeof DashboardSchema>;
+
+function pipeline(userId: string): Document[] {
+  return [
+    // 1. Por cada curso del catálogo, cuántas secciones ha leído el usuario…
+    {
+      $lookup: {
+        from: "i4_lecturas_b",
+        let: { curso: "$_id" },
+        pipeline: [{ $match: { userId, $expr: { $eq: ["$cursoId", "$$curso"] } } }, { $count: "n" }],
+        as: "leidas",
+      },
+    },
+    // 2. …y su última evaluación en ese curso
+    {
+      $lookup: {
+        from: "i4_evaluaciones",
+        let: { curso: "$_id" },
+        pipeline: [
+          { $match: { userId, $expr: { $eq: ["$cursoId", "$$curso"] } } },
+          { $sort: { fecha: -1 } },
+          { $limit: 1 },
+          { $project: { _id: 0, puntuacion: 1, aprobado: 1, fecha: 1 } },
+        ],
+        as: "ultima",
+      },
+    },
+    // 3. De arrays de un elemento (o vacíos) a valores
+    { $set: { leidas: { $ifNull: [{ $first: "$leidas.n" }, 0] }, ultima: { $ifNull: [{ $first: "$ultima" }, null] } } },
+    { $set: { porcentaje: { $round: [{ $multiply: [{ $divide: ["$leidas", "$secciones"] }, 100] }, 0] } } },
+    // 4. Dos resultados a la vez: la tabla por curso y el total
+    {
+      $facet: {
+        porCurso: [
+          { $match: { $or: [{ leidas: { $gt: 0 } }, { ultima: { $ne: null } }] } }, // solo los cursos empezados
+          { $project: { titulo: 1, leidas: 1, secciones: 1, porcentaje: 1, ultima: 1 } },
+          { $sort: { porcentaje: -1, _id: 1 } },
+        ],
+        total: [
+          { $group: { _id: null, leidas: { $sum: "$leidas" }, secciones: { $sum: "$secciones" } } },
+          { $project: { _id: 0, leidas: 1, secciones: 1, porcentaje: { $round: [{ $multiply: [{ $divide: ["$leidas", "$secciones"] }, 100] }, 1] } } },
+        ],
+      },
+    },
+  ];
+}
+
+async function dashboard(userId: string): Promise<Dashboard> {
+  const [crudo] = await cursos.aggregate(pipeline(userId)).toArray();
+  return DashboardSchema.parse(crudo); // si la pipeline cambia y el esquema no, el error sale aquí
+}
+
+const t = performance.now();
+const d = await dashboard("u_00007");
+const ms = (performance.now() - t).toFixed(1);
+
+const dia = (f: Date) => f.toLocaleDateString("es-MX", { timeZone: ZONA, day: "numeric", month: "short" });
+console.log(`Progreso de u_00007 (una consulta, ${ms} ms)`);
+for (const c of d.porCurso) {
+  const ultima = c.ultima ? `${c.ultima.puntuacion}/5 ${c.ultima.aprobado ? "✓" : "✗"} (${dia(c.ultima.fecha)})` : "sin evaluar";
+  console.log(`  ${c._id} ${c.titulo.padEnd(40)} ${String(c.leidas).padStart(2)}/${c.secciones} ${String(c.porcentaje).padStart(4)} %  ${ultima}`);
+}
+const total = d.total[0]!;
+console.log(`  Total: ${total.leidas} de ${total.secciones} secciones (${total.porcentaje} %)`);
+await cliente.close();
+```
+
+```bash
+npm start -- src/i4/05-ejercicio.ts
+```
+
+```text
+Progreso de u_00007 (una consulta, 11.8 ms)
+  I2 React intermedio                          5/6   83 %  4/5 ✓ (23 sep)
+  I3 Backend con Astro                         5/6   83 %  4/5 ✓ (4 sep)
+  B4 Fundamentos de bases de datos             4/5   80 %  sin evaluar
+  I5 Autenticación y autorización a fondo      4/5   80 %  sin evaluar
+  P1 Proyecto integrador                       6/8   75 %  sin evaluar
+  I4 Modelado de datos con MongoDB             4/6   67 %  sin evaluar
+  I6 Servidores Linux                          4/6   67 %  sin evaluar
+  I7 Sistema de diseño con Tailwind v4         3/5   60 %  sin evaluar
+  B6 React esencial                            4/7   57 %  sin evaluar
+  A3 SQL y PostgreSQL                          3/6   50 %  sin evaluar
+  A6 Rendimiento y observabilidad              2/4   50 %  sin evaluar
+  A1 TypeScript avanzado                       2/5   40 %  sin evaluar
+  B7 Tailwind CSS v4 esencial                  0/5    0 %  2/5 ✗ (5 sep)
+  I1 TypeScript intermedio                     0/6    0 %  4/5 ✓ (14 sep)
+  Total: 46 de 134 secciones (34.3 %)
+```
+
+- **Se parte de los cursos, no de las lecturas:** el porcentaje necesita el número de secciones de cada curso, y "empezado" incluye cursos sin lecturas pero con evaluación (B7 e I1). Partiendo de las lecturas, esos dos no aparecerían.
+- **Dos `$lookup` con _pipeline_, uno por fuente:** el primero cuenta las lecturas del usuario en el curso (`$count`); el segundo trae su última evaluación (`$sort` + `$limit: 1`). Los dos filtran primero por `userId`, el primer campo de un índice.
+- **`$facet` al final** saca la tabla y el total de los mismos 24 documentos: una consulta, 12 ms en local.
+- **Zod valida la forma completa:** si alguien cambia la _pipeline_, `DashboardSchema.parse` falla con el campo exacto antes de que la página pinte un `undefined`.
+
+<Callout type="risk">
+
+- **Una sola consulta no siempre es mejor que tres:** esta hace 48 búsquedas internas (2 por curso). Para 24 cursos es rápido; para un catálogo de miles, tres consultas sencillas con índice y una unión en la aplicación (I4.2) pueden ser más rápidas y más fáciles de mantener. Mide antes de decidir.
+- **La plataforma real usa cinco consultas en paralelo** (`Promise.all` en `src/server/services/stats.service.ts`), porque mezcla datos del catálogo, que está en archivos, con los de MongoDB. Una agregación solo puede unir lo que está en la base de datos.
+
+</Callout>
+
+<Callout type="mastery">
+
+Una página completa de estadísticas sale de una sola consulta: unes colecciones con `$lookup` (simple o con _pipeline_ y variables), sacas varios resultados con `$facet`, agrupas por rangos (`$bucket`) y por periodos en la zona horaria del usuario (`$dateTrunc`), compruebas con `explain` que el filtro usa un índice y validas la forma del resultado.
+
+</Callout>
+
+## Resumen
+
+- `$lookup` simple une por igualdad; con _pipeline_ y `let` filtra y agrega en la otra colección. Siempre devuelve un array.
+- `$facet` ejecuta varias _sub-pipelines_ sobre la misma entrada y devuelve un documento (máximo 16 MB).
+- `$bucket` agrupa por rangos y `$dateTrunc` por periodos; los dos, con la zona horaria correcta.
+- El optimizador adelanta algunos `$match`, pero no los que filtran campos calculados (de 0,4 ms a 27,5 ms). Escríbelos al principio y comprueba con `explain`.
+- `aggregate<T>()` tipa, pero no comprueba: valida con Zod las agregaciones complejas.
