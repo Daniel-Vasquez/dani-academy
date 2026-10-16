@@ -45,10 +45,19 @@ jobs:
       - name: MongoDB (replica set de un nodo, necesario para las transacciones de Better Auth)
         run: |
           docker run -d --name mongo -p 27017:27017 mongo:8 --replSet rs0 --bind_ip_all
-          for i in $(seq 1 30); do
-            docker exec mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]}).ok }' && break
+          # Tras rs.initiate() el nodo tarda unos segundos en ser PRIMARIO; hasta entonces rechaza
+          # escrituras. Se espera a que las acepte (y, si no llega, el paso falla aquí con los logs).
+          for i in $(seq 1 60); do
+            docker exec mongo mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id:"rs0",members:[{_id:0,host:"localhost:27017"}]}).ok }' > /dev/null 2>&1 || true
+            if docker exec mongo mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
+              echo "MongoDB listo como primario tras ${i} s"
+              exit 0
+            fi
             sleep 1
           done
+          echo "MongoDB no llegó a primario en 60 s"
+          docker logs mongo | tail -50
+          exit 1
       - run: npm run db:setup
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
