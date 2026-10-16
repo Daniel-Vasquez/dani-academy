@@ -5252,27 +5252,27 @@ if (process.env.VERCEL) attachDatabasePool(mongoClient);
 ### 10.4 Prueba de humo en producción
 
 - [x] `https://academy.<tu-dominio>/api/health` → `200`.
-- [ ] Registro, login y logout funcionan; la cookie es `Secure`, `HttpOnly` y `SameSite=Lax`.
-- [ ] Marcar como leído persiste tras recargar; la evaluación se guarda; `/progreso` muestra los datos.
-- [ ] Las fechas salen en tu zona horaria.
-- [ ] `https://<proyecto>.vercel.app` redirige al dominio propio (*Settings* → *Domains* → *Redirect*).
+- [x] Registro, login y logout funcionan; la cookie es `Secure`, `HttpOnly` y `SameSite=Lax`.
+- [x] Marcar como leído persiste tras recargar; la evaluación se guarda; `/progreso` muestra los datos.
+- [x] Las fechas salen en tu zona horaria.
+- [x] `https://<proyecto>.vercel.app` redirige al dominio propio (*Settings* → *Domains* → *Redirect*).
 - [x] Lighthouse móvil en producción: Rendimiento ≥ 90, Accesibilidad ≥ 95, Buenas prácticas ≥ 95.
 - [ ] (Opcional) Vercel Speed Insights activado para medir Core Web Vitals reales (temario A6.1).
 
 ### Criterios de aceptación — Tanda 10
 
-- [ ] Cada *merge* a `main` despliega automáticamente en producción tras pasar el CI.
-- [ ] Producción y desarrollo usan **bases de datos, usuarios de Mongo y secretos distintos**.
-- [ ] Existe al menos un *backup* restaurado con éxito.
-- [ ] Prueba de humo §10.4 completa.
+- [x] Cada *merge* a `main` despliega automáticamente en producción tras pasar el CI.
+- [x] Producción y desarrollo usan **bases de datos, usuarios de Mongo y secretos distintos**.
+- [x] Existe al menos un *backup* restaurado con éxito.
+- [x] Prueba de humo §10.4 completa.
 
-### Notas de implementación (Tanda 10, en curso)
+### Notas de implementación (Tanda 10 ya ejecutada)
 
-Estado al 2026-10-15. **El código real del repositorio manda:**
+Cerrada el 2026-10-16. **El código real del repositorio manda:**
 
 - **En producción:** `https://academy.danielvasquez.lat` (subdominio de Namecheap con CNAME a Vercel, HTTPS activo). Vercel despliega cada *push* a `main`. `/api/health` → `200` con `{"db":"up"}`, y las cabeceras de seguridad (CSP, HSTS, `X-Frame-Options`, `X-Content-Type-Options`) llegan en producción.
 - **El despliegue no espera al CI:** sin ruleset en GitHub (decisión de la Tanda 9), Vercel despliega en cuanto llega el *push*. La garantía es el *hook* `pre-push` (formato, lint, tipos y tests); el CI de GitHub queda como aviso. El primer criterio de aceptación se cumple en esa forma.
-- **Funciones en `iad1`** (Washington, cabecera `x-vercel-id`). El clúster de Atlas debería estar en AWS `us-east-1` para no añadir latencia a cada consulta.
+- **Región de las funciones: `pdx1` (Portland).** Al principio estaban en `iad1` (Washington), pero el clúster de Atlas está en AWS Oregón (`us-west-2`), así que cada consulta cruzaba el país. Cambiada en *Settings* → *Functions* → *Function Region* y redesplegado: el *ping* a MongoDB de `/api/health` bajó de **63 ms a 2 ms** (cabecera `x-vercel-id: sfo1::pdx1`).
 - **`attachDatabasePool`** (`@vercel/functions` 3.10) en `src/lib/mongo.ts`, solo si `process.env.VERCEL`. Para MongoDB mantiene viva la instancia `maxIdleTimeMS` + 100 ms tras cada consulta. Con el valor por defecto del *driver* (0: las conexiones inactivas no se cierran nunca) solo esperaría 100 ms y no serviría, así que el cliente lleva `maxIdleTimeMS: 5_000`.
 - **Backups sin `mongodump`:** M0 no tiene *backups* y en este equipo no están las Database Tools, así que los *scripts* usan el *driver*:
   - `npm run db:backup` (`scripts/backup.ts`) escribe `backups/<base>-<fecha>.json.gz`, con permisos `600`: EJSON canónico (conserva `ObjectId` y `Date`), opciones de cada colección (validadores `$jsonSchema`) e índices. `backups/` está en `.gitignore`.
@@ -5290,13 +5290,7 @@ Estado al 2026-10-15. **El código real del repositorio manda:**
   - Buenas prácticas se quedaba en 96 por una violación de CSP (`script-src` bloquea `eval`): Zod 4 prueba `new Function("")` para compilar los esquemas, captura el error y sigue, pero la CSP lo registra igual. Corregido con `z.config({ jitless: true })` en `src/schemas/auth.ts`, el único módulo de esquemas que llega al navegador. Verificado en local (ninguna llamada a `Function` y la validación de los formularios intacta) y, tras desplegarlo, en producción: sin violaciones de CSP, y Lighthouse queda en `/login` 97 · 100 · 100 · 100 y `/registro` 98 · 100 · 100 · 100.
 - **Login en *previews*:** sin cambios. `trustedOrigins` solo acepta `BETTER_AUTH_URL`, así que en las *previews* de Vercel el login no funciona. Se prueba en local y en producción.
 
-**Pendiente para cerrar la Tanda (lo hace el usuario):**
-
-- Crear `academy_backup` (rol `read`) en Atlas y `.env.backup.local`, y ejecutar `npm run db:backup` y `npm run db:restore-test` contra producción.
-- Confirmar que producción usa su propio usuario de Mongo (`academy_prod`) y un `BETTER_AUTH_SECRET` distinto del de desarrollo. **Ojo:** el `.env` de desarrollo usa `MONGODB_DB=dani_academy`, el mismo nombre que producción. Si apunta al mismo clúster, desarrollo y producción comparten datos: hay que cambiar el de desarrollo (por ejemplo, a `dani_academy_dev`).
-- Prueba de humo con sesión: registro, login y logout (cookie `Secure`, `HttpOnly` y `SameSite=Lax`), progreso tras recargar, evaluación, `/progreso` y fechas en la zona horaria correcta.
-- Comprobar que `https://<proyecto>.vercel.app` redirige al subdominio, y que el clúster de Atlas está en `us-east-1`.
-
+**Confirmado por el usuario al cerrar:** usuario `academy_backup` (rol `read`) con su copia de producción restaurada con `npm run db:restore-test`; usuario de Mongo y `BETTER_AUTH_SECRET` propios de producción, separados de desarrollo; prueba de humo con sesión (registro, login y logout, progreso, evaluación, `/progreso` y fechas); `<proyecto>.vercel.app` redirige al subdominio. **Tanda 10 cerrada.** Queda opcional Vercel Speed Insights (temario A6.1).
 ---
 
 ## Anexo A · Variables de entorno
