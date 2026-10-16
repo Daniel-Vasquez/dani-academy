@@ -1,0 +1,335 @@
+---
+sectionId: "I7.1"
+course: "I7"
+title: "Design tokens y colores semánticos"
+order: 1
+minutes: 60
+summary: "Conviertes la paleta de Dani Academy en tokens semánticos con variables CSS y @theme inline, mides por qué hace falta ese inline y sustituyes con un script los 117 colores directos de tu proyecto por tokens."
+---
+
+En B7 usaste los colores de Tailwind tal cual: `bg-white` para las tarjetas, `text-slate-600` para el texto secundario, `border-slate-200` para los bordes. Funciona, hasta que quieres cambiar algo. ¿El gris del texto secundario es `slate-500` o `slate-600`? Depende del archivo. ¿Y el modo oscuro? Habría que añadir un `dark:` a cada una de esas clases. Un **sistema de diseño** resuelve esto con **_design tokens_**: cada color tiene un nombre que dice **para qué sirve** (`surface`, `muted`, `accent`), no **cómo es** (`slate-200`). En esta sección vas a convertir la paleta oficial de Dani Academy en _tokens_ y a sustituir todos los colores directos de tu proyecto, con un _script_, por su versión semántica.
+
+**Lo que tendrás al terminar:** los _tokens_ de la plataforma en `src/styles/global.css`, utilidades como `bg-surface` y `text-muted`, y `scripts/a-tokens.mjs`, que traduce los colores directos de un proyecto a _tokens_.
+
+**Requisitos:** el proyecto `tw-lab` de B7, con todas sus páginas.
+
+## Paso 1: primitivos frente a semánticos
+
+|                     | _Token_ primitivo                                | _Token_ semántico                            |
+| ------------------- | ------------------------------------------------ | -------------------------------------------- |
+| Qué nombra          | Un valor: el color tal cual                      | Un papel: para qué se usa                    |
+| Ejemplos            | `slate-200`, `teal-600`, `#0d9488`               | `surface`, `muted`, `accent`, `danger`       |
+| Cuántos hay         | Cientos (la paleta entera de Tailwind)           | Una docena (los que tu interfaz necesita)    |
+| Si cambia el diseño | Hay que buscar y sustituir en todos los archivos | Se cambia una línea, en un sitio             |
+| En modo oscuro      | Un `dark:` en cada clase                         | El _token_ cambia de valor y nada más (I7.2) |
+
+Los primitivos no desaparecen: son los **valores** de los semánticos (`--muted` vale `#475569`, que es `slate-600`). Lo que cambia es que los componentes ya no los usan directamente. Mira cuántos colores directos tiene tu proyecto de B7:
+
+```bash
+grep -rhoE "\b(bg|text|border|ring)-(slate|white|teal|emerald|sky|amber|rose)(-[0-9]+)?(/[0-9]+)?\b" src | wc -l
+```
+
+En `tw-lab`: **119**, en 19 archivos. `bg-white` aparece 19 veces, `text-slate-600` 16 y `border-slate-200` 14.
+
+## Paso 2: los _tokens_, como variables CSS y `@theme inline`
+
+Los _tokens_ se definen en dos capas. Primero, **variables CSS** en `:root` con los valores, la paleta oficial de esta plataforma. Después, `@theme inline` le dice a Tailwind que cree utilidades a partir de ellas: `--color-surface` genera `bg-surface`, `text-surface`, `border-surface`… Sustituye `src/styles/global.css`:
+
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/source-serif-4";
+@plugin "@tailwindcss/typography";
+
+/* 1. Tokens semánticos: el PAPEL de cada color (la paleta oficial de Dani Academy) */
+:root {
+  --bg: #fafafa; /* fondo de la página */
+  --surface: #eaedf2; /* tarjetas, cajas */
+  --surface-2: #e2e8f0; /* bordes, separadores, superficies sobre superficie */
+  --fg: #0f172a; /* texto principal */
+  --muted: #475569; /* texto secundario */
+  --accent: #0d9488; /* acento: botones, enlaces, foco */
+  --accent-strong: #0f766e; /* acento para texto (más contraste, I7.4) */
+  --accent-contrast: #ffffff; /* texto SOBRE el acento */
+  --info: #0284c7;
+  --warning: #d97706;
+  --danger: #f25c76;
+  --danger-strong: #be123c;
+}
+
+/* 2. Tokens → utilidades de Tailwind: bg-surface, text-muted, border-accent… */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-info: var(--info);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-danger-strong: var(--danger-strong);
+}
+
+@theme {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --font-serif: "Source Serif 4 Variable", Georgia, serif;
+
+  /* Planificador 2026: un color por categoría (B7.1) */
+  --color-trabajo: #0284c7;
+  --color-personal: #d97706;
+  --color-salud: #0d9488;
+  --color-estudio: #f25c76;
+}
+
+/* Una utilidad propia: funciona con variantes (lg:scrollbar-fino) */
+@utility scrollbar-fino {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-2) transparent;
+}
+```
+
+- **`--accent` y `--accent-strong`:** el acento de la plataforma (`#0d9488`) se usa para fondos y bordes. Para **texto** hace falta una versión más oscura (`#0f766e`), por contraste: lo medirás en I7.4.
+- **`--accent-contrast`:** el color del texto **sobre** el acento. En light es blanco; en dark (I7.2) será casi negro, porque el acento oscuro es más claro.
+- **`@theme inline`** genera las utilidades; `@theme` (sin `inline`) se queda para lo que no cambia con el tema: las fuentes y los colores del Planificador de B7.
+
+Tras el _build_, el CSS que genera Tailwind para una utilidad semántica:
+
+```css
+.bg-accent{background-color:var(--accent)}
+.text-accent-strong{color:var(--accent-strong)}
+```
+
+La utilidad apunta **directamente** a la variable. Eso es lo que hace `inline`.
+
+<Callout type="risk">
+
+- **Un _token_ por papel, no por color:** si dos papeles distintos tienen hoy el mismo valor (el texto de un aviso y el texto normal), siguen siendo dos _tokens_, o uno solo si de verdad deben ir siempre juntos. Pregúntate: "si cambio este, ¿quiero que cambie el otro?".
+- **No crees un _token_ para cada caso:** `--boton-guardar-fondo` es un nombre de componente, no de papel. Con una docena de _tokens_ (fondo, superficies, texto, apagado, acento y estados) se construye toda esta plataforma.
+
+</Callout>
+
+## Paso 3: por qué `inline`
+
+Sin `inline`, Tailwind genera `--color-accent: var(--accent)` en `:root`, y la utilidad usa `var(--color-accent)`. La diferencia se nota cuando una parte de la página redefine un _token_ solo para sí misma. Crea `src/pages/tokens.astro`:
+
+```astro
+---
+// Archivo: src/pages/tokens.astro
+import Layout from "../layouts/Layout.astro";
+---
+
+<Layout titulo="I7.1 · Tokens">
+  <main class="space-y-6 p-8">
+    <button id="fuera" class="rounded-lg bg-accent px-4 py-2 text-accent-contrast">Acento normal</button>
+
+    <!-- Una sección que redefine el token SOLO para su contenido -->
+    <section style="--accent: #7c3aed" class="rounded-xl border border-surface-2 p-4">
+      <button id="dentro" class="rounded-lg bg-accent px-4 py-2 text-accent-contrast">Acento de la sección</button>
+    </section>
+  </main>
+</Layout>
+```
+
+El color calculado de los dos botones, en Chrome, con cada versión de `global.css`:
+
+```text
+Con @theme inline:
+  fuera de la sección:  rgb(13, 148, 136)
+  dentro de la sección: rgb(124, 58, 237)
+Con @theme (sin inline):
+  fuera de la sección:  rgb(13, 148, 136)
+  dentro de la sección: rgb(13, 148, 136)
+```
+
+**Sin `inline`, la sección no puede cambiar su acento:** `--color-accent` se calculó en `:root` con el valor de `:root`, y el `--accent` morado de la sección llega tarde. Con `inline`, la utilidad lee `--accent` en el propio elemento, y la sección manda. Es lo que hará funcionar el modo oscuro (I7.2) y cualquier zona con otro tema.
+
+<Callout type="risk">
+
+- **Con `@theme` normal, el modo oscuro parece funcionar… a veces:** si el tema oscuro se aplica en `<html>`, el mismo elemento que `:root`, no hay diferencia. El fallo aparece en cuanto alguien aplica el tema a una sección, a un _iframe_ o a un componente. Usa `inline` para todo lo que cambie con el tema.
+- **`@theme inline` no crea las variables en `:root`:** con él, `--color-accent` no existe como variable CSS en la página; solo existe `--accent`. Si algún CSS propio usa `var(--color-accent)`, cámbialo por `var(--accent)`.
+
+</Callout>
+
+## Paso 4: cambiar el acento con una línea
+
+Para comprobar la promesa de los _tokens_, un _script_ de Chrome automatizado guarda el color calculado (fondo, texto, borde y contorno) de todos los elementos de cinco páginas. Después se cambia **una línea**, `--accent: #0d9488` por `--accent: #2563eb`, y se cuentan los elementos cuyo color cambió:
+
+```text
+Cambiando una sola línea: --accent: #0d9488 → #2563eb
+  /componentes         3 elementos cambian de color
+  /curso-responsive    2 elementos cambian de color
+  /leccion             2 elementos cambian de color
+  /estados             1 elementos cambian de color
+  /tokens              1 elementos cambian de color
+  total: 9
+```
+
+Solo 9 elementos, porque casi todo `tw-lab` sigue usando colores directos de B7: un fondo `bg-white` no se entera de que existe `--surface`. Medido con `--surface`, antes y después de sustituir los colores directos del ejercicio:
+
+```text
+Antes del codemod (colores directos de B7), cambiando solo --surface:
+  total: 0
+Después del codemod, la misma línea:
+  total: 6
+```
+
+Antes, cambiar `--surface` no cambiaba **nada**: ningún elemento lo usaba. Después, cambian los 6 elementos visibles que hacen de superficie, más los estados `hover:` que solo se ven al pasar el ratón. Para eso sirve el ejercicio.
+
+<Callout type="risk">
+
+- **Un _token_ que nadie usa no sirve de nada:** definirlos es la mitad del trabajo; la otra mitad es que **todo** el proyecto los use. Un solo `bg-white` olvidado se queda blanco en modo oscuro.
+- **Con opacidad, el color calculado cambia de formato:** `bg-accent/10` aparece como `oklab(…/ 0.1)` en `getComputedStyle`, no como `rgb()`. Por eso la medición compara los valores antes y después, en lugar de buscar un color concreto.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Define los _tokens_ de tu app (los de este paso) y sustituye **todos** los colores directos (`bg-slate-100`, `text-white`…) por semánticos (`bg-surface`, `text-accent-contrast`…).
+2. Hazlo con un _script_, no a mano: una tabla de "color directo → _token_" aplicada a todos los archivos de `src/`.
+3. Comprueba que no queda ningún color directo, que el proyecto compila y qué cambia en el aspecto de las páginas.
+
+</Callout>
+
+Solución. `scripts/a-tokens.mjs`:
+
+```js
+// Archivo: scripts/a-tokens.mjs
+// Sustituye los colores directos de Tailwind (bg-slate-100…) por tokens semánticos (bg-surface…)
+// Uso: node scripts/a-tokens.mjs        (cambia los archivos de src/)
+//      node scripts/a-tokens.mjs --ver  (solo lista lo que cambiaría)
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+// La traducción: cada color directo, al PAPEL que cumple
+const TABLA = {
+  "bg-slate-50": "bg-bg",
+  "bg-white": "bg-surface",
+  "bg-slate-100": "bg-surface",
+  "bg-slate-200": "bg-surface-2",
+  "text-slate-900": "text-fg",
+  "text-slate-800": "text-fg",
+  "text-slate-700": "text-fg",
+  "text-slate-600": "text-muted",
+  "text-slate-500": "text-muted",
+  "text-slate-400": "text-muted",
+  "border-slate-200": "border-surface-2",
+  "border-slate-300": "border-surface-2",
+  "text-white": "text-accent-contrast", // en este proyecto, siempre sobre un fondo de acento
+  "text-rose-800": "text-danger-strong",
+  "text-emerald-800": "text-accent-strong",
+  "bg-emerald-100": "bg-accent/15",
+  "bg-slate-300": "bg-surface-2",
+  // Avisos y estados: el color del estado con transparencia, y el texto con el color normal
+  "bg-sky-50": "bg-info/10",
+  "border-sky-500": "border-info",
+  "bg-amber-50": "bg-warning/10",
+  "bg-amber-100": "bg-warning/15",
+  "border-amber-300": "border-warning",
+  "ring-amber-200": "ring-warning/40",
+  "text-amber-800": "text-fg",
+  "text-amber-900": "text-fg",
+  "bg-rose-50": "bg-danger/10",
+  "bg-rose-100": "bg-danger/15",
+  "border-rose-500": "border-danger",
+  "ring-slate-200": "ring-surface-2",
+  "ring-slate-300": "ring-surface-2",
+  "ring-slate-900/5": "ring-fg/5",
+};
+const EXCLUIR = new Set(["src/lib/prueba-cn.ts"]); // demuestra cn() con clases literales (B7.5)
+const soloVer = process.argv.includes("--ver");
+
+function* archivos(dir) {
+  for (const nombre of readdirSync(dir)) {
+    const ruta = join(dir, nombre);
+    if (statSync(ruta).isDirectory()) yield* archivos(ruta);
+    else if (/\.(astro|tsx?|jsx?|mdx?)$/.test(nombre) && !EXCLUIR.has(ruta)) yield ruta;
+  }
+}
+
+let cambios = 0;
+for (const ruta of archivos("src")) {
+  const antes = readFileSync(ruta, "utf8");
+  let despues = antes
+    // Los colores de modo oscuro sobran: el token ya cambia solo (I7.2)
+    .replace(/\s?\bdark:(bg|text|border)-(slate|white|gray)(-\d{2,3})?\b/g, "");
+  // (?<![\w-]) y (?![\w-]): la clase entera, conservando variantes (hover:) y opacidad (/90)
+  for (const [directo, token] of Object.entries(TABLA)) {
+    despues = despues.replace(new RegExp(`(?<![\\w-])${directo}(?![\\w-])`, "g"), token);
+  }
+  if (despues !== antes) {
+    const n = [...antes.matchAll(/\b(bg|text|border|ring)-(slate|white|rose|emerald|gray|amber|sky)\b/g)].length;
+    cambios += n;
+    console.log(`${soloVer ? "cambiaría" : "✓"} ${ruta} (${n})`);
+    if (!soloVer) writeFileSync(ruta, despues);
+  }
+}
+console.log(`${cambios} colores directos ${soloVer ? "por cambiar" : "sustituidos"}`);
+```
+
+Primero `node scripts/a-tokens.mjs --ver`, para ver qué cambiaría (`117 colores directos por cambiar`), y después sin `--ver`:
+
+```text
+✓ src/components/IndiceCurso.astro (2)
+✓ src/components/Insignia.astro (6)
+✓ src/components/ui/Aviso.astro (5)
+✓ src/components/ui/Badge.astro (6)
+✓ src/components/ui/Button.tsx (7)
+✓ src/layouts/Layout.astro (2)
+✓ src/pages/articulo.astro (6)
+✓ src/pages/curso-responsive.astro (13)
+✓ src/pages/curso.astro (10)
+✓ src/pages/ejercicio-b71.astro (1)
+✓ src/pages/escalas.astro (6)
+✓ src/pages/estados.astro (15)
+✓ src/pages/flex.astro (10)
+✓ src/pages/grid.astro (8)
+✓ src/pages/index.astro (4)
+✓ src/pages/oscuro.astro (4)
+✓ src/pages/prose.astro (2)
+✓ src/pages/responsive.astro (10)
+117 colores directos sustituidos
+```
+
+Ejecutado otra vez, `0 colores directos sustituidos`: el _script_ se puede repetir sin estropear nada. Quedan **0** colores directos (fuera de `prueba-cn.ts`), `astro check` da 0 errores y el _build_ termina. El aspecto cambia en 113 elementos de las cinco páginas medidas:
+
+```text
+Colores calculados: B7 frente a tokens (después del codemod)
+  /componentes         9 elementos cambian de color
+  /curso-responsive   74 elementos cambian de color
+  /leccion             7 elementos cambian de color
+  /estados            19 elementos cambian de color
+  /tokens              4 elementos cambian de color
+  total: 113
+```
+
+- **Los cambios son decisiones de diseño, no errores:** las tarjetas blancas pasan a `surface` (`#eaedf2`), el gris `slate-500` del texto secundario pasa a `muted` (`#475569`, más oscuro y con más contraste) y el fondo `slate-50` pasa a `bg` (`#fafafa`). La paleta de la plataforma tiene tres tonos de fondo (`bg`, `surface` y `surface-2`); B7 usaba cinco (`white` y `slate-50`, `100`, `200` y `300`).
+- **`text-white` se traduce a `text-accent-contrast`** porque en este proyecto siempre está sobre un fondo de acento. En otro proyecto, revisa cada caso: un texto blanco sobre una foto no es "texto sobre el acento".
+- **Los avisos usan el color de estado con transparencia** (`bg-warning/10`, `bg-danger/10`) y el texto normal (`text-fg`). Así un aviso se adapta solo al modo oscuro.
+- **Los `dark:` con colores directos se eliminan:** con _tokens_, el modo oscuro lo dan los propios valores (I7.2).
+
+<Callout type="risk">
+
+- **Revisa el resultado en el navegador, página a página:** el _script_ aplica la tabla a ciegas. `(?<![\w-])` y `(?![\w-])` evitan cambiar `bg-white-alpha` o `my-bg-white`, pero no saben si un `text-white` concreto debería ser otra cosa.
+- **Haz el cambio en un _commit_ aparte:** un _codemod_ que toca 18 archivos es imposible de revisar mezclado con otros cambios (B2). Y si algo sale mal, `git checkout -- src` lo deshace.
+
+</Callout>
+
+<Callout type="mastery">
+
+Cambiar el color de acento implica tocar una sola línea: tus colores tienen nombres de papel (`surface`, `muted`, `accent`) definidos una vez como variables CSS, Tailwind los convierte en utilidades con `@theme inline` (que deja a cada zona redefinir sus _tokens_), y en tu proyecto no queda ni un color directo.
+
+</Callout>
+
+## Resumen
+
+- Primitivos (`slate-200`) son valores; semánticos (`surface`) son papeles. Los componentes solo usan semánticos.
+- Variables CSS en `:root` con los valores, y `@theme inline` para que Tailwind cree `bg-surface`, `text-muted`…
+- Sin `inline`, una zona no puede redefinir sus _tokens_ (medido: el botón seguía verde azulado).
+- Un _token_ solo sirve si todo el proyecto lo usa: con colores directos, cambiar `--surface` no cambiaba nada.
+- Un _codemod_ con una tabla de traducción sustituye todos los colores directos de una vez, y se puede repetir.
