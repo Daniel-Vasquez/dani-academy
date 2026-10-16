@@ -5287,7 +5287,7 @@ Estado al 2026-10-15. **El código real del repositorio manda:**
   | `/registro` | 98 | 100 | 96 | 100 |
 
   - El 93 de `/login` incluye un arranque en frío: 2,6 s en la primera petición; en caliente, unos 0,35 s.
-  - Buenas prácticas se quedaba en 96 por una violación de CSP (`script-src` bloquea `eval`): Zod 4 prueba `new Function("")` para compilar los esquemas, captura el error y sigue, pero la CSP lo registra igual. Corregido con `z.config({ jitless: true })` en `src/schemas/auth.ts`, el único módulo de esquemas que llega al navegador. Verificado en local (ninguna llamada a `Function` y la validación de los formularios intacta); la puntuación en producción falta medirla tras el despliegue.
+  - Buenas prácticas se quedaba en 96 por una violación de CSP (`script-src` bloquea `eval`): Zod 4 prueba `new Function("")` para compilar los esquemas, captura el error y sigue, pero la CSP lo registra igual. Corregido con `z.config({ jitless: true })` en `src/schemas/auth.ts`, el único módulo de esquemas que llega al navegador. Verificado en local (ninguna llamada a `Function` y la validación de los formularios intacta) y, tras desplegarlo, en producción: sin violaciones de CSP, y Lighthouse queda en `/login` 97 · 100 · 100 · 100 y `/registro` 98 · 100 · 100 · 100.
 - **Login en *previews*:** sin cambios. `trustedOrigins` solo acepta `BETTER_AUTH_URL`, así que en las *previews* de Vercel el login no funciona. Se prueba en local y en producción.
 
 **Pendiente para cerrar la Tanda (lo hace el usuario):**
