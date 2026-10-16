@@ -1,0 +1,47 @@
+course: I5
+passingScore: 4
+questions:
+  - prompt: "¿Por qué se añade una sal aleatoria a cada contraseña antes de calcular su hash?"
+    options:
+      - "Para que el hash se pueda descifrar si el usuario olvida la contraseña."
+      - "Para que el hash sea más corto y ocupe menos en la base de datos."
+      - "Para que la misma contraseña dé un hash distinto en cada usuario: así no sirven las tablas precalculadas (rainbow tables) y el atacante tiene que probar contraseñas usuario por usuario."
+      - "Porque la sal es secreta y sin ella nadie puede verificar la contraseña."
+    answer: 2
+    explanation: "La sal no es secreta: se guarda junto al hash (Better Auth: «sal:clave» en la colección account). Su trabajo es hacer única cada contraseña. En I5.1, sin sal, dos usuarias con «123456» tenían el mismo hash y una tabla de 126 entradas rompió 5 de 6 cuentas en 0,06 ms. Con sal y un algoritmo lento (scrypt), un diccionario de 10 millones pasa a costar 5 días por usuario."
+
+  - prompt: "¿Qué diferencia hay entre autenticación y autorización?"
+    options:
+      - "La autenticación comprueba quién eres (la sesión); la autorización decide qué puedes hacer y con qué datos. Una app puede tener sesiones perfectas y, aun así, una autorización mal hecha."
+      - "Son lo mismo: si un usuario tiene sesión, puede hacer cualquier cosa."
+      - "La autenticación se hace en el navegador y la autorización en la base de datos."
+      - "La autorización solo existe en las apps con administradores."
+    answer: 0
+    explanation: "Si falla la autenticación, la respuesta es 401 (inicia sesión); si falla la autorización, 403 (no tienes permiso) o 404 (no existe para ti). El middleware resuelve la autenticación para todas las rutas; la autorización depende de cada dato y se comprueba en cada endpoint, servicio y consulta."
+
+  - prompt: "En una página o endpoint de Astro renderizado en el servidor, ¿dónde se lee la sesión del usuario?"
+    options:
+      - "En cada componente de React, con useSession."
+      - "Leyendo la cookie better-auth.session_token con document.cookie."
+      - "En una página prerenderizada, durante el build."
+      - "Una vez por petición en el middleware, con auth.api.getSession (reenviando sus Set-Cookie), que la deja en locals; cada endpoint y cada Action vuelve a comprobar que haya usuario."
+    answer: 3
+    explanation: "useSession es para pintar la interfaz en el navegador, no protege nada. La cookie es httpOnly: JavaScript no puede leerla. En el build no hay petición ni sesión. En I5.3, sin reenviar los Set-Cookie de getSession, la renovación se quedaba en Mongo y la cookie del navegador caducaba igualmente."
+
+  - prompt: "¿Qué es un open redirect y cómo se evita?"
+    options:
+      - "Una redirección que tarda demasiado; se evita con un código 301."
+      - "Que un parámetro como ?volver= lleve al usuario a otra web tras iniciar sesión. Se evita aceptando solo rutas de la propia app: resolviéndolas como el navegador (WHATWG URL) y exigiendo que el origen no cambie."
+      - "Una redirección sin HTTPS; se evita con la cabecera HSTS."
+      - "Que la página de login no tenga contraseña; se evita con un límite de intentos."
+    answer: 1
+    explanation: "Con un open redirect, el enlace es de tu dominio, el usuario confía, inicia sesión y acaba en una copia de tu web. Comprobar el texto («empieza por / y no por //») no basta: el navegador trata «\\» como «/» y borra tabuladores y saltos de línea, así que /\\evil.com y /%09/evil.com acaban en evil.com (I5.3)."
+
+  - prompt: "Con cookieCache activo (maxAge de 5 minutos), un usuario cierra todas sus sesiones desde otro dispositivo. ¿Qué pasa con la sesión de este?"
+    options:
+      - "Se corta al instante en todas las peticiones."
+      - "Nunca se corta: la caché dura lo mismo que la sesión."
+      - "Puede seguir funcionando hasta 5 minutos, porque la caché es una copia firmada que no se contrasta con MongoDB. Para las operaciones delicadas se lee la sesión con disableCookieCache."
+      - "Se corta solo si el usuario recarga la página."
+    answer: 2
+    explanation: "Medido en I5.3: tras borrar la sesión en MongoDB, la cookie de caché siguió dando acceso a páginas y API (200); sin ella, el acceso se cortó al momento (302). Cerrar sesión en el propio dispositivo no tiene ese retraso, porque signOut borra las dos cookies."

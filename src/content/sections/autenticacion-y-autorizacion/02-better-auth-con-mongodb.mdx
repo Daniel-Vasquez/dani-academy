@@ -1,0 +1,542 @@
+---
+sectionId: "I5.2"
+course: "I5"
+title: "Better Auth con MongoDB"
+order: 2
+minutes: 75
+summary: "Configuras Better Auth con el adaptador de MongoDB, su ruta catch-all y el cliente de React, añades un campo propio al usuario y recorres qué escribe en user, session, account y verification en cada paso."
+---
+
+Better Auth es la librería de autenticación de esta plataforma: registra usuarios, guarda sus contraseñas como viste en I5.1, crea y renueva sesiones y expone todo eso como una API (`/api/auth/sign-up/email`, `/api/auth/sign-in/email`…) y como un cliente para el navegador. No tiene servidor propio: se configura como una función más de tu app y guarda sus datos en tu base de datos, a través de un **adaptador**. En esta sección vas a añadirla a tu app de entrenamiento, con el adaptador de MongoDB, y a recorrer qué escribe en cada colección al registrarse, iniciar sesión y cerrarla.
+
+**Lo que tendrás al terminar:** `src/lib/auth.ts` (el servidor), `src/pages/api/auth/[...all].ts` (la ruta), `src/lib/auth-client.ts` (el cliente), un componente de React que muestra la sesión y un _script_ que enseña las cuatro colecciones de Better Auth.
+
+**Requisitos:** la app `entrenos-app` de I3 con `scripts/i5/hash.ts` (I5.1). Tu MongoDB debe ser un _replica set_: Atlas lo es; uno local, solo si lo arrancaste como tal (B5.2).
+
+## Paso 1: instalar y configurar las variables
+
+```bash
+npm install better-auth @better-auth/mongo-adapter
+```
+
+Better Auth necesita dos variables. **`BETTER_AUTH_SECRET`** firma las _cookies_ de sesión: con él, nadie puede fabricar una _cookie_ válida, que es justo lo que se podía hacer con la sesión de demostración de I3.4. **`BETTER_AUTH_URL`** es la dirección de la app, y Better Auth la usa para construir enlaces y para comprobar el origen de las peticiones (Paso 3). Declara las dos en el esquema de `astro:env` (I3.6). Sustituye `astro.config.mjs`:
+
+```js
+// @ts-check
+import { defineConfig, envField } from "astro/config";
+import react from "@astrojs/react";
+
+import node from "@astrojs/node";
+
+export default defineConfig({
+  integrations: [react()],
+
+  env: {
+    schema: {
+      // Secretas del servidor: nunca llegan al navegador ni al HTML
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "entrenos_lab" }),
+      // Better Auth: el secreto firma las cookies de sesión (mínimo 32 caracteres) y la URL base de la app
+      BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
+      // Públicas del servidor: configuración que no es secreta (se puede incrustar en el build)
+      OBJETIVO_SEMANAL_MINUTOS: envField.number({ context: "server", access: "public", int: true, gt: 0, default: 150 }),
+      // Públicas del cliente: las pueden leer los componentes de React. NUNCA un secreto.
+      PUBLIC_NOMBRE_APP: envField.string({ context: "client", access: "public", default: "Mi entreno" }),
+    },
+    // Comprueba también las secretas al arrancar `astro dev` y `astro build`
+    validateSecrets: true,
+  },
+
+  adapter: node({
+    mode: "standalone",
+  }),
+});
+```
+
+Genera un secreto y añade las dos líneas a tu `.env`:
+
+```bash
+openssl rand -base64 32
+```
+
+```bash
+BETTER_AUTH_SECRET="el-resultado-de-openssl"
+BETTER_AUTH_URL="http://localhost:4321"
+```
+
+Y documéntalas en `.env.example`, sin el valor del secreto:
+
+```bash
+# Archivo: .env.example
+# Copia este archivo a .env y rellena los valores: cp .env.example .env
+# .env NUNCA se sube a Git (está en .gitignore). Este archivo SÍ, y sin valores reales.
+# En Vercel: Settings → Environment Variables, una por entorno (Production, Preview, Development).
+
+# ─── Base de datos (secretas) ────────────────────────────────
+# Atlas → Connect → Drivers. Local: mongodb://127.0.0.1:27017
+MONGODB_URI=
+# Una base de datos distinta por entorno: entrenos_dev, entrenos_preview, entrenos
+MONGODB_DB=entrenos_dev
+
+# ─── Autenticación (secretas) · I5 ───────────────────────────
+# Mínimo 32 caracteres, uno distinto por entorno. Genéralo con: openssl rand -base64 32
+BETTER_AUTH_SECRET=
+# URL base de la app. Local: http://localhost:4321 · Producción: tu dominio con https
+BETTER_AUTH_URL=http://localhost:4321
+
+# ─── Configuración (públicas del servidor) ───────────────────
+# Minutos semanales del objetivo. Opcional (por defecto, 150). Se fija en el build.
+# OBJETIVO_SEMANAL_MINUTOS=150
+
+# ─── Configuración (públicas del cliente: las ve cualquiera) ─
+# Nombre que se muestra en la app. Opcional (por defecto, "Mi entreno").
+# PUBLIC_NOMBRE_APP=Mi entreno
+```
+
+<Callout type="risk">
+
+- **Un secreto por entorno, y nunca el de los ejemplos:** si dos entornos comparten secreto, una _cookie_ de desarrollo vale en producción. Si el secreto se filtra, cámbialo: todas las sesiones dejarán de valer y los usuarios tendrán que volver a entrar (es la forma de echar a todo el mundo a la vez).
+- **`BETTER_AUTH_URL` debe coincidir con la dirección real:** si Astro arranca en otro puerto porque el 4321 está ocupado, Better Auth rechazará las peticiones del navegador (lo verás en el Paso 3). En producción, es tu dominio con `https`.
+- **`min: 32` lo comprueba `validateSecrets`:** con un secreto más corto, `npm run dev` y el _build_ se paran con un mensaje claro (I3.6), en lugar de arrancar con un secreto débil.
+
+</Callout>
+
+## Paso 2: el servidor, `src/lib/auth.ts`
+
+Crea `src/lib/auth.ts`:
+
+```ts
+// Archivo: src/lib/auth.ts
+// La configuración de Better Auth en el servidor: base de datos, método de acceso y sesiones
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { BETTER_AUTH_SECRET, BETTER_AUTH_URL } from "astro:env/server";
+import { db, mongoClient } from "./mongo";
+
+export const auth = betterAuth({
+  appName: "Mi entreno",
+  baseURL: BETTER_AUTH_URL,
+  secret: BETTER_AUTH_SECRET,
+  // El mismo cliente de la app (B5.2). Pasarlo permite a Better Auth usar transacciones (requiere replica set)
+  database: mongodbAdapter(db, { client: mongoClient }),
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true, // tras registrarse, la sesión queda iniciada
+    minPasswordLength: 8,
+    maxPasswordLength: 128, // I5.1: sin límite, una contraseña de megas obliga a ejecutar scrypt sobre ella
+  },
+  user: {
+    // Campos propios del usuario, además de los de Better Auth (name, email, image…)
+    additionalFields: {
+      zonaHoraria: { type: "string", required: false, defaultValue: "America/Mexico_City" },
+    },
+  },
+});
+
+/** El tipo de la sesión, con los campos adicionales incluidos */
+export type Sesion = typeof auth.$Infer.Session;
+```
+
+- **`mongodbAdapter(db, { client: mongoClient })`** usa la misma conexión que el resto de la app (`src/lib/mongo.ts`, B5.2). Pasarle también el cliente le permite usar **transacciones**: el registro crea un usuario y su cuenta, y con una transacción se crean los dos o ninguno. Las transacciones necesitan un _replica set_.
+- **`emailAndPassword`** activa el acceso con correo y contraseña, el único que usa esta plataforma. Better Auth también admite Google, GitHub y muchos más, cada uno con su configuración.
+- **`additionalFields`** añade campos propios al usuario: aquí, la zona horaria, que usaste en I3 para agrupar por días. Se guardan en el mismo documento `user` y aparecen, con su tipo, en la sesión.
+- **`Sesion = typeof auth.$Infer.Session`:** el tipo de la sesión, inferido de la configuración, campos adicionales incluidos. Lo usarás en I5.3 para tipar `locals`.
+
+<Callout type="risk">
+
+- **Sin _replica set_, el registro falla:** un MongoDB local arrancado como servidor suelto no admite transacciones. Usa Atlas o arranca el local con `--replSet` (B5.2). Si no puedes, quita `{ client: mongoClient }`: funcionará sin transacciones, con el riesgo de dejar un usuario sin cuenta si algo falla a mitad.
+- **`auth.ts` es solo de servidor:** importa el secreto de `astro:env/server`. Si un componente de React lo importa (en lugar de `auth-client.ts`), el _build_ falla con `ServerOnlyModule` (I3.6). Es una protección, no un error que haya que esquivar.
+- **Los campos adicionales se pueden enviar desde el cliente:** por defecto, `zonaHoraria` se puede escribir al registrarse. Para un campo que el usuario **no** debe poder elegir (un rol), hace falta `input: false` (I5.4).
+
+</Callout>
+
+## Paso 3: la ruta _catch-all_ y el primer registro
+
+Toda la API de Better Auth vive bajo `/api/auth/`. En lugar de un _endpoint_ por operación, una sola ruta con **parámetro _rest_** (`[...all]`) recoge cualquier subruta y se la pasa a Better Auth, que decide qué hacer. Crea `src/pages/api/auth/[...all].ts`:
+
+```ts
+// Archivo: src/pages/api/auth/[...all].ts
+// Una sola ruta para todo Better Auth: /api/auth/sign-up/email, /api/auth/sign-in/email, /api/auth/get-session…
+import type { APIRoute } from "astro";
+import { auth } from "../../../lib/auth";
+
+export const prerender = false;
+
+export const ALL: APIRoute = (ctx) => auth.handler(ctx.request);
+```
+
+- **`export const ALL`** responde a cualquier método (GET, POST…): Better Auth sabe cuál espera en cada ruta.
+- **`auth.handler(ctx.request)`** recibe la petición estándar (`Request`) y devuelve una respuesta estándar (`Response`), así que funciona igual en Astro, en Vercel o en cualquier servidor.
+
+Prueba a registrarte:
+
+```bash
+curl -s -X POST http://localhost:4321/api/auth/sign-up/email \
+  -H "origin: http://localhost:4321" -H "content-type: application/json" \
+  -d '{"name":"Ana","email":"ana@entrenos.test","password":"Gatito2019!"}'
+```
+
+```text
+{"error":"Inicia sesión para continuar"} (401)
+```
+
+Es el _middleware_ de I3.4: protege todo lo que empieza por `/api/` y, para él, `/api/auth/sign-up/email` es una API privada más. Nadie podría registrarse ni iniciar sesión. Añade `/api/auth/` a las excepciones. Sustituye `src/middleware.ts` (el único cambio es la línea de `PUBLICAS`; en I5.3 lo reescribirás entero con la sesión de Better Auth):
+
+```ts
+// Archivo: src/middleware.ts
+// Se ejecuta ANTES de cada página o endpoint renderizado en el servidor
+import { defineMiddleware, sequence } from "astro:middleware";
+import { COOKIE_SESION, usuarioPorId } from "./lib/sesion";
+
+const PRIVADAS = ["/estadisticas", "/notas", "/nuevo", "/api/", "/_actions/"];
+const PUBLICAS = ["/api/sesion", "/api/auth/"]; // excepciones dentro de las privadas (Better Auth, I5.2)
+
+/** 0. Registro: método, ruta, código y duración de cada petición (va el primero para medirlo todo) */
+const registrar = defineMiddleware(async (ctx, next) => {
+  if (ctx.isPrerendered) return next(); // en el build no hay peticiones que registrar
+  const inicio = performance.now();
+  try {
+    const respuesta = await next();
+    const ms = (performance.now() - inicio).toFixed(1);
+    console.log(`${ctx.request.method} ${ctx.url.pathname} → ${respuesta.status} (${ms} ms)`);
+    return respuesta;
+  } catch (error) {
+    // Un error no capturado más abajo: se registra y se deja seguir hasta Astro (que responde 500)
+    console.error(`${ctx.request.method} ${ctx.url.pathname} → error (${(performance.now() - inicio).toFixed(1)} ms)`, error);
+    throw error;
+  }
+});
+
+/** 1. Carga la sesión en locals: lo que pongas aquí lo verán todas las páginas y endpoints */
+const cargarSesion = defineMiddleware((ctx, next) => {
+  // En el build (páginas prerenderizadas) no hay petición: ni cookies ni usuario
+  ctx.locals.usuario = ctx.isPrerendered ? null : usuarioPorId(ctx.cookies.get(COOKIE_SESION)?.value);
+  return next();
+});
+
+/** 2. Protege las rutas privadas: ninguna página tiene que comprobarlo por su cuenta */
+const proteger = defineMiddleware((ctx, next) => {
+  if (ctx.isPrerendered) return next(); // una página estática no se puede proteger: ver el aviso de la lección
+  const { pathname, search } = ctx.url;
+  const privada = PRIVADAS.some((p) => pathname.startsWith(p)) && !PUBLICAS.some((p) => pathname.startsWith(p));
+  if (!privada || ctx.locals.usuario) return next();
+
+  const esApi = pathname.startsWith("/api/") || pathname.startsWith("/_actions/");
+  if (esApi) return Response.json({ error: "Inicia sesión para continuar" }, { status: 401 });
+  return ctx.redirect(`/entrar?volver=${encodeURIComponent(pathname + search)}`);
+});
+
+export const onRequest = sequence(registrar, cargarSesion, proteger);
+```
+
+Repite el registro. Con el servidor en otro puerto (el 4600) y `BETTER_AUTH_URL` apuntando al 4321, la respuesta es:
+
+```text
+{"message":"Invalid origin","code":"INVALID_ORIGIN"} (403)
+{"token":"iVZny8pL…","user":{"name":"Ana","email":"ana@entrenos.test","emailVerified":false,"createdAt":"2026-10-16T19:17:41.192Z","updatedAt":"2026-10-16T19:17:41.192Z","zonaHoraria":"America/Mexico_City","id":"6ad27855d30b651f5b07a3d8"}} (200) sin cabecera Origin
+```
+
+- **`INVALID_ORIGIN`:** el navegador envía la cabecera `Origin` con la dirección de la página que hace la petición, y Better Auth rechaza las que no coinciden con `BETTER_AUTH_URL` (o con `trustedOrigins`). Es la protección contra CSRF (B3.4): otra web no puede registrar ni iniciar sesión en nombre de tu usuario.
+- **Sin cabecera `Origin`, la petición pasa:** es la segunda línea. Better Auth deja entrar a los clientes que no son navegadores (`curl`, una app móvil), que no envían `Origin`, y confía en que los navegadores siempre la envían en un POST de otra web. Por eso la protección funciona para usuarios reales.
+- **La respuesta del registro** trae el _token_ de la sesión y el usuario, con `zonaHoraria` rellenada con su valor por defecto.
+
+Con el puerto correcto, el registro funciona igual que en la segunda línea.
+
+<Callout type="risk">
+
+- **Las rutas de Better Auth tienen que ser públicas en el _middleware_:** registro, login y `get-session` se llaman **sin** sesión. Si tu _middleware_ protege `/api/` entero, añade la excepción. Esta plataforma lo hace con `PUBLIC_PREFIXES = ["/api/auth/", "/api/health"]` en `src/middleware.ts`.
+- **`prerender = false` es obligatorio:** sin él, en un proyecto con salida estática (I3.1), Astro intentaría generar la ruta en el _build_ y no existiría en producción.
+- **En desarrollo, el puerto cambia:** si el 4321 está ocupado, Astro usa otro y todo falla con `INVALID_ORIGIN`. Esta plataforma lo resuelve con una función `trustedOrigins` que, **solo en desarrollo**, acepta también el origen local real (`src/lib/auth.ts`). En producción, solo `BETTER_AUTH_URL`.
+
+</Callout>
+
+## Paso 4: las colecciones y el formato de la contraseña
+
+Better Auth crea cuatro colecciones en tu base de datos:
+
+| Colección      | Qué guarda                                                                                                                   | Cuándo cambia                                 |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `user`         | Un documento por persona: nombre, correo, `emailVerified`, imagen y los campos adicionales                                   | Al registrarse y al editar el perfil          |
+| `session`      | Una por sesión abierta: `token`, `userId`, `expiresAt`, IP y navegador                                                       | Al iniciar sesión, al renovarla y al cerrarla |
+| `account`      | Una por forma de entrar: `providerId: "credential"` (correo y contraseña) con el _hash_ en `password`, o `google`, `github`… | Al registrarse y al vincular otro proveedor   |
+| `verification` | _Tokens_ temporales: verificar el correo, recuperar la contraseña                                                            | Al pedir uno de esos correos                  |
+
+La contraseña está en `account`, con el formato de I5.1. Compruébalo: crea `scripts/i5/02-compatible.ts`, que lee la cuenta de Ana y la verifica con **tu** función:
+
+```ts
+// Archivo: scripts/i5/02-compatible.ts
+// El verificar() de I5.1 comprueba un hash guardado por Better Auth: es el mismo formato
+// Uso: node --env-file=.env scripts/i5/02-compatible.ts
+import { MongoClient } from "mongodb";
+import { verificar } from "./hash.ts";
+
+const cliente = await MongoClient.connect(process.env.MONGODB_URI!);
+const db = cliente.db(process.env.MONGODB_DB);
+const usuario = await db.collection("user").findOne({ email: "ana@entrenos.test" });
+const cuenta = await db.collection("account").findOne({ userId: usuario!._id, providerId: "credential" });
+
+console.log(`account.password: ${String(cuenta!.password).slice(0, 12)}…  (${String(cuenta!.password).length} caracteres)`);
+console.log(`verificar("Gatito2019!"): ${await verificar("Gatito2019!", cuenta!.password)}`);
+console.log(`verificar("gatito2019!"): ${await verificar("gatito2019!", cuenta!.password)}`);
+console.log(`account.userId es ${cuenta!.userId.constructor.name}, igual que user._id: ${cuenta!.userId.equals(usuario!._id)}`);
+await cliente.close();
+```
+
+```bash
+node --env-file=.env scripts/i5/02-compatible.ts
+```
+
+```text
+account.password: cac457b6399b…  (161 caracteres)
+verificar("Gatito2019!"): true
+verificar("gatito2019!"): false
+account.userId es ObjectId, igual que user._id: true
+```
+
+- **El `verificar` de I5.1 acepta el _hash_ de Better Auth:** mismo algoritmo, mismos parámetros, mismo formato `sal:clave` de 161 caracteres.
+- **`account.userId` es un `ObjectId`,** igual que `user._id`. En cambio, las colecciones de la plataforma (`section_progress`, `quiz_attempts`) guardan el `userId` como **texto** (el `id` que da la sesión). Al cruzar datos de Better Auth con los tuyos, ten en cuenta el tipo.
+
+<Callout type="risk">
+
+- **No escribas en estas colecciones a mano:** cambiar un correo o borrar un usuario directamente en MongoDB deja huérfanas sus sesiones y cuentas. Usa la API de Better Auth (`auth.api.…`) o, si no hay más remedio, un _script_ que trate las cuatro colecciones juntas.
+- **Las sesiones caducadas que nadie vuelve a usar se quedan:** Better Auth borra una sesión caducada cuando llega una petición con ella, pero la de un usuario que no vuelve nunca se queda en la colección. Un índice TTL sobre `expiresAt` (B5.6) las borra automáticamente.
+- **La colección `user` tiene datos personales:** correos y nombres. Entra en tus _backups_ (Tanda 10) y en lo que no debe aparecer en los registros.
+
+</Callout>
+
+## Paso 5: el cliente de React
+
+En el navegador no se importa `auth.ts` (tiene el secreto). Se usa un **cliente** que llama a la API de `/api/auth/` por `fetch`. Crea `src/lib/auth-client.ts`:
+
+```ts
+// Archivo: src/lib/auth-client.ts
+// El cliente de Better Auth para los componentes de React (se ejecuta en el navegador)
+import { createAuthClient } from "better-auth/react";
+import { inferAdditionalFields } from "better-auth/client/plugins";
+import type { auth } from "./auth"; // import type: solo los tipos, el código del servidor no llega al navegador
+
+export const authClient = createAuthClient({
+  // Sin baseURL: usa el mismo origen que la página (http://localhost:4321)
+  plugins: [inferAdditionalFields<typeof auth>()],
+});
+```
+
+- **`import type { auth }`** trae solo los **tipos** del servidor: el cliente sabe que el usuario tiene `zonaHoraria` sin que ni una línea de `auth.ts` llegue al navegador. `inferAdditionalFields` es el _plugin_ que lo hace posible.
+- **Sin `baseURL`**, el cliente llama al mismo origen que la página, que es lo que quieres casi siempre.
+
+Un componente que lo usa, `src/components/SesionActual.tsx`:
+
+```tsx
+// Archivo: src/components/SesionActual.tsx
+// Quién ha iniciado sesión, leído en el navegador con el cliente de Better Auth
+import { authClient } from "../lib/auth-client";
+
+export default function SesionActual() {
+  const { data, isPending } = authClient.useSession(); // pide /api/auth/get-session y se actualiza solo
+
+  if (isPending) return <span id="sesion">…</span>;
+  if (!data) return <span id="sesion">Sin sesión</span>;
+
+  return (
+    <span id="sesion">
+      {data.user.name} · {data.user.zonaHoraria /* campo adicional, con su tipo */}{" "}
+      <button type="button" onClick={() => authClient.signOut()}>
+        Salir
+      </button>
+    </span>
+  );
+}
+```
+
+Añádelo a la barra de navegación del _layout_. Sustituye `src/layouts/Base.astro`:
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+import { PUBLIC_NOMBRE_APP } from "astro:env/client";
+import SesionActual from "../components/SesionActual";
+
+interface Props {
+  titulo: string;
+}
+const { titulo } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · {PUBLIC_NOMBRE_APP}</title>
+    <style is:global>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+      nav { display: flex; gap: 1rem; margin-bottom: 1rem; }
+    </style>
+  </head>
+  <body>
+    <nav><a href="/">Entrenos</a><a href="/estadisticas">Estadísticas</a><a href="/acerca">Acerca de</a><SesionActual client:load /></nav>
+    <slot />
+  </body>
+</html>
+```
+
+Probado en Chrome: abrir la página sin sesión, iniciar sesión, recargar y pulsar "Salir":
+
+```text
+sin sesión: Sin sesión
+tras iniciar sesión: Ana · America/Mexico_City Salir
+cookie: better-auth.session_token httpOnly: true sameSite: Lax secure: false JS la ve: false
+tras pulsar Salir: Sin sesión
+errores en consola: 0
+```
+
+- **`useSession`** pide `/api/auth/get-session` al montar el componente y se actualiza solo al iniciar o cerrar sesión: tras pulsar "Salir", el componente pasa a "Sin sesión" sin recargar la página.
+- **La _cookie_ `better-auth.session_token` es `httpOnly`:** el JavaScript de la página no puede leerla (`document.cookie` no la ve). Aunque un atacante consiguiera inyectar código en tu página (XSS, A5), no podría robar la sesión. `SameSite=Lax` impide que se envíe en peticiones POST desde otras webs. `secure: false` es solo porque `localhost` usa `http`; en producción, con `https`, Better Auth la marca `Secure`.
+
+<Callout type="risk">
+
+- **Si al añadir el componente aparece `Invalid hook call` en la consola del servidor:** Vite acaba de optimizar `better-auth/react` con el servidor en marcha y quedan dos copias de React cargadas. Para el servidor y arráncalo con `npm run dev -- --force`. Es el mismo problema de caché del `504 (Outdated Optimize Dep)` de I3.3.
+- **La sesión del cliente es para pintar la interfaz, no para proteger datos:** que `useSession` diga que no hay sesión no impide nada. La protección está en el servidor, en cada _endpoint_ (I5.3 e I5.4).
+- **`useSession` hace una petición por componente montado:** con la _cookie_ de caché de I5.3 es barata, pero no lo pongas en una lista de cien elementos. Léelo una vez arriba y pásalo por _props_ (I2.4).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Recorre las 4 colecciones de Better Auth después de registrarte, de cerrar sesión y de volver a iniciarla. Puedes hacerlo en Compass (I4.4) o con un _script_.
+2. Documenta qué cambia en cada paso: qué documentos se crean, cuáles se borran y cuáles no se tocan.
+
+</Callout>
+
+Solución con dos _scripts_, para que sea repetible. `scripts/i5/02-estado.ts` enseña las colecciones, sin mostrar los secretos completos:
+
+```ts
+// Archivo: scripts/i5/02-estado.ts
+// Qué hay en las 4 colecciones de Better Auth (sin enseñar secretos completos)
+// Uso: node --env-file=.env scripts/i5/02-estado.ts "título del paso"
+import { MongoClient } from "mongodb";
+
+const cliente = await MongoClient.connect(process.env.MONGODB_URI!);
+const db = cliente.db(process.env.MONGODB_DB);
+const corto = (v: unknown) => (typeof v === "string" && v.length > 16 ? `${v.slice(0, 8)}…(${v.length})` : v);
+const hora = (d: unknown) => (d instanceof Date ? d.toISOString().slice(11, 19) : d);
+
+console.log(`── ${process.argv[2] ?? "estado"}`);
+for (const nombre of ["user", "session", "account", "verification"]) {
+  const docs = await db.collection(nombre).find().toArray();
+  console.log(`  ${nombre} (${docs.length})`);
+  for (const d of docs) {
+    const resumen =
+      nombre === "user"
+        ? { email: d.email, name: d.name, emailVerified: d.emailVerified, zonaHoraria: d.zonaHoraria }
+        : nombre === "session"
+          ? { userId: corto(String(d.userId)), token: corto(d.token), expiresAt: d.expiresAt?.toISOString().slice(0, 10), ip: d.ipAddress, userAgent: corto(d.userAgent) }
+          : nombre === "account"
+            ? { providerId: d.providerId, accountId: corto(String(d.accountId)), password: corto(d.password) }
+            : { identifier: d.identifier, expiresAt: hora(d.expiresAt) };
+    console.log(`    ${JSON.stringify(resumen)}`);
+  }
+}
+await cliente.close();
+```
+
+`scripts/i5/02-flujo.sh` hace el recorrido con `curl` y llama al anterior en cada paso:
+
+```bash
+#!/bin/sh
+# Archivo: scripts/i5/02-flujo.sh
+# Registro → sesión → cerrar sesión → iniciar sesión → cerrar sesión, enseñando las colecciones en cada paso
+B=http://localhost:4321
+J=/tmp/entrenos-cookies.txt
+rm -f "$J"
+estado() { node --env-file=.env scripts/i5/02-estado.ts "$1"; }
+pedir() { # método ruta [cuerpo]
+  curl -s -b "$J" -c "$J" -o /tmp/entrenos-respuesta.json -w "  %{http_code} $1 $2\n" -X "$1" "$B$2" \
+    -H "origin: $B" -H "content-type: application/json" ${3:+-d "$3"}
+}
+
+estado "0. antes de nada"
+pedir POST /api/auth/sign-up/email '{"name":"Ana","email":"ana@entrenos.test","password":"Gatito2019!"}'
+estado "1. tras registrarse"
+pedir GET /api/auth/get-session
+echo "  get-session: $(head -c 160 /tmp/entrenos-respuesta.json)…"
+pedir POST /api/auth/sign-out '{}'
+estado "2. tras cerrar sesión"
+pedir POST /api/auth/sign-in/email '{"email":"ana@entrenos.test","password":"Gatito2019!"}'
+estado "3. tras iniciar sesión"
+```
+
+Con la base de datos vacía y el servidor en marcha (en la medición, en el puerto 4600):
+
+```bash
+sh scripts/i5/02-flujo.sh
+```
+
+```text
+── 0. antes de nada
+  user (0)
+  session (0)
+  account (0)
+  verification (0)
+  200 POST /api/auth/sign-up/email
+── 1. tras registrarse
+  user (1)
+    {"email":"ana@entrenos.test","name":"Ana","emailVerified":false,"zonaHoraria":"America/Mexico_City"}
+  session (1)
+    {"userId":"6ad27868…(24)","token":"sjnurrd5…(32)","expiresAt":"2026-10-23","ip":"127.0.0.1","userAgent":"curl/8.7.1"}
+  account (1)
+    {"providerId":"credential","accountId":"6ad27868…(24)","password":"cac457b6…(161)"}
+  verification (0)
+  200 GET /api/auth/get-session
+  get-session: {"session":{"expiresAt":"2026-10-23T19:18:00.752Z","token":"sjnurrd5…","createdAt":"2026-10-16T19:18:00.752Z","updatedAt":"2026-10-16T19:…
+  200 POST /api/auth/sign-out
+── 2. tras cerrar sesión
+  user (1)
+    {"email":"ana@entrenos.test","name":"Ana","emailVerified":false,"zonaHoraria":"America/Mexico_City"}
+  session (0)
+  account (1)
+    {"providerId":"credential","accountId":"6ad27868…(24)","password":"cac457b6…(161)"}
+  verification (0)
+  200 POST /api/auth/sign-in/email
+── 3. tras iniciar sesión
+  user (1)
+    {"email":"ana@entrenos.test","name":"Ana","emailVerified":false,"zonaHoraria":"America/Mexico_City"}
+  session (1)
+    {"userId":"6ad27868…(24)","token":"zGfvQYi5…(32)","expiresAt":"2026-10-23","ip":"127.0.0.1","userAgent":"curl/8.7.1"}
+  account (1)
+    {"providerId":"credential","accountId":"6ad27868…(24)","password":"cac457b6…(161)"}
+  verification (0)
+```
+
+| Paso           | `user`   | `session`                | `account`                        | `verification` |
+| -------------- | -------- | ------------------------ | -------------------------------- | -------------- |
+| Registrarse    | +1 (Ana) | +1 (`autoSignIn`)        | +1 (`credential`, con el _hash_) | —              |
+| Cerrar sesión  | —        | −1: se **borra**         | —                                | —              |
+| Iniciar sesión | —        | +1, con un _token_ nuevo | —                                | —              |
+
+- **Cerrar sesión borra el documento de la sesión,** no solo la _cookie_. Si alguien copió la _cookie_ antes, ya no le sirve: el _token_ no existe.
+- **Cada inicio de sesión crea una sesión nueva:** con dos dispositivos, Ana tendría dos documentos en `session`. Cerrar sesión en uno no cierra el otro.
+- **`verification` sigue vacía:** solo se usa con la verificación de correo o la recuperación de contraseña, que esta app no tiene activadas.
+
+<Callout type="risk">
+
+- **El _token_ de la sesión es una contraseña temporal:** el _script_ enseña solo los 8 primeros caracteres. Quien tenga el _token_ completo tiene la sesión. No lo registres, no lo pegues en un _issue_ y no lo enseñes en capturas de pantalla.
+- **Haz estas pruebas con correos de prueba** (`@entrenos.test`, un dominio que no existe) y bórralos al terminar. Los E2E de esta plataforma van más allá: usan una base de datos en memoria que se descarta al acabar (Tanda 9).
+
+</Callout>
+
+<Callout type="mastery">
+
+Puedes configurar Better Auth en un proyecto nuevo sin copiar de otro: instalas la librería y el adaptador, declaras el secreto y la URL en `astro:env`, creas `auth.ts` con el adaptador de MongoDB y los campos adicionales, la ruta _catch-all_ pública en el _middleware_ y el cliente de React con los tipos del servidor; y sabes qué escribe en cada colección en cada paso.
+
+</Callout>
+
+## Resumen
+
+- `betterAuth({ database: mongodbAdapter(db, { client }), emailAndPassword, user: { additionalFields } })` en `src/lib/auth.ts`, solo de servidor.
+- Una ruta `src/pages/api/auth/[...all].ts` con `export const ALL = (ctx) => auth.handler(ctx.request)`, pública en el _middleware_.
+- Better Auth rechaza con `INVALID_ORIGIN` las peticiones de un `Origin` distinto de `BETTER_AUTH_URL`.
+- `user`, `session` (una por sesión abierta), `account` (el _hash_, en `password`) y `verification` (_tokens_ temporales).
+- `createAuthClient` con `inferAdditionalFields<typeof auth>()` para React; la _cookie_ de sesión es `httpOnly` y `SameSite=Lax`.
