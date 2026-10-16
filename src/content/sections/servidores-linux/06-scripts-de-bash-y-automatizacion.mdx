@@ -1,0 +1,420 @@
+---
+sectionId: "I6.6"
+course: "I6"
+title: "Scripts de Bash y automatización"
+order: 6
+minutes: 75
+summary: "Mides lo que evita set -euo pipefail, escribes un backup con variables, condicionales, bucles y funciones, lo programas con cron, rotas sus registros con logrotate y haces un backup de MongoDB que de verdad se restaura."
+---
+
+Todo lo que haces más de dos veces en un servidor debería ser un **_script_**: un archivo con los comandos, que se ejecuta igual cada vez. Y lo que tiene que pasar sin que nadie se acuerde, como el _backup_ de cada noche, se programa con **`cron`**. Un _script_ mal escrito es peligroso precisamente porque nadie lo mira: si falla en silencio, el día que necesites el _backup_ descubrirás que lleva semanas vacío. En esta sección vas a escribir _scripts_ de Bash que se paran al primer error, vas a programarlos, vas a rotar sus registros y vas a terminar con un _backup_ de base de datos comprobado restaurándolo.
+
+**Lo que tendrás al terminar:** `backup.sh` (copia de la carpeta de la app, con rotación), `backup-bd.sh` (copia de MongoDB con `mongodump`), los dos programados con `cron` y sus registros rotados con `logrotate`.
+
+**Requisitos:** el servidor de I6.5 con `ssh academy`. Los comandos se escriben en el servidor, como `deploy`.
+
+## Paso 1: `set -euo pipefail`, que el _script_ se pare
+
+Por defecto, Bash **sigue adelante** cuando un comando falla. Compruébalo con un _script_ que copia una carpeta con una errata en el nombre. Crea `~/sin-set.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: ~/sin-set.sh — sin protección
+ORIGEN="/opt/entrenos-con-errata"
+tar czf /tmp/copia.tar.gz "$ORIGEN"
+echo "Backup OK: /tmp/copia.tar.gz"
+```
+
+La misma con una línea más, `~/con-set.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: ~/con-set.sh — con set -euo pipefail
+set -euo pipefail
+ORIGEN="/opt/entrenos-con-errata"
+tar czf /tmp/copia.tar.gz "$ORIGEN"
+echo "Backup OK: /tmp/copia.tar.gz"
+```
+
+Y dos casos más que esa línea cubre, una variable mal escrita (`~/variables.sh`) y un fallo en medio de una tubería (`~/pipefail.sh`):
+
+```bash
+#!/usr/bin/env bash
+# Archivo: ~/variables.sh — set -u con una variable mal escrita
+set -euo pipefail
+DESTINO="/var/backups/entrenos"
+echo "Borrando copias antiguas en ${DESTIN0}"   # errata: un cero en lugar de una O
+```
+
+```bash
+#!/usr/bin/env bash
+# Archivo: ~/pipefail.sh — un fallo en medio de una tubería
+set -eu
+cat /no/existe.log | grep ERROR | wc -l
+echo "sin pipefail: el script sigue, con un 0 que parece correcto"
+set -o pipefail
+cat /no/existe.log | grep ERROR | wc -l
+echo "esta línea no se ejecuta"
+```
+
+```text
+$ chmod +x sin-set.sh con-set.sh variables.sh pipefail.sh
+$ ./sin-set.sh; echo "código de salida: $?"
+tar: Removing leading `/' from member names
+tar: /opt/entrenos-con-errata: Cannot stat: No such file or directory
+tar: Exiting with failure status due to previous errors
+Backup OK: /tmp/copia.tar.gz
+código de salida: 0
+$ ./con-set.sh; echo "código de salida: $?"
+tar: Removing leading `/' from member names
+tar: /opt/entrenos-con-errata: Cannot stat: No such file or directory
+tar: Exiting with failure status due to previous errors
+código de salida: 2
+$ ./variables.sh; echo "código de salida: $?"
+./variables.sh: line 5: DESTIN0: unbound variable
+código de salida: 1
+$ ./pipefail.sh; echo "código de salida: $?"
+cat: /no/existe.log: No such file or directory
+0
+sin pipefail: el script sigue, con un 0 que parece correcto
+cat: /no/existe.log: No such file or directory
+0
+código de salida: 1
+```
+
+- **Sin `set -e`, el _script_ miente:** `tar` falla, pero el _script_ dice `Backup OK` y termina con código **0**, que para `cron` y para cualquier otro programa significa "todo bien".
+- **`-e`** (_errexit_) para el _script_ en el primer comando que falla, y devuelve su código (2, el de `tar`).
+- **`-u`** (_nounset_) para con una variable sin definir: `DESTIN0` (con un cero) habría sido una cadena vacía, y un `rm -rf "${DESTIN0}/"*` habría borrado desde la raíz.
+- **`-o pipefail`:** sin él, una tubería solo informa del **último** comando. `cat` falla, pero `wc -l` responde `0` y el _script_ sigue, con un resultado que parece correcto. Con `pipefail`, la tubería falla si falla cualquiera de sus comandos.
+
+<Callout type="risk">
+
+- **La primera línea, siempre `#!/usr/bin/env bash`**, y justo debajo `set -euo pipefail`. Sin el `#!`, el _script_ se ejecuta con la _shell_ que tenga quien lo lance (en Ubuntu, `sh` es `dash`, que no entiende `[[` ni los arrays).
+- **`set -e` tiene excepciones:** no para en los comandos de un `if`, ni con `||` o `&&`. Es lo esperado (`if comando; then` sirve para preguntar si falla), pero un `comando || true` desactiva la protección a propósito.
+- **Comillas en todas las variables** (I6.1): `"$ORIGEN"`, no `$ORIGEN`.
+
+</Callout>
+
+## Paso 2: un _script_ de verdad, variables, condicionales, bucles y funciones
+
+Prepara las carpetas (una vez, con `sudo`):
+
+```bash
+sudo mkdir -p /var/backups/entrenos /var/log/entrenos /opt/entrenos/scripts
+sudo chown deploy:deploy /var/backups/entrenos /var/log/entrenos /opt/entrenos/scripts
+sudo chmod 750 /var/backups/entrenos
+```
+
+Crea `/opt/entrenos/scripts/backup.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: /opt/entrenos/scripts/backup.sh
+# Copia comprimida de la carpeta de la app y rotación: solo se guardan las últimas $CONSERVAR
+set -euo pipefail
+
+ORIGEN="/opt/entrenos"
+DESTINO="/var/backups/entrenos"
+CONSERVAR=7
+FECHA=$(date +%F_%H%M%S)
+ARCHIVO="$DESTINO/entrenos-$FECHA.tar.gz"
+
+log() {
+  echo "$(date '+%F %T') $*"
+}
+
+if [[ ! -d "$ORIGEN" ]]; then
+  log "✗ No existe $ORIGEN"
+  exit 1
+fi
+
+mkdir -p "$DESTINO"
+# -C: entra en /opt para que el archivo contenga "entrenos/…" y no la ruta absoluta
+tar czf "$ARCHIVO" --exclude="entrenos/dist" -C "$(dirname "$ORIGEN")" "$(basename "$ORIGEN")"
+chmod 600 "$ARCHIVO" # lleva el .env dentro: solo para deploy
+log "✓ Copia: $ARCHIVO ($(du -h "$ARCHIVO" | cut -f1))"
+
+# Rotación: de más reciente a más antigua, se borran todas a partir de la $CONSERVAR
+mapfile -t copias < <(ls -1t "$DESTINO"/entrenos-*.tar.gz)
+for vieja in "${copias[@]:$CONSERVAR}"; do
+  rm -- "$vieja"
+  log "  borrada la antigua $(basename "$vieja")"
+done
+log "  copias guardadas: $(ls -1 "$DESTINO"/entrenos-*.tar.gz | wc -l)"
+```
+
+| Construcción            | En el _script_                                      | Qué hace                                              |
+| ----------------------- | --------------------------------------------------- | ----------------------------------------------------- |
+| Variable                | `DESTINO="/var/backups/entrenos"`                   | Sin espacios alrededor del `=`                        |
+| Sustitución de comandos | `FECHA=$(date +%F_%H%M%S)`                          | Guarda la salida de un comando                        |
+| Función                 | `log() { … }`                                       | Reutiliza un bloque; `$*` son sus argumentos          |
+| Condicional             | `if [[ ! -d "$ORIGEN" ]]; then … fi`                | `-d` existe y es carpeta; `!` niega                   |
+| Array                   | `mapfile -t copias < <(ls -1t …)`                   | Una lista con una línea de la salida en cada elemento |
+| Bucle                   | `for vieja in "${copias[@]:$CONSERVAR}"; do … done` | Recorre los elementos a partir del 7.º                |
+
+Ejecútalo varias veces para ver la rotación:
+
+```text
+$ chmod 750 /opt/entrenos/scripts/backup.sh
+$ /opt/entrenos/scripts/backup.sh
+2026-10-16 14:33:57 ✓ Copia: /var/backups/entrenos/entrenos-2026-10-16_143357.tar.gz (4.0K)
+2026-10-16 14:33:57   copias guardadas: 1
+$ for i in 1 2 3 4 5 6 7 8; do sleep 1; /opt/entrenos/scripts/backup.sh > /dev/null; done
+$ /opt/entrenos/scripts/backup.sh
+2026-10-16 14:34:26 ✓ Copia: /var/backups/entrenos/entrenos-2026-10-16_143425.tar.gz (4.0K)
+2026-10-16 14:34:26   borrada la antigua entrenos-2026-10-16_143359.tar.gz
+2026-10-16 14:34:26   copias guardadas: 7
+$ ls -l /var/backups/entrenos
+total 28
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143400.tar.gz
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143401.tar.gz
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143402.tar.gz
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143403.tar.gz
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143404.tar.gz
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143405.tar.gz
+-rw------- 1 deploy deploy 2091 Oct 16 14:34 entrenos-2026-10-16_143425.tar.gz
+$ tar tzf "$(ls -1t /var/backups/entrenos/*.tar.gz | head -n 1)"
+entrenos/
+entrenos/servidor.mjs
+entrenos/.env.example
+entrenos/config.env
+entrenos/scripts/
+entrenos/scripts/backup.sh
+entrenos/servidor.log
+entrenos/.env
+```
+
+- **Cada copia lleva la fecha y la hora en el nombre**, así que se ordenan solas y nunca se pisan (salvo dos en el mismo segundo).
+- **La rotación deja siempre las 7 más recientes:** la octava borra la más antigua.
+- **`chmod 600`:** la copia lleva dentro el `.env`, así que solo la lee `deploy`.
+- **`tar tzf` lista el contenido sin descomprimir:** la carpeta `entrenos/` sin `dist` (que se reconstruye con `npm run build`, no hace falta copiarlo).
+
+<Callout type="risk">
+
+- **Un _backup_ en el mismo servidor no protege del servidor:** si el disco falla o el servidor se borra, las copias se van con él. Cópialas fuera (`rsync` a otra máquina, I6.3, o a un almacenamiento externo), como hiciste en la Tanda 10 con la base de datos.
+- **`rm` en un _script_ que se ejecuta solo, con muchísimo cuidado:** este solo borra rutas que `ls` encontró con un patrón concreto (`"$DESTINO"/entrenos-*.tar.gz`) y usa `--` para que un nombre raro no se interprete como una opción.
+
+</Callout>
+
+## Paso 3: programarlo con `cron`
+
+**`cron`** ejecuta comandos a horas fijas. Cada usuario tiene su tabla (_crontab_), con una línea por tarea:
+
+```text
+┌───────── minuto (0-59)
+│ ┌─────── hora (0-23)
+│ │ ┌───── día del mes (1-31)
+│ │ │ ┌─── mes (1-12)
+│ │ │ │ ┌─ día de la semana (0-7, 0 y 7 son domingo)
+│ │ │ │ │
+0 3 * * *  /opt/entrenos/scripts/backup.sh >> /var/log/entrenos/backup.log 2>&1
+```
+
+`*` es "cualquiera": la línea de abajo significa "a las 3:00, todos los días". Edita tu tabla con `crontab -e` (la primera vez pregunta qué editor usar; `nano` es el más sencillo). Para comprobar que funciona sin esperar a las 3:00, ponlo primero **cada minuto** (`* * * * *`), y dos minutos después:
+
+```text
+$ crontab -l
+* * * * * /opt/entrenos/scripts/backup.sh >> /var/log/entrenos/backup.log 2>&1
+$ cat /var/log/entrenos/backup.log
+2026-10-16 14:35:01 ✓ Copia: /var/backups/entrenos/entrenos-2026-10-16_143501.tar.gz (4.0K)
+2026-10-16 14:35:01   borrada la antigua entrenos-2026-10-16_143400.tar.gz
+2026-10-16 14:35:01   copias guardadas: 7
+2026-10-16 14:36:01 ✓ Copia: /var/backups/entrenos/entrenos-2026-10-16_143601.tar.gz (4.0K)
+2026-10-16 14:36:01   borrada la antigua entrenos-2026-10-16_143401.tar.gz
+2026-10-16 14:36:01   copias guardadas: 7
+$ sudo journalctl -u cron -n 2 --no-pager -o cat
+(deploy) CMD (/opt/entrenos/scripts/backup.sh >> /var/log/entrenos/backup.log 2>&1)
+pam_unix(cron:session): session closed for user deploy
+```
+
+- **`>> backup.log 2>&1`:** `cron` no tiene pantalla. Sin la redirección, la salida y los errores se pierden (o se intentan enviar por correo local, que nadie lee).
+- **El diario de `cron`** (con `sudo`) registra cada ejecución: qué comando lanzó y para qué usuario.
+- **Cuando funcione, vuelve a `0 3 * * *`:** un _backup_ cada minuto llenaría el disco.
+
+<Callout type="risk">
+
+- **`cron` usa la zona horaria del servidor:** muchos VPS están en UTC, así que `0 3` son las 21:00 del día anterior en Ciudad de México. Compruébalo con `timedatectl` y elige la hora en consecuencia (de madrugada para tus usuarios).
+- **Que `cron` lo ejecute no significa que funcione:** el registro es la prueba. Revísalo de vez en cuando, o haz que el _script_ avise si falla (un correo o un mensaje).
+
+</Callout>
+
+## Paso 4: rotar los registros con `logrotate`
+
+`backup.log` crece con cada ejecución, para siempre. **`logrotate`**, que Ubuntu ejecuta a diario, lo rota: lo renombra, comprime los antiguos y borra los muy viejos. Crea `/etc/logrotate.d/entrenos` (con `sudo`):
+
+```bash
+# Archivo: /etc/logrotate.d/entrenos
+/var/log/entrenos/*.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su deploy deploy
+}
+```
+
+```text
+$ sudo logrotate -d /etc/logrotate.d/entrenos 2>&1 | grep -E "rotating pattern|considering log|log needs rotating|log does not need" | head -n 4
+rotating pattern: /var/log/entrenos/*.log weekly empty log files are not rotated, (8 rotations), old logs are removed
+considering log /var/log/entrenos/backup.log
+  log does not need rotating (log has already been rotated)
+$ sudo logrotate -f /etc/logrotate.d/entrenos && ls -l /var/log/entrenos
+total 4
+-rw-rw-r-- 1 deploy deploy 422 Oct 16 14:36 backup.log.1
+$ sudo -iu deploy bash -c '/opt/entrenos/scripts/backup.sh >> /var/log/entrenos/backup.log 2>&1' && sudo logrotate -f /etc/logrotate.d/entrenos && ls -l /var/log/entrenos
+total 8
+-rw-r--r-- 1 deploy deploy 211 Oct 16 14:37 backup.log.1
+-rw-rw-r-- 1 deploy deploy 168 Oct 16 14:36 backup.log.2.gz
+```
+
+- **`weekly` y `rotate 8`:** una rotación por semana, conservando 8 (dos meses).
+- **`-d` (_debug_) prueba la configuración sin tocar nada**; `-f` fuerza una rotación ahora.
+- **`delaycompress`:** la copia más reciente (`.1`) queda sin comprimir, por si algún programa aún escribe en ella; la anterior pasa a `.2.gz`.
+- **`su deploy deploy`:** `logrotate` trabaja como `deploy`, el dueño de la carpeta. En esta carpeta (`755`) también funcionaría sin él (comprobado), pero si la carpeta fuera escribible por el grupo o por otros usuarios, `logrotate` se negaría a rotarla por considerarlo inseguro.
+
+<Callout type="risk">
+
+- **Sin `missingok`, un registro que aún no existe es un error,** y `logrotate` lo avisa cada día. `notifempty` evita rotar archivos vacíos.
+- **Los servicios de `systemd` no necesitan esto:** su salida va al diario (I6.4), que tiene su propia rotación. `logrotate` es para los archivos que escriben tus _scripts_.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe un _script_ que haga el _backup_ de la base de datos de tu Planificador con `mongodump`, leyendo la conexión de `/opt/entrenos/.env` y borrando las copias de más de 7 días.
+2. Comprueba que funciona en el entorno vacío de `cron`, y no solo desde tu terminal.
+3. Prográmalo con `cron` y comprueba que la copia se puede **restaurar**.
+
+</Callout>
+
+Solución. Instala las MongoDB Database Tools (el paquete oficial para Ubuntu, de mongodb.com/try/download/database-tools; en la medición, la versión 100.13.0):
+
+```bash
+curl -fsSLO https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-arm64-100.13.0.deb
+sudo apt install -y ./mongodb-database-tools-ubuntu2404-arm64-100.13.0.deb
+```
+
+(`arm64` es para Mac con Apple Silicon; en un VPS con Intel o AMD, `x86_64`.) Pon la conexión de tu base de datos en `/opt/entrenos/.env` (`MONGODB_URI=…`, con permisos `600`). En la medición, la base de datos `planificador` está en otra máquina, igual que Atlas lo está de tu VPS. Crea `/opt/entrenos/scripts/backup-bd.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: /opt/entrenos/scripts/backup-bd.sh
+# Backup de la base de datos con mongodump, rotado por antigüedad. Pensado para cron.
+set -euo pipefail
+
+ENV_FILE="/opt/entrenos/.env"
+DESTINO="/var/backups/planificador"
+DIAS=7 # se borran las copias de más de 7 días
+
+# cron no carga tu sesión: la conexión se lee del .env, no de la terminal
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "✗ No puedo leer $ENV_FILE" >&2
+  exit 1
+fi
+set -a # exporta todo lo que se defina mientras está activo
+source "$ENV_FILE"
+set +a
+: "${MONGODB_URI:?Falta MONGODB_URI en $ENV_FILE}" # para con un mensaje claro si no está
+
+FECHA=$(date +%F_%H%M%S)
+ARCHIVO="$DESTINO/planificador-$FECHA.archive.gz"
+mkdir -p "$DESTINO"
+
+mongodump --uri="$MONGODB_URI" --archive="$ARCHIVO" --gzip --quiet
+chmod 600 "$ARCHIVO"
+echo "$(date '+%F %T') ✓ $ARCHIVO ($(du -h "$ARCHIVO" | cut -f1))"
+
+# Rotación por antigüedad: -mtime +7 son los modificados hace más de 7 días
+find "$DESTINO" -name 'planificador-*.archive.gz' -mtime +"$DIAS" -print -delete | sed 's/^/  borrada la antigua /'
+```
+
+La trampa de `cron`: **no carga tu sesión**. Un _script_ que da por hecho que `MONGODB_URI` existe (porque la exportaste en la terminal o en `~/.bashrc`) funciona a mano y falla en `cron`. `env -i` ejecuta un comando con el entorno vacío, como `cron`:
+
+```text
+$ export MONGODB_URI="mongodb://192.168.64.1:27300/planificador"
+$ /opt/entrenos/scripts/backup-bd-ingenuo.sh
+✓ backup hecho
+$ env -i /opt/entrenos/scripts/backup-bd-ingenuo.sh; echo "código de salida: $?"
+/opt/entrenos/scripts/backup-bd-ingenuo.sh: line 4: MONGODB_URI: unbound variable
+código de salida: 1
+$ env -i /opt/entrenos/scripts/backup-bd.sh; echo "código de salida: $?"
+2026-10-16 14:40:03 ✓ /var/backups/planificador/planificador-2026-10-16_144003.archive.gz (4.0K)
+código de salida: 0
+```
+
+La rotación por antigüedad, con dos copias falsas de hace 10 y 3 días (`touch -d` cambia su fecha):
+
+```text
+$ rm -f /opt/entrenos/scripts/backup-bd-ingenuo.sh /var/backups/planificador/prueba.archive.gz
+$ touch -d "10 days ago" /var/backups/planificador/planificador-2026-10-06_030000.archive.gz
+$ touch -d "3 days ago" /var/backups/planificador/planificador-2026-10-13_030000.archive.gz
+$ ls -lt /var/backups/planificador
+total 4
+-rw------- 1 deploy deploy 1382 Oct 16 14:40 planificador-2026-10-16_144003.archive.gz
+-rw-rw-r-- 1 deploy deploy    0 Oct 13 14:40 planificador-2026-10-13_030000.archive.gz
+-rw-rw-r-- 1 deploy deploy    0 Oct  6 14:40 planificador-2026-10-06_030000.archive.gz
+$ /opt/entrenos/scripts/backup-bd.sh
+2026-10-16 14:40:16 ✓ /var/backups/planificador/planificador-2026-10-16_144016.archive.gz (4.0K)
+  borrada la antigua /var/backups/planificador/planificador-2026-10-06_030000.archive.gz
+$ ls -lt /var/backups/planificador
+total 8
+-rw------- 1 deploy deploy 1385 Oct 16 14:40 planificador-2026-10-16_144016.archive.gz
+-rw------- 1 deploy deploy 1382 Oct 16 14:40 planificador-2026-10-16_144003.archive.gz
+-rw-rw-r-- 1 deploy deploy    0 Oct 13 14:40 planificador-2026-10-13_030000.archive.gz
+```
+
+Y desde `cron` (primero cada minuto, para comprobarlo):
+
+```text
+$ crontab -l
+0 3 * * * /opt/entrenos/scripts/backup.sh >> /var/log/entrenos/backup.log 2>&1
+* * * * * /opt/entrenos/scripts/backup-bd.sh >> /var/log/entrenos/backup-bd.log 2>&1
+$ cat /var/log/entrenos/backup-bd.log
+2026-10-16 14:41:01 ✓ /var/backups/planificador/planificador-2026-10-16_144101.archive.gz (4.0K)
+```
+
+Un _backup_ que no se ha restaurado nunca es una esperanza, no un _backup_. Restáuralo en una base de datos **distinta**, para no tocar la original, y cuenta lo que hay:
+
+```text
+$ ULTIMA=$(ls -1t /var/backups/planificador/planificador-*.archive.gz | head -n 1)
+$ mongorestore --uri="mongodb://192.168.64.1:27300" --archive="$ULTIMA" --gzip --nsFrom='planificador.*' --nsTo='restaurado.*' 2>&1 | tail -n 1
+2026-10-16T14:41:44.659-0600	122 document(s) restored successfully. 0 document(s) failed to restore.
+$ mongodump --uri="mongodb://192.168.64.1:27300/restaurado" --archive=/dev/null 2>&1 | grep done
+2026-10-16T14:41:44.668-0600	done dumping restaurado.categorias (2 documents)
+2026-10-16T14:41:44.669-0600	done dumping restaurado.tareas (120 documents)
+$ (crontab -l | grep -v backup-bd; echo "30 3 * * * /opt/entrenos/scripts/backup-bd.sh >> /var/log/entrenos/backup-bd.log 2>&1") | crontab - && crontab -l
+0 3 * * * /opt/entrenos/scripts/backup.sh >> /var/log/entrenos/backup.log 2>&1
+30 3 * * * /opt/entrenos/scripts/backup-bd.sh >> /var/log/entrenos/backup-bd.log 2>&1
+```
+
+- **`source` con `set -a`** carga el `.env` y exporta sus variables para `mongodump`.
+- **`: "${MONGODB_URI:?…}"`** para con un mensaje claro si falta la variable, en lugar del `unbound variable` genérico.
+- **`find -mtime +7 -delete`** borra solo la copia de hace 10 días y deja la de hace 3.
+- **`--nsFrom` y `--nsTo`** restauran `planificador.*` como `restaurado.*`: 122 documentos (120 tareas y 2 categorías), los mismos del original. Después, borra la base `restaurado`.
+- **La tabla final** tiene los dos _backups_ a diario, separados media hora.
+
+<Callout type="risk">
+
+- **El `.env` del servidor da acceso a la base de datos:** permisos `600` y, si puedes, un usuario de Atlas solo de lectura para el _backup_ (el `academy_backup` de la Tanda 10).
+- **MongoDB 8.0 no arranca en núcleos de Linux 6.19 o posteriores:** en Ubuntu 26.04 (núcleo 7.0), `mongod` sale con `Linux kernel versions 6.19 and newer has a known incompatibility with this version of MongoDB` (SERVER-121912). Si necesitas MongoDB en tu propio servidor, comprueba la compatibilidad antes; con Atlas, el problema no existe.
+- **`mongodump` a un archivo en el mismo servidor no basta** (Paso 2): copia el resultado fuera.
+
+</Callout>
+
+<Callout type="mastery">
+
+Automatizas una tarea repetitiva con un _script_ en lugar de hacerla a mano: lo empiezas con `set -euo pipefail`, usas variables entre comillas, condicionales, bucles y funciones, lo programas con `cron` sin depender de tu sesión, rotas sus registros con `logrotate` y compruebas el resultado, porque el único _backup_ que vale es el que has restaurado.
+
+</Callout>
+
+## Resumen
+
+- `#!/usr/bin/env bash` y `set -euo pipefail`: parar en el primer error, en variables sin definir y en tuberías rotas.
+- Variables entre comillas, `$(…)`, funciones, `if [[ … ]]`, arrays y `for`.
+- `crontab -e` con `minuto hora día mes día-semana`, siempre con `>> archivo.log 2>&1` y sin contar con tu entorno.
+- `logrotate` en `/etc/logrotate.d/` para los registros de tus _scripts_; `-d` para probar.
+- Un _backup_ se comprueba restaurándolo (`mongorestore --nsFrom/--nsTo` en otra base de datos) y se guarda fuera del servidor.

@@ -1,0 +1,355 @@
+---
+sectionId: "I6.2"
+course: "I6"
+title: "Usuarios, permisos y paquetes"
+order: 2
+minutes: 75
+summary: "Creas un servidor Ubuntu de práctica con Lima, un usuario deploy con sudo, lees y cambias permisos rwx en octal, das acceso por grupo a la carpeta de la app y gestionas paquetes con apt."
+---
+
+Un servidor lo comparten varios usuarios y programas: tú, el usuario con el que se ejecuta la app, el servidor web, la base de datos. Linux decide qué puede hacer cada uno con **usuarios, grupos y permisos**, y casi todos los fallos de "no funciona en el servidor" (y muchos de seguridad) tienen que ver con ellos: un `.env` que lee cualquiera, una app que no puede escribir sus registros, un _script_ que no se puede ejecutar. En esta sección vas a crear tu servidor de práctica, un usuario para desplegar, y vas a leer y cambiar permisos hasta que `-rw-r--r--` te diga, de un vistazo, quién puede hacer qué. También instalarás programas con `apt`.
+
+**Lo que tendrás al terminar:** un servidor Ubuntu en tu Mac, el usuario `deploy` con `sudo`, la carpeta `/opt/entrenos` con permisos de grupo y soltura con `chmod`, `chown` y `apt`.
+
+**Requisitos:** I6.1, un Mac con Apple Silicon o Intel, unos 3 GB libres y [Homebrew](https://brew.sh).
+
+## Paso 1: tu servidor de práctica con Lima
+
+Para practicar sin miedo a romper nada (ni pagar) necesitas un Linux de verdad. Un contenedor de Docker no sirve: no tiene `systemd` (I6.4) ni _firewall_ (I6.5). **Lima** crea una máquina virtual con Ubuntu dentro de tu Mac, gratis y desde la terminal:
+
+```bash
+brew install lima
+limactl create --name=academy --cpus=2 --memory=2 --disk=10 --tty=false \
+  --set '.mounts=[] | .networks=[{"vzNAT":true}]' template:ubuntu-lts
+limactl start academy
+limactl shell academy
+```
+
+- **`--set '.mounts=[]'`:** por defecto, Lima comparte tu carpeta personal del Mac con la máquina virtual. Así no: lo que hagas dentro del servidor no puede tocar tus archivos.
+- **`.networks=[{"vzNAT":true}]`:** da al servidor una IP propia en una red interna con tu Mac (`192.168.64.x`). La usarás en I6.5 para comprobar el _firewall_ desde fuera.
+- **`limactl shell academy`** abre una terminal **dentro** del servidor. El indicador cambia y estás en Ubuntu: todo lo que escribas a partir de aquí, hasta `exit`, se ejecuta allí.
+
+En la medición, el servidor es Ubuntu 26.04 LTS. Lima crea un usuario con tu mismo nombre del Mac y con `sudo` sin contraseña (en las salidas aparece como `tu-usuario`). En un VPS real, el primer acceso suele ser como `root`, y lo primero que se hace es justo lo de este paso: crear otro usuario y dejar de usar `root`.
+
+<Callout type="risk">
+
+- **Cuando acabes el curso, bórralo:** `limactl stop academy` lo apaga y `limactl delete academy` lo elimina con su disco. Mientras está encendido usa 2 GB de RAM.
+- **Mira siempre en qué terminal estás:** el indicador dice si estás en tu Mac o en el servidor. Un `sudo` en el sitio equivocado es el error más fácil de cometer en este curso.
+
+</Callout>
+
+## Paso 2: usuarios, grupos, `root` y `sudo`
+
+Cada usuario tiene un número (UID), un grupo principal y, opcionalmente, otros grupos. **`root`** (UID 0) puede hacer cualquier cosa, sin ninguna comprobación de permisos. Por eso no se trabaja con él: se trabaja con un usuario normal que usa **`sudo`** para las tareas de administración, una a una y quedando registradas. Crea el usuario con el que desplegarás la app:
+
+```bash
+sudo adduser --disabled-password --comment "" deploy
+sudo passwd deploy
+```
+
+`--disabled-password` crea el usuario sin contraseña para entrar (en I6.3 entrará por SSH con una clave). `passwd` le pone una contraseña, que es la que pedirá `sudo`: escríbela dos veces, larga y distinta de cualquier otra. Comprobado en el servidor:
+
+```text
+$ whoami
+tu-usuario
+$ id
+uid=501(tu-usuario) gid=1000(tu-usuario) groups=1000(tu-usuario),999(systemd-journal)
+$ sudo adduser --disabled-password --comment "" deploy
+usermod: no changes
+$ groups deploy
+deploy : deploy users
+$ sudo usermod -aG sudo deploy
+$ groups deploy
+deploy : deploy sudo users
+$ getent passwd deploy
+deploy:x:1001:1001::/home/deploy:/bin/bash
+$ sudo -l -U deploy
+User deploy may run the following commands on lima-academy:
+    (ALL : ALL) ALL
+$ ls /root
+ls: cannot open directory '/root': Permission denied
+$ sudo ls -a /root
+.
+..
+.bashrc
+.profile
+.ssh
+```
+
+- **`id`** da el UID, el grupo principal y los demás grupos. `systemd-journal` permite al usuario de Lima leer los registros del sistema (I6.4).
+- **`usermod -aG sudo deploy`** añade `deploy` al grupo `sudo`. La `-a` (_append_) es crucial: sin ella, `-G` **sustituye** todos sus grupos por los indicados.
+- **`sudo -l -U deploy`** lista qué puede hacer con `sudo`: `(ALL : ALL) ALL`, cualquier comando como cualquier usuario.
+- **`/root` es de `root`:** sin `sudo`, ni siquiera se puede listar.
+- **`/etc/passwd`** guarda los usuarios (`getent passwd deploy`): nombre, UID 1001, GID 1001, carpeta personal y _shell_. La contraseña no está ahí: está, cifrada, en `/etc/shadow`, que solo lee `root`.
+
+<Callout type="risk">
+
+- **`usermod -G` sin `-a` es un clásico:** `sudo usermod -G docker deploy` deja a `deploy` **solo** en `docker`, sin `sudo`. Si ese era tu único usuario administrador, te has quedado sin forma de administrar el servidor.
+- **Los grupos nuevos se aplican en la siguiente sesión:** si añades tu propio usuario a un grupo, `groups` no lo mostrará hasta que salgas y vuelvas a entrar.
+- **Ubuntu 26.04 usa `sudo-rs`**, una reescritura de `sudo` en Rust (`sudo --version`: `sudo-rs 0.2.13`), y algunos mensajes cambian, como el que verás en el ejercicio. Los comandos y el archivo `/etc/sudoers` son los mismos.
+
+</Callout>
+
+## Paso 3: leer y cambiar permisos
+
+Cada archivo tiene un **dueño**, un **grupo** y tres juegos de permisos: para el dueño, para el grupo y para todos los demás. Cada juego tiene tres letras:
+
+| Letra | En un archivo            | En una carpeta                                 | Valor |
+| ----- | ------------------------ | ---------------------------------------------- | ----- |
+| `r`   | Leer el contenido        | Listar lo que contiene                         | 4     |
+| `w`   | Modificarlo              | Crear, borrar o renombrar lo que contiene      | 2     |
+| `x`   | Ejecutarlo como programa | **Entrar** en ella y acceder a lo que contiene | 1     |
+
+`-rw-r--r--` se lee así: el primer carácter es el tipo (`-` archivo, `d` carpeta, `l` enlace); después, `rw-` para el dueño (leer y escribir), `r--` para el grupo (leer) y `r--` para los demás (leer). En **octal** se suma cada juego: `rw-` = 4+2 = **6**, `r--` = **4**, así que `-rw-r--r--` es **644**.
+
+| Octal | Letras      | Uso típico                                           |
+| ----- | ----------- | ---------------------------------------------------- |
+| `644` | `rw-r--r--` | Archivos normales: todos leen, solo el dueño escribe |
+| `600` | `rw-------` | Secretos: `.env`, claves SSH. Solo el dueño          |
+| `640` | `rw-r-----` | Configuración que el grupo necesita leer             |
+| `755` | `rwxr-xr-x` | Programas y carpetas públicas                        |
+| `750` | `rwxr-x---` | Carpetas para el dueño y su grupo                    |
+| `700` | `rwx------` | Carpetas privadas                                    |
+
+Practica como `deploy`. `sudo -iu deploy` abre una sesión como ese usuario, en su carpeta. El segundo usuario que intenta leer sus archivos es el tuyo:
+
+```text
+$ sudo -iu deploy bash -c 'umask; touch nota.txt; mkdir privado; echo "echo hola desde el script" > saluda.sh; ls -l'
+0022
+total 8
+-rw-r--r-- 1 deploy deploy    0 Oct 16 14:18 nota.txt
+drwxr-xr-x 2 deploy deploy 4096 Oct 16 14:18 privado
+-rw-r--r-- 1 deploy deploy   26 Oct 16 14:18 saluda.sh
+$ sudo -iu deploy bash -c './saluda.sh'
+bash: line 1: ./saluda.sh: Permission denied
+$ sudo -iu deploy bash -c 'chmod u+x saluda.sh && ./saluda.sh && ls -l saluda.sh'
+hola desde el script
+-rwxr--r-- 1 deploy deploy 26 Oct 16 14:18 saluda.sh
+$ sudo -iu deploy bash -c 'echo "MONGODB_URI=secreto" > .env && chmod 600 .env && chmod 700 privado && chmod 644 nota.txt && ls -la'
+total 32
+drwxr-x--- 3 deploy deploy 4096 Oct 16 14:18 .
+drwxr-xr-x 4 root   root   4096 Oct 16 14:18 ..
+-rw-r--r-- 1 deploy deploy  220 Oct 16 14:18 .bash_logout
+-rw-r--r-- 1 deploy deploy 3771 Oct 16 14:18 .bashrc
+-rw------- 1 deploy deploy   20 Oct 16 14:18 .env
+-rw-r--r-- 1 deploy deploy  807 Oct 16 14:18 .profile
+-rw-r--r-- 1 deploy deploy    0 Oct 16 14:18 nota.txt
+drwx------ 2 deploy deploy 4096 Oct 16 14:18 privado
+-rwxr--r-- 1 deploy deploy   26 Oct 16 14:18 saluda.sh
+$ ls -ld /home/deploy
+drwxr-x--- 3 deploy deploy 4096 Oct 16 14:18 /home/deploy
+$ cat /home/deploy/nota.txt
+cat: /home/deploy/nota.txt: Permission denied
+$ sudo chmod 755 /home/deploy && cat /home/deploy/nota.txt && echo "(nota.txt es 644: se puede leer)"
+(nota.txt es 644: se puede leer)
+$ cat /home/deploy/.env
+cat: /home/deploy/.env: Permission denied
+$ ls /home/deploy/privado
+ls: cannot open directory '/home/deploy/privado': Permission denied
+$ sudo chmod 750 /home/deploy && ls -ld /home/deploy
+drwxr-x--- 3 deploy deploy 4096 Oct 16 14:18 /home/deploy
+$ sudo touch /home/deploy/config.json && sudo ls -l /home/deploy/config.json
+-rw-r--r-- 1 root root 0 Oct 16 14:19 /home/deploy/config.json
+$ sudo -iu deploy bash -c 'echo "{}" > config.json'
+bash: line 1: config.json: Permission denied
+$ sudo chown deploy:deploy /home/deploy/config.json && sudo ls -l /home/deploy/config.json
+-rw-r--r-- 1 deploy deploy 0 Oct 16 14:19 /home/deploy/config.json
+$ sudo -iu deploy bash -c 'echo "{}" > config.json && echo "escrito"'
+escrito
+```
+
+- **Los archivos nuevos nacen con `644` y las carpetas con `755`:** lo decide la **`umask`** (`0022`), que resta permisos a los de partida (`666` para archivos, `777` para carpetas).
+- **Un _script_ recién creado no se puede ejecutar** (`Permission denied`) hasta que se le da `x`: `chmod u+x` (notación simbólica: `u` dueño, `g` grupo, `o` otros, `a` todos; `+` añade, `-` quita).
+- **La carpeta personal de `deploy` es `750`** en Ubuntu: los demás usuarios no pueden entrar, aunque `nota.txt` sea `644`. Para leer un archivo hace falta permiso sobre el archivo **y** `x` en todas las carpetas del camino. Con `755`, `nota.txt` se lee; `.env` (600) y `privado` (700), no.
+- **`chown dueño:grupo`** cambia el dueño. Un archivo creado con `sudo` es de `root`, y `deploy` no puede escribirlo hasta que se le cambia.
+
+<Callout type="risk">
+
+- **`chmod 777` no arregla nada, lo rompe:** "no funciona, le pongo 777" hace que cualquier usuario y cualquier programa del servidor pueda modificar el archivo (o, en una carpeta, borrar lo que contiene). Busca **qué** usuario necesita **qué** permiso y da solo ese.
+- **Lo que creas con `sudo` es de `root`:** `sudo nano /opt/app/.env` o `sudo git clone` dejan archivos que la app (que corre como `deploy`) no podrá leer o escribir. Trabaja como el usuario de la app, o corrige con `chown` después.
+- **`chmod -R` sobre una carpeta también cambia las subcarpetas:** `chmod -R 644 carpeta` les quita la `x`, y nadie podrá entrar en ellas. Para carpetas y archivos distintos, usa `find carpeta -type d -exec chmod 755 {} +` y `find carpeta -type f -exec chmod 644 {} +`.
+
+</Callout>
+
+## Paso 4: instalar programas con `apt`
+
+Ubuntu instala programas desde sus **repositorios** con **`apt`**: descarga el paquete, sus dependencias y lo deja todo en su sitio. Siempre en dos pasos: actualizar la lista de lo disponible e instalar:
+
+```text
+$ sudo apt update 2>&1 | tail -n 2
+Reading state information...
+41 packages can be upgraded. Run 'apt list --upgradable' to see them.
+$ apt list --upgradable 2>/dev/null | wc -l
+42
+$ tree --version
+bash: line 1: tree: command not found
+$ sudo apt install -y tree 2>&1 | grep -E "^(Installing|Summary|  Download|Setting up)|Upgrading:|Installing:" | head -n 6
+Installing:
+Summary:
+  Upgrading: 0, Installing: 1, Removing: 0, Not Upgrading: 41
+  Download size: 52.7 kB
+Setting up tree (2.3.1-1) ...
+$ tree --version
+tree v2.3.1 © 1996 - 2026 by Steve Baker, Thomas Moore, Francesc Rocher, Florian Sesser, Kyosuke Tokoro
+$ which tree
+/usr/bin/tree
+$ dpkg -L tree | grep -E "bin|man1"
+/usr/bin
+/usr/bin/tree
+/usr/share/man/man1
+/usr/share/man/man1/tree.1.gz
+$ apt show tree 2>/dev/null | grep -E "^(Package|Version|Installed-Size|Description)"
+Package: tree
+Version: 2.3.1-1
+Installed-Size: 162 kB
+Description: displays an indented directory tree, in color
+$ sudo apt remove -y tree 2>&1 | grep -E "^(Removing|REMOVING|Summary)" | head -n 3
+REMOVING:
+Summary:
+Removing tree (2.3.1-1) ...
+$ tree --version
+bash: line 1: tree: command not found
+```
+
+- **`apt update`** solo descarga la lista de paquetes y versiones; no instala ni cambia nada. Dice además cuántos paquetes tienen actualización.
+- **`apt install -y`** instala sin preguntar (`-y`, "sí a todo"). `tree` ocupa 52,7 kB.
+- **`dpkg -L`** lista dónde dejó cada archivo el paquete: el programa en `/usr/bin` y su manual en `/usr/share/man`.
+- **`apt remove`** lo desinstala. `apt purge` borra también su configuración, y `apt autoremove` las dependencias que ya nadie usa.
+- **`sudo apt upgrade`** instala las actualizaciones pendientes (41 en la medición). En un servidor, hazlo con regularidad: muchas son de seguridad.
+
+<Callout type="risk">
+
+- **No instales programas a mano si hay paquete:** un programa copiado en `/usr/local/bin` desde una web no se actualiza con `apt upgrade` y nadie recordará que está ahí. Para Node.js, que tiene versiones muy distintas, usa el repositorio oficial de NodeSource o `nvm`, no un `.tar.gz` suelto.
+- **`apt upgrade` en producción, con cuidado:** actualiza todo lo instalado, y alguna actualización reinicia servicios (la base de datos, el servidor web). Hazlo en un momento tranquilo, y antes en un servidor de pruebas como este.
+
+</Callout>
+
+## Paso 5: dónde está cada cosa
+
+```text
+$ ls /
+bin
+boot
+dev
+etc
+home
+lib
+lost+found
+media
+mnt
+opt
+proc
+root
+run
+sbin
+snap
+srv
+sys
+tmp
+usr
+var
+$ ls /etc | wc -l
+195
+$ ls -l /etc/ssh/sshd_config /etc/hostname /etc/passwd /etc/shadow
+-rw-r--r-- 1 root root     13 Oct 16 14:11 /etc/hostname
+-rw-r--r-- 1 root root   1694 Oct 16 14:18 /etc/passwd
+-rw-r----- 1 root shadow  906 Oct 16 14:18 /etc/shadow
+-rw-r--r-- 1 root root   4307 Aug 31 12:36 /etc/ssh/sshd_config
+$ ls /var/log | head -n 8
+README
+alternatives.log
+apport.log
+apt
+auth.log
+btmp
+chrony
+cloud-init-output.log
+$ ls /opt
+$ sudo du -sh /usr /var /etc 2>/dev/null
+2.8G	/usr
+323M	/var
+6.2M	/etc
+```
+
+| Carpeta | Qué contiene                                                        | Ejemplo                                      |
+| ------- | ------------------------------------------------------------------- | -------------------------------------------- |
+| `/etc`  | Configuración del sistema y de los servicios (195 entradas, 6,2 MB) | `/etc/ssh/sshd_config` (I6.3)                |
+| `/var`  | Datos que cambian: registros, cachés, bases de datos                | `/var/log/auth.log`, los accesos al servidor |
+| `/home` | Las carpetas personales de los usuarios                             | `/home/deploy`                               |
+| `/opt`  | Programas y apps que no vienen en paquetes (vacía de serie)         | `/opt/entrenos`, tu app (I6.4)               |
+| `/usr`  | Los programas instalados (2,8 GB, lo más grande)                    | `/usr/bin/tree`                              |
+| `/tmp`  | Archivos temporales, que se borran al reiniciar                     | —                                            |
+| `/root` | La carpeta personal de `root`                                       | —                                            |
+
+- **`/etc/shadow` es `640` y del grupo `shadow`:** ni siquiera los usuarios con cuenta pueden leer los _hashes_ de las contraseñas (I5.1). `/etc/passwd`, en cambio, es `644`.
+
+<Callout type="risk">
+
+- **Edita `/etc` con una copia de seguridad al lado:** `sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak` antes de tocarlo. Un error en la configuración de SSH puede dejarte fuera del servidor (I6.3).
+- **`/tmp` no es para guardar nada:** se vacía al reiniciar. Los _backups_ de I6.6 van en `/var/backups`.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. En tu servidor de práctica, con el usuario `deploy` del Paso 2, crea la carpeta `/opt/entrenos` para la app, de `deploy` y con permisos `750`.
+2. Como `deploy`, crea dentro un `config.env` que el grupo pueda leer y un `.env` que solo pueda leer `deploy`.
+3. Crea un usuario `lector` sin `sudo`, dale acceso de lectura a la configuración a través del grupo `deploy` y comprueba qué puede y qué no puede hacer.
+
+</Callout>
+
+Solución, comprobada en el servidor:
+
+```text
+$ sudo mkdir -p /opt/entrenos && sudo chown deploy:deploy /opt/entrenos && sudo chmod 750 /opt/entrenos && ls -ld /opt/entrenos
+drwxr-x--- 2 deploy deploy 4096 Oct 16 14:19 /opt/entrenos
+$ sudo -iu deploy bash -c 'cd /opt/entrenos && echo "PORT=4321" > config.env && echo "MONGODB_URI=secreto" > .env && chmod 640 config.env && chmod 600 .env && ls -la /opt/entrenos'
+total 16
+drwxr-x--- 2 deploy deploy 4096 Oct 16 14:19 .
+drwxr-xr-x 3 root   root   4096 Oct 16 14:19 ..
+-rw------- 1 deploy deploy   20 Oct 16 14:19 .env
+-rw-r----- 1 deploy deploy   10 Oct 16 14:19 config.env
+$ sudo adduser --disabled-password --comment "" lector >/dev/null 2>&1 && groups lector
+lector : lector users
+$ sudo -iu lector bash -c 'ls /opt/entrenos'
+ls: cannot open directory '/opt/entrenos': Permission denied
+$ sudo usermod -aG deploy lector && groups lector
+lector : lector users deploy
+$ sudo -iu lector bash -c 'ls /opt/entrenos && cat /opt/entrenos/config.env'
+config.env
+PORT=4321
+$ sudo -iu lector bash -c 'cat /opt/entrenos/.env'
+cat: /opt/entrenos/.env: Permission denied
+$ sudo -iu lector bash -c 'echo "PORT=80" > /opt/entrenos/config.env'
+bash: line 1: /opt/entrenos/config.env: Permission denied
+$ sudo -iu lector bash -c 'sudo whoami'
+sudo: I'm sorry lector. I'm afraid I can't do that
+```
+
+- **Sin el grupo, `lector` no puede ni listar `/opt/entrenos`:** la carpeta es `750` y él es "otros".
+- **Con `usermod -aG deploy lector`,** pasa a ser "grupo": lista la carpeta y lee `config.env` (`640`, `r` para el grupo), pero no `.env` (`600`) y no puede modificar `config.env` (el grupo no tiene `w`).
+- **`lector` no puede usar `sudo`:** no está en el grupo `sudo`. El mensaje es el de `sudo-rs`.
+- **Este es el patrón de un servidor real:** la app y sus archivos son de un usuario (`deploy`), y quien necesite leer registros o configuración entra en su grupo, sin poder tocar los secretos.
+
+<Callout type="risk">
+
+- **El grupo da acceso a todo lo que el grupo puede leer:** meter a `lector` en `deploy` le da acceso a cualquier archivo `640` o `750` de `deploy`, no solo a `/opt/entrenos`. Para separar más, crea un grupo específico (`sudo addgroup entrenos-lectura`) y usa ese.
+- **Borra los usuarios de práctica:** `sudo deluser --remove-home lector`. Un usuario olvidado es una cuenta más que proteger.
+
+</Callout>
+
+<Callout type="mastery">
+
+Lees `-rw-r--r--` y sabes quién puede hacer qué: el dueño lee y escribe, el grupo y los demás solo leen (644). Creas usuarios con `sudo` sin trabajar como `root`, das los permisos justos con `chmod` en octal o simbólico y con `chown`, compartes por grupo sin exponer los secretos (600), instalas con `apt` y sabes en qué carpeta del sistema buscar cada cosa.
+
+</Callout>
+
+## Resumen
+
+- Lima crea un servidor Ubuntu de práctica en tu Mac; sin carpetas compartidas, no puede tocar tus archivos.
+- No se trabaja como `root`: un usuario con `sudo` (`usermod -aG sudo`, con la `-a`).
+- `rwx` para dueño, grupo y otros; en octal, `r=4`, `w=2`, `x=1`: 644 archivos, 600 secretos, 755 y 750 carpetas.
+- En una carpeta, `x` es poder entrar: hace falta en todo el camino hasta el archivo.
+- `apt update` y después `apt install`; `dpkg -L` dice dónde quedó cada archivo.

@@ -1,0 +1,343 @@
+---
+sectionId: "I6.4"
+course: "I6"
+title: "Procesos y servicios"
+order: 4
+minutes: 75
+summary: "Lees los procesos del servidor, mandas SIGTERM y SIGKILL a un servidor Node y ves su efecto, descubres que nohup no protege a Node y lo conviertes en un servicio de systemd que se reinicia solo."
+---
+
+Una app en un servidor tiene que estar siempre en marcha: si se cae, que vuelva; si el servidor se reinicia, que arranque sola; y tiene que dejar registro de lo que hace. Arrancarla a mano en una sesión SSH no cumple nada de eso: muere en cuanto cierras la sesión o al primer error. En esta sección vas a ver los procesos del servidor y a hablar con ellos mediante **señales**, y vas a convertir un servidor Node en un **servicio de `systemd`**, el programa que arranca y vigila todo lo demás en Linux. Por el camino descubrirás que el truco clásico, `nohup`, no sirve con Node.
+
+**Lo que tendrás al terminar:** `/opt/entrenos/servidor.mjs`, un servidor Node que se cierra de forma ordenada, y el servicio `entrenos` que lo mantiene en marcha, se reinicia solo y sobrevive a un reinicio del servidor.
+
+**Requisitos:** el servidor de I6.3 con `ssh academy`. Los comandos de esta sección se escriben **en el servidor** (`ssh academy`), salvo los que indican el Mac.
+
+## Paso 1: ver los procesos
+
+Un **proceso** es un programa en ejecución. Cada uno tiene un número (**PID**), un proceso padre (**PPID**) y un usuario.
+
+```text
+$ ps aux | head -n 4
+USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+root           1  0.1  0.8  27484 17908 ?        Ss   14:11   0:01 /usr/lib/systemd/systemd --switched-root --system --deserialize=48
+root           2  0.0  0.0      0     0 ?        S    14:11   0:00 [kthreadd]
+root           3  0.0  0.0      0     0 ?        S    14:11   0:00 [pool_workqueue_release]
+$ ps aux | wc -l
+124
+$ ps -o pid,ppid,user,etime,cmd -p 1
+    PID    PPID USER         ELAPSED CMD
+      1       0 root           16:08 /usr/lib/systemd/systemd --switched-root --system --deserialize=48
+$ pgrep -a sshd
+1146 sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups
+2105 sshd-session: tu-usuario [priv]
+2107 [sshd] <defunct>
+2158 sshd-session: tu-usuario@notty
+26478 sshd-session: deploy [priv]
+26548 sshd-session: deploy@notty
+$ top -b -n 1 | head -n 5
+top - 14:27:16 up 16 min,  2 users,  load average: 0.12, 0.04, 0.01
+Tasks: 123 total,   1 running, 121 sleeping,   0 stopped,   1 zombie
+%Cpu(s):  0.0 us,  0.0 sy,  0.0 ni,100.0 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+MiB Mem :   1949.5 total,    155.2 free,    437.4 used,   1452.6 buff/cache
+MiB Swap:      0.0 total,      0.0 free,      0.0 used.   1512.1 avail Mem
+$ nproc && free -h | head -n 2
+2
+               total        used        free      shared  buff/cache   available
+Mem:           1.9Gi       441Mi       150Mi       1.1Mi       1.4Gi       1.5Gi
+```
+
+- **`ps aux`** lista todos los procesos: el usuario, el PID, el consumo de CPU y memoria y el comando. Este servidor tiene 123, casi todos del sistema.
+- **El PID 1 es `systemd`**, el primer proceso que arranca el núcleo y el padre de todos los servicios. Lo usarás en el Paso 4.
+- **`pgrep -a`** busca procesos por nombre. Hay un `sshd` que escucha (el _listener_) y uno por cada sesión abierta.
+- **`top`** enseña la carga del sistema en tiempo real (aquí, `-b -n 1` toma una sola foto); para salir, `q`. **`htop`** (`sudo apt install htop`) es lo mismo, más legible y con colores.
+- **`load average`** es la cantidad media de trabajo en los últimos 1, 5 y 15 minutos. Con 2 núcleos (`nproc`), una carga de 2 significa que van justos.
+
+<Callout type="risk">
+
+- **Un proceso _zombie_** (`<defunct>`, "1 zombie" en `top`) es uno que ya terminó, pero cuyo padre aún no ha recogido su resultado. No consume CPU ni memoria y desaparece cuando el padre lo recoge. Uno suelto no es un problema; cientos que crecen indican un fallo en el programa padre.
+- **En `free`, la memoria "libre" engaña:** Linux usa la memoria sobrante como caché de disco (`buff/cache`). La cifra que importa es `available`: 1,5 GiB aquí, aunque "libre" diga 150 MiB.
+
+</Callout>
+
+## Paso 2: el servidor Node y el segundo plano
+
+Crea el servidor de práctica en tu Mac y cópialo al servidor:
+
+```js
+// Archivo: /opt/entrenos/servidor.mjs
+// Un servidor HTTP mínimo para practicar procesos y servicios
+import { createServer } from "node:http";
+
+const PORT = Number(process.env.PORT ?? 3000);
+const inicio = Date.now();
+
+const servidor = createServer((req, res) => {
+  console.log(`${req.method} ${req.url}`);
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ pid: process.pid, enMarchaSeg: Math.round((Date.now() - inicio) / 1000) }));
+});
+
+servidor.listen(PORT, () => console.log(`Escuchando en el puerto ${PORT} (pid ${process.pid})`));
+
+// SIGTERM: "termina, por favor". Se cierra en orden: deja de aceptar conexiones y sale
+process.on("SIGTERM", () => {
+  console.log("SIGTERM recibido: cerrando en orden…");
+  servidor.close(() => {
+    console.log("Cerrado.");
+    process.exit(0);
+  });
+});
+```
+
+```bash
+scp servidor.mjs academy:/opt/entrenos/
+```
+
+Si lo arrancas con `node servidor.mjs`, ocupa la terminal hasta que lo pares con Ctrl+C. Con **`&`** al final, se ejecuta en **segundo plano** y la terminal queda libre. **`jobs`** lista los procesos en segundo plano de esa sesión, `fg` trae uno al primer plano, y Ctrl+Z seguido de `bg` hace lo contrario.
+
+<Callout type="risk">
+
+- **Un proceso en segundo plano sigue atado a la sesión:** al cerrar la terminal o la conexión SSH, la _shell_ le manda `SIGHUP` (Paso 3) y, normalmente, muere. `&` sirve para seguir trabajando mientras algo corre, no para dejar una app en marcha.
+- **Sin redirección, su salida se mezcla con la tuya:** el servidor escribiría sus mensajes en medio de lo que estés escribiendo. Por eso los ejemplos redirigen a `servidor.log` (I6.1).
+
+</Callout>
+
+## Paso 3: señales, `SIGTERM` y `SIGKILL`
+
+Una **señal** es un aviso que el sistema entrega a un proceso. `kill` las envía (a pesar del nombre, no siempre matan):
+
+| Señal     | Número | Qué pide                                         | ¿El programa puede reaccionar?                |
+| --------- | ------ | ------------------------------------------------ | --------------------------------------------- |
+| `SIGTERM` | 15     | "Termina, por favor" (la de `kill` sin opciones) | Sí: puede cerrar en orden o incluso ignorarla |
+| `SIGKILL` | 9      | Terminar **ya** (`kill -9`)                      | No: el núcleo lo elimina sin avisarle         |
+| `SIGINT`  | 2      | Interrumpir (Ctrl+C)                             | Sí                                            |
+| `SIGHUP`  | 1      | "Se cerró la terminal"                           | Sí                                            |
+
+```text
+$ cd /opt/entrenos
+$ node servidor.mjs > servidor.log 2>&1 &
+$ sleep 1; jobs -l
+[1]+ 26649 Running                    node servidor.mjs > servidor.log 2>&1 &
+$ curl -s localhost:3000/; echo
+{"pid":26649,"enMarchaSeg":1}
+$ kill %1; wait %1; echo "código de salida: $?"
+código de salida: 0
+$ cat servidor.log
+Escuchando en el puerto 3000 (pid 26649)
+GET /
+SIGTERM recibido: cerrando en orden…
+Cerrado.
+$ node servidor.mjs > servidor.log 2>&1 &
+$ sleep 1; kill -9 %1; wait %1; echo "código de salida: $?"
+código de salida: 137
+$ cat servidor.log
+bash: line 16: 26659 Killed                     node servidor.mjs > servidor.log 2>&1
+Escuchando en el puerto 3000 (pid 26659)
+$ node -e 'setInterval(() => {}, 1000)' &
+$ sleep 1; kill -HUP %1; wait %1; echo "sin nohup, tras SIGHUP: código $?"
+sin nohup, tras SIGHUP: código 129
+```
+
+- **Con `SIGTERM`, el servidor cierra en orden:** su manejador escribe "cerrando en orden…", deja de aceptar conexiones, termina las que están en curso y sale con código 0.
+- **Con `SIGKILL`, desaparece sin más:** el registro no tiene ni una línea de cierre, y el código de salida es **137** (128 + 9, la señal). Las peticiones en curso se cortan, y lo que estuviera escribiendo puede quedar a medias.
+- **Con `SIGHUP`** (lo que pasa al cerrar la sesión), un proceso sin manejador muere con código **129** (128 + 1).
+
+El remedio clásico para que un proceso sobreviva al cierre de la sesión es **`nohup`**, que ignora `SIGHUP`. Pruébalo con un programa cualquiera y con Node:
+
+```text
+$ nohup sleep 300 > /dev/null 2>&1 &
+$ sleep 1; kill -HUP $!; sleep 1; ps -p $! -o pid=,cmd= && echo "sleep con nohup: sigue vivo"; kill $!
+  26776 sleep 300
+sleep con nohup: sigue vivo
+$ nohup node -e 'setInterval(() => {}, 1000)' > /dev/null 2>&1 &
+$ sleep 1; grep SigIgn /proc/$!/status; kill -HUP $!; sleep 1; ps -p $! > /dev/null || echo "node con nohup: ha muerto"
+SigIgn:	0000000001001000
+node con nohup: ha muerto
+bash: line 9: 26780 Hangup                     nohup node -e 'setInterval(() => {}, 1000)' > /dev/null 2>&1
+$ nohup sleep 300 > /dev/null 2>&1 &
+$ sleep 1; grep SigIgn /proc/$!/status; kill $!
+SigIgn:	0000000000000007
+```
+
+**Con Node, `nohup` no funciona.** `sleep` sigue vivo; Node muere igual. `/proc/PID/status` lo explica: en `SigIgn` (las señales ignoradas, en hexadecimal), `sleep` tiene el bit de `SIGHUP` activo (`…0007`) y Node no (`…1001000`). Node restablece las señales a su comportamiento por defecto al arrancar, y deshace lo que hizo `nohup`. Hace falta algo mejor: `systemd`.
+
+<Callout type="risk">
+
+- **Usa `kill -9` solo como último recurso:** primero `kill` (`SIGTERM`), espera unos segundos y, solo si no termina, `kill -9`. Con `SIGKILL` no hay cierre ordenado: conexiones cortadas, archivos a medio escribir, transacciones a medias.
+- **Si tu app no maneja `SIGTERM`, Node sale sin cerrar nada:** el comportamiento por defecto es terminar al instante. Un manejador como el de `servidor.mjs` (cerrar el servidor, la conexión a MongoDB…) es lo que hace que reiniciar no corte las peticiones en curso.
+
+</Callout>
+
+## Paso 4: `systemd`, el que arranca y vigila
+
+**`systemd`** (el PID 1) arranca los servicios al encender el servidor, los vigila, los reinicia si caen y guarda su salida en el **diario** (_journal_). Cada servicio se describe en un archivo **`.service`** y se maneja con `systemctl`. Míralo con uno que ya existe, el de SSH:
+
+```text
+$ systemctl status ssh --no-pager | head -n 9
+● ssh.service - OpenBSD Secure Shell server
+     Loaded: loaded (/usr/lib/systemd/system/ssh.service; disabled; preset: enabled)
+     Active: active (running) since Fri 2026-10-16 14:11:14 CST; 16min ago
+ Invocation: 61e0dda743e94a1bbc1621ae27921e3f
+TriggeredBy: ● ssh.socket
+       Docs: man:sshd(8)
+             man:sshd_config(5)
+    Process: 19359 ExecReload=/usr/sbin/sshd -t (code=exited, status=0/SUCCESS)
+    Process: 19361 ExecReload=/bin/kill -HUP $MAINPID (code=exited, status=0/SUCCESS)
+$ systemctl is-enabled ssh; systemctl is-active ssh
+disabled
+active
+$ systemctl list-units --type=service --state=running --no-pager | head -n 8
+  UNIT                               LOAD   ACTIVE SUB     DESCRIPTION
+  chrony.service                     loaded active running chrony, an NTP client/server
+  cron.service                       loaded active running Regular background program processing daemon
+  dbus.service                       loaded active running D-Bus System Message Bus
+  getty@tty1.service                 loaded active running Getty on tty1
+  lima-guestagent.service            loaded active running lima-guestagent
+  ModemManager.service               loaded active running Modem Manager
+  multipathd.service                 loaded active running Device-Mapper Multipath Device Controller
+$ journalctl -u ssh -n 4 --no-pager
+Oct 16 14:27:26 lima-academy sshd-session[26577]: Accepted publickey for deploy from 192.168.64.1 port 51729 ssh2: ED25519 SHA256:Z9VlU+rcR34QAbvNomDlg0IHAfMBZ4Dv5jdHhUvQZDw
+Oct 16 14:27:26 lima-academy sshd-session[26577]: pam_unix(sshd:session): session opened for user deploy(uid=1001) by deploy(uid=0)
+Oct 16 14:27:44 lima-academy sshd-session[26703]: Accepted publickey for deploy from 192.168.64.1 port 51730 ssh2: ED25519 SHA256:Z9VlU+rcR34QAbvNomDlg0IHAfMBZ4Dv5jdHhUvQZDw
+Oct 16 14:27:44 lima-academy sshd-session[26703]: pam_unix(sshd:session): session opened for user deploy(uid=1001) by deploy(uid=0)
+```
+
+| Comando                                     | Qué hace                                                                                         |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `systemctl status nombre`                   | Estado, PID, memoria y las últimas líneas del registro                                           |
+| `sudo systemctl start` / `stop` / `restart` | Arrancar, parar (con `SIGTERM`) o reiniciar ahora                                                |
+| `sudo systemctl reload`                     | Releer la configuración sin parar (si el servicio lo admite, como `ssh` en I6.3)                 |
+| `sudo systemctl enable` / `disable`         | Que arranque, o no, al encender el servidor                                                      |
+| `journalctl -u nombre`                      | Su registro completo; `-n 20` las últimas líneas, `-f` en directo, `-b` desde el último arranque |
+
+- **`ssh.service` está `disabled`, pero activo:** lo arranca `ssh.socket` (`TriggeredBy`) cuando llega la primera conexión. Es la activación por _socket_, habitual en Ubuntu.
+- **El registro de SSH** muestra cada entrada: `Accepted publickey for deploy`, con la huella de tu clave (I6.3).
+
+<Callout type="risk">
+
+- **`enable` no arranca y `start` no habilita:** con solo `start`, el servicio no volverá tras un reinicio; con solo `enable`, no arranca hasta el siguiente. `enable --now` hace las dos cosas.
+- **El diario crece:** `journalctl --disk-usage` dice cuánto ocupa. Ubuntu lo limita por defecto (un porcentaje del disco), pero en un disco pequeño conviene fijar un tope (`SystemMaxUse=` en `/etc/systemd/journald.conf`).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Crea un servicio de `systemd` para el servidor Node de este paso: que se ejecute como `deploy`, en `/opt/entrenos`, con `PORT=3000`, y que se reinicie siempre que caiga.
+2. Mata su proceso con `kill -9` y comprueba que se reinicia solo. Lee lo que pasó con `journalctl -u`.
+3. Páralo con `systemctl stop` y comprueba que se cierra en orden. Después reinicia el servidor entero y comprueba que la app vuelve sola.
+
+</Callout>
+
+Solución. En el servidor, crea `/etc/systemd/system/entrenos.service` (con `sudo nano` o `sudo tee`):
+
+```ini
+# Archivo: /etc/systemd/system/entrenos.service
+[Unit]
+Description=Entrenos (servidor Node de práctica)
+After=network.target
+
+[Service]
+User=deploy
+WorkingDirectory=/opt/entrenos
+Environment=PORT=3000
+ExecStart=/usr/bin/node servidor.mjs
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- **`User=deploy`:** la app no se ejecuta como `root` (I6.2). Si alguien encontrara un fallo en ella, tendría los permisos de `deploy`, no los de todo el servidor.
+- **`Restart=always` y `RestartSec=2`:** si el proceso termina por cualquier motivo, `systemd` lo vuelve a arrancar a los 2 segundos.
+- **`WantedBy=multi-user.target`:** el servicio arranca con el resto del sistema al encender el servidor, cuando se habilita con `enable`.
+
+```text
+$ sudo systemctl daemon-reload
+$ sudo systemctl enable --now entrenos
+Created symlink '/etc/systemd/system/multi-user.target.wants/entrenos.service' → '/etc/systemd/system/entrenos.service'.
+$ systemctl status entrenos --no-pager | head -n 7
+● entrenos.service - Entrenos (servidor Node de práctica)
+     Loaded: loaded (/etc/systemd/system/entrenos.service; enabled; preset: enabled)
+     Active: active (running) since Fri 2026-10-16 14:28:12 CST; 62ms ago
+ Invocation: 29fcb30e4fc44a52a114330378cdd427
+   Main PID: 27094 (node)
+      Tasks: 7 (limit: 2102)
+     Memory: 24.5M (peak: 24.5M)
+$ curl -s localhost:3000/; echo
+
+$ systemctl show entrenos -p MainPID
+MainPID=27094
+$ sudo kill -9 $(systemctl show entrenos -p MainPID --value); sleep 3; systemctl show entrenos -p MainPID; curl -s localhost:3000/; echo
+MainPID=27206
+{"pid":27206,"enMarchaSeg":1}
+$ journalctl -u entrenos -n 6 --no-pager -o cat
+entrenos.service: Main process exited, code=killed, status=9/KILL
+entrenos.service: Failed with result 'signal'.
+entrenos.service: Scheduled restart job, restart counter is at 1.
+Started entrenos.service - Entrenos (servidor Node de práctica).
+Escuchando en el puerto 3000 (pid 27206)
+GET /
+$ sudo systemctl stop entrenos; journalctl -u entrenos -n 5 --no-pager -o cat
+SIGTERM recibido: cerrando en orden…
+Cerrado.
+Stopping entrenos.service - Entrenos (servidor Node de práctica)...
+entrenos.service: Deactivated successfully.
+Stopped entrenos.service - Entrenos (servidor Node de práctica).
+$ sudo systemctl start entrenos; systemctl is-active entrenos
+active
+```
+
+- **`daemon-reload`** hace que `systemd` lea el archivo nuevo; `enable --now` lo habilita y lo arranca.
+- **El primer `curl` sale vacío:** 62 ms después de arrancar, `systemd` ya dice `active (running)`, pero Node aún no escucha. "Activo" significa que el proceso existe, no que esté listo. Por eso un despliegue espera a que la app responda (un `/api/health`, como el de esta plataforma) antes de darlo por bueno.
+- **Tras `kill -9`, otro PID** (27206 en lugar de 27094), y el diario lo cuenta todo: `code=killed, status=9/KILL`, el reinicio programado y la app escuchando de nuevo.
+- **`systemctl stop` envía `SIGTERM`:** la app escribe "cerrando en orden…" y "Cerrado.", y el servicio termina limpio.
+
+Y el reinicio completo, desde el Mac:
+
+```text
+$ limactl stop academy && limactl start academy   (en el Mac: apagar y encender el servidor)
+The instance academy has shut down
+READY. Run `limactl shell academy` to open the shell.
+```
+
+De vuelta en el servidor:
+
+```text
+$ uptime -p
+up 0 minutes
+$ systemctl is-active entrenos
+active
+$ sleep 1; curl -s localhost:3000/; echo
+{"pid":1008,"enMarchaSeg":5}
+$ journalctl -u entrenos -b -n 2 --no-pager -o cat
+Escuchando en el puerto 3000 (pid 1008)
+GET /
+```
+
+La app arrancó sola con el servidor (PID 1008, de los primeros), sin que nadie entrara a lanzarla.
+
+<Callout type="risk">
+
+- **Los secretos, en `EnvironmentFile`, no en `Environment`:** `Environment=MONGODB_URI=…` deja la contraseña en el archivo `.service`, que cualquier usuario puede leer (`systemctl show`). Con `EnvironmentFile=/opt/entrenos/.env`, `systemd` lee el archivo como `root` antes de arrancar la app, así que el `.env` puede ser `600`.
+- **`Restart=always` puede esconder un fallo en bucle:** si la app cae nada más arrancar, `systemd` la reinicia sin parar, y tras 5 intentos en 10 segundos se rinde (`start-limit-hit`). Si ves eso en `systemctl status`, el problema está en la app: léelo en `journalctl -u`.
+- **Tras editar el `.service`, `daemon-reload` y `restart`:** sin el `daemon-reload`, `systemd` sigue usando la versión anterior y lo avisa en `systemctl status`.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tu app sobrevive a un reinicio del servidor: la conviertes en un servicio de `systemd` que se ejecuta como un usuario sin privilegios, se reinicia sola si cae y guarda su registro en el diario; sabes leer procesos con `ps`, `top` y `pgrep`, distinguir `SIGTERM` de `SIGKILL`, y por qué `nohup` no protege a una app de Node.
+
+</Callout>
+
+## Resumen
+
+- `ps aux`, `pgrep -a` y `top`/`htop` para ver procesos; el PID 1 es `systemd`.
+- `SIGTERM` (`kill`) pide terminar y permite cerrar en orden; `SIGKILL` (`kill -9`) termina al instante (código 137).
+- `&` y `nohup` no sirven para dejar una app en marcha; con Node, `nohup` ni siquiera evita `SIGHUP`.
+- Un `.service` con `User`, `WorkingDirectory`, `ExecStart` y `Restart=always`; `daemon-reload` y `enable --now`.
+- `systemctl status` y `journalctl -u` dicen qué pasó; "activo" no es "listo".

@@ -1,0 +1,263 @@
+---
+sectionId: "I6.3"
+course: "I6"
+title: "SSH"
+order: 3
+minutes: 60
+summary: "Creas una clave ed25519, la instalas en tu servidor, entras con ssh academy, copias archivos con scp y rsync, y desactivas el acceso por contraseña y de root, evitando la trampa del orden de sshd_config.d."
+---
+
+Hasta ahora has entrado a tu servidor de práctica con `limactl shell`, que solo existe porque la máquina virtual está en tu Mac. Un servidor real está en otro sitio, y se entra con **SSH** (_Secure Shell_): una conexión cifrada que te da una terminal en la máquina remota. Por SSH se administra, se despliega y se copian archivos, así que es la puerta principal del servidor. Y una puerta que acepta contraseñas recibe miles de intentos al día de programas que prueban contraseñas comunes. En esta sección vas a entrar con una **clave** en lugar de una contraseña, vas a crear un alias para no escribir IP ni usuario y vas a cerrar la puerta a las contraseñas y a `root`.
+
+**Lo que tendrás al terminar:** una clave `ed25519`, `ssh academy` para entrar como `deploy`, copias con `scp` y `rsync`, y SSH solo con clave.
+
+**Requisitos:** el servidor de I6.2 con el usuario `deploy` (con su contraseña) y la carpeta `/opt/entrenos`. La IP del servidor sale de `limactl shell academy ip -4 addr show lima0`; en la medición es `192.168.64.2`.
+
+En un servidor nuevo de un proveedor, el acceso por contraseña suele venir **activado**. La imagen de Ubuntu de Lima ya lo trae desactivado, así que, para practicar como en un VPS recién creado, simula la configuración del proveedor dentro del servidor (`limactl shell academy`):
+
+```bash
+printf "PasswordAuthentication yes\nPermitRootLogin yes\n" | sudo tee /etc/ssh/sshd_config.d/50-proveedor.conf
+sudo systemctl reload ssh
+```
+
+## Paso 1: claves pública y privada
+
+Una **clave SSH** son dos archivos que van juntos. La **privada** se queda en tu Mac y nunca sale de él. La **pública** se copia a los servidores en los que quieres entrar. Al conectar, el servidor te plantea un desafío que solo puede resolver quien tiene la privada, sin que la privada viaje nunca por la red. Es como un candado (la pública) que puedes instalar en muchas puertas, con una única llave (la privada) que guardas tú. En tu Mac:
+
+```bash
+ssh-keygen -t ed25519 -C "practica@mac"
+```
+
+Pulsa Enter para aceptar la ruta (`~/.ssh/id_ed25519`) y escribe una **frase de paso** para cifrar la clave privada. La salida:
+
+```text
+Generating public/private ed25519 key pair.
+Your identification has been saved in /Users/tu-usuario/.ssh/id_ed25519
+Your public key has been saved in /Users/tu-usuario/.ssh/id_ed25519.pub
+The key fingerprint is:
+SHA256:Z9VlU+rcR34QAbvNomDlg0IHAfMBZ4Dv5jdHhUvQZDw practica@mac
+The key's randomart image is:
++--[ED25519 256]--+
+|   .=+*=o   ..oo=|
+|  .  =.+E    o =.|
+|   .  o..o. o + .|
+|    .. .o+.. * = |
+|   .  ..So= o = =|
+|    o  oo+ o .  o|
+|   o   .  .      |
+|    . o .        |
+|     . o         |
++----[SHA256]-----+
+```
+
+- **`ed25519`** es el algoritmo recomendado hoy: claves cortas, rápidas y seguras. Si un servidor muy antiguo no lo admite, `-t rsa -b 4096`.
+- **`-C`** es solo un comentario para reconocer la clave (en qué equipo la creaste).
+- **Dos archivos:** `id_ed25519` (privada, permisos `600`) e `id_ed25519.pub` (pública, `644`). La pública es una sola línea que empieza por `ssh-ed25519`.
+
+<Callout type="risk">
+
+- **La frase de paso protege la clave si te roban el Mac:** sin ella, quien copie `id_ed25519` entra en todos tus servidores. Con ella, el archivo no sirve sin la frase. macOS la guarda en el llavero para no pedirla cada vez: añade `UseKeychain yes` y `AddKeysToAgent yes` en `~/.ssh/config` (Paso 3).
+- **Nunca compartas ni subas la clave privada:** ni a Git, ni a un chat, ni a la configuración de un servicio. Si alguna vez la expones, genera otra y borra la pública antigua de todos los servidores.
+- **Una clave por equipo, no una para todo:** si pierdes el portátil, revocas solo esa clave (quitando su línea de `authorized_keys`), no las de tus otros equipos.
+
+</Callout>
+
+## Paso 2: instalar la pública en el servidor
+
+La pública se añade, en el servidor, al archivo `~/.ssh/authorized_keys` del usuario. **`ssh-copy-id`** lo hace por ti: entra una vez con la contraseña de `deploy` y deja la clave en su sitio. Desde el Mac:
+
+```bash
+ssh-copy-id deploy@192.168.64.2
+```
+
+La primera vez, SSH te enseña la huella del servidor y pregunta si confías en él (`yes`); después pide la contraseña de `deploy`:
+
+```text
+/usr/bin/ssh-copy-id: INFO: Source of key(s) to be installed: "/Users/tu-usuario/.ssh/id_ed25519.pub"
+/usr/bin/ssh-copy-id: INFO: attempting to log in with the new key(s), to filter out any that are already installed
+/usr/bin/ssh-copy-id: INFO: 1 key(s) remain to be installed -- if you are prompted now it is to install the new keys
+
+Number of key(s) added:        1
+
+Now try logging into the machine, with: "ssh 'deploy@192.168.64.2'"
+and check to make sure that only the key(s) you wanted were added.
+```
+
+Y la primera conexión con la clave, sin contraseña:
+
+```bash
+ssh deploy@192.168.64.2 'whoami; hostname; ls -la ~/.ssh; cut -c1-40 ~/.ssh/authorized_keys'
+```
+
+```text
+deploy
+lima-academy
+total 12
+drwx------ 2 deploy deploy 4096 Oct 16 14:24 .
+drwxr-x--- 5 deploy deploy 4096 Oct 16 14:24 ..
+-rw------- 1 deploy deploy   94 Oct 16 14:24 authorized_keys
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPBt
+```
+
+- **El comando entre comillas se ejecuta en el servidor** y la conexión se cierra. Sin comando, `ssh` te deja una terminal remota (hasta `exit`).
+- **`~/.ssh` es `700` y `authorized_keys`, `600`:** `ssh-copy-id` los deja así. Si otro usuario pudiera escribir en ellos, podría añadir su clave, y por eso `sshd` **rechaza** la clave si el grupo u otros usuarios tienen permiso de escritura (la opción `StrictModes`, activa de serie).
+- **La huella del servidor queda en `~/.ssh/known_hosts`** de tu Mac. Si un día cambia, SSH se niega a conectar con un aviso enorme: o se reinstaló el servidor, o alguien se está haciendo pasar por él.
+
+<Callout type="risk">
+
+- **El aviso `REMOTE HOST IDENTIFICATION HAS CHANGED` no se ignora:** compruébalo antes (¿has reinstalado el servidor?). Solo entonces borra la línea antigua con `ssh-keygen -R 192.168.64.2`.
+- **Con Lima, ese aviso aparece tras cada `limactl stop` y `limactl start`:** Lima regenera las claves del servidor en cada arranque (la fecha de `/etc/ssh/ssh_host_ed25519_key.pub` coincide con el arranque). En tu servidor de práctica es normal y se resuelve con `ssh-keygen -R 192.168.64.2`; en un servidor real, no.
+- **Si el servidor no admite contraseña** (como Lima sin la simulación de arriba, o un VPS que ya pide la clave al crearlo), `ssh-copy-id` no puede entrar. El proveedor te deja pegar la clave pública en su panel al crear el servidor; en Lima, puedes añadirla desde `limactl shell` al `authorized_keys` de `deploy`.
+
+</Callout>
+
+## Paso 3: un alias en `~/.ssh/config`
+
+Escribir `ssh deploy@192.168.64.2` cada vez es lento y propenso a errores. En `~/.ssh/config` de tu Mac le pones un nombre:
+
+```bash
+# Archivo: ~/.ssh/config
+Host academy
+  HostName 192.168.64.2
+  User deploy
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+```
+
+- **`Host academy`** es el alias; el resto, cómo conectar: la IP, el usuario y la clave.
+- **`IdentitiesOnly yes`** usa solo esa clave. Sin él, SSH prueba todas las que tengas, y algunos servidores te expulsan tras varios intentos fallidos antes de llegar a la buena.
+- **El alias vale para todo lo que use SSH:** `ssh`, `scp`, `rsync` y Git.
+
+## Paso 4: copiar archivos con `scp` y `rsync`
+
+```text
+$ ssh academy "whoami && uptime -p"
+deploy
+up 13 minutes
+$ scp .env.example academy:/opt/entrenos/
+(sin salida: copiado)
+$ ssh academy "ls -la /opt/entrenos"
+total 24
+drwxr-x--- 3 deploy deploy 4096 Oct 16 14:24 .
+drwxr-xr-x 3 root   root   4096 Oct 16 14:19 ..
+-rw------- 1 deploy deploy   20 Oct 16 14:19 .env
+-rw-r--r-- 1 deploy deploy 1376 Oct 16 14:24 .env.example
+-rw-r----- 1 deploy deploy   10 Oct 16 14:19 config.env
+drwxr-xr-x 4 deploy deploy 4096 Oct 16 13:12 dist
+$ rsync -avz --delete ./dist/ academy:/opt/entrenos/dist/
+
+sent 285890 bytes  received 1200 bytes  8673413 bytes/sec
+total size is 960746  speedup is 3.35
+$ rsync -avz --delete ./dist/ academy:/opt/entrenos/dist/   (otra vez, sin cambios)
+sent 3321 bytes  received 20 bytes  33410000 bytes/sec
+total size is 960746  speedup is 287.56
+$ ssh academy "du -sh /opt/entrenos/dist && find /opt/entrenos/dist -type f | wc -l"
+1.1M	/opt/entrenos/dist
+52
+```
+
+- **`scp origen destino`** copia como `cp`, con `alias:ruta` para el lado remoto. Bien para archivos sueltos.
+- **`rsync -avz`** sincroniza carpetas: `-a` conserva permisos y fechas, `-v` enseña qué hace y `-z` comprime durante el envío. La primera vez envió 286 KB (comprimidos) de los 961 KB de `dist`.
+- **La segunda vez, casi nada:** 3,3 KB, solo para comprobar que no había cambios ("_speedup_ 287"). `rsync` solo envía lo que cambió, y por eso es la herramienta para desplegar.
+- **La barra final de `./dist/` importa:** con barra, copia el **contenido** de `dist` dentro de `/opt/entrenos/dist/`; sin barra (`./dist`), crearía `/opt/entrenos/dist/dist`.
+
+<Callout type="risk">
+
+- **`--delete` borra en el destino lo que no está en el origen:** es lo que quieres para que el servidor tenga exactamente tu `dist`, pero con la ruta equivocada (`academy:/opt/entrenos/` en lugar de `.../dist/`) borraría el `.env` y todo lo demás. Pruébalo antes con `--dry-run` (`-n`), que enseña lo que haría sin hacerlo.
+- **`rsync` de macOS es `openrsync`** (`rsync --version`: `openrsync: protocol version 29`), y su resumen es más corto que el de Linux. Las opciones de este curso funcionan en los dos.
+
+</Callout>
+
+## Paso 5: endurecer SSH
+
+Con la clave funcionando, ya no hace falta que el servidor acepte contraseñas. Y no debe: cualquier servidor con el puerto 22 abierto en Internet recibe intentos automáticos sin parar, y una contraseña débil (o reutilizada) acaba cayendo. Dos cambios en la configuración del servidor (`sshd`):
+
+- **`PasswordAuthentication no`** (y `KbdInteractiveAuthentication no`, su variante): solo se entra con clave.
+- **`PermitRootLogin no`:** nadie entra directamente como `root`. Se entra como `deploy` y se usa `sudo`, que deja registro de quién hizo qué.
+
+Los cambios no se hacen en `/etc/ssh/sshd_config`, sino en un archivo propio dentro de **`/etc/ssh/sshd_config.d/`**, que las actualizaciones de Ubuntu no sobrescriben. Hay una trampa: en `sshd`, **gana el primer valor que se lee**, y los archivos de esa carpeta se leen en orden alfabético. Tu archivo debe ir **antes** que los del proveedor. Lo aplicarás en el ejercicio.
+
+<Callout type="risk">
+
+- **Antes de recargar `sshd`, deja una sesión abierta:** si el cambio te deja fuera, esa sesión sigue viva para deshacerlo. En Lima siempre te queda `limactl shell`; en un VPS, la consola web del proveedor.
+- **`sudo sshd -t` antes de recargar:** comprueba la sintaxis. Con un error, `sshd` no arrancaría y, en un VPS, no podrías volver a entrar por SSH.
+- **No desactives la contraseña hasta que la clave funcione** con el usuario que vas a usar (`ssh academy whoami`). En el orden contrario, el servidor queda sin ninguna forma de entrar.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Configura el acceso por clave a tu servidor de práctica (Pasos 1 a 3) y comprueba que `ssh academy` entra sin contraseña.
+2. Desactiva el acceso por contraseña y el de `root` en `/etc/ssh/sshd_config.d/`, con un nombre de archivo que gane a la configuración del proveedor.
+3. Comprueba desde tu Mac que la contraseña ya no sirve, que `root` no entra y que tu clave sigue funcionando.
+
+</Callout>
+
+Solución. Dentro del servidor, crea `/etc/ssh/sshd_config.d/01-endurecer.conf` (con `sudo nano` o `sudo tee`):
+
+```bash
+# Archivo: /etc/ssh/sshd_config.d/01-endurecer.conf
+# Solo claves: sin contraseñas y sin root
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+```
+
+La medición incluye antes un intento con el nombre `99-endurecer.conf`, para ver la trampa:
+
+```text
+=== Antes: la configuración del proveedor
+$ ls /etc/ssh/sshd_config.d/
+10-acceptenv-colorterm.conf
+50-proveedor.conf
+60-cloudimg-settings.conf
+$ ssh -o PubkeyAuthentication=no deploy@192.168.64.2 whoami   (con la contraseña de deploy)
+deploy
+=== Intento 1: el archivo con nombre 99-endurecer.conf
+$ sudo sshd -t && sudo sshd -T | grep -E "^(passwordauthentication|permitrootlogin) "
+permitrootlogin yes
+passwordauthentication yes
+=== Intento 2: el mismo archivo, renombrado a 01-endurecer.conf
+$ sudo mv /etc/ssh/sshd_config.d/99-endurecer.conf /etc/ssh/sshd_config.d/01-endurecer.conf
+$ sudo sshd -t && sudo sshd -T | grep -E "^(passwordauthentication|permitrootlogin|kbdinteractiveauthentication) "
+permitrootlogin no
+passwordauthentication no
+kbdinteractiveauthentication no
+$ sudo systemctl reload ssh
+(recargado)
+=== Después, desde el Mac
+$ ssh -o PubkeyAuthentication=no deploy@192.168.64.2 whoami
+deploy@192.168.64.2: Permission denied (publickey).
+$ ssh academy whoami
+deploy
+$ ssh root@192.168.64.2
+root@192.168.64.2: Permission denied (publickey).
+```
+
+- **Con `99-endurecer.conf`, no cambia nada:** `sshd -T` (la configuración que de verdad aplica) sigue diciendo `passwordauthentication yes`, porque `50-proveedor.conf` se lee antes. No da ningún error: simplemente se ignora.
+- **Con `01-endurecer.conf`, gana:** se lee el primero. `sshd -t` no da errores, y `systemctl reload ssh` aplica el cambio sin cortar las sesiones abiertas.
+- **Desde el Mac:** con la contraseña, `Permission denied (publickey)`, porque el servidor ya solo ofrece `publickey`. `root` tampoco entra. `ssh academy` sigue funcionando.
+- **Mejor aún, borra la configuración contradictoria:** `sudo rm /etc/ssh/sshd_config.d/50-proveedor.conf`. Así nadie tendrá que razonar sobre el orden.
+
+<Callout type="risk">
+
+- **Comprueba siempre con `sshd -T`, no leyendo los archivos:** es la única forma de saber qué valor ganó. Es habitual que la imagen del proveedor incluya un `50-cloud-init.conf` con `PasswordAuthentication yes`, que anula cualquier endurecimiento con un nombre posterior.
+- **Si te quedas fuera,** entra por la consola del proveedor (o `limactl shell academy`), corrige el archivo y vuelve a recargar.
+
+</Callout>
+
+<Callout type="mastery">
+
+Entras a tu servidor con `ssh academy` y nadie puede entrar con contraseña: tienes una clave `ed25519` con frase de paso, la pública en `authorized_keys` con permisos `600`, un alias en `~/.ssh/config`, copias con `scp` y despliegas con `rsync`, y has desactivado la contraseña y `root` comprobándolo con `sshd -T` y desde fuera.
+
+</Callout>
+
+## Resumen
+
+- La clave privada se queda en tu Mac (`600`, con frase de paso); la pública va a `~/.ssh/authorized_keys` en el servidor.
+- `ssh-copy-id` instala la pública; `~/.ssh/config` crea alias como `academy`.
+- `scp` para archivos sueltos; `rsync -avz` para carpetas, enviando solo lo que cambió (cuidado con `--delete` y la barra final).
+- Solo claves y sin `root`: `PasswordAuthentication no` y `PermitRootLogin no` en `sshd_config.d/`, en un archivo que se lea **antes** que los del proveedor.
+- `sudo sshd -t` antes de recargar, `sshd -T` para comprobar y una sesión abierta por si acaso.
