@@ -1,0 +1,684 @@
+---
+sectionId: "I3.2"
+course: "I3"
+title: "Endpoints (API routes)"
+order: 2
+minutes: 60
+summary: "Diseñas e implementas una API REST con GET, POST, PATCH y DELETE, query params, [id], JSON y FormData, códigos y cabeceras correctos, y resuelves tres fallos reales: null en MongoDB, prerender e índices."
+---
+
+Un **_endpoint_** es un archivo `.ts` dentro de `src/pages/` que, en lugar de una página, devuelve una respuesta HTTP cualquiera: JSON, un 204 vacío o una redirección. Es la forma de dar a tu app una **API**: el formulario de React la llama con `fetch`, otra app podría consumirla y, en una aplicación móvil, sería su único punto de contacto con el servidor. En B3.3 aprendiste los verbos y los códigos de estado de HTTP; en esta sección los vas a aplicar a una API de verdad, con un diseño REST coherente, y vas a medir cada respuesta con `curl`. Por el camino vas a encontrar tres fallos que solo aparecen cuando una API se usa de verdad.
+
+**Lo que tendrás al terminar:** la API de entrenos completa (listar con filtros, crear con JSON o con un formulario HTML, leer, editar y borrar uno) y la API REST de notas del Planificador.
+
+**Requisitos:** la app de I3.1 y los temas B3.3 (HTTP), I1.4 (Zod) e I1.5 (errores tipados, con `validar` y `aRespuesta` en `src/lib/errores.ts`).
+
+## Paso 1: diseñar antes de programar
+
+Una API REST se organiza alrededor de **recursos** (sustantivos: entrenos, notas) y de **verbos HTTP** (lo que haces con ellos). Antes de escribir código, se diseña en una tabla:
+
+| Método y ruta                     | Qué hace                  | Respuesta correcta                               | Errores posibles                |
+| --------------------------------- | ------------------------- | ------------------------------------------------ | ------------------------------- |
+| `GET /api/entrenos?tipo=&limite=` | Lista (la colección)      | `200` con la lista (vacía también es 200)        | `422` si un filtro no es válido |
+| `POST /api/entrenos`              | Crea uno                  | `201` + cabecera `Location` con la URL del nuevo | `422` datos inválidos           |
+| `GET /api/entrenos/:id`           | Lee uno                   | `200`                                            | `404`                           |
+| `PATCH /api/entrenos/:id`         | Cambia **algunos** campos | `200` con el resultado                           | `404`, `422`                    |
+| `DELETE /api/entrenos/:id`        | Borra uno                 | `204` sin cuerpo                                 | `404`                           |
+
+Las convenciones que sigue:
+
+- **Rutas en plural y sin verbos:** `/api/entrenos/123`, no `/api/borrarEntreno?id=123`. El verbo ya va en el método.
+- **La colección y el elemento son dos archivos:** `src/pages/api/entrenos/index.ts` (la colección) y `src/pages/api/entrenos/[id].ts` (un elemento, con el _id_ como parámetro dinámico).
+- **`PATCH` para cambios parciales, `PUT` para reemplazar entero:** un formulario de edición casi siempre envía solo lo que cambia, así que `PATCH` es lo habitual.
+- **El código de estado dice qué pasó, el cuerpo dice el detalle.** Un cliente debe poder decidir qué hacer solo mirando el código.
+
+<Callout type="risk">
+
+- **No devuelvas 200 con `{ "error": … }`:** un cliente que solo mira `res.ok` creerá que todo fue bien. Cada fallo, con su código: 4xx si es culpa de la petición, 5xx si es del servidor.
+- **No reveles qué existe a quien no debe saberlo:** un `GET` de un recurso de otro usuario debe responder 404 (como si no existiera), no 403. Por eso las consultas de esta lección filtran siempre por `userId`.
+
+</Callout>
+
+## Paso 2: la colección, con query params, JSON y FormData
+
+Primero, el esquema de los filtros y de los cambios parciales. Sustituye `src/schemas/entreno.ts` (añade `CambiosEntrenoSchema`, `FiltroEntrenosSchema` y sus tipos):
+
+```ts
+// Archivo: src/schemas/entreno.ts
+// La única fuente de verdad: la usan el formulario (cliente), el endpoint y la base de datos (servidor)
+import { z } from "zod";
+
+export const TIPOS_ENTRENO = ["fuerza", "running", "movilidad"] as const;
+
+// Un campo de formulario vacío ("") significa "no lo he rellenado", no 0
+const vacioComoAusente = (v: unknown) => (v === "" ? undefined : v);
+
+// Campos comunes a la entrada y al DTO
+const campos = {
+  tipo: z.enum(TIPOS_ENTRENO, "Elige un tipo de entreno"),
+  minutos: z.coerce.number("Indica los minutos").int("Minutos enteros").min(1, "Mínimo 1 minuto").max(600, "Máximo 600 minutos"),
+  km: z.preprocess(vacioComoAusente, z.coerce.number().positive("Los km deben ser mayores que 0").max(100).optional()),
+  fecha: z.coerce.date("Fecha no válida"),
+  notas: z.preprocess(vacioComoAusente, z.string().trim().max(200, "Máximo 200 caracteres").optional()),
+  sensacion: z.coerce.number().int().min(1, "De 1 a 5").max(5, "De 1 a 5"), // ← campo nuevo
+};
+
+/** Lo que envía el formulario y valida el endpoint */
+export const EntrenoSchema = z
+  .object(campos)
+  .refine((e) => e.tipo === "running" || e.km === undefined, {
+    message: "Solo los entrenos de running llevan km",
+    path: ["km"],
+  });
+
+/** Lo que devuelve la API: el entreno más su id y su fecha de creación */
+export const EntrenoDTOSchema = z.object({
+  ...campos,
+  id: z.string(),
+  creado: z.coerce.date(), // en el JSON llega como texto ISO; al validar vuelve a ser Date
+});
+
+export const ListaEntrenosSchema = z.object({ entrenos: z.array(EntrenoDTOSchema) });
+
+/** PATCH: cualquier subconjunto de campos (la regla de los km se comprueba sobre el resultado) */
+export const CambiosEntrenoSchema = z.object(campos).partial();
+
+/** Filtros de GET /api/entrenos?tipo=running&limite=10 (los query params llegan como texto) */
+export const FiltroEntrenosSchema = z.object({
+  tipo: z.enum(TIPOS_ENTRENO).optional(),
+  limite: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+// Los tipos se derivan; ninguno se escribe a mano
+export type TipoEntreno = (typeof TIPOS_ENTRENO)[number];
+export type EntrenoInput = z.output<typeof EntrenoSchema>;
+export type EntrenoDTO = z.output<typeof EntrenoDTOSchema>;
+export type CambiosEntreno = z.output<typeof CambiosEntrenoSchema>;
+export type FiltroEntrenos = z.output<typeof FiltroEntrenosSchema>;
+/** Estado del formulario: los mismos campos, todos como texto (así los dan los <input>) */
+export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
+```
+
+Después, la capa de datos. Sustituye `src/server/entrenos.ts`:
+
+```ts
+// Archivo: src/server/entrenos.ts
+// Capa de datos: el único sitio que sabe que existe MongoDB
+import { ObjectId, type WithId } from "mongodb";
+import { db } from "../lib/mongo";
+import type { CambiosEntreno, EntrenoDTO, EntrenoInput, FiltroEntrenos } from "../schemas/entreno";
+
+/** El documento tal como se guarda: lo validado más lo que pone el servidor */
+export interface EntrenoDoc extends EntrenoInput {
+  _id?: ObjectId;
+  userId: string;
+  creado: Date;
+}
+
+// ignoreUndefined: un campo opcional sin valor (km: undefined) no se guarda.
+// Sin esta opción, el driver lo guarda como null, y null no es un km válido para el esquema.
+const entrenos = db.collection<EntrenoDoc>("entrenos", { ignoreUndefined: true });
+
+/** Documento de BD → DTO para el cliente: _id pasa a id y userId no sale nunca */
+export function aDTO(doc: WithId<EntrenoDoc>): EntrenoDTO {
+  return {
+    id: doc._id.toHexString(),
+    tipo: doc.tipo,
+    minutos: doc.minutos,
+    km: doc.km,
+    fecha: doc.fecha,
+    notas: doc.notas,
+    sensacion: doc.sensacion,
+    creado: doc.creado,
+  };
+}
+
+/** Un id de la URL que no es un ObjectId válido se trata como "no existe" (404), no como error */
+function aObjectId(id: string): ObjectId | null {
+  return /^[0-9a-f]{24}$/i.test(id) ? new ObjectId(id) : null;
+}
+
+export async function listarEntrenos(userId: string, filtro: FiltroEntrenos): Promise<EntrenoDTO[]> {
+  const docs = await entrenos
+    .find({ userId, ...(filtro.tipo && { tipo: filtro.tipo }) })
+    .sort({ fecha: -1, creado: -1 })
+    .limit(filtro.limite)
+    .toArray();
+  return docs.map(aDTO);
+}
+
+export async function crearEntreno(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+  const doc: EntrenoDoc = { ...datos, userId, creado: new Date() };
+  const { insertedId } = await entrenos.insertOne(doc);
+  return aDTO({ ...doc, _id: insertedId });
+}
+
+export async function obtenerEntreno(userId: string, id: string): Promise<EntrenoDTO | null> {
+  const _id = aObjectId(id);
+  if (!_id) return null;
+  const doc = await entrenos.findOne({ _id, userId }); // userId en el filtro: nadie lee entrenos ajenos
+  return doc ? aDTO(doc) : null;
+}
+
+export async function actualizarEntreno(
+  userId: string,
+  id: string,
+  cambios: CambiosEntreno,
+): Promise<EntrenoDTO | null> {
+  const _id = aObjectId(id);
+  if (!_id) return null;
+  const doc = await entrenos.findOneAndUpdate({ _id, userId }, { $set: cambios }, { returnDocument: "after" });
+  return doc ? aDTO(doc) : null;
+}
+
+export async function borrarEntreno(userId: string, id: string): Promise<boolean> {
+  const _id = aObjectId(id);
+  if (!_id) return false;
+  const { deletedCount } = await entrenos.deleteOne({ _id, userId });
+  return deletedCount === 1;
+}
+```
+
+Ahora el _endpoint_ de la colección. Borra `src/pages/api/entrenos.ts` y crea `src/pages/api/entrenos/index.ts` (la URL sigue siendo `/api/entrenos`):
+
+```ts
+// Archivo: src/pages/api/entrenos/index.ts
+// La COLECCIÓN: GET /api/entrenos (listar) y POST /api/entrenos (crear)
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../../lib/errores";
+import { EntrenoSchema, FiltroEntrenosSchema } from "../../../schemas/entreno";
+import { crearEntreno, listarEntrenos } from "../../../server/entrenos";
+
+export const prerender = false;
+
+// Sin autenticación todavía (curso I5): todos los entrenos son de un usuario de demostración
+const USUARIO_DEMO = "u_demo";
+
+export const GET: APIRoute = async ({ url }) => {
+  try {
+    // ?tipo=running&limite=10 → { tipo: "running", limite: 10 }
+    const filtro = validar(FiltroEntrenosSchema, Object.fromEntries(url.searchParams));
+    const entrenos = await listarEntrenos(USUARIO_DEMO, filtro);
+    return Response.json({ entrenos });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const POST: APIRoute = async ({ request, redirect }) => {
+  const esFormulario = request.headers.get("content-type")?.includes("application/x-www-form-urlencoded") ?? false;
+  try {
+    // El mismo endpoint acepta JSON (fetch) y formularios HTML sin JavaScript
+    const cuerpo = esFormulario
+      ? Object.fromEntries(await request.formData())
+      : await request.json().catch(() => null);
+    const creado = await crearEntreno(USUARIO_DEMO, validar(EntrenoSchema, cuerpo));
+
+    if (esFormulario) return redirect("/?creado=1", 303); // tras un POST, el navegador hace un GET
+    return Response.json(creado, {
+      status: 201,
+      headers: { Location: `/api/entrenos/${creado.id}` }, // dónde vive el recurso nuevo
+    });
+  } catch (e) {
+    if (esFormulario) return redirect("/nuevo?error=1", 303);
+    return aRespuesta(e);
+  }
+};
+```
+
+Cada método es una función exportada con el nombre del verbo (`GET`, `POST`…) que recibe el **contexto** de la petición:
+
+- **`url.searchParams`**: los _query params_ (`?tipo=fuerza&limite=10`). Llegan como texto; `FiltroEntrenosSchema` los convierte y valida (`z.coerce.number()`).
+- **`request.json()`**: el cuerpo de un `fetch` con `Content-Type: application/json`.
+- **`request.formData()`**: el cuerpo de un formulario HTML. El mismo `POST` acepta los dos, mirando la cabecera `Content-Type`.
+- **`Response.json(datos, { status, headers })`**: la respuesta JSON, con el código y las cabeceras.
+- **`redirect(url, 303)`**: una redirección. Tras un `POST` de formulario se responde **303**, que le dice al navegador que haga un `GET` a la nueva URL; así, recargar la página no vuelve a enviar el formulario.
+
+Un formulario HTML que funciona **sin JavaScript**, `src/pages/nuevo.astro`:
+
+```astro
+---
+// Archivo: src/pages/nuevo.astro
+// Un formulario HTML que funciona SIN JavaScript: el navegador envía FormData a la API
+import Base from "../layouts/Base.astro";
+
+export const prerender = false; // lee ?error de la URL: en el build no hay URL que leer
+const hayError = Astro.url.searchParams.has("error");
+---
+
+<Base titulo="Nuevo entreno">
+  <h1>Nuevo entreno (sin JavaScript)</h1>
+  {hayError && <p id="error">Revisa los datos: no se pudo guardar.</p>}
+  <form method="post" action="/api/entrenos">
+    <label>Tipo <select name="tipo"><option>running</option><option>fuerza</option><option>movilidad</option></select></label>
+    <label>Minutos <input name="minutos" inputmode="numeric" required /></label>
+    <label>Km <input name="km" inputmode="decimal" /></label>
+    <label>Fecha <input name="fecha" type="date" required /></label>
+    <label>Sensación <input name="sensacion" type="number" min="1" max="5" value="3" /></label>
+    <button type="submit">Guardar</button>
+  </form>
+</Base>
+```
+
+## Paso 3: un elemento con `[id]`, y la medición
+
+Crea `src/pages/api/entrenos/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/entrenos/[id].ts
+// UN RECURSO: GET, PATCH y DELETE /api/entrenos/:id
+import type { APIRoute } from "astro";
+import { aRespuesta, NoEncontradoError, validar } from "../../../lib/errores";
+import { CambiosEntrenoSchema, EntrenoSchema } from "../../../schemas/entreno";
+import { actualizarEntreno, borrarEntreno, obtenerEntreno } from "../../../server/entrenos";
+
+export const prerender = false;
+
+const USUARIO_DEMO = "u_demo";
+
+export const GET: APIRoute = async ({ params }) => {
+  try {
+    const entreno = await obtenerEntreno(USUARIO_DEMO, params.id!);
+    if (!entreno) throw new NoEncontradoError("El entreno", params.id!);
+    return Response.json(entreno);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const PATCH: APIRoute = async ({ params, request }) => {
+  try {
+    const cambios = validar(CambiosEntrenoSchema, await request.json().catch(() => null));
+    const actual = await obtenerEntreno(USUARIO_DEMO, params.id!);
+    if (!actual) throw new NoEncontradoError("El entreno", params.id!);
+    validar(EntrenoSchema, { ...actual, ...cambios }); // las reglas se cumplen en el RESULTADO (p. ej., los km)
+    const actualizado = await actualizarEntreno(USUARIO_DEMO, params.id!, cambios);
+    return Response.json(actualizado);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const DELETE: APIRoute = async ({ params }) => {
+  try {
+    const borrado = await borrarEntreno(USUARIO_DEMO, params.id!);
+    if (!borrado) throw new NoEncontradoError("El entreno", params.id!);
+    return new Response(null, { status: 204 }); // hecho, y no hay nada que devolver
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+`params.id` es el trozo de la URL que ocupa `[id]`. Arranca `npm run dev` y prueba la API completa. Para guardar el _id_ de un entreno en una variable de la terminal:
+
+```bash
+ID=$(curl -s "http://localhost:4321/api/entrenos?limite=1" | grep -oE '"id":"[0-9a-f]{24}"' | head -1 | cut -d'"' -f4)
+```
+
+Medido con `curl -i` (que muestra el código y las cabeceras):
+
+```text
+$ POST /api/entrenos (JSON)
+  → 201 Created
+  location: /api/entrenos/6ad1921b681e3c41d67bf38b
+  {"id":"6ad1921b681e3c41d67bf38b","tipo":"running","minutos":45,"km":9.5,"fecha":"2026-10-12T00:00:00.000Z","sensacion":4,"creado":"2026-10-16T02:55:23.620Z"}
+$ GET /api/entrenos?tipo=fuerza
+  → 200 OK
+  {"entrenos":[{"id":"6ad1921b681e3c41d67bf38c","tipo":"fuerza","minutos":50,"fecha":"2026-10-13T00:00:00.000Z","sensacion":3,"creado":"2026-10-16T02:55:23.683Z"}]}
+$ GET /api/entrenos?limite=abc
+  → 422 Unprocessable Entity
+  {"error":"Revisa los datos del formulario","campos":{"limite":["Invalid input: expected number, received NaN"]}}
+$ GET /api/entrenos/$ID
+  → 200 OK
+  {"id":"6ad1921b681e3c41d67bf38b","tipo":"running","minutos":45,"km":9.5,"fecha":"2026-10-12T00:00:00.000Z","sensacion":4,"creado":"2026-10-16T02:55:23.620Z"}
+$ PATCH /api/entrenos/$ID {minutos: 50}
+  → 200 OK
+  {"id":"6ad1921b681e3c41d67bf38b","tipo":"running","minutos":50,"km":9.5,"fecha":"2026-10-12T00:00:00.000Z","sensacion":4,"creado":"2026-10-16T02:55:23.620Z"}
+$ PATCH /api/entrenos/$ID {tipo: fuerza} (le quedarían km)
+  → 422 Unprocessable Entity
+  {"error":"Revisa los datos del formulario","campos":{"km":["Solo los entrenos de running llevan km"]}}
+$ DELETE /api/entrenos/$ID
+  → 204 No Content
+$ DELETE otra vez
+  → 404 Not Found
+  {"error":"El entreno 6ad1921b681e3c41d67bf38b no existe"}
+$ GET /api/entrenos/no-es-un-id
+  → 404 Not Found
+  {"error":"El entreno no-es-un-id no existe"}
+$ PUT /api/entrenos (método no exportado)
+  → 404 Not Found
+$ POST formulario HTML
+  → 303 See Other
+  location: /?creado=1
+$ POST formulario HTML con error
+  → 303 See Other
+  location: /nuevo?error=1
+```
+
+Fíjate en los detalles:
+
+- **El `PATCH` a `fuerza` se rechaza** aunque `{ tipo: "fuerza" }` sea válido por sí solo: el entreno tiene km, y la regla dice que solo los de running los llevan. Por eso el _endpoint_ valida el **resultado** (`{ ...actual, ...cambios }`) con el esquema completo.
+- **Un _id_ mal formado es un 404,** no un 500: `aObjectId` comprueba el formato antes de crear el `ObjectId`, que lanzaría una excepción.
+- **Un método que no exportas responde 404** (con una página HTML), no el 405 _Method Not Allowed_ que sería lo correcto en HTTP. Es el comportamiento de Astro, en desarrollo y en producción.
+
+<Callout type="risk">
+
+- **Un `undefined` se guarda en MongoDB como `null`:** al enviar el formulario sin JavaScript con el campo km vacío, Zod lo convierte en `undefined` (correcto), pero el _driver_ de MongoDB lo guardó como `km: null`. Ese `null` no es un km válido para `EntrenoDTOSchema`, y **un solo documento así** hizo que el listado del navegador mostrara "No se pudieron cargar los entrenos". Por eso la colección se abre con `{ ignoreUndefined: true }`: los `undefined` no se guardan. (Con `fetch` no pasaba, porque `JSON.stringify` ya elimina los `undefined`).
+- **Una página que lee la URL no puede ser estática:** la primera versión de `nuevo.astro` no tenía `prerender = false`, y el mensaje de `?error=1` **nunca aparecía**: la página se generó en el _build_, cuando no había ninguna URL que leer (I3.1). Todo lo que lea `Astro.url.searchParams`, cookies o la sesión va en servidor.
+- **Un `PATCH` que valida solo los campos que llegan deja pasar estados inválidos:** cada campo puede ser válido y la combinación no. Valida el resultado, o las reglas de negocio en el servicio (I3.5).
+- **`checkOrigin` protege los formularios:** Astro rechaza con 403 un `POST` de formulario que venga de otro origen (CSRF, Tanda 9). Los `curl` de esta lección llevan la cabecera `Origin` por eso.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Diseña en una tabla, como la del Paso 1, la API REST de **notas** del Planificador: listar (con filtros por categoría y por fijadas), crear, leer, editar y borrar, con los códigos de estado correctos.
+2. Una regla nueva: un usuario no puede tener dos notas con el mismo título (409 _Conflict_), garantizada por un **índice único** en MongoDB.
+3. Impleméntala con un esquema (`src/schemas/nota.ts`), una capa de datos (`src/server/notas.ts`) y dos _endpoints_, y pruébala con `curl` en todos los casos.
+
+</Callout>
+
+El diseño:
+
+| Método y ruta                       | Respuesta                 | Errores                                                  |
+| ----------------------------------- | ------------------------- | -------------------------------------------------------- |
+| `GET /api/notas?categoria=&fijada=` | `200` + lista             | `422`                                                    |
+| `POST /api/notas`                   | `201` + `Location`        | `409` título repetido, `422`                             |
+| `GET /api/notas/:id`                | `200`                     | `404`                                                    |
+| `PATCH /api/notas/:id`              | `200` con la nota editada | `404`, `409`, `422` (incluido "no hay nada que cambiar") |
+| `DELETE /api/notas/:id`             | `204`                     | `404`                                                    |
+
+Solución. `src/schemas/nota.ts`:
+
+```ts
+// Archivo: src/schemas/nota.ts
+import { z } from "zod";
+
+export const CATEGORIAS = ["trabajo", "personal", "salud", "estudio"] as const;
+
+const campos = {
+  titulo: z.string().trim().min(1, "El título es obligatorio").max(120, "Máximo 120 caracteres"),
+  contenido: z.string().max(5000, "Máximo 5000 caracteres").default(""),
+  categoria: z.enum(CATEGORIAS, "Categoría no válida"),
+  fijada: z.boolean().default(false),
+};
+
+export const NuevaNotaSchema = z.object(campos);
+// Para editar: sin valores por defecto (si no llega un campo, no se toca)
+export const CambiosNotaSchema = z
+  .object({ ...campos, contenido: z.string().max(5000), fijada: z.boolean() })
+  .partial();
+export const FiltroNotasSchema = z.object({
+  categoria: z.enum(CATEGORIAS).optional(),
+  fijada: z.stringbool().optional(), // ?fijada=true
+});
+
+export type NuevaNota = z.output<typeof NuevaNotaSchema>;
+export type CambiosNota = z.output<typeof CambiosNotaSchema>;
+export type FiltroNotas = z.output<typeof FiltroNotasSchema>;
+
+export interface NotaDTO extends NuevaNota {
+  id: string;
+  creada: Date;
+  actualizada: Date;
+}
+```
+
+`src/server/notas.ts`:
+
+```ts
+// Archivo: src/server/notas.ts
+import { MongoServerError, ObjectId, type WithId } from "mongodb";
+import { ConflictoError } from "../lib/errores";
+import { db } from "../lib/mongo";
+import type { CambiosNota, FiltroNotas, NotaDTO, NuevaNota } from "../schemas/nota";
+
+interface NotaDoc extends NuevaNota {
+  _id?: ObjectId;
+  userId: string;
+  creada: Date;
+  actualizada: Date;
+}
+
+// Un usuario no puede tener dos notas con el mismo título: lo garantiza el índice único
+// que crea scripts/crear-indices.mjs (no se crea desde aquí, en cada petición)
+const notas = db.collection<NotaDoc>("notas", { ignoreUndefined: true });
+
+const DUPLICADA = 11000;
+
+function aDTO({ _id, titulo, contenido, categoria, fijada, creada, actualizada }: WithId<NotaDoc>): NotaDTO {
+  return { id: _id.toHexString(), titulo, contenido, categoria, fijada, creada, actualizada };
+}
+
+const aObjectId = (id: string) => (/^[0-9a-f]{24}$/i.test(id) ? new ObjectId(id) : null);
+
+/** Traduce el error de índice único de MongoDB a un 409 */
+function siDuplicada(error: unknown, titulo: string | undefined): never {
+  if (error instanceof MongoServerError && error.code === DUPLICADA) {
+    throw new ConflictoError(`Ya tienes una nota titulada «${titulo}»`, { cause: error });
+  }
+  throw error;
+}
+
+export async function listarNotas(userId: string, filtro: FiltroNotas): Promise<NotaDTO[]> {
+  const docs = await notas
+    .find({ userId, ...filtro })
+    .sort({ fijada: -1, actualizada: -1 })
+    .toArray();
+  return docs.map(aDTO);
+}
+
+export async function crearNota(userId: string, datos: NuevaNota): Promise<NotaDTO> {
+  const ahora = new Date();
+  const doc: NotaDoc = { ...datos, userId, creada: ahora, actualizada: ahora };
+  try {
+    const { insertedId } = await notas.insertOne(doc);
+    return aDTO({ ...doc, _id: insertedId });
+  } catch (error) {
+    return siDuplicada(error, datos.titulo);
+  }
+}
+
+export async function obtenerNota(userId: string, id: string): Promise<NotaDTO | null> {
+  const _id = aObjectId(id);
+  const doc = _id && (await notas.findOne({ _id, userId }));
+  return doc ? aDTO(doc) : null;
+}
+
+export async function editarNota(userId: string, id: string, cambios: CambiosNota): Promise<NotaDTO | null> {
+  const _id = aObjectId(id);
+  if (!_id) return null;
+  try {
+    const doc = await notas.findOneAndUpdate(
+      { _id, userId },
+      { $set: { ...cambios, actualizada: new Date() } },
+      { returnDocument: "after" },
+    );
+    return doc ? aDTO(doc) : null;
+  } catch (error) {
+    return siDuplicada(error, cambios.titulo);
+  }
+}
+
+export async function borrarNota(userId: string, id: string): Promise<boolean> {
+  const _id = aObjectId(id);
+  return _id ? (await notas.deleteOne({ _id, userId })).deletedCount === 1 : false;
+}
+```
+
+El índice único, en un _script_ aparte, `scripts/crear-indices.mjs`:
+
+```js
+// Archivo: scripts/crear-indices.mjs
+// Uso: node --env-file=.env scripts/crear-indices.mjs  (una vez, y cada vez que cambien los índices)
+import { MongoClient } from "mongodb";
+
+const client = new MongoClient(process.env.MONGODB_URI);
+try {
+  const db = client.db(process.env.MONGODB_DB ?? "entrenos_lab");
+  const nombre = await db
+    .collection("notas")
+    .createIndex({ userId: 1, titulo: 1 }, { unique: true, name: "usuario_titulo_unico" });
+  console.log(`✓ índice notas.${nombre}`);
+} finally {
+  await client.close();
+}
+```
+
+`src/pages/api/notas/index.ts`:
+
+```ts
+// Archivo: src/pages/api/notas/index.ts
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../../lib/errores";
+import { FiltroNotasSchema, NuevaNotaSchema } from "../../../schemas/nota";
+import { crearNota, listarNotas } from "../../../server/notas";
+
+export const prerender = false;
+const USUARIO_DEMO = "u_demo";
+
+// GET /api/notas?categoria=salud&fijada=true → 200 con la lista (vacía también es 200)
+export const GET: APIRoute = async ({ url }) => {
+  try {
+    const filtro = validar(FiltroNotasSchema, Object.fromEntries(url.searchParams));
+    return Response.json({ notas: await listarNotas(USUARIO_DEMO, filtro) });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+// POST /api/notas → 201 + Location; 422 si los datos no valen; 409 si el título ya existe
+export const POST: APIRoute = async ({ request }) => {
+  try {
+    const nota = await crearNota(USUARIO_DEMO, validar(NuevaNotaSchema, await request.json().catch(() => null)));
+    return Response.json(nota, { status: 201, headers: { Location: `/api/notas/${nota.id}` } });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+`src/pages/api/notas/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/notas/[id].ts
+import type { APIRoute } from "astro";
+import { aRespuesta, NoEncontradoError, ValidacionError, validar } from "../../../lib/errores";
+import { CambiosNotaSchema } from "../../../schemas/nota";
+import { borrarNota, editarNota, obtenerNota } from "../../../server/notas";
+
+export const prerender = false;
+const USUARIO_DEMO = "u_demo";
+
+const noExiste = (id: string) => new NoEncontradoError("La nota", id);
+
+// GET /api/notas/:id → 200 o 404
+export const GET: APIRoute = async ({ params }) => {
+  try {
+    const nota = await obtenerNota(USUARIO_DEMO, params.id!);
+    if (!nota) throw noExiste(params.id!);
+    return Response.json(nota);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+// PATCH /api/notas/:id → 200 con la nota editada; 404, 409 o 422
+export const PATCH: APIRoute = async ({ params, request }) => {
+  try {
+    const cambios = validar(CambiosNotaSchema, await request.json().catch(() => null));
+    if (Object.keys(cambios).length === 0) throw new ValidacionError({}, "No hay nada que cambiar");
+    const nota = await editarNota(USUARIO_DEMO, params.id!, cambios);
+    if (!nota) throw noExiste(params.id!);
+    return Response.json(nota);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+// DELETE /api/notas/:id → 204 sin cuerpo; 404 si no existe
+export const DELETE: APIRoute = async ({ params }) => {
+  try {
+    if (!(await borrarNota(USUARIO_DEMO, params.id!))) throw noExiste(params.id!);
+    return new Response(null, { status: 204 });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+```bash
+node --env-file=.env scripts/crear-indices.mjs
+```
+
+```text
+✓ índice notas.usuario_titulo_unico
+```
+
+Medido con `curl`:
+
+```text
+$ curl -X POST /api/notas -d '{"titulo":"Revisar presupuesto","categoria":"trabajo"}'
+  → 201 Created
+  location: /api/notas/6ad192e1787f958153901640
+  {"id":"6ad192e1787f958153901640","titulo":"Revisar presupuesto","contenido":"","categoria":"trabajo","fijada":false,"creada":"2026-10-16T02:58:41.297Z","actualizada":"2026-10-16T02:58:41.297Z"}
+$ curl -X POST /api/notas -d '{"titulo":"Revisar presupuesto","categoria":"personal"}'
+  → 409 Conflict
+  {"error":"Ya tienes una nota titulada «Revisar presupuesto»"}
+$ curl -X POST /api/notas -d '{"titulo":"Correr 10 km"}'
+  → 422 Unprocessable Entity
+  {"error":"Revisa los datos del formulario","campos":{"categoria":["Categoría no válida"]}}
+$ curl -X POST /api/notas -d '{"titulo":"Correr 10 km","categoria":"salud","fijada":true}'
+  → 201 Created
+  location: /api/notas/6ad192e1787f958153901642
+  {"id":"6ad192e1787f958153901642","titulo":"Correr 10 km","contenido":"","categoria":"salud","fijada":true,"creada":"2026-10-16T02:58:41.351Z","actualizada":"2026-10-16T02:58:41.351Z"}
+$ curl '/api/notas?fijada=true'
+  → 200 OK
+  {"notas":[{"id":"6ad192e1787f958153901642","titulo":"Correr 10 km","contenido":"","categoria":"salud","fijada":true,"creada":"2026-10-16T02:58:41.351Z","actualizada":"2026-10-16T02:58:41.351Z"}]}
+$ curl -X PATCH /api/notas/$ID -d '{"contenido":"Q4"}'
+  → 200 OK
+  {"id":"6ad192e1787f958153901640","titulo":"Revisar presupuesto","contenido":"Q4","categoria":"trabajo","fijada":false,"creada":"2026-10-16T02:58:41.297Z","actualizada":"2026-10-16T02:58:41.375Z"}
+$ curl -X PATCH /api/notas/$ID -d '{}'
+  → 422 Unprocessable Entity
+  {"error":"No hay nada que cambiar","campos":{}}
+$ curl -X PATCH /api/notas/$ID -d '{"titulo":"Correr 10 km"}'
+  → 409 Conflict
+  {"error":"Ya tienes una nota titulada «Correr 10 km»"}
+$ curl -X DELETE /api/notas/$ID
+  → 204 No Content
+$ curl /api/notas/$ID
+  → 404 Not Found
+  {"error":"La nota 6ad192e1787f958153901640 no existe"}
+```
+
+Las decisiones:
+
+- **La unicidad la garantiza la base de datos, no el código:** comprobar "¿existe ya una nota con este título?" antes de insertar falla con dos peticiones simultáneas (las dos ven que no existe y las dos insertan). El índice único hace que MongoDB rechace la segunda con el error `11000`, y `siDuplicada` lo traduce a un `ConflictoError` (409, I1.5). Funciona igual al crear y al editar.
+- **El índice se crea en un _script_, no en el código de la API:** la primera versión de esta solución lo creaba en la primera petición y guardaba la promesa para no repetirlo. Al borrar la colección durante las pruebas, MongoDB borró también su índice, el código no lo volvió a crear y **el título repetido se aceptó con un 201**. Un _script_ de preparación (como el `db:setup` de esta plataforma) se ejecuta al desplegar y no depende del estado de un proceso.
+- **"No hay nada que cambiar" se comprueba en el _endpoint_:** como `.refine()` en el esquema, el mensaje no era de ningún campo y la respuesta llegaba como `"campos": {}`, sin ninguna explicación. Con un `ValidacionError` explícito, el cliente recibe el motivo.
+- **`CambiosNotaSchema` no tiene valores por defecto:** si los tuviera, un `PATCH` de solo el título reiniciaría `contenido` a `""` y `fijada` a `false`.
+
+<Callout type="risk">
+
+- **Ejecuta el _script_ de índices en cada base de datos:** en desarrollo, en la de pruebas y en producción. Sin el índice, la API no da ningún error: simplemente deja de garantizar la regla.
+- **El índice no se puede crear si ya hay duplicados:** si la colección ya tiene dos notas con el mismo título, `createIndex` falla con `E11000`. Hay que limpiar los datos antes (con una migración, como en I1.6).
+- **La ordenación por `fijada` y `actualizada` necesita su índice cuando haya muchas notas:** con pocas da igual; con miles por usuario, añade `{ userId: 1, fijada: -1, actualizada: -1 }` al _script_ (B4.4).
+
+</Callout>
+
+<Callout type="mastery">
+
+Tus rutas y códigos de estado siguen las convenciones REST de B3.3: diseñas la API en una tabla antes de programarla, separas colección (`index.ts`) y elemento (`[id].ts`), lees _query params_, JSON y `FormData`, respondes 201 con `Location`, 204 sin cuerpo, 404, 409 o 422 según el caso, y garantizas las reglas de unicidad en la base de datos.
+
+</Callout>
+
+## Resumen
+
+- Un _endpoint_ exporta una función por verbo (`GET`, `POST`, `PATCH`, `DELETE`) que recibe `params`, `url`, `request` y devuelve un `Response`.
+- REST: recursos en plural, la colección en `index.ts`, el elemento en `[id].ts`; el verbo dice qué se hace y el código, qué pasó.
+- `201` + `Location` al crear, `204` al borrar, `303` tras un formulario HTML, `404` también para _ids_ mal formados.
+- Valida _query params_ y cuerpos con Zod, y en un `PATCH` valida el resultado completo.
+- Tres fallos medidos: MongoDB guarda `undefined` como `null` (`ignoreUndefined`), una página estática no lee la URL (`prerender = false`) y un índice creado desde el código se pierde (_script_ de índices).

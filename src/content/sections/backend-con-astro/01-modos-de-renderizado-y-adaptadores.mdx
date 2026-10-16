@@ -1,0 +1,382 @@
+---
+sectionId: "I3.1"
+course: "I3"
+title: "Modos de renderizado y adaptadores"
+order: 1
+minutes: 60
+summary: "Compilas la app con y sin adaptador, comparas output static y server con prerender, mides qué páginas cambian en cada petición, sigues el ciclo de una petición SSR y usas server islands con server:defer."
+---
+
+Hasta ahora has escrito páginas y _endpoints_ sin preguntarte **cuándo** se genera su HTML. En Astro hay dos momentos posibles: **en el _build_**, una sola vez, y se sirve el mismo archivo a todo el mundo (estático, SSG); o **en cada petición**, en un servidor que ejecuta tu código (SSR). Elegir bien es la decisión de rendimiento más importante de un proyecto Astro: una página estática se sirve en microsegundos desde una CDN y no puede fallar por la base de datos; una página en servidor puede mostrar datos de ese momento y de ese usuario. En esta sección vas a compilar tu app de entrenamiento de las dos formas, vas a **medir** qué cambia en cada petición, vas a seguir el recorrido de una petición en el servidor y vas a combinar los dos mundos en una misma página con las _server islands_.
+
+**Lo que tendrás al terminar:** la app de entrenamiento de I1.6 con un adaptador de Node, una página estática, una página que se renderiza en cada petición y una portada estática con un trozo dinámico (`server:defer`).
+
+**Requisitos:** la app `entrenos-app` de I1.6, con su `.env` apuntando a tu MongoDB. Todo el curso I3 se hace sobre ella.
+
+## Paso 1: el build sin adaptador
+
+En I1.6, la app tenía una ruta de API con `export const prerender = false` (se ejecuta en el servidor) y nunca la compilaste. Hazlo ahora:
+
+```bash
+npm run build
+```
+
+```text
+[NoAdapterInstalled] Cannot use server-rendered pages without an adapter. Please install and configure the appropriate server adapter for your final deployment.
+```
+
+`npm run dev` funcionaba porque el servidor de desarrollo **siempre** ejecuta código en un servidor (el de Vite). Pero para producción, Astro necesita saber **dónde** se va a ejecutar ese código: Node, Vercel, Netlify, Cloudflare… Eso es un **adaptador**: el traductor entre tu app y la plataforma donde la despliegas.
+
+| Adaptador         | Para                                    | Resultado del build                                     |
+| ----------------- | --------------------------------------- | ------------------------------------------------------- |
+| `@astrojs/node`   | Tu propio servidor, Docker, un VPS (A4) | Un servidor Node: `node dist/server/entry.mjs`          |
+| `@astrojs/vercel` | Vercel (esta plataforma)                | Funciones _serverless_ y archivos para la CDN de Vercel |
+| (ninguno)         | Una web 100 % estática                  | Solo archivos HTML, CSS y JS                            |
+
+Añade el de Node, que puedes ejecutar en local:
+
+```bash
+npx astro add node --yes
+```
+
+Tu `astro.config.mjs` queda así:
+
+```js
+// @ts-check
+import { defineConfig, envField } from "astro/config";
+import react from "@astrojs/react";
+
+import node from "@astrojs/node";
+
+export default defineConfig({
+  integrations: [react()],
+
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "entrenos_lab" }),
+    },
+  },
+
+  adapter: node({
+    mode: "standalone",
+  }),
+});
+```
+
+<Callout type="risk">
+
+- **Desarrollo no es producción:** que algo funcione en `npm run dev` no garantiza que compile. Ejecuta `npm run build` de vez en cuando, y siempre antes de desplegar; esta plataforma lo hace en su CI (Tanda 9).
+- **El adaptador decide qué APIs tienes:** `@astrojs/node` en modo `standalone` es un servidor de larga duración (memoria compartida entre peticiones, conexiones persistentes). En Vercel, cada función puede arrancar en frío y vivir poco tiempo. Código que "funciona en Node" puede comportarse distinto en _serverless_ (I3.4 y la reconexión a MongoDB de la Tanda 9).
+
+</Callout>
+
+## Paso 2: estático por defecto, servidor donde haga falta
+
+Con un adaptador, cada ruta se compila de una de dos formas. Añade dos páginas para verlo. Primero un layout común, `src/layouts/Base.astro`:
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+interface Props {
+  titulo: string;
+}
+const { titulo } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · Mis entrenos</title>
+    <style is:global>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+      nav { display: flex; gap: 1rem; margin-bottom: 1rem; }
+    </style>
+  </head>
+  <body>
+    <nav><a href="/">Entrenos</a><a href="/estadisticas">Estadísticas</a><a href="/acerca">Acerca de</a></nav>
+    <slot />
+  </body>
+</html>
+```
+
+Una página cuyo contenido no depende de nada, `src/pages/acerca.astro`:
+
+```astro
+---
+// Archivo: src/pages/acerca.astro
+// Contenido que no depende de quién lo pide ni de cuándo: se genera una vez, en el build
+import Base from "../layouts/Base.astro";
+const generada = new Date().toISOString();
+---
+
+<Base titulo="Acerca de">
+  <h1>Acerca de Mis entrenos</h1>
+  <p>Una app para registrar entrenos de fuerza, running y movilidad.</p>
+  <p id="generada">HTML generado: {generada}</p>
+</Base>
+```
+
+Y una que muestra datos de la base de datos de ese momento, `src/pages/estadisticas.astro`:
+
+```astro
+---
+// Archivo: src/pages/estadisticas.astro
+// Depende de los datos de ese momento: se renderiza en el servidor en CADA petición
+import Base from "../layouts/Base.astro";
+import { db } from "../lib/mongo";
+
+export const prerender = false;
+
+const [fila] = await db
+  .collection("entrenos")
+  .aggregate<{ total: number; minutos: number }>([
+    { $match: { userId: "u_demo" } },
+    { $group: { _id: null, total: { $sum: 1 }, minutos: { $sum: "$minutos" } } },
+  ])
+  .toArray();
+const generada = new Date().toISOString();
+---
+
+<Base titulo="Estadísticas">
+  <h1>Estadísticas</h1>
+  <p id="totales">{fila?.total ?? 0} entrenos · {fila?.minutos ?? 0} minutos</p>
+  <p id="generada">HTML generado: {generada}</p>
+</Base>
+```
+
+Compila:
+
+```bash
+npm run build
+```
+
+```text
+[build] output: "static"
+  ├─ /acerca/index.html (+4ms)
+  ├─ /index.html (+6ms)
+[build] Complete!
+```
+
+Con `output: "static"` (el valor por defecto), **todo se genera en el _build_** salvo lo que diga `export const prerender = false`. `index` y `acerca` son archivos HTML en `dist/client/`; `estadisticas` y la API se compilan como código de servidor. Arranca el servidor de producción y pide cada página dos veces (y entre medias, crea un entreno):
+
+```bash
+PORT=4322 node dist/server/entry.mjs
+```
+
+Medido con `curl`:
+
+```text
+petición 1 /acerca        → generada: HTML generado: 2026-10-16T02:51:40.250Z
+petición 1 /estadisticas  → totales: 0 entrenos · 0 minutos generada: HTML generado: 2026-10-16T02:51:50.094Z
+petición 2 /acerca        → generada: HTML generado: 2026-10-16T02:51:40.250Z
+petición 2 /estadisticas  → totales: 0 entrenos · 0 minutos generada: HTML generado: 2026-10-16T02:51:51.140Z
+POST entreno → 201
+tras crear un entreno → 1 entrenos · 30 minutos
+```
+
+- **`/acerca`** devuelve siempre la hora del _build_: es el mismo archivo para todos. El servidor lo envía con `Last-Modified` y `ETag`, así que el navegador puede usar su caché.
+- **`/estadisticas`** tiene una hora distinta en cada petición y refleja el entreno nuevo **al instante**: su código (la consulta a MongoDB) se ejecuta cada vez.
+
+**La otra forma de configurarlo**, `output: "server"`, invierte el valor por defecto: todo se renderiza en cada petición salvo lo que diga `export const prerender = true`. Medido con `output: "server"` en `astro.config.mjs`:
+
+```text
+— output: server, sin prerender:
+[build] output: "server"
+[build] Complete!
+— output: server, acerca con prerender = true:
+[build] output: "server"
+  ├─ /acerca/index.html (+4ms)
+[build] Complete!
+```
+
+Sin `prerender = true`, el _build_ no genera ningún HTML. Esta plataforma usa `output: "server"`, porque casi todas sus páginas dependen del usuario (su progreso, sus evaluaciones). Para una app con mayoría de páginas públicas, el valor por defecto es mejor.
+
+| Pregunta                                     | Estático (en el build)                           | Servidor (en cada petición) |
+| -------------------------------------------- | ------------------------------------------------ | --------------------------- |
+| ¿Depende de quién la pide? (sesión, cookies) | No                                               | Sí                          |
+| ¿Depende de datos que cambian a menudo?      | No (o se acepta que se actualice al redesplegar) | Sí                          |
+| ¿Puede fallar por la base de datos?          | No: ya está generada                             | Sí                          |
+| ¿Dónde se sirve en Vercel?                   | CDN, en todo el mundo                            | Una función, en una región  |
+
+<Callout type="risk">
+
+- **Una página estática con datos de usuario es un fallo de seguridad:** si una página prerenderizada lee la sesión, se generará en el _build_ sin ningún usuario (o, peor, con datos de quien hizo el _build_) y se servirá igual a todos. Todo lo que dependa de cookies o sesión va en servidor.
+- **Los datos de una página estática se congelan en el _build_:** si `acerca` mostrara "1234 entrenos registrados" leyendo la base de datos, ese número no cambiaría hasta el siguiente despliegue.
+- **Un `prerender` de más sale caro en el build:** una ruta dinámica (`[id].astro`) con `prerender = true` necesita `getStaticPaths` para saber qué páginas generar; con miles de elementos, el _build_ tarda minutos. Para esos casos, servidor (y caché HTTP).
+
+</Callout>
+
+## Paso 3: el ciclo de vida de una petición en el servidor
+
+Cuando llega una petición a `/estadisticas` en el servidor de producción, pasa esto:
+
+1. **El adaptador recibe la petición HTTP** y comprueba si existe un archivo estático con esa ruta (`dist/client/estadisticas/index.html`). Si existe, lo envía y termina aquí: tu código ni se ejecuta.
+2. **El _router_ de Astro busca la ruta** que coincide (`src/pages/estadisticas.astro`).
+3. **Se ejecuta el _middleware_** (I3.4): sesión, protección de rutas, cabeceras.
+4. **Se ejecuta el _frontmatter_ de la página** (el código entre `---`): aquí se hace la consulta a MongoDB, con `await`.
+5. **Se renderizan los componentes a HTML**, en orden, y se envían al navegador **en _streaming_**, a medida que se generan.
+6. **El navegador recibe el HTML**, lo pinta y descarga el JavaScript de las islas (`client:*`), que se hidratan después.
+
+Todo el trabajo de los pasos 3 a 5 se repite en **cada** petición. Por eso una página de servidor es tan rápida como su consulta más lenta: si MongoDB tarda 80 ms, la página no puede tardar menos.
+
+<Callout type="risk">
+
+- **Un `await` lento en el _frontmatter_ retrasa toda la página:** el navegador no recibe nada hasta que se resuelve. Si una parte de la página es lenta y no es lo principal, sácala a una _server island_ (Paso 4).
+- **Los errores del _frontmatter_ son errores 500:** una excepción en la consulta tumba la página entera. Captura los errores esperables y deja que el resto llegue al manejador de errores (I1.5).
+
+</Callout>
+
+## Paso 4: server islands, una página estática con un trozo dinámico
+
+¿Y si la portada es igual para todos excepto un detalle, como "tu último entreno"? Renderizar toda la página en el servidor por un dato es desperdiciar el estático. Las **_server islands_** resuelven eso: la página se genera en el _build_, y un componente marcado con **`server:defer`** se pide al servidor **aparte**, después de cargar. Crea `src/components/UltimoEntreno.astro`:
+
+```astro
+---
+// Archivo: src/components/UltimoEntreno.astro
+// Componente de servidor: consulta MongoDB cada vez que se pide
+import { db } from "../lib/mongo";
+
+const ultimo = await db
+  .collection<{ tipo: string; minutos: number; fecha: Date }>("entrenos")
+  .find({ userId: "u_demo" })
+  .sort({ fecha: -1, creado: -1 })
+  .limit(1)
+  .next();
+---
+
+<p id="ultimo">
+  {
+    ultimo
+      ? `Último entreno: ${ultimo.tipo}, ${ultimo.minutos} min (${ultimo.fecha.toISOString().slice(0, 10)})`
+      : "Todavía no has registrado ningún entreno"
+  }
+</p>
+```
+
+Y sustituye `src/pages/index.astro` (ahora usa el layout y añade la _server island_):
+
+```astro
+---
+// Archivo: src/pages/index.astro
+// La página se genera en el build; solo el último entreno se pide al servidor en cada visita
+import Base from "../layouts/Base.astro";
+import Entrenos from "../components/Entrenos";
+import UltimoEntreno from "../components/UltimoEntreno.astro";
+---
+
+<Base titulo="Mis entrenos">
+  <h1>Mis entrenos</h1>
+  <UltimoEntreno server:defer>
+    <p slot="fallback" id="ultimo-cargando">Cargando tu último entreno…</p>
+  </UltimoEntreno>
+  <Entrenos client:load />
+</Base>
+```
+
+Compila y mira el HTML que se genera:
+
+```text
+[build] output: "static"
+  ├─ /acerca/index.html (+4ms)
+  ├─ /index.html (+61ms)
+— HTML de dist/client/index.html:
+/_server-islands/UltimoEntreno
+id="ultimo-cargando">Cargando tu último entreno…
+```
+
+`index.html` sigue siendo estático, y en lugar del componente lleva su `fallback` ("Cargando…") y una referencia a `/_server-islands/UltimoEntreno`. Medido en Chrome:
+
+```text
+al recibir el HTML: Cargando tu último entreno…
+después: Último entreno: running, 30 min (2026-10-14)
+peticiones: GET /_server-islands/UltimoEntreno · GET /api/entrenos
+```
+
+El navegador recibe la página al instante (desde la CDN, en producción), muestra el _fallback_ y pide la isla al servidor, que ejecuta la consulta y devuelve solo ese trozo de HTML. No confundas los dos tipos de islas:
+
+|                                           | Isla de cliente (`client:load`, B6.7) | _Server island_ (`server:defer`) |
+| ----------------------------------------- | ------------------------------------- | -------------------------------- |
+| ¿Dónde se ejecuta su código?              | En el navegador (React)               | En el servidor (Astro)           |
+| ¿Envía JavaScript al navegador?           | Sí, el del componente                 | No, solo HTML                    |
+| ¿Puede leer la base de datos o la sesión? | No directamente (necesita una API)    | Sí                               |
+
+<Callout type="risk">
+
+- **Las _server islands_ necesitan un adaptador:** sin servidor no hay nadie que responda a `/_server-islands/…`.
+- **Las _props_ de una _server island_ viajan por la URL, cifradas:** Astro las cifra con una clave del _build_, pero no pases datos grandes ni secretos como _props_. Lee lo que necesites dentro del componente (de la sesión o de la base de datos).
+- **Un _fallback_ de distinto tamaño mueve la página:** como en I2.6 con `Suspense`, dale al _fallback_ la misma altura que el contenido final para evitar saltos (CLS).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Clasifica cada ruta de tu app (`/`, `/acerca`, `/estadisticas`, `/api/entrenos`) como estática, de servidor o mixta, justificando cada una con la tabla del Paso 2.
+2. Configúralas con el `output` por defecto y `prerender = false` donde haga falta (es como ha quedado la app tras los pasos anteriores).
+3. Compara este _build_ con uno `output: "server"` sin ningún `prerender`: cuenta los HTML generados y mide el tiempo medio de respuesta de cada página con 50 peticiones.
+
+</Callout>
+
+La clasificación:
+
+| Ruta            | Modo                                         | Motivo                                                                                                                 |
+| --------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `/acerca`       | Estática                                     | No depende de nada                                                                                                     |
+| `/`             | Estática + _server island_ + isla de cliente | La estructura es fija; el último entreno se pide al servidor (`server:defer`) y el formulario es React (`client:load`) |
+| `/estadisticas` | Servidor                                     | Depende de los datos de ese momento                                                                                    |
+| `/api/entrenos` | Servidor                                     | Es una API: lee y escribe en la base de datos                                                                          |
+
+Para medir, con el servidor de producción en marcha, ejecuta en otra terminal (`curl` repite cada petición 50 veces y `awk` calcula la media):
+
+```bash
+for r in / /acerca /estadisticas; do
+  t=$(for i in $(seq 1 50); do curl -s -o /dev/null -w "%{time_total}\n" http://localhost:4322$r; done | awk '{s+=$1} END {printf "%.2f", s/NR*1000}')
+  echo "$r $t ms"
+done
+```
+
+Medido en un portátil, con MongoDB en la misma máquina:
+
+```text
+Mixto (output por defecto + prerender = false donde hace falta):
+   HTML generados en el build: 2
+   /              0.61 ms de media (50 peticiones)
+   /acerca        0.43 ms de media (50 peticiones)
+   /estadisticas  2.03 ms de media (50 peticiones)
+Todo bajo demanda (output: "server"):
+   HTML generados en el build: 0
+   /              2.59 ms de media (50 peticiones)
+   /acerca        0.58 ms de media (50 peticiones)
+   /estadisticas  1.26 ms de media (50 peticiones)
+```
+
+Cómo leerlo:
+
+- **La portada es unas 4 veces más lenta en servidor** (0,61 → 2,59 ms): en cada petición se renderiza el componente de React en el servidor. Como archivo estático, solo se lee del disco.
+- **Las demás diferencias son ruido:** `/estadisticas` es de servidor en los dos _builds_ (las variaciones de un milisegundo son normales), y `/acerca` es tan simple que apenas cuesta renderizarla.
+- **En local, todo es rápido.** La diferencia real aparece en producción: con MongoDB en Atlas (decenas de milisegundos por consulta), con las funciones de Vercel arrancando en frío y, sobre todo, porque el HTML estático se sirve desde la CDN más cercana al usuario y una función, desde una sola región.
+
+<Callout type="risk">
+
+- **No midas una vez y saques conclusiones:** una sola petición puede tardar el doble por cualquier motivo (la primera carga de un módulo, el recolector de basura). Repite y usa la media o, mejor, la mediana.
+- **El servidor de producción ya tiene la caché caliente:** la primera petición tras arrancar es más lenta (carga de módulos, primera conexión a MongoDB). Para medir el arranque en frío de Vercel, necesitas medir en Vercel.
+- **Medir en tu red no es medir para tus usuarios:** un usuario con un móvil y 4G lejos del servidor nota mucho más la diferencia entre la CDN y una función. Para eso están las herramientas de A6 (rendimiento y observabilidad).
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes qué páginas deben renderizarse en el servidor y por qué: añades el adaptador que corresponde a tu plataforma, generas en el _build_ todo lo que no depende del usuario ni de datos cambiantes, marcas con `prerender` las excepciones según el `output`, entiendes qué ocurre en cada paso de una petición en el servidor y usas _server islands_ para el trozo dinámico de una página estática.
+
+</Callout>
+
+## Resumen
+
+- Un adaptador (`@astrojs/node`, `@astrojs/vercel`) es obligatorio en cuanto una ruta se ejecuta en el servidor; sin él, el _build_ falla con `NoAdapterInstalled`.
+- `output: "static"` (por defecto): todo en el _build_ salvo `prerender = false`. `output: "server"`: todo en cada petición salvo `prerender = true`.
+- Lo estático es el mismo archivo para todos (medido: misma hora en cada petición); lo de servidor se ejecuta cada vez (medido: datos al instante).
+- En el servidor, cada petición ejecuta _middleware_, _frontmatter_ y componentes: la página es tan rápida como su consulta más lenta.
+- `server:defer` crea una _server island_: una página estática con un componente de servidor que se pide aparte y muestra un _fallback_ mientras tanto.

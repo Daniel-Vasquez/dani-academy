@@ -1,0 +1,47 @@
+course: I3
+passingScore: 4
+questions:
+  - prompt: 'Añades `"/acerca"` a las rutas privadas del middleware. Sin sesión, `npm run dev` redirige a `/entrar`, pero en producción `/acerca` responde 200. ¿Por qué?'
+    options:
+      - "Porque el middleware solo se ejecuta en desarrollo."
+      - "Porque en producción hace falta reiniciar el servidor para que el middleware lea la lista nueva."
+      - "Porque `/acerca` es una página prerenderizada: en producción se sirve como un archivo, sin ejecutar código, y el middleware no llega a correr. En desarrollo todo se renderiza bajo demanda."
+      - "Porque `ctx.redirect` no funciona con el adaptador de Node."
+    answer: 2
+    explanation: 'El middleware solo intercepta lo que se renderiza en el servidor. Una página privada tiene que llevar `prerender = false` (o el proyecto entero, `output: "server"`). Y la seguridad se prueba con el build de producción, no solo con `npm run dev`.'
+
+  - prompt: "Un formulario HTML se envía a una Action con `action={actions.crearEntreno}`. Tras guardar, el usuario recarga la página y el entreno aparece dos veces. ¿Qué lo soluciona?"
+    options:
+      - "Que la página, si `Astro.getActionResult` trae `data`, redirija con `Astro.redirect(…, 303)` a una URL normal (POST/Redirect/GET): recargar repetirá ese GET, no el POST."
+      - 'Añadir `accept: "form"` a la Action.'
+      - "Marcar la página con `prerender = true` para que no se ejecute dos veces."
+      - "Validar en el cliente con JavaScript antes de enviar."
+    answer: 0
+    explanation: 'La respuesta a un POST era la propia página, y recargar una respuesta a un POST repite el POST. Con una redirección 303 tras el éxito, el navegador queda en un GET. Es lo mismo que hacía el endpoint de I3.2 con `redirect("/?creado=1", 303)`.'
+
+  - prompt: "¿Cuándo es mejor un endpoint REST (`src/pages/api/…`) que una Astro Action?"
+    options:
+      - "Siempre: las Actions son solo para formularios sin JavaScript."
+      - "Cuando necesitas validar la entrada con Zod."
+      - "Cuando el cliente es un componente de React de tu propia web."
+      - "Cuando la API la consumen clientes externos (una app móvil, otro servicio, un webhook) o son lecturas que conviene cachear con GET: necesitas una URL y un formato estables y verbos HTTP propios."
+    answer: 3
+    explanation: "Las Actions dan validación integrada, tipos automáticos y una URL generada, pero siempre son POST y su cliente solo existe dentro de tu web. Para lo que solo usa tu web, Actions; para clientes externos y lecturas cacheables, endpoints. Las dos puertas pueden compartir el mismo servicio."
+
+  - prompt: "En la arquitectura por capas, ¿por qué el servicio recibe el repositorio como parámetro (`crearServicioEntrenos({ entrenos })`) en lugar de importar la base de datos?"
+    options:
+      - "Porque importar `db` en un servicio es un error de TypeScript."
+      - "Para que las reglas se puedan probar con un repositorio falso en memoria, sin servidor ni MongoDB, y para que el único sitio que conecta con la base de datos real sea el punto de composición (`src/services/index.ts`)."
+      - "Porque así las consultas a MongoDB son más rápidas."
+      - "Para que el servicio pueda devolver directamente objetos `Response`."
+    answer: 1
+    explanation: "Es inyección de dependencias con una fábrica. Los tests del servicio pasan un `Map` y tardan 1 ms; las consultas reales se prueban aparte contra `mongodb-memory-server`. El servicio lanza errores de dominio y cada puerta los traduce: nunca devuelve `Response`."
+
+  - prompt: 'Haces el build con `OBJETIVO_SEMANAL_MINUTOS=120` (declarada como `context: "server", access: "public"`) y arrancas el servidor con `OBJETIVO_SEMANAL_MINUTOS=200`. ¿Qué objetivo usa la API?'
+    options:
+      - "200: las variables siempre se leen al arrancar."
+      - "150, el valor por defecto del esquema."
+      - "120: las variables públicas se fijan en el build; solo las secretas se leen al ejecutar. Para cambiarla hay que volver a hacer el build (en Vercel, redesplegar)."
+      - "Ninguno: el servidor no arranca porque los valores no coinciden."
+    answer: 2
+    explanation: "Medido en I3.6: la API respondió 120. Por eso, en Vercel, cambiar una variable exige un nuevo despliegue. Y un secreto nunca debe ir en una variable pública: las de `client` acaban escritas en el JavaScript del navegador."

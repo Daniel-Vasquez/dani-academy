@@ -1,0 +1,649 @@
+---
+sectionId: "I3.4"
+course: "I3"
+title: "Middleware y locals"
+order: 4
+minutes: 60
+summary: "Encadenas middleware con sequence, cargas la sesión en un locals tipado, proteges rutas sin tocar cada página, mides que una página estática no se puede proteger y registras cada petición con su duración."
+---
+
+Hasta ahora, cada _endpoint_ y cada Action usaba un usuario fijo (`USUARIO_DEMO`). En una app real, el usuario sale de la **sesión** de cada petición, y hay dos tareas que se repiten en todas partes: averiguar quién es y bloquear a quien no ha entrado. Si cada página lo hiciera por su cuenta, bastaría con olvidarlo en una para tener un agujero. El **_middleware_** es código que se ejecuta **antes** de cada página o _endpoint_ renderizado en el servidor: el sitio único para cargar la sesión, proteger rutas, añadir cabeceras o medir. En esta sección vas a añadir una sesión de demostración a tu app de entrenamiento, vas a dejar que el _middleware_ la gestione entera y vas a encontrar el límite más importante del _middleware_: no puede proteger lo que no se ejecuta.
+
+**Lo que tendrás al terminar:** un `src/middleware.ts` con tres pasos encadenados (registro, sesión y protección), `locals.usuario` tipado y usado por todas las páginas, _endpoints_ y Actions, y un registro de cada petición con su código y su duración.
+
+**Requisitos:** la app de I3.3.
+
+## Paso 1: una sesión de demostración y `locals` tipado
+
+La autenticación real (contraseñas, Better Auth) es el curso I5. Aquí basta con una **sesión de demostración**: una _cookie_ que guarda el _id_ de uno de dos usuarios ficticios. Crea `src/lib/sesion.ts`:
+
+```ts
+// Archivo: src/lib/sesion.ts
+// Sesión DE DEMOSTRACIÓN: una cookie con el id de un usuario ficticio.
+// No es segura (cualquiera puede escribir la cookie): la autenticación real es el curso I5.
+export interface UsuarioDemo {
+  id: string;
+  nombre: string;
+}
+
+export const USUARIOS_DEMO: UsuarioDemo[] = [
+  { id: "u_ana", nombre: "Ana" },
+  { id: "u_dani", nombre: "Dani" },
+];
+
+export const COOKIE_SESION = "demo_usuario";
+
+export const usuarioPorId = (id: string | undefined) => USUARIOS_DEMO.find((u) => u.id === id) ?? null;
+```
+
+**`context.locals`** es un objeto que vive lo que dura **una petición**: el _middleware_ lo rellena y las páginas, _endpoints_ y Actions lo leen (`Astro.locals` en una página, `locals` en un _endpoint_, `ctx.locals` en una Action). Para que TypeScript sepa qué contiene, se declara en `src/env.d.ts`:
+
+```ts
+// Archivo: src/env.d.ts
+// El tipo de context.locals (Astro.locals en las páginas): lo rellena el middleware
+declare namespace App {
+  interface Locals {
+    usuario: import("./lib/sesion").UsuarioDemo | null;
+  }
+}
+```
+
+El _endpoint_ que crea y borra la sesión, `src/pages/api/sesion.ts`:
+
+```ts
+// Archivo: src/pages/api/sesion.ts
+// Entrar (POST con el usuario elegido) y salir (POST con accion=salir)
+import type { APIRoute } from "astro";
+import { COOKIE_SESION, usuarioPorId } from "../../lib/sesion";
+
+export const prerender = false;
+
+export const POST: APIRoute = async ({ request, cookies, redirect }) => {
+  const datos = await request.formData();
+  if (datos.get("accion") === "salir") {
+    cookies.delete(COOKIE_SESION, { path: "/" });
+    return redirect("/entrar", 303);
+  }
+  const usuario = usuarioPorId(String(datos.get("usuario")));
+  if (!usuario) return redirect("/entrar?error=1", 303);
+  cookies.set(COOKIE_SESION, usuario.id, { path: "/", httpOnly: true, sameSite: "lax", maxAge: 60 * 60 * 24 });
+  const volver = String(datos.get("volver") ?? "/");
+  return redirect(volver.startsWith("/") && !volver.startsWith("//") ? volver : "/", 303); // sin open redirect
+};
+```
+
+Y la página de entrada, `src/pages/entrar.astro`:
+
+```astro
+---
+// Archivo: src/pages/entrar.astro
+import Base from "../layouts/Base.astro";
+import { USUARIOS_DEMO } from "../lib/sesion";
+
+export const prerender = false; // lee ?volver y la sesión
+const volver = Astro.url.searchParams.get("volver") ?? "/";
+const { usuario } = Astro.locals;
+---
+
+<Base titulo="Entrar">
+  <h1>Entrar (sesión de demostración)</h1>
+  {usuario && <p id="sesion">Has entrado como {usuario.nombre}.</p>}
+  <form method="post" action="/api/sesion">
+    <input type="hidden" name="volver" value={volver} />
+    {USUARIOS_DEMO.map((u) => <button name="usuario" value={u.id}>Entrar como {u.nombre}</button>)}
+  </form>
+  {usuario && (
+    <form method="post" action="/api/sesion">
+      <button name="accion" value="salir">Salir</button>
+    </form>
+  )}
+</Base>
+```
+
+<Callout type="risk">
+
+- **Esta sesión no es segura, a propósito:** la _cookie_ guarda el _id_ del usuario sin firmar, así que cualquiera puede escribir `demo_usuario=u_dani` en su navegador y "ser" Dani. Medido: con la _cookie_ de un usuario que no existe, la API responde 401; con la de otro usuario real escrita a mano, responde 200. Una sesión real guarda un _token_ aleatorio que el servidor comprueba en la base de datos (B3.4 e I5).
+- **`httpOnly`, `sameSite: "lax"` y `path: "/"`:** el JavaScript de la página no puede leer la _cookie_, no se envía en peticiones de otros sitios (CSRF) y vale para toda la app. Sin `path: "/"`, la _cookie_ solo se enviaría a las rutas bajo `/api/`.
+- **`volver` puede ser un _open redirect_:** sin la comprobación, `?volver=//evil.com` mandaría al usuario a otra web tras entrar. Medido: con la comprobación, termina en `/`. La plataforma usa `safeRedirect` (Tanda 3) para esto mismo.
+
+</Callout>
+
+## Paso 2: el middleware, en dos pasos encadenados
+
+Crea `src/middleware.ts`. Astro lo detecta por su nombre y lo ejecuta antes de cada petición:
+
+```ts
+// Archivo: src/middleware.ts
+// Se ejecuta ANTES de cada página o endpoint renderizado en el servidor
+import { defineMiddleware, sequence } from "astro:middleware";
+import { COOKIE_SESION, usuarioPorId } from "./lib/sesion";
+
+const PRIVADAS = ["/estadisticas", "/notas", "/nuevo", "/api/", "/_actions/"];
+const PUBLICAS = ["/api/sesion"]; // excepciones dentro de las privadas
+
+/** 1. Carga la sesión en locals: lo que pongas aquí lo verán todas las páginas y endpoints */
+const cargarSesion = defineMiddleware((ctx, next) => {
+  ctx.locals.usuario = usuarioPorId(ctx.cookies.get(COOKIE_SESION)?.value);
+  return next();
+});
+
+/** 2. Protege las rutas privadas: ninguna página tiene que comprobarlo por su cuenta */
+const proteger = defineMiddleware((ctx, next) => {
+  const { pathname, search } = ctx.url;
+  const privada = PRIVADAS.some((p) => pathname.startsWith(p)) && !PUBLICAS.some((p) => pathname.startsWith(p));
+  if (!privada || ctx.locals.usuario) return next();
+
+  const esApi = pathname.startsWith("/api/") || pathname.startsWith("/_actions/");
+  if (esApi) return Response.json({ error: "Inicia sesión para continuar" }, { status: 401 });
+  return ctx.redirect(`/entrar?volver=${encodeURIComponent(pathname + search)}`);
+});
+
+export const onRequest = sequence(cargarSesion, proteger);
+```
+
+- **`defineMiddleware((ctx, next) => …)`**: `ctx` es el contexto de la petición (URL, _cookies_, `locals`…) y `next()` continúa hacia el siguiente _middleware_ o, al final, hacia la página. Devuelve la respuesta, así que el _middleware_ puede leerla y modificarla.
+- **Devolver una respuesta sin llamar a `next()`** corta la cadena: la página nunca se ejecuta. Es lo que hace `proteger` con un 401 o una redirección.
+- **`sequence(cargarSesion, proteger)`**: encadena _middlewares_ en orden. Primero se sabe quién es y, después, se decide si puede pasar. Cada uno hace una sola cosa.
+
+Ahora sustituye el usuario fijo por el de la petición. `src/pages/api/entrenos/index.ts`:
+
+```ts
+// Archivo: src/pages/api/entrenos/index.ts
+// La COLECCIÓN: GET /api/entrenos (listar) y POST /api/entrenos (crear)
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../../lib/errores";
+import { EntrenoSchema, FiltroEntrenosSchema } from "../../../schemas/entreno";
+import { crearEntreno, listarEntrenos } from "../../../server/entrenos";
+
+export const prerender = false;
+
+
+export const GET: APIRoute = async ({ url, locals }) => {
+  try {
+    // ?tipo=running&limite=10 → { tipo: "running", limite: 10 }
+    const filtro = validar(FiltroEntrenosSchema, Object.fromEntries(url.searchParams));
+    const entrenos = await listarEntrenos(locals.usuario!.id, filtro);
+    return Response.json({ entrenos });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const POST: APIRoute = async ({ request, redirect, locals }) => {
+  const esFormulario = request.headers.get("content-type")?.includes("application/x-www-form-urlencoded") ?? false;
+  try {
+    // El mismo endpoint acepta JSON (fetch) y formularios HTML sin JavaScript
+    const cuerpo = esFormulario
+      ? Object.fromEntries(await request.formData())
+      : await request.json().catch(() => null);
+    const creado = await crearEntreno(locals.usuario!.id, validar(EntrenoSchema, cuerpo));
+
+    if (esFormulario) return redirect("/?creado=1", 303); // tras un POST, el navegador hace un GET
+    return Response.json(creado, {
+      status: 201,
+      headers: { Location: `/api/entrenos/${creado.id}` }, // dónde vive el recurso nuevo
+    });
+  } catch (e) {
+    if (esFormulario) return redirect("/nuevo?error=1", 303);
+    return aRespuesta(e);
+  }
+};
+```
+
+`src/pages/api/entrenos/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/entrenos/[id].ts
+// UN RECURSO: GET, PATCH y DELETE /api/entrenos/:id
+import type { APIRoute } from "astro";
+import { aRespuesta, NoEncontradoError, validar } from "../../../lib/errores";
+import { CambiosEntrenoSchema, EntrenoSchema } from "../../../schemas/entreno";
+import { actualizarEntreno, borrarEntreno, obtenerEntreno } from "../../../server/entrenos";
+
+export const prerender = false;
+
+
+export const GET: APIRoute = async ({ params, locals }) => {
+  try {
+    const entreno = await obtenerEntreno(locals.usuario!.id, params.id!);
+    if (!entreno) throw new NoEncontradoError("El entreno", params.id!);
+    return Response.json(entreno);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const PATCH: APIRoute = async ({ params, request, locals }) => {
+  try {
+    const cambios = validar(CambiosEntrenoSchema, await request.json().catch(() => null));
+    const actual = await obtenerEntreno(locals.usuario!.id, params.id!);
+    if (!actual) throw new NoEncontradoError("El entreno", params.id!);
+    validar(EntrenoSchema, { ...actual, ...cambios }); // las reglas se cumplen en el RESULTADO (p. ej., los km)
+    const actualizado = await actualizarEntreno(locals.usuario!.id, params.id!, cambios);
+    return Response.json(actualizado);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const DELETE: APIRoute = async ({ params, locals }) => {
+  try {
+    const borrado = await borrarEntreno(locals.usuario!.id, params.id!);
+    if (!borrado) throw new NoEncontradoError("El entreno", params.id!);
+    return new Response(null, { status: 204 }); // hecho, y no hay nada que devolver
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+`src/pages/api/notas/index.ts`:
+
+```ts
+// Archivo: src/pages/api/notas/index.ts
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../../lib/errores";
+import { FiltroNotasSchema, NuevaNotaSchema } from "../../../schemas/nota";
+import { crearNota, listarNotas } from "../../../server/notas";
+
+export const prerender = false;
+
+// GET /api/notas?categoria=salud&fijada=true → 200 con la lista (vacía también es 200)
+export const GET: APIRoute = async ({ url, locals }) => {
+  try {
+    const filtro = validar(FiltroNotasSchema, Object.fromEntries(url.searchParams));
+    return Response.json({ notas: await listarNotas(locals.usuario!.id, filtro) });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+// POST /api/notas → 201 + Location; 422 si los datos no valen; 409 si el título ya existe
+export const POST: APIRoute = async ({ request, locals }) => {
+  try {
+    const nota = await crearNota(locals.usuario!.id, validar(NuevaNotaSchema, await request.json().catch(() => null)));
+    return Response.json(nota, { status: 201, headers: { Location: `/api/notas/${nota.id}` } });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+`src/pages/api/notas/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/notas/[id].ts
+import type { APIRoute } from "astro";
+import { aRespuesta, NoEncontradoError, ValidacionError, validar } from "../../../lib/errores";
+import { CambiosNotaSchema } from "../../../schemas/nota";
+import { borrarNota, editarNota, obtenerNota } from "../../../server/notas";
+
+export const prerender = false;
+
+const noExiste = (id: string) => new NoEncontradoError("La nota", id);
+
+// GET /api/notas/:id → 200 o 404
+export const GET: APIRoute = async ({ params, locals }) => {
+  try {
+    const nota = await obtenerNota(locals.usuario!.id, params.id!);
+    if (!nota) throw noExiste(params.id!);
+    return Response.json(nota);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+// PATCH /api/notas/:id → 200 con la nota editada; 404, 409 o 422
+export const PATCH: APIRoute = async ({ params, request, locals }) => {
+  try {
+    const cambios = validar(CambiosNotaSchema, await request.json().catch(() => null));
+    if (Object.keys(cambios).length === 0) throw new ValidacionError({}, "No hay nada que cambiar");
+    const nota = await editarNota(locals.usuario!.id, params.id!, cambios);
+    if (!nota) throw noExiste(params.id!);
+    return Response.json(nota);
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+// DELETE /api/notas/:id → 204 sin cuerpo; 404 si no existe
+export const DELETE: APIRoute = async ({ params, locals }) => {
+  try {
+    if (!(await borrarNota(locals.usuario!.id, params.id!))) throw noExiste(params.id!);
+    return new Response(null, { status: 204 });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+`src/actions/index.ts`, donde el usuario sale de `ctx.locals`:
+
+```ts
+// Archivo: src/actions/index.ts
+// Las Actions: funciones de servidor que el cliente llama como si fueran locales
+import { ActionError, defineAction, type ActionErrorCode } from "astro:actions";
+import { z } from "astro/zod";
+import { HttpError } from "../lib/errores";
+import { EntrenoSchema } from "../schemas/entreno";
+import { NuevaNotaSchema } from "../schemas/nota";
+import { borrarEntreno, crearEntreno } from "../server/entrenos";
+import { crearNota } from "../server/notas";
+
+// Los errores de dominio (I1.5) tienen un código HTTP; las Actions usan nombres
+const CODIGOS: Record<number, ActionErrorCode> = {
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  422: "UNPROCESSABLE_CONTENT",
+};
+
+/** Convierte un HttpError en ActionError; el resto de errores sigue su camino (500) */
+function comoActionError(error: unknown): never {
+  if (error instanceof HttpError) {
+    throw new ActionError({ code: CODIGOS[error.status] ?? "INTERNAL_SERVER_ERROR", message: error.message });
+  }
+  throw error;
+}
+
+export const server = {
+  crearEntreno: defineAction({
+    accept: "form", // acepta FormData: sirve para un <form> HTML y para React
+    input: EntrenoSchema, // Astro valida ANTES de llamar al handler
+    handler: async (entreno, ctx) => crearEntreno(ctx.locals.usuario!.id, entreno), // entreno ya es un EntrenoInput
+  }),
+
+  borrarEntreno: defineAction({
+    input: z.object({ id: z.string() }), // sin accept: recibe JSON
+    handler: async ({ id }, ctx) => {
+      const borrado = await borrarEntreno(ctx.locals.usuario!.id, id);
+      if (!borrado) throw new ActionError({ code: "NOT_FOUND", message: `El entreno ${id} no existe` });
+      return { borrado: id };
+    },
+  }),
+
+  // Ejercicio: POST /api/notas convertido en Action
+  crearNota: defineAction({
+    input: NuevaNotaSchema,
+    handler: (nota, ctx) => crearNota(ctx.locals.usuario!.id, nota).catch(comoActionError),
+  }),
+};
+```
+
+La página de estadísticas, `src/pages/estadisticas.astro`:
+
+```astro
+---
+// Archivo: src/pages/estadisticas.astro
+// Depende de los datos de ese momento: se renderiza en el servidor en CADA petición
+import Base from "../layouts/Base.astro";
+import { db } from "../lib/mongo";
+
+export const prerender = false;
+
+const [fila] = await db
+  .collection("entrenos")
+  .aggregate<{ total: number; minutos: number }>([
+    { $match: { userId: Astro.locals.usuario!.id } }, // el middleware garantiza la sesión
+    { $group: { _id: null, total: { $sum: 1 }, minutos: { $sum: "$minutos" } } },
+  ])
+  .toArray();
+const generada = new Date().toISOString();
+---
+
+<Base titulo="Estadísticas">
+  <h1>Estadísticas de {Astro.locals.usuario!.nombre}</h1>
+  <p id="totales">{fila?.total ?? 0} entrenos · {fila?.minutos ?? 0} minutos</p>
+  <p id="generada">HTML generado: {generada}</p>
+</Base>
+```
+
+Y la _server island_ de la portada, `src/components/UltimoEntreno.astro`, que es pública y puede no tener sesión:
+
+```astro
+---
+// Archivo: src/components/UltimoEntreno.astro
+// Componente de servidor: consulta MongoDB cada vez que se pide
+import { db } from "../lib/mongo";
+
+const { usuario } = Astro.locals; // la portada es pública: puede no haber sesión
+const ultimo = usuario && await db
+  .collection<{ tipo: string; minutos: number; fecha: Date }>("entrenos")
+  .find({ userId: usuario.id })
+  .sort({ fecha: -1, creado: -1 })
+  .limit(1)
+  .next();
+---
+
+<p id="ultimo">
+  {
+    !usuario
+      ? "Entra para ver tu último entreno"
+      : ultimo
+        ? `Último entreno: ${ultimo.tipo}, ${ultimo.minutos} min (${ultimo.fecha.toISOString().slice(0, 10)})`
+        : "Todavía no has registrado ningún entreno"
+  }
+</p>
+```
+
+El `!` de `locals.usuario!.id` es seguro porque el _middleware_ garantiza que, en las rutas privadas, hay usuario. Medido con `curl`:
+
+```text
+— sin sesión
+  GET /acerca        → 200
+  GET /estadisticas  → 302 http://localhost:4321/entrar?volver=%2Festadisticas
+  GET /notas         → 302 http://localhost:4321/entrar?volver=%2Fnotas
+  GET /api/entrenos  → 401
+  POST /_actions/crearNota → {"error":"Inicia sesión para continuar"} (401)
+— entrar como Ana desde /entrar?volver=/estadisticas → 303 http://localhost:4321/estadisticas
+  Ana, /estadisticas → Estadísticas de Ana · 1 entrenos · 40 minutos
+  Dani, /estadisticas → Estadísticas de Dani · 0 entrenos · 0 minutos
+  Dani, GET /api/entrenos → {"entrenos":[]}
+  open redirect: volver=//evil.com → http://localhost:4321/
+  cookie falsificada (usuario inventado) → 401
+```
+
+Ninguna página ni _endpoint_ comprueba la sesión: lo hace el _middleware_. Ana ve su entreno y Dani no, porque todas las consultas filtran por el `userId` que sale de `locals`.
+
+<Callout type="risk">
+
+- **El orden de `sequence` importa:** con `sequence(proteger, cargarSesion)`, `proteger` se ejecutaría con `locals.usuario` todavía sin rellenar y bloquearía a todo el mundo.
+- **`locals` es de una sola petición:** no sirve para guardar nada entre peticiones (eso es la sesión o la base de datos). Y nunca lo rellenes con datos del cuerpo de la petición: lo que hay en `locals` debe ser de confianza.
+- **El `!` traslada la responsabilidad al _middleware_:** si mañana alguien quita `/api/` de `PRIVADAS`, todos esos `locals.usuario!.id` fallarán con `Cannot read properties of null`. Para el servicio (I3.5), es más robusto recibir el usuario como parámetro y comprobarlo en un solo sitio.
+
+</Callout>
+
+## Paso 3: el límite del middleware, las páginas estáticas
+
+Haz una prueba: añade `"/acerca"` a la lista `PRIVADAS` y pide la página sin sesión, primero con `npm run dev` y después con el _build_ de producción (`npm run build` y `PORT=4322 node dist/server/entry.mjs`). Medido:
+
+```text
+desarrollo, GET /acerca sin sesión → 302 http://localhost:4321/entrar?volver=%2Facerca
+producción, GET /acerca sin sesión → 200
+producción, GET /estadisticas sin sesión → 302 http://localhost:4322/entrar?volver=%2Festadisticas
+```
+
+**En desarrollo, la página está protegida; en producción, no.** `/acerca` es estática (I3.1): en producción se sirve como un archivo, sin ejecutar ningún código, y el _middleware_ no llega a correr. En desarrollo todo se renderiza bajo demanda, y por eso parece que funciona. El _build_ da la pista, con este aviso para cada página estática:
+
+```text
+[WARN] `Astro.request.headers` was used when rendering the route `src/pages/acerca.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` …
+```
+
+El _middleware_ **también se ejecuta en el _build_**, una vez por cada página estática, y al leer la _cookie_ no hay ninguna petición de verdad. El mismo aviso apareció para `/notas`, que es privada pero se había quedado estática: en producción, cualquiera habría recibido su HTML (aunque sus datos seguían protegidos, porque la Action responde 401).
+
+La solución tiene dos partes. Primero, **toda página privada debe ser de servidor**: añade `export const prerender = false;` en `src/pages/notas.astro`:
+
+```astro
+---
+// Archivo: src/pages/notas.astro
+import Base from "../layouts/Base.astro";
+import NuevaNota from "../components/NuevaNota";
+import NuevaNotaFetch from "../components/NuevaNotaFetch";
+
+export const prerender = false; // privada: el middleware solo protege lo que se renderiza en el servidor
+---
+
+<Base titulo="Notas">
+  <h1>Notas</h1>
+  <h2>Con la Action</h2>
+  <NuevaNota client:load />
+  <h2>Con fetch al endpoint</h2>
+  <NuevaNotaFetch client:load />
+</Base>
+```
+
+Segundo, el _middleware_ no debe leer la sesión durante el _build_. Sustituye `src/middleware.ts`:
+
+```ts
+// Archivo: src/middleware.ts
+// Se ejecuta ANTES de cada página o endpoint renderizado en el servidor
+import { defineMiddleware, sequence } from "astro:middleware";
+import { COOKIE_SESION, usuarioPorId } from "./lib/sesion";
+
+const PRIVADAS = ["/estadisticas", "/notas", "/nuevo", "/api/", "/_actions/"];
+const PUBLICAS = ["/api/sesion"]; // excepciones dentro de las privadas
+
+/** 1. Carga la sesión en locals: lo que pongas aquí lo verán todas las páginas y endpoints */
+const cargarSesion = defineMiddleware((ctx, next) => {
+  // En el build (páginas prerenderizadas) no hay petición: ni cookies ni usuario
+  ctx.locals.usuario = ctx.isPrerendered ? null : usuarioPorId(ctx.cookies.get(COOKIE_SESION)?.value);
+  return next();
+});
+
+/** 2. Protege las rutas privadas: ninguna página tiene que comprobarlo por su cuenta */
+const proteger = defineMiddleware((ctx, next) => {
+  if (ctx.isPrerendered) return next(); // una página estática no se puede proteger: ver el aviso de la lección
+  const { pathname, search } = ctx.url;
+  const privada = PRIVADAS.some((p) => pathname.startsWith(p)) && !PUBLICAS.some((p) => pathname.startsWith(p));
+  if (!privada || ctx.locals.usuario) return next();
+
+  const esApi = pathname.startsWith("/api/") || pathname.startsWith("/_actions/");
+  if (esApi) return Response.json({ error: "Inicia sesión para continuar" }, { status: 401 });
+  return ctx.redirect(`/entrar?volver=${encodeURIComponent(pathname + search)}`);
+});
+
+export const onRequest = sequence(cargarSesion, proteger);
+```
+
+Medido de nuevo en producción, ya sin avisos en el _build_:
+
+```text
+producción, GET /acerca        sin sesión → 200
+producción, GET /              sin sesión → 200
+producción, GET /notas         sin sesión → 302 http://localhost:4322/entrar?volver=%2Fnotas
+producción, GET /estadisticas  sin sesión → 302 http://localhost:4322/entrar?volver=%2Festadisticas
+producción, GET /api/entrenos  sin sesión → 401
+producción, server island sin sesión → Entra para ver tu último entreno
+producción, server island como Ana → Último entreno: running, 40 min (2026-10-14)
+```
+
+La portada sigue siendo estática (y pública), pero su _server island_ se pide al servidor en cada visita, así que **sí** pasa por el _middleware_ y muestra el dato de quien la pide.
+
+<Callout type="risk">
+
+- **Prueba la seguridad con el _build_ de producción, no con `npm run dev`:** el fallo de `/acerca` solo existe en producción. Los E2E de esta plataforma (Tanda 9) se ejecutan contra el servidor de desarrollo y no lo detectarían; por eso la plataforma usa `output: "server"`, donde nada es estático salvo lo que se marca a propósito.
+- **`ctx.isPrerendered` es `true` en el _build_:** úsalo para no leer _cookies_, cabeceras ni la sesión en ese momento. Esta plataforma lo comprueba al principio de su `loadSession`.
+- **Las cabeceras de seguridad tampoco llegan a las páginas estáticas:** un _middleware_ que añade `X-Frame-Options` (Tanda 9) no se ejecuta para un archivo servido tal cual. En Vercel, esas cabeceras se configuran también para los estáticos (en `vercel.json`) o se renderiza todo en el servidor.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade al _middleware_ un tercer paso, `registrar`, que escriba en la consola el método, la ruta, el código de respuesta y la duración de cada petición.
+2. Debe ser el **primero** de la cadena, para medir también el tiempo de los demás pasos, y debe registrar las peticiones que terminan en error.
+3. Haz una ronda de peticiones contra el servidor de producción (páginas estáticas, privadas con y sin sesión, un 422, un 404, un POST y la _server island_) y comprueba qué aparece en el registro.
+
+</Callout>
+
+Solución. `src/middleware.ts` completo:
+
+```ts
+// Archivo: src/middleware.ts
+// Se ejecuta ANTES de cada página o endpoint renderizado en el servidor
+import { defineMiddleware, sequence } from "astro:middleware";
+import { COOKIE_SESION, usuarioPorId } from "./lib/sesion";
+
+const PRIVADAS = ["/estadisticas", "/notas", "/nuevo", "/api/", "/_actions/"];
+const PUBLICAS = ["/api/sesion"]; // excepciones dentro de las privadas
+
+/** 0. Registro: método, ruta, código y duración de cada petición (va el primero para medirlo todo) */
+const registrar = defineMiddleware(async (ctx, next) => {
+  if (ctx.isPrerendered) return next(); // en el build no hay peticiones que registrar
+  const inicio = performance.now();
+  try {
+    const respuesta = await next();
+    const ms = (performance.now() - inicio).toFixed(1);
+    console.log(`${ctx.request.method} ${ctx.url.pathname} → ${respuesta.status} (${ms} ms)`);
+    return respuesta;
+  } catch (error) {
+    // Un error no capturado más abajo: se registra y se deja seguir hasta Astro (que responde 500)
+    console.error(`${ctx.request.method} ${ctx.url.pathname} → error (${(performance.now() - inicio).toFixed(1)} ms)`, error);
+    throw error;
+  }
+});
+
+/** 1. Carga la sesión en locals: lo que pongas aquí lo verán todas las páginas y endpoints */
+const cargarSesion = defineMiddleware((ctx, next) => {
+  // En el build (páginas prerenderizadas) no hay petición: ni cookies ni usuario
+  ctx.locals.usuario = ctx.isPrerendered ? null : usuarioPorId(ctx.cookies.get(COOKIE_SESION)?.value);
+  return next();
+});
+
+/** 2. Protege las rutas privadas: ninguna página tiene que comprobarlo por su cuenta */
+const proteger = defineMiddleware((ctx, next) => {
+  if (ctx.isPrerendered) return next(); // una página estática no se puede proteger: ver el aviso de la lección
+  const { pathname, search } = ctx.url;
+  const privada = PRIVADAS.some((p) => pathname.startsWith(p)) && !PUBLICAS.some((p) => pathname.startsWith(p));
+  if (!privada || ctx.locals.usuario) return next();
+
+  const esApi = pathname.startsWith("/api/") || pathname.startsWith("/_actions/");
+  if (esApi) return Response.json({ error: "Inicia sesión para continuar" }, { status: 401 });
+  return ctx.redirect(`/entrar?volver=${encodeURIComponent(pathname + search)}`);
+});
+
+export const onRequest = sequence(registrar, cargarSesion, proteger);
+```
+
+Lo que escribe el servidor de producción tras pedir `/`, `/acerca`, `/estadisticas` (sin y con sesión), `/api/entrenos?limite=abc`, `/api/entrenos/no-existe`, un `POST /api/entrenos` y la _server island_:
+
+```text
+GET /estadisticas → 302 (0.3 ms)
+GET /estadisticas → 200 (7.9 ms)
+GET /api/entrenos → 422 (1.0 ms)
+GET /api/entrenos/no-existe → 404 (0.1 ms)
+POST /api/entrenos → 201 (7.1 ms)
+GET /_server-islands/UltimoEntreno → 200 (2.0 ms)
+```
+
+Las decisiones:
+
+- **`registrar` va el primero:** `await next()` espera a toda la cadena (sesión, protección y la página o _endpoint_), así que la duración incluye todo. El 302 de `/estadisticas` sin sesión tarda 0,3 ms porque `proteger` corta antes de la consulta; con sesión, 7,9 ms, con la consulta a MongoDB incluida.
+- **`/` y `/acerca` no aparecen:** son estáticas y se sirven sin pasar por el _middleware_, la misma razón del Paso 3. Para registrar esas peticiones hacen falta los registros del servidor web o de la plataforma (Vercel los tiene).
+- **`ctx.url.pathname` y no la URL completa:** la _query string_ puede contener datos personales o _tokens_. El registro de la _server island_ tampoco incluye sus _props_ cifradas.
+- **El `try/catch` vuelve a lanzar el error:** el _middleware_ registra el fallo, pero no lo convierte en respuesta; eso es trabajo de Astro (un 500) o del manejador de errores de cada _endpoint_ (I1.5).
+
+<Callout type="risk">
+
+- **No registres cuerpos, _cookies_ ni cabeceras de autorización:** un registro con contraseñas o _tokens_ es una filtración esperando a ocurrir, porque los registros se copian a servicios externos y se guardan durante meses.
+- **`console.log` en producción no es un sistema de registros:** sirve para empezar, pero en Vercel cada función escribe por separado y sin estructura. En A6 verás registros estructurados (JSON) y trazas.
+- **Medir en cada petición tiene un coste mínimo, pero no nulo:** `performance.now()` y un `console.log` son baratos. Un _middleware_ que consulta la base de datos en cada petición (por ejemplo, para registrar en MongoDB) multiplica la carga: hazlo de forma asíncrona o por lotes.
+
+</Callout>
+
+<Callout type="mastery">
+
+Ninguna página privada comprueba la sesión por su cuenta: lo hace el _middleware_. Encadenas pasos con `sequence` en el orden correcto, cargas la sesión en un `locals` tipado que usan páginas, _endpoints_ y Actions, sabes que el _middleware_ no protege lo que es estático (y por eso toda página privada se renderiza en el servidor) y lo usas para tareas transversales como el registro de peticiones.
+
+</Callout>
+
+## Resumen
+
+- `src/middleware.ts` exporta `onRequest`; `defineMiddleware((ctx, next) => …)` y `sequence(a, b, c)` encadenan pasos.
+- `locals` vive una petición: el _middleware_ lo rellena y se tipa en `src/env.d.ts` (`declare namespace App { interface Locals … }`).
+- Devolver una respuesta sin `next()` corta la cadena: un 401 para APIs y una redirección para páginas.
+- Una página prerenderizada se sirve sin ejecutar el _middleware_: en producción no se puede proteger (medido: 302 en desarrollo, 200 en producción).
+- Un _middleware_ de registro, el primero de la cadena, mide método, ruta, código y duración de todo lo que pasa por el servidor.

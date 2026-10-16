@@ -1,0 +1,503 @@
+---
+sectionId: "I3.3"
+course: "I3"
+title: "Astro Actions"
+order: 3
+minutes: 60
+summary: "Creas Actions con validación integrada, las usas desde un formulario sin JavaScript y desde React, manejas ActionError, corriges dos trampas medidas (campos null y el reenvío al recargar) y comparas Actions y endpoints."
+---
+
+En I3.2 escribiste _endpoints_: tú eliges la URL, lees el cuerpo, validas, construyes la respuesta con su código y, en el cliente, haces el `fetch`, compruebas el código y conviertes el JSON. Funciona, pero cada llamada repite ese trabajo en los dos lados, y el cliente no sabe qué tipo de datos devuelve el servidor (un `as NotaDTO` es una promesa sin comprobar). Las **Astro Actions** son funciones de servidor que el cliente llama **como si fueran funciones locales**: Astro genera la URL, valida la entrada con tu esquema de Zod, serializa la respuesta (incluidos los `Date`) y la devuelve **tipada** al cliente. En esta sección vas a crear Actions, usarlas desde un formulario HTML que funciona sin JavaScript y desde React, y vas a medir dos trampas que no aparecen en la documentación de forma evidente.
+
+**Lo que tendrás al terminar:** las Actions `crearEntreno`, `borrarEntreno` y `crearNota`, un formulario sin JavaScript que las usa con el patrón POST/Redirect/GET, y una comparación medida entre Action y _endpoint_.
+
+**Requisitos:** la app de I3.2 (con las notas) y los errores de I1.5. Esta plataforma usa una Action para enviar las evaluaciones (`src/actions/index.ts`), que verás al final.
+
+```bash
+mkdir -p src/actions
+```
+
+## Paso 1: definir Actions
+
+Todas las Actions de la app se exportan desde un único archivo, `src/actions/index.ts`, dentro de un objeto `server`. Créalo:
+
+```ts
+// Archivo: src/actions/index.ts
+// Las Actions: funciones de servidor que el cliente llama como si fueran locales
+import { ActionError, defineAction } from "astro:actions";
+import { z } from "astro/zod";
+import { EntrenoSchema } from "../schemas/entreno";
+import { borrarEntreno, crearEntreno } from "../server/entrenos";
+
+const USUARIO_DEMO = "u_demo";
+
+export const server = {
+  crearEntreno: defineAction({
+    accept: "form", // acepta FormData: sirve para un <form> HTML y para React
+    input: EntrenoSchema, // Astro valida ANTES de llamar al handler
+    handler: async (entreno) => crearEntreno(USUARIO_DEMO, entreno), // entreno ya es un EntrenoInput
+  }),
+
+  borrarEntreno: defineAction({
+    input: z.object({ id: z.string() }), // sin accept: recibe JSON
+    handler: async ({ id }) => {
+      const borrado = await borrarEntreno(USUARIO_DEMO, id);
+      if (!borrado) throw new ActionError({ code: "NOT_FOUND", message: `El entreno ${id} no existe` });
+      return { borrado: id };
+    },
+  }),
+};
+```
+
+- **`defineAction({ input, handler })`**: `input` es un esquema de Zod. Astro valida los datos **antes** de llamar al `handler`; si no son válidos, el `handler` ni se ejecuta. Dentro, el argumento ya está validado y tipado (`entreno` es un `EntrenoInput`).
+- **`accept: "form"`**: la Action recibe un `FormData` (de un `<form>` o de React). Sin `accept`, recibe JSON.
+- **`ActionError`**: el equivalente de un `HttpError` (I1.5) para Actions, con un **código con nombre** (`NOT_FOUND`, `CONFLICT`…) en lugar de un número.
+- **`import { z } from "astro/zod"`**: Astro incluye Zod; en este proyecto es la misma versión que el paquete `zod`, así que `EntrenoSchema` sirve igual.
+- **El valor que devuelve el `handler`** es lo que recibe el cliente.
+
+<Callout type="risk">
+
+- **Una Action es un _endpoint_ público:** aunque se llame "como una función", cualquiera puede hacer un `POST /_actions/borrarEntreno` con `curl`. La autenticación y los permisos se comprueban **dentro** del `handler`, siempre (I5). Por eso el `handler` usa el usuario de la sesión, nunca un `userId` que llegue en la entrada.
+- **Los errores no controlados siguen siendo 500:** si el `handler` lanza un `Error` cualquiera, el cliente recibe `INTERNAL_SERVER_ERROR`. Convierte los errores esperables en `ActionError` (lo harás en el ejercicio).
+
+</Callout>
+
+## Paso 2: desde un formulario HTML, sin JavaScript
+
+Un formulario puede enviarse **directamente** a una Action con `action={actions.crearEntreno}`. Funciona sin JavaScript (la llamada _mejora progresiva_), y la página lee el resultado con `Astro.getActionResult`. Crea `src/pages/nuevo-accion.astro`:
+
+```astro
+---
+// Archivo: src/pages/nuevo-accion.astro
+// El mismo formulario sin JavaScript, ahora enviado a una Action
+import { actions, isInputError } from "astro:actions";
+import Base from "../layouts/Base.astro";
+import BorrarEntreno from "../components/BorrarEntreno";
+
+export const prerender = false; // lee el resultado de la Action en cada petición
+
+const resultado = Astro.getActionResult(actions.crearEntreno);
+// POST/Redirect/GET: si salió bien, redirige a un GET; así, recargar no vuelve a enviar el formulario
+if (resultado?.data) {
+  return Astro.redirect(`/nuevo-accion?guardado=${resultado.data.minutos}`, 303);
+}
+const errores = resultado?.error && isInputError(resultado.error) ? resultado.error.fields : {};
+const guardado = Astro.url.searchParams.get("guardado");
+---
+
+<Base titulo="Nuevo entreno (Action)">
+  <h1>Nuevo entreno (Action, sin JavaScript)</h1>
+  {guardado && <p id="ok">Guardado: entreno de {guardado} min</p>}
+  {
+    resultado?.error && (
+      <p id="error">
+        {isInputError(resultado.error) ? "Revisa los campos marcados." : `No se pudo guardar: ${resultado.error.message}`}
+      </p>
+    )
+  }
+  <form method="POST" action={actions.crearEntreno}>
+    <label>Tipo <select name="tipo"><option>running</option><option>fuerza</option><option>movilidad</option></select></label>
+    <label>Minutos <input name="minutos" inputmode="numeric" /></label>
+    {errores.minutos && <span class="campo-error">{errores.minutos.join(", ")}</span>}
+    <label>Km <input name="km" inputmode="decimal" /></label>
+    {errores.km && <span class="campo-error">{errores.km.join(", ")}</span>}
+    <label>Fecha <input name="fecha" type="date" /></label>
+    {errores.fecha && <span class="campo-error">{errores.fecha.join(", ")}</span>}
+    <label>Sensación <input name="sensacion" type="number" value="3" /></label>
+    <button type="submit">Guardar</button>
+  </form>
+  <BorrarEntreno client:load />
+</Base>
+```
+
+Y el componente de React que usa al final, `src/components/BorrarEntreno.tsx` (lo verás en el Paso 3):
+
+```tsx
+// Archivo: src/components/BorrarEntreno.tsx
+// Llamar a una Action desde React: tipada de extremo a extremo, sin escribir fetch
+import { useState } from "react";
+import { actions } from "astro:actions";
+
+export default function BorrarEntreno() {
+  const [id, setId] = useState("");
+  const [mensaje, setMensaje] = useState("");
+
+  async function borrar() {
+    const { data, error } = await actions.borrarEntreno({ id }); // nunca lanza: devuelve data o error
+    if (error) setMensaje(`${error.code}: ${error.message}`);
+    else setMensaje(`Borrado ${data.borrado}`); // data está tipado: { borrado: string }
+  }
+
+  return (
+    <p>
+      <input aria-label="Id del entreno" value={id} onChange={(e) => setId(e.target.value)} />
+      <button onClick={borrar}>Borrar</button> <output id="mensaje">{mensaje}</output>
+    </p>
+  );
+}
+```
+
+Al probarlo en Chrome con JavaScript desactivado, el primer intento con datos **válidos** falló con un 400. La respuesta de la Action decía:
+
+```text
+{"type":"AstroActionInputError","issues":[…],"fields":{"km":["Los km deben ser mayores que 0"],"notas":["Invalid input: expected string, received null"]}}
+```
+
+El formulario no tiene campo de notas y el km estaba vacío, pero Astro no los envió a Zod como "ausentes": **los convierte en `null`** antes de validar. Se ve en su código (`formDataToObject`, en `node_modules/astro/dist/actions/runtime/server.js`): un campo vacío o que no viene en el formulario pasa a `null`, salvo que su esquema sea directamente un `.optional()`. El `vacioComoAusente` de I1.6 solo trataba `""`, y `z.coerce.number()` convierte `null` en `0`. La solución es tratar también `null` como ausente. Sustituye `src/schemas/entreno.ts`:
+
+```ts
+// Archivo: src/schemas/entreno.ts
+// La única fuente de verdad: la usan el formulario (cliente), el endpoint y la base de datos (servidor)
+import { z } from "zod";
+
+export const TIPOS_ENTRENO = ["fuerza", "running", "movilidad"] as const;
+
+// Un campo de formulario vacío ("") significa "no lo he rellenado", no 0.
+// Y las Astro Actions convierten en null los campos que no vienen en el formulario.
+const vacioComoAusente = (v: unknown) => (v === "" || v === null ? undefined : v);
+
+// Campos comunes a la entrada y al DTO
+const campos = {
+  tipo: z.enum(TIPOS_ENTRENO, "Elige un tipo de entreno"),
+  minutos: z.coerce.number("Indica los minutos").int("Minutos enteros").min(1, "Mínimo 1 minuto").max(600, "Máximo 600 minutos"),
+  km: z.preprocess(vacioComoAusente, z.coerce.number().positive("Los km deben ser mayores que 0").max(100).optional()),
+  fecha: z.coerce.date("Fecha no válida"),
+  notas: z.preprocess(vacioComoAusente, z.string().trim().max(200, "Máximo 200 caracteres").optional()),
+  sensacion: z.coerce.number().int().min(1, "De 1 a 5").max(5, "De 1 a 5"), // ← campo nuevo
+};
+
+/** Lo que envía el formulario y valida el endpoint */
+export const EntrenoSchema = z
+  .object(campos)
+  .refine((e) => e.tipo === "running" || e.km === undefined, {
+    message: "Solo los entrenos de running llevan km",
+    path: ["km"],
+  });
+
+/** Lo que devuelve la API: el entreno más su id y su fecha de creación */
+export const EntrenoDTOSchema = z.object({
+  ...campos,
+  id: z.string(),
+  creado: z.coerce.date(), // en el JSON llega como texto ISO; al validar vuelve a ser Date
+});
+
+export const ListaEntrenosSchema = z.object({ entrenos: z.array(EntrenoDTOSchema) });
+
+/** PATCH: cualquier subconjunto de campos (la regla de los km se comprueba sobre el resultado) */
+export const CambiosEntrenoSchema = z.object(campos).partial();
+
+/** Filtros de GET /api/entrenos?tipo=running&limite=10 (los query params llegan como texto) */
+export const FiltroEntrenosSchema = z.object({
+  tipo: z.enum(TIPOS_ENTRENO).optional(),
+  limite: z.coerce.number().int().min(1).max(50).default(20),
+});
+
+// Los tipos se derivan; ninguno se escribe a mano
+export type TipoEntreno = (typeof TIPOS_ENTRENO)[number];
+export type EntrenoInput = z.output<typeof EntrenoSchema>;
+export type EntrenoDTO = z.output<typeof EntrenoDTOSchema>;
+export type CambiosEntreno = z.output<typeof CambiosEntrenoSchema>;
+export type FiltroEntrenos = z.output<typeof FiltroEntrenosSchema>;
+/** Estado del formulario: los mismos campos, todos como texto (así los dan los <input>) */
+export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
+```
+
+Con eso, medido en Chrome con JavaScript desactivado:
+
+```text
+sin JS, datos inválidos: [ 'Revisa los campos marcados.', 'Mínimo 1 minuto', 'Solo los entrenos de running llevan km' ]
+   red: POST /nuevo-accion?_action=crearEntreno → 400
+tras enviar: entrenos de 42 min = 1 · Guardado: entreno de 42 min
+tras recargar: entrenos de 42 min = 1 · petición: GET /nuevo-accion?guardado=42 · Guardado: entreno de 42 min
+```
+
+- **El formulario se envía a la propia página** con `?_action=crearEntreno`. Astro ejecuta la Action y luego renderiza la página, que lee el resultado.
+- **`isInputError(error)`** distingue un error de validación (con `error.fields`, los mensajes por campo, listos para pintarlos) de los demás.
+- **Los errores de cada campo** aparecen junto a él, y el mensaje general es legible. El `error.message` de un error de validación es un JSON con todos los problemas: nunca lo muestres tal cual.
+
+La última línea es la segunda trampa. La primera versión de la página no tenía la redirección y, al **recargar** tras guardar, el navegador **reenvió el POST**. Medido:
+
+```text
+tras enviar: entrenos de 41 min = 1 · Guardado: running, 41 min
+tras recargar: entrenos de 41 min = 2 · petición: POST /nuevo-accion?_action=crearEntreno · Guardado: running, 41 min
+```
+
+¡Dos entrenos! La respuesta a un POST era la propia página (un 200), y recargar una respuesta a un POST repite el POST. La solución es el patrón **POST/Redirect/GET**: si la Action ha ido bien, la página redirige con `Astro.redirect(…, 303)` a una URL normal, y recargar solo repite ese GET.
+
+<Callout type="risk">
+
+- **Toda página con un formulario que crea o cambia algo necesita POST/Redirect/GET:** sin la redirección, recargar, o pulsar "atrás" y "adelante", duplica la operación. El _endpoint_ de I3.2 ya lo hacía (respondía 303).
+- **La página tiene que ser de servidor:** `Astro.getActionResult` lee el resultado de esa petición; en una página prerenderizada no hay petición que leer (I3.1). Por eso lleva `prerender = false`.
+- **Tras la redirección se pierden los errores y los valores escritos:** aquí solo se redirige si todo fue bien. Si hay errores, la página se renderiza con ellos (y sin redirección), pero los campos aparecen vacíos, porque este formulario no rellena `value`. Para conservarlos, pinta `value={…}` con lo que llegó, o usa el formulario de React (I2.5).
+
+</Callout>
+
+## Paso 3: desde React, tipado de extremo a extremo
+
+En React, una Action se llama como una función asíncrona: `await actions.borrarEntreno({ id })`. Es el componente `BorrarEntreno` del Paso 2, que ya está en la página `/nuevo-accion`. Medido en Chrome, borrando un entreno que existe y repitiendo con el mismo _id_:
+
+```text
+React, borrar 6ad193ee…: Borrado 6ad193ee7ba8492e8d0f63a9
+React, borrar 6ad193ee…: NOT_FOUND: El entreno 6ad193ee7ba8492e8d0f63a9 no existe
+POST /_actions/borrarEntreno/ → 200
+   cuerpo: [{"borrado":1},"6ad193ee7ba8492e8d0f63a9"]
+POST /_actions/borrarEntreno/ → 404
+   cuerpo: {"type":"AstroActionError","code":"NOT_FOUND","status":404,"message":"El entreno 6ad193ee7ba8492e8d0f63a9 no existe"}
+```
+
+- **`{ data, error }` y nunca una excepción:** la llamada devuelve una de las dos cosas. Con `if (error) …`, TypeScript sabe que en la otra rama `data` es `{ borrado: string }`, el tipo que devuelve el `handler`, **sin escribirlo en el cliente**.
+- **La URL es `/_actions/borrarEntreno/`**, generada por Astro; no la escribes en ningún sitio.
+- **El cuerpo de la respuesta no es JSON "normal":** Astro usa su propio formato (`devalue`) para que viajen tipos que JSON pierde, como `Date`, `Map` o `undefined`. Por eso no hace falta convertir las fechas a mano, como en I1.6.
+- **El código HTTP sale del `ActionError`:** `NOT_FOUND` → 404.
+
+| Código de `ActionError` | HTTP | Cuándo                                                                  |
+| ----------------------- | ---- | ----------------------------------------------------------------------- |
+| `BAD_REQUEST`           | 400  | Entrada inválida (los errores de validación de `input` también son 400) |
+| `UNAUTHORIZED`          | 401  | Sin sesión                                                              |
+| `FORBIDDEN`             | 403  | Con sesión, sin permiso                                                 |
+| `NOT_FOUND`             | 404  | El recurso no existe                                                    |
+| `CONFLICT`              | 409  | Choca con el estado actual (un duplicado)                               |
+| `TOO_MANY_REQUESTS`     | 429  | Límite de peticiones (Tanda 9)                                          |
+| `INTERNAL_SERVER_ERROR` | 500  | Cualquier error no controlado                                           |
+
+<Callout type="risk">
+
+- **El cliente de una Action funciona solo desde tu propia web:** `actions.x()` depende del código que genera Astro. Una app móvil u otro servicio no pueden importarlo; para ellos, un _endpoint_ REST con URL y formato estables (I3.2).
+- **Los errores de validación de una Action son 400, no 422:** si tu cliente o tus pruebas esperan 422, como en los _endpoints_ de este curso, comprueba `isInputError(error)` en lugar del código.
+
+</Callout>
+
+## Paso 4: ¿Action o endpoint?
+
+| Criterio                   | Astro Action                                           | _Endpoint_ (API route)                                         |
+| -------------------------- | ------------------------------------------------------ | -------------------------------------------------------------- |
+| ¿Quién lo consume?         | Tu propia web (páginas y componentes de Astro y React) | Cualquiera: tu web, una app móvil, otro servidor, un _webhook_ |
+| URL                        | Generada por Astro (`/_actions/nombre`)                | La eliges tú (`/api/notas/:id`)                                |
+| Validación de la entrada   | Integrada (`input`)                                    | La haces tú (`validar`)                                        |
+| Tipos en el cliente        | Automáticos                                            | Los defines y validas tú                                       |
+| Verbos HTTP                | Siempre POST                                           | Los que quieras (GET, PATCH, DELETE…)                          |
+| Formularios sin JavaScript | Integrados (`action={actions.x}`)                      | Con `FormData` y redirección a mano                            |
+| Caché HTTP de lecturas     | No (son POST)                                          | Sí, con `GET` y cabeceras                                      |
+
+La regla corta: **Actions para lo que solo usa tu web; _endpoints_ para lo que se consume desde fuera, o para leer datos que se pueden cachear.** Esta plataforma lo sigue: la evaluación se envía con una Action (`submitQuiz`) porque solo la usa su componente de React; "marcar como leído" es un _endpoint_ (`PUT/DELETE /api/progress/:id`), con verbos REST que podría usar cualquier cliente.
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Convierte el `POST /api/notas` de I3.2 en una Action `crearNota` que reutilice `NuevaNotaSchema` y la función `crearNota` de la capa de datos.
+2. El 409 de título repetido (`ConflictoError`) debe llegar al cliente como `ActionError` con código `CONFLICT`. Escribe una función que traduzca cualquier `HttpError` a su código de `ActionError`.
+3. Crea un componente de React que use la Action, y otro que haga lo mismo con `fetch` contra el _endpoint_ de I3.2. Pruébalos con una nota nueva, una repetida y una sin título, y compara el código de los dos.
+
+</Callout>
+
+Solución. `src/actions/index.ts` completo:
+
+```ts
+// Archivo: src/actions/index.ts
+// Las Actions: funciones de servidor que el cliente llama como si fueran locales
+import { ActionError, defineAction, type ActionErrorCode } from "astro:actions";
+import { z } from "astro/zod";
+import { HttpError } from "../lib/errores";
+import { EntrenoSchema } from "../schemas/entreno";
+import { NuevaNotaSchema } from "../schemas/nota";
+import { borrarEntreno, crearEntreno } from "../server/entrenos";
+import { crearNota } from "../server/notas";
+
+const USUARIO_DEMO = "u_demo";
+
+// Los errores de dominio (I1.5) tienen un código HTTP; las Actions usan nombres
+const CODIGOS: Record<number, ActionErrorCode> = {
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  422: "UNPROCESSABLE_CONTENT",
+};
+
+/** Convierte un HttpError en ActionError; el resto de errores sigue su camino (500) */
+function comoActionError(error: unknown): never {
+  if (error instanceof HttpError) {
+    throw new ActionError({ code: CODIGOS[error.status] ?? "INTERNAL_SERVER_ERROR", message: error.message });
+  }
+  throw error;
+}
+
+export const server = {
+  crearEntreno: defineAction({
+    accept: "form", // acepta FormData: sirve para un <form> HTML y para React
+    input: EntrenoSchema, // Astro valida ANTES de llamar al handler
+    handler: async (entreno) => crearEntreno(USUARIO_DEMO, entreno), // entreno ya es un EntrenoInput
+  }),
+
+  borrarEntreno: defineAction({
+    input: z.object({ id: z.string() }), // sin accept: recibe JSON
+    handler: async ({ id }) => {
+      const borrado = await borrarEntreno(USUARIO_DEMO, id);
+      if (!borrado) throw new ActionError({ code: "NOT_FOUND", message: `El entreno ${id} no existe` });
+      return { borrado: id };
+    },
+  }),
+
+  // Ejercicio: POST /api/notas convertido en Action
+  crearNota: defineAction({
+    input: NuevaNotaSchema,
+    handler: (nota) => crearNota(USUARIO_DEMO, nota).catch(comoActionError),
+  }),
+};
+```
+
+El cliente con la Action, `src/components/NuevaNota.tsx`:
+
+```tsx
+// Archivo: src/components/NuevaNota.tsx
+// El cliente de la Action: sin URL, sin fetch, sin parsear la respuesta a mano
+import { useState } from "react";
+import { actions, isInputError } from "astro:actions";
+import { CATEGORIAS } from "../schemas/nota";
+
+export default function NuevaNota() {
+  const [titulo, setTitulo] = useState("");
+  const [categoria, setCategoria] = useState<(typeof CATEGORIAS)[number]>("trabajo");
+  const [mensaje, setMensaje] = useState("");
+
+  async function guardar() {
+    const { data, error } = await actions.crearNota({ titulo, categoria });
+    if (!error) return setMensaje(`Creada: ${data.titulo}`); // data es un NotaDTO, tipado
+    if (isInputError(error)) return setMensaje(`Revisa: ${Object.values(error.fields).flat().join(", ")}`);
+    setMensaje(error.code === "CONFLICT" ? error.message : "No se pudo guardar");
+  }
+
+  return (
+    <p>
+      <input aria-label="Título" value={titulo} onChange={(e) => setTitulo(e.target.value)} />
+      <select aria-label="Categoría" value={categoria} onChange={(e) => setCategoria(e.target.value as (typeof CATEGORIAS)[number])}>
+        {CATEGORIAS.map((c) => (
+          <option key={c}>{c}</option>
+        ))}
+      </select>
+      <button id="guardar-nota" onClick={guardar}>
+        Guardar nota
+      </button>{" "}
+      <output id="mensaje-nota">{mensaje}</output>
+    </p>
+  );
+}
+```
+
+El mismo cliente con `fetch`, `src/components/NuevaNotaFetch.tsx`:
+
+```tsx
+// Archivo: src/components/NuevaNotaFetch.tsx
+// Lo mismo, contra el endpoint POST /api/notas de I3.2: URL, cabeceras y respuesta a mano
+import { useState } from "react";
+import { z } from "zod";
+import { CATEGORIAS, type NotaDTO } from "../schemas/nota";
+
+const RespuestaError = z.object({ error: z.string(), campos: z.record(z.string(), z.array(z.string())).optional() });
+
+export default function NuevaNotaFetch() {
+  const [titulo, setTitulo] = useState("");
+  const [categoria, setCategoria] = useState<(typeof CATEGORIAS)[number]>("trabajo");
+  const [mensaje, setMensaje] = useState("");
+
+  async function guardar() {
+    const res = await fetch("/api/notas", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ titulo, categoria }),
+    }).catch(() => null);
+    if (!res) return setMensaje("Sin conexión");
+    if (res.status === 201) return setMensaje(`Creada: ${((await res.json()) as NotaDTO).titulo}`); // un cast: nada lo comprueba
+    const cuerpo = RespuestaError.safeParse(await res.json().catch(() => null));
+    if (res.status === 422 && cuerpo.success) return setMensaje(`Revisa: ${Object.values(cuerpo.data.campos ?? {}).flat().join(", ")}`);
+    setMensaje(res.status === 409 && cuerpo.success ? cuerpo.data.error : "No se pudo guardar");
+  }
+
+  return (
+    <p>
+      <input aria-label="Título (fetch)" value={titulo} onChange={(e) => setTitulo(e.target.value)} />
+      <select aria-label="Categoría (fetch)" value={categoria} onChange={(e) => setCategoria(e.target.value as (typeof CATEGORIAS)[number])}>
+        {CATEGORIAS.map((c) => (
+          <option key={c}>{c}</option>
+        ))}
+      </select>
+      <button id="guardar-nota-fetch" onClick={guardar}>
+        Guardar nota (fetch)
+      </button>{" "}
+      <output id="mensaje-nota-fetch">{mensaje}</output>
+    </p>
+  );
+}
+```
+
+La página `src/pages/notas.astro`, con los dos:
+
+```astro
+---
+// Archivo: src/pages/notas.astro
+import Base from "../layouts/Base.astro";
+import NuevaNota from "../components/NuevaNota";
+import NuevaNotaFetch from "../components/NuevaNotaFetch";
+---
+
+<Base titulo="Notas">
+  <h1>Notas</h1>
+  <h2>Con la Action</h2>
+  <NuevaNota client:load />
+  <h2>Con fetch al endpoint</h2>
+  <NuevaNotaFetch client:load />
+</Base>
+```
+
+Medido en Chrome, con una nota nueva, la misma repetida y una sin título:
+
+```text
+Con la Action:
+«Preparar la media maratón» → Creada: Preparar la media maratón
+«Preparar la media maratón» → Ya tienes una nota titulada «Preparar la media maratón»
+«» → Revisa: El título es obligatorio
+POST /_actions/crearNota/ → 200 · POST /_actions/crearNota/ → 409 · POST /_actions/crearNota/ → 400
+Con fetch al endpoint:
+«Rodaje del domingo» → Creada: Rodaje del domingo
+«Rodaje del domingo» → Ya tienes una nota titulada «Rodaje del domingo»
+«» → Revisa: El título es obligatorio
+POST /api/notas → 201 · POST /api/notas → 409 · POST /api/notas → 422
+```
+
+El comportamiento es el mismo. La comparación del código (sin contar comentarios ni líneas en blanco):
+
+|                                    | Action                 | _Endpoint_ + `fetch`                               |
+| ---------------------------------- | ---------------------- | -------------------------------------------------- |
+| Servidor (la operación de crear)   | 4 líneas               | 8 líneas                                           |
+| Cliente (la función `guardar`)     | 6 líneas               | 12 líneas, más un esquema para validar los errores |
+| Tipo de la respuesta en el cliente | Inferido del `handler` | Un `as NotaDTO` que nada comprueba                 |
+
+Las decisiones:
+
+- **`comoActionError` traduce una vez para todas las Actions:** cualquier `HttpError` de la capa de datos (I1.5) llega con su código con nombre; lo demás sigue siendo un 500. Es lo que hace esta plataforma con `STATUS_TO_CODE` en su `src/actions/index.ts`.
+- **El _endpoint_ no desaparece:** la Action reutiliza el mismo esquema y la misma función de la capa de datos. Puedes tener las dos puertas a la vez: la Action para tu web y el _endpoint_ para otros clientes.
+- **Menos código no es la única razón:** lo importante es que el cliente **no puede equivocarse** con la URL, el método, el formato del cuerpo o el tipo de la respuesta.
+
+<Callout type="risk">
+
+- **El `as NotaDTO` del cliente con `fetch` es justo el problema de I1.4:** si el servidor cambia la forma de la respuesta, el compilador no avisa. Con la Action, cambiar lo que devuelve el `handler` hace fallar al compilador en el cliente.
+- **Una Action no se puede "versionar":** si cambias su entrada, todos los clientes deben actualizarse a la vez. En tu propia web se despliegan juntos y no pasa nada; una app móvil antigua, en cambio, seguiría llamando a la forma vieja. Otra razón para usar _endpoints_ con clientes externos.
+- **Si una isla no llama a la Action y no ves ninguna petición,** revisa la consola: tras crear Actions o componentes nuevos, la caché de Vite puede dar `504 (Outdated Optimize Dep)`. Reinicia `npm run dev -- --force`.
+
+</Callout>
+
+<Callout type="mastery">
+
+Eliges entre _endpoint_ y Action según quién consume la API: usas Actions, con validación integrada, `ActionError` y tipos automáticos, para lo que solo usa tu propia web (también desde formularios sin JavaScript, con POST/Redirect/GET), y _endpoints_ REST para clientes externos y lecturas cacheables; y en las dos traduces los errores de dominio al código correcto.
+
+</Callout>
+
+## Resumen
+
+- `defineAction({ input, handler })` en `src/actions/index.ts`: Astro valida con Zod antes del `handler` y genera la URL.
+- Desde React, `const { data, error } = await actions.x(…)`: nunca lanza, y `data` está tipado; `isInputError` da los errores por campo.
+- Desde un `<form action={actions.x}>` sin JavaScript: `Astro.getActionResult` en una página de servidor y POST/Redirect/GET para no duplicar al recargar.
+- Con `accept: "form"`, Astro convierte en `null` los campos vacíos o ausentes antes de validar: trátalos como ausentes en el esquema.
+- Actions para tu web; _endpoints_ para clientes externos, verbos REST y lecturas cacheables.

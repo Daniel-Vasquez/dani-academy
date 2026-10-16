@@ -1,0 +1,890 @@
+---
+sectionId: "I3.5"
+course: "I3"
+title: "Arquitectura por capas"
+order: 5
+minutes: 75
+summary: "Separas HTTP, reglas y datos en endpoint, servicio y repositorio con la base de datos inyectada, pruebas el servicio con un repositorio en memoria y adelgazas un endpoint gordo de 31 líneas a 14."
+---
+
+Tu app ya tiene dos "puertas" para las mismas operaciones: los _endpoints_ REST (I3.2) y las Actions (I3.3). Si la regla "solo los entrenos de running llevan km" vive dentro del `PATCH`, la Action que edite un entreno tendrá que copiarla, y la copia acabará desincronizada. Además, para probar esa regla hoy necesitas levantar el servidor, entrar con una sesión y hacer peticiones HTTP. La **arquitectura por capas** separa el código por responsabilidad: la capa **HTTP** (_endpoints_ y Actions) traduce peticiones y respuestas; la capa de **servicio** guarda las reglas del negocio, y la de **repositorio** habla con la base de datos. Cada capa solo conoce a la de debajo. En esta sección vas a aplicarla a los entrenos, vas a probar las reglas sin MongoDB y vas a adelgazar un _endpoint_ gordo.
+
+**Lo que tendrás al terminar:** `src/repositories/` y `src/services/` con la base de datos inyectada, _endpoints_ y Actions de pocas líneas que comparten las reglas, y 13 tests con Vitest que se ejecutan en medio segundo.
+
+**Requisitos:** la app de I3.4.
+
+```bash
+mkdir -p src/repositories src/services tests
+npm install --save-dev vitest mongodb-memory-server
+```
+
+| Capa        | Archivos                         | Sabe de                                                | No sabe de        |
+| ----------- | -------------------------------- | ------------------------------------------------------ | ----------------- |
+| HTTP        | `src/pages/api/`, `src/actions/` | `Request`, códigos de estado, _cookies_, `locals`      | MongoDB           |
+| Servicio    | `src/services/`                  | Las reglas del negocio y los errores de dominio (I1.5) | HTTP y MongoDB    |
+| Repositorio | `src/repositories/`              | MongoDB: colecciones, filtros, `ObjectId`              | Las reglas y HTTP |
+
+## Paso 1: el repositorio, con la base de datos inyectada
+
+El repositorio es lo que era `src/server/entrenos.ts` (I3.2), con una diferencia: **no importa `db`, lo recibe**. Así, en producción se le pasa la base de datos real y, en los tests, una en memoria. Crea `src/repositories/entrenos.repo.ts`:
+
+```ts
+// Archivo: src/repositories/entrenos.repo.ts
+// Capa de datos: SOLO consultas a MongoDB. Ni reglas de negocio, ni HTTP.
+// Recibe la base de datos como parámetro: en producción, la real; en los tests, una en memoria.
+import { ObjectId, type Db, type WithId } from "mongodb";
+import type { CambiosEntreno, EntrenoDTO, EntrenoInput, FiltroEntrenos } from "../schemas/entreno";
+
+/** El documento tal como se guarda: lo validado más lo que pone el servidor */
+export interface EntrenoDoc extends EntrenoInput {
+  _id?: ObjectId;
+  userId: string;
+  creado: Date;
+}
+
+/** Documento de BD → DTO: _id pasa a id y userId no sale nunca */
+function aDTO(doc: WithId<EntrenoDoc>): EntrenoDTO {
+  return {
+    id: doc._id.toHexString(),
+    tipo: doc.tipo,
+    minutos: doc.minutos,
+    km: doc.km,
+    fecha: doc.fecha,
+    notas: doc.notas,
+    sensacion: doc.sensacion,
+    creado: doc.creado,
+  };
+}
+
+/** Un id que no es un ObjectId válido se trata como "no existe" */
+const aObjectId = (id: string) => (/^[0-9a-f]{24}$/i.test(id) ? new ObjectId(id) : null);
+
+export function crearEntrenosRepo(db: Db) {
+  // ignoreUndefined: un campo opcional sin valor no se guarda como null (I3.2)
+  const col = db.collection<EntrenoDoc>("entrenos", { ignoreUndefined: true });
+
+  return {
+    async listar(userId: string, filtro: FiltroEntrenos): Promise<EntrenoDTO[]> {
+      const docs = await col
+        .find({ userId, ...(filtro.tipo && { tipo: filtro.tipo }) })
+        .sort({ fecha: -1, creado: -1 })
+        .limit(filtro.limite)
+        .toArray();
+      return docs.map(aDTO);
+    },
+
+    /** Entrenos con fecha en [desde, hasta): para resúmenes por periodo */
+    async entre(userId: string, desde: Date, hasta: Date): Promise<EntrenoDTO[]> {
+      const docs = await col.find({ userId, fecha: { $gte: desde, $lt: hasta } }).sort({ fecha: 1 }).toArray();
+      return docs.map(aDTO);
+    },
+
+    async crear(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+      const doc: EntrenoDoc = { ...datos, userId, creado: new Date() };
+      const { insertedId } = await col.insertOne(doc);
+      return aDTO({ ...doc, _id: insertedId });
+    },
+
+    async obtener(userId: string, id: string): Promise<EntrenoDTO | null> {
+      const _id = aObjectId(id);
+      const doc = _id && (await col.findOne({ _id, userId }));
+      return doc ? aDTO(doc) : null;
+    },
+
+    async actualizar(userId: string, id: string, cambios: CambiosEntreno): Promise<EntrenoDTO | null> {
+      const _id = aObjectId(id);
+      if (!_id) return null;
+      const doc = await col.findOneAndUpdate({ _id, userId }, { $set: cambios }, { returnDocument: "after" });
+      return doc ? aDTO(doc) : null;
+    },
+
+    async totales(userId: string): Promise<{ total: number; minutos: number }> {
+      const [fila] = await col
+        .aggregate<{ total: number; minutos: number }>([
+          { $match: { userId } },
+          { $group: { _id: null, total: { $sum: 1 }, minutos: { $sum: "$minutos" } } },
+        ])
+        .toArray();
+      return { total: fila?.total ?? 0, minutos: fila?.minutos ?? 0 };
+    },
+
+    async borrar(userId: string, id: string): Promise<boolean> {
+      const _id = aObjectId(id);
+      return _id ? (await col.deleteOne({ _id, userId })).deletedCount === 1 : false;
+    },
+  };
+}
+
+export type EntrenosRepo = ReturnType<typeof crearEntrenosRepo>;
+```
+
+Y el único archivo que lo conecta con la base de datos real, `src/repositories/index.ts`:
+
+```ts
+// Archivo: src/repositories/index.ts
+// El único sitio que conecta los repositorios con la base de datos REAL
+import { db } from "../lib/mongo";
+import { crearEntrenosRepo } from "./entrenos.repo";
+
+export const repos = {
+  entrenos: crearEntrenosRepo(db),
+};
+```
+
+- **`crearEntrenosRepo(db)` es una "fábrica":** una función que recibe sus dependencias y devuelve un objeto con las operaciones. Es la forma más simple de **inyección de dependencias**, sin librerías ni decoradores.
+- **`EntrenosRepo = ReturnType<typeof crearEntrenosRepo>`**: el tipo sale del código, así que nunca se desincroniza.
+- **El repositorio devuelve DTOs, nunca documentos:** `_id`, `userId` y el resto de detalles de MongoDB no salen de esta capa.
+- **`totales` y `entre`** son consultas nuevas para la página de estadísticas y para el ejercicio. El `aggregate` que estaba en `estadisticas.astro` (I3.1) se muda aquí.
+
+<Callout type="risk">
+
+- **Todas las consultas filtran por `userId`:** es lo que impide que Dani vea los entrenos de Ana. Al estar en el repositorio, ninguna capa de arriba puede olvidarlo. Nunca añadas un método como `obtenerPorId(id)` sin usuario "para uso interno": acabará llamándose desde un _endpoint_.
+- **Un `src/repositories/index.ts` que importa `db` es el único punto con la base de datos real:** si un servicio importa `../lib/mongo` directamente, sus tests necesitarán MongoDB. Lo comprobarás al final con un `grep`.
+
+</Callout>
+
+## Paso 2: el servicio, donde viven las reglas
+
+Crea `src/services/entrenos.service.ts`:
+
+```ts
+// Archivo: src/services/entrenos.service.ts
+// Capa de negocio: las REGLAS. No sabe de HTTP (ni Request ni Response) ni de MongoDB.
+import { NoEncontradoError, validar } from "../lib/errores";
+import type { EntrenosRepo } from "../repositories/entrenos.repo";
+import {
+  EntrenoSchema,
+  type CambiosEntreno,
+  type EntrenoDTO,
+  type EntrenoInput,
+  type FiltroEntrenos,
+} from "../schemas/entreno";
+
+type Dependencias = { entrenos: Pick<EntrenosRepo, "listar" | "crear" | "obtener" | "actualizar" | "borrar"> };
+
+/** Las dependencias se reciben, no se importan: así los tests pueden pasar un repositorio falso */
+export function crearServicioEntrenos({ entrenos }: Dependencias) {
+  async function obtener(userId: string, id: string): Promise<EntrenoDTO> {
+    const entreno = await entrenos.obtener(userId, id);
+    if (!entreno) throw new NoEncontradoError("El entreno", id);
+    return entreno;
+  }
+
+  /** Regla: el entreno RESULTANTE debe ser válido (p. ej., solo los de running llevan km) */
+  async function editar(userId: string, id: string, cambios: CambiosEntreno): Promise<EntrenoDTO> {
+    const actual = await obtener(userId, id);
+    validar(EntrenoSchema, { ...actual, ...cambios });
+    const actualizado = await entrenos.actualizar(userId, id, cambios);
+    if (!actualizado) throw new NoEncontradoError("El entreno", id); // borrado entre medias
+    return actualizado;
+  }
+
+  async function borrar(userId: string, id: string): Promise<void> {
+    if (!(await entrenos.borrar(userId, id))) throw new NoEncontradoError("El entreno", id);
+  }
+
+  return {
+    listar: (userId: string, filtro: FiltroEntrenos) => entrenos.listar(userId, filtro),
+    crear: (userId: string, datos: EntrenoInput) => entrenos.crear(userId, datos),
+    obtener,
+    editar,
+    borrar,
+  };
+}
+
+export type ServicioEntrenos = ReturnType<typeof crearServicioEntrenos>;
+```
+
+Y `src/services/index.ts`, que conecta los servicios con los repositorios reales:
+
+```ts
+// Archivo: src/services/index.ts
+// Los servicios de la app, conectados a los repositorios reales
+import { repos } from "../repositories";
+import { crearServicioEntrenos } from "./entrenos.service";
+
+export const servicios = {
+  entrenos: crearServicioEntrenos({ entrenos: repos.entrenos }),
+};
+```
+
+- **La regla del `PATCH` ahora está en `editar`:** carga el entreno, comprueba que el **resultado** es válido y guarda. Cualquier puerta que edite un entreno pasa por aquí.
+- **El servicio lanza errores de dominio** (`NoEncontradoError`, `ValidacionError`, de I1.5), nunca respuestas. Cada puerta los traduce a su formato: `aRespuesta` en los _endpoints_ y `comoActionError` en las Actions.
+- **`Pick<EntrenosRepo, …>`** declara qué necesita el servicio del repositorio, y nada más. Un test puede pasarle cualquier objeto con esos cinco métodos.
+
+<Callout type="risk">
+
+- **Un servicio que recibe `Request` o devuelve `Response` ya no es un servicio:** si aparece `status: 404` en `src/services/`, la regla ha vuelto a la capa HTTP. El servicio dice "no existe"; la capa HTTP decide que eso es un 404 (o un `NOT_FOUND` en una Action).
+- **No crees capas vacías por costumbre:** `listar` y `crear` solo delegan en el repositorio. Está bien en este caso, porque así toda la HTTP pasa por el servicio y una regla futura tiene sitio. Pero si un servicio entero solo reenvía llamadas, en un proyecto pequeño puede bastar con el repositorio.
+
+</Callout>
+
+## Paso 3: endpoints y Actions de pocas líneas
+
+Sustituye `src/pages/api/entrenos/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/entrenos/[id].ts
+// Capa HTTP: tres líneas por método. Las reglas están en el servicio.
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../../lib/errores";
+import { CambiosEntrenoSchema } from "../../../schemas/entreno";
+import { servicios } from "../../../services";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ params, locals }) => {
+  try {
+    return Response.json(await servicios.entrenos.obtener(locals.usuario!.id, params.id!));
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const PATCH: APIRoute = async ({ params, request, locals }) => {
+  try {
+    const cambios = validar(CambiosEntrenoSchema, await request.json().catch(() => null));
+    return Response.json(await servicios.entrenos.editar(locals.usuario!.id, params.id!, cambios));
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const DELETE: APIRoute = async ({ params, locals }) => {
+  try {
+    await servicios.entrenos.borrar(locals.usuario!.id, params.id!);
+    return new Response(null, { status: 204 });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+Sustituye `src/pages/api/entrenos/index.ts`:
+
+```ts
+// Archivo: src/pages/api/entrenos/index.ts
+// Capa HTTP: leer la petición, validar, llamar al servicio y responder. Nada más.
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../../lib/errores";
+import { EntrenoSchema, FiltroEntrenosSchema } from "../../../schemas/entreno";
+import { servicios } from "../../../services";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ url, locals }) => {
+  try {
+    const filtro = validar(FiltroEntrenosSchema, Object.fromEntries(url.searchParams));
+    return Response.json({ entrenos: await servicios.entrenos.listar(locals.usuario!.id, filtro) });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+
+export const POST: APIRoute = async ({ request, redirect, locals }) => {
+  const esFormulario = request.headers.get("content-type")?.includes("application/x-www-form-urlencoded") ?? false;
+  try {
+    const cuerpo = esFormulario ? Object.fromEntries(await request.formData()) : await request.json().catch(() => null);
+    const creado = await servicios.entrenos.crear(locals.usuario!.id, validar(EntrenoSchema, cuerpo));
+    if (esFormulario) return redirect("/?creado=1", 303);
+    return Response.json(creado, { status: 201, headers: { Location: `/api/entrenos/${creado.id}` } });
+  } catch (e) {
+    if (esFormulario) return redirect("/nuevo?error=1", 303);
+    return aRespuesta(e);
+  }
+};
+```
+
+Sustituye `src/actions/index.ts`. Tiene una Action nueva, `editarEntreno`, que reutiliza la regla del servicio sin duplicarla:
+
+```ts
+// Archivo: src/actions/index.ts
+// Las Actions: funciones de servidor que el cliente llama como si fueran locales
+import { ActionError, defineAction, type ActionErrorCode } from "astro:actions";
+import { z } from "astro/zod";
+import { HttpError } from "../lib/errores";
+import { CambiosEntrenoSchema, EntrenoSchema } from "../schemas/entreno";
+import { NuevaNotaSchema } from "../schemas/nota";
+import { crearNota } from "../server/notas";
+import { servicios } from "../services";
+
+// Los errores de dominio (I1.5) tienen un código HTTP; las Actions usan nombres
+const CODIGOS: Record<number, ActionErrorCode> = {
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  422: "UNPROCESSABLE_CONTENT",
+};
+
+/** Convierte un HttpError en ActionError; el resto de errores sigue su camino (500) */
+function comoActionError(error: unknown): never {
+  if (error instanceof HttpError) {
+    throw new ActionError({ code: CODIGOS[error.status] ?? "INTERNAL_SERVER_ERROR", message: error.message });
+  }
+  throw error;
+}
+
+export const server = {
+  crearEntreno: defineAction({
+    accept: "form", // acepta FormData: sirve para un <form> HTML y para React
+    input: EntrenoSchema, // Astro valida ANTES de llamar al handler
+    handler: async (entreno, ctx) => servicios.entrenos.crear(ctx.locals.usuario!.id, entreno), // entreno ya es un EntrenoInput
+  }),
+
+  borrarEntreno: defineAction({
+    input: z.object({ id: z.string() }), // sin accept: recibe JSON
+    handler: async ({ id }, ctx) => {
+      await servicios.entrenos.borrar(ctx.locals.usuario!.id, id).catch(comoActionError); // el 404 sale del servicio
+      return { borrado: id };
+    },
+  }),
+
+  // La misma regla que el PATCH, sin duplicarla: las dos puertas llaman al servicio
+  editarEntreno: defineAction({
+    input: z.object({ id: z.string(), cambios: CambiosEntrenoSchema }),
+    handler: ({ id, cambios }, ctx) =>
+      servicios.entrenos.editar(ctx.locals.usuario!.id, id, cambios).catch(comoActionError),
+  }),
+
+  // Ejercicio de I3.3: POST /api/notas convertido en Action
+  crearNota: defineAction({
+    input: NuevaNotaSchema,
+    handler: (nota, ctx) => crearNota(ctx.locals.usuario!.id, nota).catch(comoActionError),
+  }),
+};
+```
+
+La página de estadísticas, `src/pages/estadisticas.astro`, usa el repositorio:
+
+```astro
+---
+// Archivo: src/pages/estadisticas.astro
+// Depende de los datos de ese momento: se renderiza en el servidor en CADA petición
+import Base from "../layouts/Base.astro";
+import { repos } from "../repositories";
+
+export const prerender = false;
+
+const fila = await repos.entrenos.totales(Astro.locals.usuario!.id); // la consulta vive en el repositorio
+const generada = new Date().toISOString();
+---
+
+<Base titulo="Estadísticas">
+  <h1>Estadísticas de {Astro.locals.usuario!.nombre}</h1>
+  <p id="totales">{fila.total} entrenos · {fila.minutos} minutos</p>
+  <p id="generada">HTML generado: {generada}</p>
+</Base>
+```
+
+Y la _server island_ `src/components/UltimoEntreno.astro`, también:
+
+```astro
+---
+// Archivo: src/components/UltimoEntreno.astro
+// Componente de servidor: consulta MongoDB cada vez que se pide
+import { repos } from "../repositories";
+
+const { usuario } = Astro.locals; // la portada es pública: puede no haber sesión
+const [ultimo] = usuario ? await repos.entrenos.listar(usuario.id, { limite: 1 }) : [];
+---
+
+<p id="ultimo">
+  {
+    !usuario
+      ? "Entra para ver tu último entreno"
+      : ultimo
+        ? `Último entreno: ${ultimo.tipo}, ${ultimo.minutos} min (${ultimo.fecha.toISOString().slice(0, 10)})`
+        : "Todavía no has registrado ningún entreno"
+  }
+</p>
+```
+
+Ya nadie usa `src/server/entrenos.ts`. Bórralo:
+
+```bash
+rm src/server/entrenos.ts
+```
+
+El `PATCH` ha pasado de 12 líneas a 8 (sin contar comentarios ni líneas en blanco). Lo importante es que el comportamiento es **el mismo** en las dos puertas. Medido con `curl`, con la sesión de Ana:
+
+```text
+POST /api/entrenos                             → 201 {"id":"6ad19674a4d312595278bde4","tipo":"running","minutos":45,"km":9,…
+PATCH {minutos: 50}                            → 200 {"id":"6ad19674a4d312595278bde4","tipo":"running","minutos":50,"km":9,…
+PATCH {tipo: fuerza} (le quedarían km)         → 422 {"error":"Revisa los datos del formulario","campos":{"km":["Solo los entrenos de running llevan km"]}}
+Action editarEntreno {tipo: fuerza}            → 422 {"type":"AstroActionError","code":"UNPROCESSABLE_CONTENT","status":422,…
+Action editarEntreno {minutos: 55}             → 200
+GET /api/entrenos/:id                          → 200 {…,"minutos":55,"km":9,…
+DELETE /api/entrenos/:id                       → 204
+Action borrarEntreno (ya no existe)            → 404 {"type":"AstroActionError","code":"NOT_FOUND","status":404,"message":"El entreno 6ad19674a4d312595278bde4 no existe"}
+```
+
+La regla del km funciona igual en el `PATCH` y en la Action (422), y el 404 de `borrarEntreno` ya no se escribe en la Action: sale del servicio.
+
+<Callout type="risk">
+
+- **Refactorizar no es cambiar el comportamiento:** antes de mover código entre capas, apunta lo que responde la API (como la tabla de arriba) y compáralo después. Si una respuesta cambia, es un _bug_ del refactor, no una mejora.
+- **Las notas siguen en `src/server/notas.ts`:** está bien migrar por partes, un recurso cada vez, con la app funcionando entre medias. Lo que no está bien es dejar las dos formas para siempre: apúntalo como tarea.
+
+</Callout>
+
+## Paso 4: probar las reglas sin servidor ni MongoDB
+
+Como el servicio recibe el repositorio, un test puede pasarle uno **falso**: un `Map` en memoria. Crea `vitest.config.ts`:
+
+```ts
+// Archivo: vitest.config.ts
+// Los servicios y repositorios no usan nada de Astro: basta con Vitest a secas
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: { include: ["tests/**/*.test.ts"], hookTimeout: 120_000 },
+});
+```
+
+Añade el _script_ a `package.json`:
+
+```json
+"test": "vitest run"
+```
+
+El test del servicio, `tests/entrenos.service.test.ts`:
+
+```ts
+// Archivo: tests/entrenos.service.test.ts
+// El servicio con un repositorio FALSO en memoria: sin MongoDB, en milisegundos
+import { describe, expect, it } from "vitest";
+import { NoEncontradoError, ValidacionError } from "../src/lib/errores";
+import type { EntrenosRepo } from "../src/repositories/entrenos.repo";
+import type { EntrenoDTO } from "../src/schemas/entreno";
+import { crearServicioEntrenos } from "../src/services/entrenos.service";
+
+function repoEnMemoria(inicial: EntrenoDTO[] = []) {
+  const datos = new Map(inicial.map((e) => [e.id, e]));
+  const repo: Pick<EntrenosRepo, "listar" | "crear" | "obtener" | "actualizar" | "borrar"> = {
+    listar: async () => [...datos.values()],
+    crear: async (_u, d) => {
+      const e = { ...d, id: String(datos.size + 1), creado: new Date() };
+      datos.set(e.id, e);
+      return e;
+    },
+    obtener: async (_u, id) => datos.get(id) ?? null,
+    actualizar: async (_u, id, cambios) => {
+      const e = datos.get(id);
+      if (!e) return null;
+      const nuevo = { ...e, ...cambios };
+      datos.set(id, nuevo);
+      return nuevo;
+    },
+    borrar: async (_u, id) => datos.delete(id),
+  };
+  return repo;
+}
+
+const running: EntrenoDTO = {
+  id: "e1",
+  tipo: "running",
+  minutos: 45,
+  km: 9,
+  fecha: new Date("2026-10-12"),
+  sensacion: 4,
+  creado: new Date("2026-10-12"),
+};
+
+describe("servicio de entrenos", () => {
+  it("editar aplica cambios válidos", async () => {
+    const servicio = crearServicioEntrenos({ entrenos: repoEnMemoria([running]) });
+    expect((await servicio.editar("u1", "e1", { minutos: 50 })).minutos).toBe(50);
+  });
+
+  it("editar rechaza un resultado inválido aunque el cambio sea válido por sí solo", async () => {
+    const servicio = crearServicioEntrenos({ entrenos: repoEnMemoria([running]) });
+    const error = await servicio.editar("u1", "e1", { tipo: "fuerza" }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ValidacionError);
+    expect((error as ValidacionError).campos).toEqual({ km: ["Solo los entrenos de running llevan km"] });
+  });
+
+  it("editar y borrar un entreno que no existe lanzan NoEncontradoError", async () => {
+    const servicio = crearServicioEntrenos({ entrenos: repoEnMemoria() });
+    await expect(servicio.editar("u1", "nada", { minutos: 1 })).rejects.toBeInstanceOf(NoEncontradoError);
+    await expect(servicio.borrar("u1", "nada")).rejects.toThrow("El entreno nada no existe");
+  });
+});
+```
+
+Y el del repositorio, que sí necesita un MongoDB de verdad para probar las consultas. `mongodb-memory-server` arranca uno temporal en memoria. `tests/entrenos.repo.test.ts`:
+
+```ts
+// Archivo: tests/entrenos.repo.test.ts
+// El repositorio contra un MongoDB de verdad (en memoria): comprueba las consultas
+import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoClient, type Db } from "mongodb";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { crearEntrenosRepo } from "../src/repositories/entrenos.repo";
+
+let servidor: MongoMemoryServer;
+let cliente: MongoClient;
+let db: Db;
+
+beforeAll(async () => {
+  servidor = await MongoMemoryServer.create();
+  cliente = await MongoClient.connect(servidor.getUri());
+  db = cliente.db("test");
+});
+afterAll(async () => {
+  await cliente?.close();
+  await servidor?.stop();
+});
+
+describe("repositorio de entrenos", () => {
+  it("aísla los entrenos por usuario y calcula los totales", async () => {
+    const repo = crearEntrenosRepo(db);
+    await repo.crear("ana", { tipo: "running", minutos: 40, km: 8, fecha: new Date("2026-10-12"), sensacion: 4 });
+    await repo.crear("ana", { tipo: "fuerza", minutos: 30, fecha: new Date("2026-10-13"), sensacion: 3 });
+    await repo.crear("dani", { tipo: "movilidad", minutos: 20, fecha: new Date("2026-10-13"), sensacion: 5 });
+
+    expect(await repo.totales("ana")).toEqual({ total: 2, minutos: 70 });
+    expect((await repo.listar("dani", { limite: 10 })).map((e) => e.tipo)).toEqual(["movilidad"]);
+  });
+
+  it("no guarda los campos undefined (ni como null)", async () => {
+    const repo = crearEntrenosRepo(db);
+    const { id } = await repo.crear("ana", { tipo: "fuerza", minutos: 30, km: undefined, fecha: new Date(), sensacion: 3 });
+    const doc = await db.collection("entrenos").findOne({}, { sort: { creado: -1 } });
+    expect(doc && "km" in doc).toBe(false);
+    expect(await repo.obtener("dani", id)).toBeNull(); // Dani no ve el entreno de Ana
+  });
+
+  it("un id mal formado es 'no existe', no una excepción", async () => {
+    const repo = crearEntrenosRepo(db);
+    expect(await repo.obtener("ana", "no-es-un-id")).toBeNull();
+    expect(await repo.borrar("ana", "no-es-un-id")).toBe(false);
+  });
+});
+```
+
+Con `npm test`:
+
+```text
+✓ tests/entrenos.service.test.ts > servicio de entrenos > editar aplica cambios válidos 1ms
+✓ tests/entrenos.service.test.ts > servicio de entrenos > editar rechaza un resultado inválido aunque el cambio sea válido por sí solo 1ms
+✓ tests/entrenos.service.test.ts > servicio de entrenos > editar y borrar un entreno que no existe lanzan NoEncontradoError 1ms
+✓ tests/entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales 33ms
+✓ tests/entrenos.repo.test.ts > repositorio de entrenos > no guarda los campos undefined (ni como null) 2ms
+✓ tests/entrenos.repo.test.ts > repositorio de entrenos > un id mal formado es 'no existe', no una excepción 0ms
+Test Files  2 passed (2)
+Tests  6 passed (6)
+Duration  513ms (tests 70%, import 27%, transform 2%, worker 1%)
+```
+
+- **Los tests del servicio tardan 1 ms**, porque no hay red ni base de datos. Puedes tener cientos y ejecutarlos en cada guardado.
+- **El test del repositorio prueba lo que un falso no puede:** que el filtro por `userId` aísla a los usuarios y que `ignoreUndefined` no guarda `null` (la trampa de I3.2).
+- **Ninguno necesita Astro:** ni servidor, ni sesión, ni `curl`.
+
+<Callout type="risk">
+
+- **Un repositorio falso puede mentir:** el `Map` del test devuelve todo en `listar`, sin filtrar por usuario. Por eso el aislamiento entre usuarios se prueba en el test del repositorio, contra MongoDB. Los falsos sirven para las reglas del servicio, no para las consultas.
+- **La primera vez, `mongodb-memory-server` descarga MongoDB** (unos 100 MB) y el test puede tardar. En CI, guarda esa descarga en caché o el tiempo de cada ejecución se dispara. Por eso está el `hookTimeout: 120_000`.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Este _endpoint_ calcula un resumen semanal: los entrenos, minutos y km de la semana, el reparto por tipo, la sensación media, si se cumple el objetivo de 150 minutos y la diferencia con la semana anterior. Créalo en `src/pages/api/resumen.ts`, pruébalo y después refactorízalo:
+
+1. Mueve las consultas al repositorio (el método `entre` del Paso 1).
+2. Mueve los cálculos a un servicio, separando una función **pura** (sin base de datos) que reciba los entrenos y devuelva el resumen.
+3. Deja el _endpoint_ en validar la _query_, llamar al servicio y responder, con la validación de la fecha en un esquema de Zod.
+4. Escribe tests de la función pura (incluidos los casos límite) y del servicio con un repositorio en memoria. Comprueba que el _endpoint_ responde lo mismo que antes.
+
+```ts
+// Archivo: src/pages/api/resumen.ts
+// ❌ Un endpoint "gordo": HTTP, consultas y reglas de negocio, todo mezclado
+import type { APIRoute } from "astro";
+import { db } from "../../lib/mongo";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ url, locals }) => {
+  const texto = url.searchParams.get("semana") ?? new Date().toISOString().slice(0, 10);
+  const dia = new Date(`${texto}T00:00:00Z`);
+  if (Number.isNaN(dia.getTime())) return Response.json({ error: "Fecha no válida" }, { status: 422 });
+
+  // Lunes de esa semana (en UTC) y el de la anterior
+  const lunes = new Date(dia);
+  lunes.setUTCDate(dia.getUTCDate() - ((dia.getUTCDay() + 6) % 7));
+  const siguiente = new Date(lunes);
+  siguiente.setUTCDate(lunes.getUTCDate() + 7);
+  const anterior = new Date(lunes);
+  anterior.setUTCDate(lunes.getUTCDate() - 7);
+
+  const col = db.collection<{ userId: string; tipo: string; minutos: number; km?: number; sensacion: number; fecha: Date }>("entrenos");
+  const deEsta = await col.find({ userId: locals.usuario!.id, fecha: { $gte: lunes, $lt: siguiente } }).toArray();
+  const deLaAnterior = await col.find({ userId: locals.usuario!.id, fecha: { $gte: anterior, $lt: lunes } }).toArray();
+
+  const minutos = deEsta.reduce((s, e) => s + e.minutos, 0);
+  const minutosAnterior = deLaAnterior.reduce((s, e) => s + e.minutos, 0);
+  const porTipo: Record<string, number> = {};
+  for (const e of deEsta) porTipo[e.tipo] = (porTipo[e.tipo] ?? 0) + 1;
+
+  return Response.json({
+    semana: lunes.toISOString().slice(0, 10),
+    entrenos: deEsta.length,
+    minutos,
+    km: Math.round(deEsta.reduce((s, e) => s + (e.km ?? 0), 0) * 10) / 10,
+    porTipo,
+    sensacionMedia: deEsta.length ? Math.round((deEsta.reduce((s, e) => s + e.sensacion, 0) / deEsta.length) * 10) / 10 : null,
+    objetivo: { minutos: 150, cumplido: minutos >= 150, porcentaje: Math.min(100, Math.round((minutos / 150) * 100)) },
+    frenteALaAnterior: minutos - minutosAnterior,
+  });
+};
+```
+
+</Callout>
+
+Antes de refactorizar, con los entrenos de Ana de dos semanas:
+
+```text
+GET /api/resumen?semana=2026-10-15 →
+{"semana":"2026-10-12","entrenos":3,"minutos":135,"km":17.5,"porTipo":{"running":2,"fuerza":1},"sensacionMedia":4,"objetivo":{"minutos":150,"cumplido":false,"porcentaje":90},"frenteALaAnterior":70}
+GET /api/resumen?semana=2026-10-05 →
+{"semana":"2026-10-05","entrenos":2,"minutos":65,"km":7,"porTipo":{"movilidad":1,"running":1},"sensacionMedia":3.5,"objetivo":{"minutos":150,"cumplido":false,"porcentaje":43},"frenteALaAnterior":65}
+GET /api/resumen?semana=ayer →
+{"error":"Fecha no válida"}
+```
+
+Solución. El servicio, `src/services/resumen.service.ts`:
+
+```ts
+// Archivo: src/services/resumen.service.ts
+// Las reglas del resumen semanal: funciones puras (fáciles de probar) y un servicio que pide los datos
+import type { EntrenosRepo } from "../repositories/entrenos.repo";
+import type { EntrenoDTO } from "../schemas/entreno";
+
+export const OBJETIVO_SEMANAL_MINUTOS = 150;
+
+export interface ResumenSemanal {
+  semana: string; // "AAAA-MM-DD" del lunes
+  entrenos: number;
+  minutos: number;
+  km: number;
+  porTipo: Record<string, number>;
+  sensacionMedia: number | null;
+  objetivo: { minutos: number; cumplido: boolean; porcentaje: number };
+  frenteALaAnterior: number;
+}
+
+const DIA_MS = 24 * 60 * 60 * 1000;
+const redondear1 = (n: number) => Math.round(n * 10) / 10;
+
+/** Lunes (00:00 UTC) de la semana de `dia` */
+export function lunesDe(dia: Date): Date {
+  const inicio = Date.UTC(dia.getUTCFullYear(), dia.getUTCMonth(), dia.getUTCDate());
+  return new Date(inicio - ((dia.getUTCDay() + 6) % 7) * DIA_MS);
+}
+
+/** Regla pura: de los entrenos de dos semanas, el resumen. Sin base de datos ni HTTP. */
+export function calcularResumen(
+  lunes: Date,
+  deEsta: EntrenoDTO[],
+  deLaAnterior: EntrenoDTO[],
+  objetivo = OBJETIVO_SEMANAL_MINUTOS,
+): ResumenSemanal {
+  const suma = (lista: EntrenoDTO[], campo: (e: EntrenoDTO) => number) => lista.reduce((s, e) => s + campo(e), 0);
+  const minutos = suma(deEsta, (e) => e.minutos);
+  const porTipo: Record<string, number> = {};
+  for (const e of deEsta) porTipo[e.tipo] = (porTipo[e.tipo] ?? 0) + 1;
+
+  return {
+    semana: lunes.toISOString().slice(0, 10),
+    entrenos: deEsta.length,
+    minutos,
+    km: redondear1(suma(deEsta, (e) => e.km ?? 0)),
+    porTipo,
+    sensacionMedia: deEsta.length ? redondear1(suma(deEsta, (e) => e.sensacion) / deEsta.length) : null,
+    objetivo: { minutos: objetivo, cumplido: minutos >= objetivo, porcentaje: Math.min(100, Math.round((minutos / objetivo) * 100)) },
+    frenteALaAnterior: minutos - suma(deLaAnterior, (e) => e.minutos),
+  };
+}
+
+export function crearServicioResumen({ entrenos }: { entrenos: Pick<EntrenosRepo, "entre"> }) {
+  return {
+    async semanal(userId: string, dia: Date): Promise<ResumenSemanal> {
+      const lunes = lunesDe(dia);
+      const siguiente = new Date(lunes.getTime() + 7 * DIA_MS);
+      const anterior = new Date(lunes.getTime() - 7 * DIA_MS);
+      const [deEsta, deLaAnterior] = await Promise.all([
+        entrenos.entre(userId, lunes, siguiente),
+        entrenos.entre(userId, anterior, lunes),
+      ]);
+      return calcularResumen(lunes, deEsta, deLaAnterior);
+    },
+  };
+}
+```
+
+`src/services/index.ts`, con el servicio nuevo:
+
+```ts
+// Archivo: src/services/index.ts
+// Los servicios de la app, conectados a los repositorios reales
+import { repos } from "../repositories";
+import { crearServicioEntrenos } from "./entrenos.service";
+import { crearServicioResumen } from "./resumen.service";
+
+export const servicios = {
+  entrenos: crearServicioEntrenos({ entrenos: repos.entrenos }),
+  resumen: crearServicioResumen({ entrenos: repos.entrenos }),
+};
+```
+
+El esquema de la _query_, en `src/schemas/entreno.ts` (justo antes de los tipos):
+
+```ts
+/** GET /api/resumen?semana=AAAA-MM-DD (cualquier día de la semana; por defecto, hoy) */
+export const ResumenQuerySchema = z.object({ semana: z.iso.date("Fecha no válida").optional() });
+```
+
+El _endpoint_, `src/pages/api/resumen.ts`:
+
+```ts
+// Archivo: src/pages/api/resumen.ts
+// ✅ Capa HTTP: validar la query, llamar al servicio, responder
+import type { APIRoute } from "astro";
+import { aRespuesta, validar } from "../../lib/errores";
+import { ResumenQuerySchema } from "../../schemas/entreno";
+import { servicios } from "../../services";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ url, locals }) => {
+  try {
+    const { semana } = validar(ResumenQuerySchema, Object.fromEntries(url.searchParams));
+    const dia = semana ? new Date(`${semana}T00:00:00Z`) : new Date();
+    return Response.json(await servicios.resumen.semanal(locals.usuario!.id, dia));
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+Los tests, `tests/resumen.service.test.ts`:
+
+```ts
+// Archivo: tests/resumen.service.test.ts
+// Las reglas del resumen, sin MongoDB: el repositorio es un array
+import { describe, expect, it } from "vitest";
+import type { EntrenoDTO } from "../src/schemas/entreno";
+import { calcularResumen, crearServicioResumen, lunesDe } from "../src/services/resumen.service";
+
+const entreno = (fecha: string, tipo: EntrenoDTO["tipo"], minutos: number, km?: number): EntrenoDTO => ({
+  id: fecha + tipo,
+  tipo,
+  minutos,
+  km,
+  fecha: new Date(`${fecha}T00:00:00Z`),
+  sensacion: 4,
+  creado: new Date(),
+});
+
+describe("lunesDe", () => {
+  it.each([
+    ["2026-10-12", "2026-10-12"], // lunes
+    ["2026-10-15", "2026-10-12"], // jueves
+    ["2026-10-18", "2026-10-12"], // domingo
+    ["2026-11-01", "2026-10-26"], // cambia de mes
+  ])("%s → %s", (dia, lunes) => {
+    expect(lunesDe(new Date(`${dia}T15:00:00Z`)).toISOString().slice(0, 10)).toBe(lunes);
+  });
+});
+
+describe("calcularResumen", () => {
+  it("objetivo cumplido justo en el límite y porcentaje tope 100", () => {
+    const r = calcularResumen(new Date("2026-10-12"), [entreno("2026-10-12", "fuerza", 150)], []);
+    expect(r.objetivo).toEqual({ minutos: 150, cumplido: true, porcentaje: 100 });
+  });
+
+  it("una semana vacía no divide entre cero", () => {
+    expect(calcularResumen(new Date("2026-10-12"), [], []).sensacionMedia).toBeNull();
+  });
+});
+
+describe("servicio de resumen con un repositorio en memoria", () => {
+  // Otro "motor de base de datos": un array. El servicio no se entera.
+  const datos = [entreno("2026-10-06", "running", 35, 7), entreno("2026-10-12", "running", 45, 9.5), entreno("2026-10-14", "fuerza", 50)];
+  const repo = { entre: async (_u: string, desde: Date, hasta: Date) => datos.filter((e) => e.fecha >= desde && e.fecha < hasta) };
+
+  it("compara con la semana anterior", async () => {
+    const r = await crearServicioResumen({ entrenos: repo }).semanal("ana", new Date("2026-10-15"));
+    expect(r).toMatchObject({ semana: "2026-10-12", entrenos: 2, minutos: 95, km: 9.5, frenteALaAnterior: 60 });
+  });
+});
+```
+
+Con `npm test`, los 13 tests:
+
+```text
+✓ tests/resumen.service.test.ts > lunesDe > 2026-10-12 → 2026-10-12 1ms
+✓ tests/resumen.service.test.ts > lunesDe > 2026-10-15 → 2026-10-12 0ms
+✓ tests/resumen.service.test.ts > lunesDe > 2026-10-18 → 2026-10-12 0ms
+✓ tests/resumen.service.test.ts > lunesDe > 2026-11-01 → 2026-10-26 0ms
+✓ tests/resumen.service.test.ts > calcularResumen > objetivo cumplido justo en el límite y porcentaje tope 100 0ms
+✓ tests/resumen.service.test.ts > calcularResumen > una semana vacía no divide entre cero 0ms
+✓ tests/resumen.service.test.ts > servicio de resumen con un repositorio en memoria > compara con la semana anterior 0ms
+✓ tests/entrenos.service.test.ts > servicio de entrenos > editar aplica cambios válidos 2ms
+✓ tests/entrenos.service.test.ts > servicio de entrenos > editar rechaza un resultado inválido aunque el cambio sea válido por sí solo 1ms
+✓ tests/entrenos.service.test.ts > servicio de entrenos > editar y borrar un entreno que no existe lanzan NoEncontradoError 1ms
+✓ tests/entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales 42ms
+✓ tests/entrenos.repo.test.ts > repositorio de entrenos > no guarda los campos undefined (ni como null) 2ms
+✓ tests/entrenos.repo.test.ts > repositorio de entrenos > un id mal formado es 'no existe', no una excepción 0ms
+Test Files  3 passed (3)
+Tests  13 passed (13)
+```
+
+Y la API, después del refactor:
+
+```text
+GET /api/resumen?semana=2026-10-15 →
+{"semana":"2026-10-12","entrenos":3,"minutos":135,"km":17.5,"porTipo":{"running":2,"fuerza":1},"sensacionMedia":4,"objetivo":{"minutos":150,"cumplido":false,"porcentaje":90},"frenteALaAnterior":70}
+GET /api/resumen?semana=2026-10-05 →
+{"semana":"2026-10-05","entrenos":2,"minutos":65,"km":7,"porTipo":{"running":1,"movilidad":1},"sensacionMedia":3.5,"objetivo":{"minutos":150,"cumplido":false,"porcentaje":43},"frenteALaAnterior":65}
+GET /api/resumen?semana=ayer →
+{"error":"Revisa los datos del formulario","campos":{"semana":["Fecha no válida"]}}
+```
+
+Los números son los mismos. Hay dos diferencias, y las dos son intencionadas:
+
+- **El orden de `porTipo` cambió en la segunda semana** (`running` antes que `movilidad`): `entre` ordena por fecha y el _endpoint_ gordo no ordenaba. Las claves de un objeto JSON no tienen orden garantizado para ningún cliente, así que no rompe nada.
+- **El error de fecha usa el formato común** de la API (`campos`), en lugar de un mensaje suelto.
+
+Las decisiones:
+
+- **El _endpoint_ pasa de 31 líneas a 14**, y no sabe nada de semanas, objetivos ni MongoDB.
+- **`calcularResumen` es una función pura:** recibe arrays y devuelve un objeto. Sus casos límite (semana vacía, objetivo justo en 150, el domingo, el cambio de mes) se prueban en 0 ms. En el _endpoint_ gordo, para probar "semana vacía" hacía falta vaciar la base de datos.
+- **`Promise.all` en el servicio:** las dos consultas, que el _endpoint_ gordo hacía una tras otra, ahora van en paralelo. Mejorar el rendimiento es más fácil cuando la lógica está separada.
+- **`lunesDe` usa UTC**, como las fechas guardadas (I1.6). La zona horaria del usuario es una regla del negocio: si algún día importa, se cambia en un solo sitio.
+
+<Callout type="risk">
+
+- **El servicio tiene más líneas (56) que el _endpoint_ gordo (31):** separar en capas no reduce el código total, lo **ordena**. A cambio, cada parte se prueba sola y se puede reutilizar desde una Action, un _cron_ o un _script_.
+- **Comprueba que las capas no se saltan:** `grep -rn 'lib/mongo' src | grep -v repositories` debería mostrar solo `src/server/notas.ts`, la migración pendiente. Si aparece un servicio o un _endpoint_, una regla está hablando con la base de datos directamente.
+- **No exportes la función pura y la uses desde el cliente "porque ya está":** importaría todo el módulo del servicio en el _bundle_ del navegador. Si una regla se necesita en los dos lados, va a un módulo sin dependencias de servidor (como los esquemas de `src/schemas/`).
+
+</Callout>
+
+<Callout type="mastery">
+
+Separas una aplicación en capas con responsabilidades claras (HTTP traduce, el servicio decide y el repositorio consulta), inyectas la base de datos para que las reglas se prueben sin servidor ni MongoDB, y sabes refactorizar un _endpoint_ gordo sin cambiar lo que responde la API.
+
+</Callout>
+
+## Resumen
+
+- HTTP (_endpoints_ y Actions) → servicio → repositorio: cada capa solo conoce a la de debajo.
+- Las dependencias se reciben con fábricas (`crearEntrenosRepo(db)`, `crearServicioEntrenos({ entrenos })`); un único `index.ts` las conecta a la base de datos real.
+- El servicio lanza errores de dominio y cada puerta los traduce (`aRespuesta`, `comoActionError`).
+- Las reglas se prueban con un repositorio en memoria (1 ms por test); las consultas, contra `mongodb-memory-server`.
+- Refactorizar no cambia el comportamiento: compara las respuestas de la API antes y después.

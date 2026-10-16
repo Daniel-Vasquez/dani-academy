@@ -1,0 +1,524 @@
+---
+sectionId: "I3.6"
+course: "I3"
+title: "Variables de entorno y configuración"
+order: 6
+minutes: 60
+summary: "Declaras la configuración con astro:env (secreta, pública del servidor y del cliente), haces que el build falle claramente si falta algo, mides qué se fija en el build y validas también los scripts."
+---
+
+La app necesita datos que **no** van en el código: la URL de MongoDB con su contraseña, el nombre de la base de datos de cada entorno o el objetivo semanal de minutos. En B5.2 ya usaste `astro:env` para `MONGODB_URI`. En esta sección vas a usarlo a fondo: los tres tipos de variable, cuándo se valida cada una, cuáles quedan fijadas en el _build_ (y por tanto no cambian al reiniciar el servidor), cómo evitar que un secreto acabe en el navegador y qué pasa con los _scripts_ de Node, que no pasan por Astro. Todo, medido.
+
+**Lo que tendrás al terminar:** un esquema de configuración con validación estricta, un _build_ que se para con un mensaje claro si falta o sobra algo, un `.env.example` documentado y _scripts_ que validan sus variables antes de tocar la base de datos.
+
+**Requisitos:** la app de I3.5.
+
+## Paso 1: los tres tipos de variable
+
+`astro:env` declara cada variable en `astro.config.mjs` con su tipo, su validación y **dónde** se puede leer:
+
+| `context` / `access` | Se importa de      | ¿Llega al navegador?           | Ejemplo                    |
+| -------------------- | ------------------ | ------------------------------ | -------------------------- |
+| `server` / `secret`  | `astro:env/server` | Nunca                          | `MONGODB_URI`              |
+| `server` / `public`  | `astro:env/server` | No, pero se fija en el _build_ | `OBJETIVO_SEMANAL_MINUTOS` |
+| `client` / `public`  | `astro:env/client` | Sí: la ve cualquiera           | `PUBLIC_NOMBRE_APP`        |
+
+Sustituye `astro.config.mjs`:
+
+```js
+// @ts-check
+import { defineConfig, envField } from "astro/config";
+import react from "@astrojs/react";
+
+import node from "@astrojs/node";
+
+export default defineConfig({
+  integrations: [react()],
+
+  env: {
+    schema: {
+      // Secretas del servidor: nunca llegan al navegador ni al HTML
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "entrenos_lab" }),
+      // Públicas del servidor: configuración que no es secreta (se puede incrustar en el build)
+      OBJETIVO_SEMANAL_MINUTOS: envField.number({ context: "server", access: "public", int: true, gt: 0, default: 150 }),
+      // Públicas del cliente: las pueden leer los componentes de React. NUNCA un secreto.
+      PUBLIC_NOMBRE_APP: envField.string({ context: "client", access: "public", default: "Mi entreno" }),
+    },
+    // Comprueba también las secretas al arrancar `astro dev` y `astro build`
+    validateSecrets: true,
+  },
+
+  adapter: node({
+    mode: "standalone",
+  }),
+});
+```
+
+El objetivo deja de ser una constante del servicio. El servicio **lo recibe**, y el único sitio que lee la variable es `src/services/index.ts`, el mismo que conecta los repositorios (I3.5):
+
+```ts
+// Archivo: src/services/index.ts
+// Los servicios de la app, conectados a los repositorios reales
+import { OBJETIVO_SEMANAL_MINUTOS } from "astro:env/server";
+import { repos } from "../repositories";
+import { crearServicioEntrenos } from "./entrenos.service";
+import { crearServicioResumen } from "./resumen.service";
+
+export const servicios = {
+  entrenos: crearServicioEntrenos({ entrenos: repos.entrenos }),
+  resumen: crearServicioResumen({ entrenos: repos.entrenos }, OBJETIVO_SEMANAL_MINUTOS),
+};
+```
+
+En `src/services/resumen.service.ts`, `crearServicioResumen` recibe el objetivo como segundo parámetro. El archivo completo:
+
+```ts
+// Archivo: src/services/resumen.service.ts
+// Las reglas del resumen semanal: funciones puras (fáciles de probar) y un servicio que pide los datos
+import type { EntrenosRepo } from "../repositories/entrenos.repo";
+import type { EntrenoDTO } from "../schemas/entreno";
+
+export const OBJETIVO_SEMANAL_MINUTOS = 150;
+
+export interface ResumenSemanal {
+  semana: string; // "AAAA-MM-DD" del lunes
+  entrenos: number;
+  minutos: number;
+  km: number;
+  porTipo: Record<string, number>;
+  sensacionMedia: number | null;
+  objetivo: { minutos: number; cumplido: boolean; porcentaje: number };
+  frenteALaAnterior: number;
+}
+
+const DIA_MS = 24 * 60 * 60 * 1000;
+const redondear1 = (n: number) => Math.round(n * 10) / 10;
+
+/** Lunes (00:00 UTC) de la semana de `dia` */
+export function lunesDe(dia: Date): Date {
+  const inicio = Date.UTC(dia.getUTCFullYear(), dia.getUTCMonth(), dia.getUTCDate());
+  return new Date(inicio - ((dia.getUTCDay() + 6) % 7) * DIA_MS);
+}
+
+/** Regla pura: de los entrenos de dos semanas, el resumen. Sin base de datos ni HTTP. */
+export function calcularResumen(
+  lunes: Date,
+  deEsta: EntrenoDTO[],
+  deLaAnterior: EntrenoDTO[],
+  objetivo = OBJETIVO_SEMANAL_MINUTOS,
+): ResumenSemanal {
+  const suma = (lista: EntrenoDTO[], campo: (e: EntrenoDTO) => number) => lista.reduce((s, e) => s + campo(e), 0);
+  const minutos = suma(deEsta, (e) => e.minutos);
+  const porTipo: Record<string, number> = {};
+  for (const e of deEsta) porTipo[e.tipo] = (porTipo[e.tipo] ?? 0) + 1;
+
+  return {
+    semana: lunes.toISOString().slice(0, 10),
+    entrenos: deEsta.length,
+    minutos,
+    km: redondear1(suma(deEsta, (e) => e.km ?? 0)),
+    porTipo,
+    sensacionMedia: deEsta.length ? redondear1(suma(deEsta, (e) => e.sensacion) / deEsta.length) : null,
+    objetivo: { minutos: objetivo, cumplido: minutos >= objetivo, porcentaje: Math.min(100, Math.round((minutos / objetivo) * 100)) },
+    frenteALaAnterior: minutos - suma(deLaAnterior, (e) => e.minutos),
+  };
+}
+
+/** El objetivo es configuración (astro:env), pero el servicio lo RECIBE: no importa astro:env */
+export function crearServicioResumen(
+  { entrenos }: { entrenos: Pick<EntrenosRepo, "entre"> },
+  objetivo = OBJETIVO_SEMANAL_MINUTOS,
+) {
+  return {
+    async semanal(userId: string, dia: Date): Promise<ResumenSemanal> {
+      const lunes = lunesDe(dia);
+      const siguiente = new Date(lunes.getTime() + 7 * DIA_MS);
+      const anterior = new Date(lunes.getTime() - 7 * DIA_MS);
+      const [deEsta, deLaAnterior] = await Promise.all([
+        entrenos.entre(userId, lunes, siguiente),
+        entrenos.entre(userId, anterior, lunes),
+      ]);
+      return calcularResumen(lunes, deEsta, deLaAnterior, objetivo);
+    },
+  };
+}
+```
+
+La variable del cliente, en el _layout_ `src/layouts/Base.astro`:
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+import { PUBLIC_NOMBRE_APP } from "astro:env/client";
+
+interface Props {
+  titulo: string;
+}
+const { titulo } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · {PUBLIC_NOMBRE_APP}</title>
+    <style is:global>
+      body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 2rem auto; padding: 0 1rem; }
+      nav { display: flex; gap: 1rem; margin-bottom: 1rem; }
+    </style>
+  </head>
+  <body>
+    <nav><a href="/">Entrenos</a><a href="/estadisticas">Estadísticas</a><a href="/acerca">Acerca de</a></nav>
+    <slot />
+  </body>
+</html>
+```
+
+Y en una isla de React nueva, `src/components/Objetivo.tsx`:
+
+```tsx
+// Archivo: src/components/Objetivo.tsx
+// Una isla de React que lee una variable PÚBLICA del cliente
+import { useEffect, useState } from "react";
+import { PUBLIC_NOMBRE_APP } from "astro:env/client";
+
+interface Resumen {
+  minutos: number;
+  objetivo: { minutos: number; porcentaje: number };
+}
+
+export default function Objetivo() {
+  const [resumen, setResumen] = useState<Resumen | null>(null);
+
+  useEffect(() => {
+    fetch("/api/resumen")
+      .then((r) => (r.ok ? (r.json() as Promise<Resumen>) : null))
+      .then(setResumen)
+      .catch(() => setResumen(null));
+  }, []);
+
+  if (!resumen) return <p id="objetivo">{PUBLIC_NOMBRE_APP}: entra para ver tu objetivo semanal</p>;
+  return (
+    <p id="objetivo">
+      {PUBLIC_NOMBRE_APP}: {resumen.minutos} de {resumen.objetivo.minutos} min esta semana ({resumen.objetivo.porcentaje} %)
+    </p>
+  );
+}
+```
+
+Añádela a la portada, `src/pages/index.astro`:
+
+```astro
+---
+// Archivo: src/pages/index.astro
+// La página se genera en el build; solo el último entreno se pide al servidor en cada visita
+import Base from "../layouts/Base.astro";
+import Entrenos from "../components/Entrenos";
+import Objetivo from "../components/Objetivo";
+import UltimoEntreno from "../components/UltimoEntreno.astro";
+---
+
+<Base titulo="Mis entrenos">
+  <h1>Mis entrenos</h1>
+  <UltimoEntreno server:defer>
+    <p slot="fallback" id="ultimo-cargando">Cargando tu último entreno…</p>
+  </UltimoEntreno>
+  <Objetivo client:load />
+  <Entrenos client:load />
+</Base>
+```
+
+Medido en Chrome, con el _build_ de desarrollo:
+
+```text
+sin sesión: Mi entreno: entra para ver tu objetivo semanal · título: Mis entrenos · Mi entreno
+como Ana: Mi entreno: 135 de 150 min esta semana (90 %)
+errores en consola: 0
+```
+
+- **`envField.number({ int: true, gt: 0, default: 150 })`**: la variable llega como texto (todas lo son), Astro la convierte en número y la valida. En el código, `OBJETIVO_SEMANAL_MINUTOS` ya es un `number`.
+- **`default`** hace la variable opcional; sin él, es obligatoria.
+- **Los tests no cambian:** como el servicio recibe el objetivo, siguen pasando los 13 sin `astro:env` (que no existe fuera de Astro).
+
+<Callout type="risk">
+
+- **`client` / `public` significa "público de verdad":** su valor se escribe en el JavaScript que descarga el navegador (medido: `Mi entreno` aparece en `dist/client/_astro/Objetivo.….js`). Nunca pongas ahí una clave de API, aunque sea "de solo lectura".
+- **Un servicio que importa `astro:env` ya no se prueba con Vitest a secas:** léelo en el punto de composición (`src/services/index.ts`) y pásalo como parámetro, igual que la base de datos.
+
+</Callout>
+
+## Paso 2: cuándo se valida y cuándo se fija cada variable
+
+Con la configuración de I3.5 (sin `validateSecrets`), un _build_ sin `MONGODB_URI` falló así:
+
+```text
+├─ /index.html [ERROR] EnvInvalidVariables: The following environment variables defined in `env.schema` are invalid:
+- MONGODB_URI is missing
+    at createInvalidVariablesError (dist/server/.prerender/chunks/repositories_CmQl5hT6.mjs:166:9)
+```
+
+Falló **por casualidad**: al prerenderizar la portada, Astro carga la _server island_ `UltimoEntreno`, que importa el repositorio, que importa `src/lib/mongo.ts`, que lee la variable. Sin esa cadena de imports, el _build_ habría terminado bien. Con un _build_ correcto, el servidor de producción **arrancó sin la variable**:
+
+```text
+GET /acerca → 200
+GET /api/entrenos (Ana) → 500
+[ERROR] EnvInvalidVariables: … - MONGODB_URI is missing
+```
+
+La app "funciona" y la API da 500 en la primera petición que toca la base de datos. Es el fallo típico de un despliegue al que le falta una variable. Por eso la configuración del Paso 1 lleva `validateSecrets: true`, que comprueba **todas** las variables al empezar `astro build` y `astro dev`. Medido:
+
+```text
+=== build SIN MONGODB_URI
+[build] Building server entrypoints...
+[EnvInvalidVariables] The following environment variables defined in `env.schema` are invalid:
+- MONGODB_URI is missing
+exit: 1
+=== build con OBJETIVO_SEMANAL_MINUTOS=mucho
+- OBJETIVO_SEMANAL_MINUTOS's type is invalid, expected: number
+exit: 1
+=== build con MONGODB_URI=postgres://x
+- The following constraints for MONGODB_URI are not met: startsWith
+exit: 1
+=== build correcto
+exit: 0
+```
+
+El _build_ se para en menos de un segundo, antes de compilar nada, y el mensaje dice qué variable falla y por qué. Un despliegue en Vercel sin la variable no llega a publicarse.
+
+Después, la prueba contraria: un _build_ hecho con `OBJETIVO_SEMANAL_MINUTOS=120`, arrancado con otro valor:
+
+```text
+=== build con OBJETIVO=120 y PUBLIC_NOMBRE_APP por defecto, arrancado con OBJETIVO=200 y PUBLIC_NOMBRE_APP=Otro nombre
+  /api/resumen → objetivo.minutos = 120
+  <title> de /estadisticas (servidor) → Estadísticas · Mi entreno
+  <title> de / (estática) → Mis entrenos · Mi entreno
+```
+
+**Las variables públicas se fijan en el _build_:** cambiarlas en el servidor no tiene efecto hasta el siguiente _build_. Solo las **secretas** se leen al ejecutar. Y si una isla de React intenta importar un secreto, el _build_ lo impide:
+
+```text
+[ServerOnlyModule] The "astro:env/server" module is only available server-side.
+```
+
+Medido también: tras el _build_, ni la URI de MongoDB ni el nombre de la base de datos aparecen en ningún archivo de `dist/client`.
+
+<Callout type="risk">
+
+- **`validateSecrets` comprueba el _build_, no cada arranque:** el servidor de producción del Paso 2 arrancó igual sin `MONGODB_URI` y dio 500. En Vercel no pasa, porque el _build_ y la ejecución usan las mismas variables de cada entorno. En un servidor propio (Node, Docker), asegúrate de que el proceso recibe las mismas variables con las que se hizo el _build_.
+- **En Vercel, cambiar una variable no cambia el despliegue que ya está publicado:** se aplica en el siguiente. Tras editarla en _Settings → Environment Variables_, vuelve a desplegar (_Redeploy_).
+- **No uses `import.meta.env.LO_QUE_SEA` ni `process.env` en la app:** no se validan, `import.meta.env` solo expone las variables `PUBLIC_` al cliente y `process.env` no existe en todos los entornos de ejecución. Todo pasa por el esquema.
+
+</Callout>
+
+## Paso 3: `.env`, `.env.example` y los entornos de Vercel
+
+En local, las variables se leen de `.env`, que **nunca** se sube a Git. Lo que sí se sube es `.env.example`: la lista de variables con su explicación, **sin valores reales**. Crea `.env.example`:
+
+```bash
+# Archivo: .env.example
+# Copia este archivo a .env y rellena los valores: cp .env.example .env
+# .env NUNCA se sube a Git (está en .gitignore). Este archivo SÍ, y sin valores reales.
+# En Vercel: Settings → Environment Variables, una por entorno (Production, Preview, Development).
+
+# ─── Base de datos (secretas) ────────────────────────────────
+# Atlas → Connect → Drivers. Local: mongodb://127.0.0.1:27017
+MONGODB_URI=
+# Una base de datos distinta por entorno: entrenos_dev, entrenos_preview, entrenos
+MONGODB_DB=entrenos_dev
+
+# ─── Configuración (públicas del servidor) ───────────────────
+# Minutos semanales del objetivo. Opcional (por defecto, 150). Se fija en el build.
+# OBJETIVO_SEMANAL_MINUTOS=150
+
+# ─── Configuración (públicas del cliente: las ve cualquiera) ─
+# Nombre que se muestra en la app. Opcional (por defecto, "Mi entreno").
+# PUBLIC_NOMBRE_APP=Mi entreno
+```
+
+Para empezar en una máquina nueva:
+
+```bash
+cp .env.example .env
+```
+
+Y rellena los valores.
+
+En Vercel, cada variable se define por **entorno**:
+
+| Entorno de Vercel | Cuándo se usa                          | `MONGODB_DB` recomendada |
+| ----------------- | -------------------------------------- | ------------------------ |
+| Production        | El dominio principal (`main`)          | `entrenos`               |
+| Preview           | Cada _push_ a otra rama o PR           | `entrenos_preview`       |
+| Development       | `vercel env pull` para tu `.env` local | `entrenos_dev`           |
+
+Esta plataforma sigue el mismo esquema: su `astro.config.mjs` declara `MONGODB_URI`, `MONGODB_DB`, `BETTER_AUTH_SECRET` (`min: 32`) y `BETTER_AUTH_URL` (`url: true`) como secretas, y `APP_TIMEZONE` como pública del servidor; su `.env.example` las documenta todas, agrupadas por la Tanda en la que aparecen.
+
+<Callout type="risk">
+
+- **Una base de datos por entorno:** si Preview usa la misma `MONGODB_DB` que Production, la versión a medio probar de una rama escribe en los datos reales. El nombre de la base de datos es la variable más barata de separar.
+- **Revisa `git status` antes del primer _commit_:** si `.env` aparece como archivo nuevo, falta en `.gitignore`. Una contraseña subida a Git sigue en el historial aunque borres el archivo: hay que **cambiarla** en Atlas.
+- **`.env.example` se desactualiza en silencio:** cada variable que añadas al esquema debe aparecer también en el ejemplo, en el mismo _commit_. Si no, la siguiente persona descubre la variable que falta en el error del _build_.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Los _scripts_ de Node (`scripts/crear-indices.mjs` y `scripts/migrar-sensacion.mjs`) no pasan por Astro: `astro:env` no existe para ellos y leen `process.env` sin validar nada.
+
+1. Comprueba qué pasa al ejecutar `crear-indices.mjs` sin `MONGODB_URI`, y con una errata en el nombre de `MONGODB_DB`.
+2. Escribe `scripts/env.mjs` con una función `leerEnv()` que valide las variables con Zod y pare el _script_ con un mensaje claro, antes de conectarse. Debe avisar de las variables que parecen una errata.
+3. Úsala en los dos _scripts_, y haz que digan en qué base de datos han trabajado.
+
+</Callout>
+
+Antes, sin `MONGODB_URI`:
+
+```text
+node_modules/mongodb-connection-string-url/lib/index.js:9
+    return connectionString.startsWith('mongodb://') || connectionString.startsWith('mongodb+srv://');
+                            ^
+TypeError: Cannot read properties of undefined (reading 'startsWith')
+```
+
+Y con `MONGOBD_DB=entrenos_i35` (la errata):
+
+```text
+✓ índice notas.usuario_titulo_unico
+```
+
+El segundo es peor que el primero: el _script_ dice que todo ha ido bien, pero ha creado el índice en `entrenos_lab`, la base de datos por defecto, y no en la que querías.
+
+Solución. `scripts/env.mjs`:
+
+```js
+// Archivo: scripts/env.mjs
+// Los scripts de Node no pasan por Astro: astro:env no existe aquí.
+// Validan sus variables con Zod y se paran con un mensaje claro ANTES de tocar la base de datos.
+import { z } from "zod";
+
+const EnvScriptsSchema = z.object({
+  MONGODB_URI: z
+    .string({ error: "falta (cópiala de tu .env)" })
+    .refine((v) => v.startsWith("mongodb://") || v.startsWith("mongodb+srv://"), "debe empezar por mongodb:// o mongodb+srv://"),
+  MONGODB_DB: z.string({ error: "falta: indica a qué base de datos va el script" }).min(1),
+});
+
+/** Variables que parecen de la app pero no están en el esquema: casi siempre, una errata */
+function sospechosas(env) {
+  const conocidas = Object.keys(EnvScriptsSchema.shape);
+  return Object.keys(env).filter((k) => /^MONGO/.test(k) && !conocidas.includes(k));
+}
+
+export function leerEnv(env = process.env) {
+  const resultado = EnvScriptsSchema.safeParse(env);
+  if (!resultado.success) {
+    console.error("✗ Variables de entorno no válidas:");
+    for (const issue of resultado.error.issues) console.error(`  - ${issue.path.join(".")}: ${issue.message}`);
+    const raras = sospechosas(env);
+    if (raras.length) console.error(`  ¿Errata? Variables desconocidas: ${raras.join(", ")}`);
+    process.exit(1);
+  }
+  return resultado.data;
+}
+```
+
+`scripts/crear-indices.mjs`:
+
+```js
+// Archivo: scripts/crear-indices.mjs
+// Uso: node --env-file=.env scripts/crear-indices.mjs  (una vez, y cada vez que cambien los índices)
+import { MongoClient } from "mongodb";
+import { leerEnv } from "./env.mjs";
+
+const { MONGODB_URI, MONGODB_DB } = leerEnv();
+const client = new MongoClient(MONGODB_URI);
+try {
+  const db = client.db(MONGODB_DB);
+  const nombre = await db
+    .collection("notas")
+    .createIndex({ userId: 1, titulo: 1 }, { unique: true, name: "usuario_titulo_unico" });
+  console.log(`✓ índice notas.${nombre} en la base de datos «${MONGODB_DB}»`); // a la vista: ¿es la correcta?
+} finally {
+  await client.close();
+}
+```
+
+`scripts/migrar-sensacion.mjs`:
+
+```js
+// Archivo: scripts/migrar-sensacion.mjs
+// Uso: node --env-file=.env scripts/migrar-sensacion.mjs
+// Da un valor a los entrenos guardados antes de que existiera el campo "sensacion"
+import { MongoClient } from "mongodb";
+import { leerEnv } from "./env.mjs";
+
+const { MONGODB_URI, MONGODB_DB } = leerEnv();
+const client = new MongoClient(MONGODB_URI);
+try {
+  const entrenos = client.db(MONGODB_DB).collection("entrenos");
+  const { matchedCount, modifiedCount } = await entrenos.updateMany(
+    { sensacion: { $exists: false } },
+    { $set: { sensacion: 3 } }, // valor neutro: "ni bien ni mal"
+  );
+  console.log(`«${MONGODB_DB}»: entrenos sin sensación: ${matchedCount}. Actualizados: ${modifiedCount}.`);
+} finally {
+  await client.close();
+}
+```
+
+Medido:
+
+```text
+--- sin variables
+✗ Variables de entorno no válidas:
+  - MONGODB_URI: falta (cópiala de tu .env)
+  - MONGODB_DB: falta: indica a qué base de datos va el script
+exit: 1
+--- MONGODB_DB con errata
+✗ Variables de entorno no válidas:
+  - MONGODB_DB: falta: indica a qué base de datos va el script
+  ¿Errata? Variables desconocidas: MONGOBD_DB
+exit: 1
+--- URI de Postgres
+✗ Variables de entorno no válidas:
+  - MONGODB_URI: debe empezar por mongodb:// o mongodb+srv://
+exit: 1
+--- correcto
+✓ índice notas.usuario_titulo_unico en la base de datos «entrenos_i35»
+--- con --env-file y un .env copiado del ejemplo sin rellenar
+✗ Variables de entorno no válidas:
+  - MONGODB_URI: debe empezar por mongodb:// o mongodb+srv://
+exit: 1
+```
+
+Las decisiones:
+
+- **`MONGODB_DB` es obligatoria en los _scripts_, aunque la app tenga un valor por defecto:** un _script_ que migra o borra datos debe decir **a qué** base de datos va. Un valor por defecto es justo lo que convirtió la errata en un fallo silencioso.
+- **El mensaje de éxito incluye la base de datos:** así, quien lo ejecuta ve en el acto si ha trabajado contra la correcta.
+- **`process.exit(1)`** hace que el _script_ falle de verdad: un CI o un `&&` en la terminal se paran ahí.
+- **La línea vacía del ejemplo (`MONGODB_URI=`) llega como `""`**, no como ausente. Por eso el mensaje es el de "debe empezar por…": la validación cubre también el `.env` copiado sin rellenar.
+
+<Callout type="risk">
+
+- **El esquema de los _scripts_ duplica parte del de `astro.config.mjs`:** si cambias una regla (por ejemplo, `startsWith`), cámbiala en los dos sitios. Mantén el de los _scripts_ pequeño: solo lo que los _scripts_ usan.
+- **Nunca imprimas el valor de una variable secreta, ni siquiera en un error:** el mensaje dice _qué_ falla (`MONGODB_URI: debe empezar por…`), nunca el valor recibido. Los registros de CI los puede leer más gente de la que crees.
+- **`node --env-file=.env` no sobrescribe las variables que ya existen en la terminal:** si exportaste `MONGODB_DB` en otra prueba, ganará esa. Si un _script_ va a la base de datos equivocada, revisa `env | grep MONGO`.
+
+</Callout>
+
+<Callout type="mastery">
+
+Declaras toda la configuración en un esquema validado, distingues lo secreto de lo público y lo que se lee al ejecutar de lo que se fija en el _build_, haces que un despliegue con una variable mal configurada falle al compilar y no en la primera petición, y das a los _scripts_ la misma protección aunque no pasen por Astro.
+
+</Callout>
+
+## Resumen
+
+- `astro:env`: `server` / `secret` (nunca sale del servidor), `server` / `public` y `client` / `public` (la ve cualquiera).
+- `validateSecrets: true` comprueba todo al empezar `astro build` y `astro dev`: un despliegue sin `MONGODB_URI` se para en el _build_.
+- Las variables públicas se fijan en el _build_; solo las secretas se leen al ejecutar.
+- `.env` nunca va a Git; `.env.example` sí, con cada variable documentada. En Vercel, una base de datos por entorno.
+- Los _scripts_ de Node validan sus variables con Zod (`leerEnv()`), sin valores por defecto peligrosos, y dicen en qué base de datos han trabajado.
