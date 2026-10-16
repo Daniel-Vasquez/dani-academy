@@ -1,0 +1,53 @@
+// Archivo: src/lib/auth.ts
+// La configuración de Better Auth en el servidor: base de datos, método de acceso y sesiones
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { BETTER_AUTH_SECRET, BETTER_AUTH_URL } from "astro:env/server";
+import { db, mongoClient } from "./mongo";
+
+export const auth = betterAuth({
+  appName: "Mi entreno",
+  baseURL: BETTER_AUTH_URL,
+  secret: BETTER_AUTH_SECRET,
+  // El mismo cliente de la app (B5.2). Pasarlo permite a Better Auth usar transacciones (requiere replica set)
+  database: mongodbAdapter(db, { client: mongoClient }),
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true, // tras registrarse, la sesión queda iniciada
+    minPasswordLength: 8,
+    maxPasswordLength: 128, // I5.1: sin límite, una contraseña de megas obliga a ejecutar scrypt sobre ella
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 7, // la sesión dura 7 días…
+    updateAge: 60 * 60 * 24, // …y, si se usa, se renueva como mucho una vez al día
+    cookieCache: { enabled: true, maxAge: 5 * 60 }, // 5 min sin consultar MongoDB (ver el Paso 3)
+  },
+  user: {
+    // Campos propios del usuario, además de los de Better Auth (name, email, image…)
+    additionalFields: {
+      zonaHoraria: { type: "string", required: false, defaultValue: "America/Mexico_City" },
+      // input: false → el cliente NO puede enviarlo al registrarse ni al editar el perfil
+      rol: { type: ["user", "admin"], required: false, defaultValue: "user", input: false },
+    },
+  },
+});
+
+/** El tipo de la sesión, con los campos adicionales incluidos */
+export type Sesion = typeof auth.$Infer.Session;
+
+/** Lo que la app necesita del usuario: lo que el middleware pone en locals.usuario */
+export interface UsuarioSesion {
+  id: string;
+  nombre: string;
+  email: string;
+  zonaHoraria: string;
+  rol: "user" | "admin";
+}
+
+export const aUsuarioSesion = (u: Sesion["user"]): UsuarioSesion => ({
+  id: u.id,
+  nombre: u.name,
+  email: u.email,
+  zonaHoraria: u.zonaHoraria ?? "America/Mexico_City",
+  rol: u.rol === "admin" ? "admin" : "user", // cualquier valor inesperado es el rol con menos permisos
+});

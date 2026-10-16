@@ -1,0 +1,36 @@
+// Archivo: src/lib/sesion.ts
+// Autenticación (¿quién eres?) y autorización (¿qué puedes hacer?) en un solo sitio
+import { aUsuarioSesion, auth, type UsuarioSesion } from "./auth";
+import { HttpError, NoAutorizadoError } from "./errores";
+
+export class ProhibidoError extends HttpError {
+  constructor(message = "No tienes permiso para hacer esto") {
+    super(403, message);
+  }
+}
+
+/** El usuario de la sesión o un 401: cada endpoint lo comprueba aunque el middleware ya lo haga */
+export function usuarioDe(locals: App.Locals): UsuarioSesion {
+  if (!locals.usuario) throw new NoAutorizadoError();
+  return locals.usuario;
+}
+
+/** El usuario, si tiene el rol pedido; si no, 401 (sin sesión) o 403 (con sesión, sin permiso) */
+export function exigirRol(locals: App.Locals, rol: UsuarioSesion["rol"]): UsuarioSesion {
+  const usuario = usuarioDe(locals);
+  if (usuario.rol !== rol) throw new ProhibidoError();
+  return usuario;
+}
+
+/**
+ * Para las operaciones de administración: vuelve a leer la sesión SIN la caché de cookies (I5.3),
+ * para que un cambio de rol o una sesión revocada se apliquen al momento y no 5 minutos después.
+ */
+export async function exigirAdmin(request: Request, locals: App.Locals): Promise<UsuarioSesion> {
+  usuarioDe(locals); // sin sesión: 401, sin consultar nada más
+  const fresca = await auth.api.getSession({ headers: request.headers, query: { disableCookieCache: true } });
+  if (!fresca) throw new NoAutorizadoError();
+  const usuario = aUsuarioSesion(fresca.user);
+  if (usuario.rol !== "admin") throw new ProhibidoError();
+  return usuario;
+}

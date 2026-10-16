@@ -1,0 +1,24 @@
+// Archivo: src/pages/api/admin/resumen.ts
+// Solo administradores: cuántos usuarios hay y cuánto entrena cada uno (sin notas ni datos personales)
+import type { APIRoute } from "astro";
+import { db } from "../../../lib/mongo";
+import { aRespuesta } from "../../../lib/errores";
+import { exigirAdmin } from "../../../lib/sesion";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ request, locals }) => {
+  try {
+    await exigirAdmin(request, locals); // sin caché: un cambio de rol se aplica al instante
+    const [usuarios, porUsuario] = await Promise.all([
+      db.collection("user").countDocuments(),
+      db
+        .collection("entrenos")
+        .aggregate([{ $group: { _id: "$userId", entrenos: { $sum: 1 }, minutos: { $sum: "$minutos" } } }, { $sort: { minutos: -1 } }])
+        .toArray(),
+    ]);
+    return Response.json({ usuarios, porUsuario });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
