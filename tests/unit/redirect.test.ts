@@ -12,6 +12,11 @@ describe("safeRedirect", () => {
   it.each([
     ["//evil.com"],
     ["/\\evil.com"],
+    ["/\t/evil.com"], // el navegador borra el tabulador: "//evil.com"
+    ["/\n/evil.com"],
+    ["/\r\n/evil.com"],
+    ["/\\/evil.com"],
+    ["//[evil"], // URL inválida: new URL lanza
     ["https://evil.com"],
     ["javascript:alert(1)"],
     ["evil.com/temario"],
