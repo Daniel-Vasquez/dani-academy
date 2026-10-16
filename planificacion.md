@@ -4659,6 +4659,17 @@ Criterio "Lo dominas si…" del temario, redactado como lo que el alumno ya sabe
 - **`@source not "../content"` en `global.css`:** Tailwind escaneaba las lecciones y generaba CSS para las clases de los ejemplos (`bg-slate-900`, `bg-amber-50`…). El MDX no necesita utilidades para pintarse (los `Callout` llevan las suyas), así que se excluye: el CSS pasó de 69,9 KB a 62,3 KB sin cambios visuales.
 - Lighthouse (con sesión, claro y oscuro) en lecciones con tablas y mucho código: rendimiento 99–100, accesibilidad 100, CLS 0.
 
+### Notas de implementación (sub-tanda 8b, en curso)
+
+- **Publicados:** I1 (6 secciones), I2 (6), I3 (6), I4 (6) e I5 (4 de 5), con sus evaluaciones.
+- **I5 sin la sección I5.4 (Autorización), pendiente.** Al redactarla, las respuestas se detuvieron por un filtro de seguridad automático y no se pudo generar. I5 se publicó con I5.1, I5.2, I5.3 e I5.5 y `plannedSections: 4` en `courses.json`. Para añadirla:
+  1. Escribir `src/content/sections/autenticacion-y-autorizacion/04-autorizacion.mdx` (`sectionId: "I5.4"`, `order: 4`) según el temario I5.4. El código y las mediciones del laboratorio están en `docs/i5-4-laboratorio/`.
+  2. Volver a poner `plannedSections: 5`.
+  3. Sustituir la quinta pregunta de `src/content/quizzes/i5.yaml` (provisional, sobre `cookieCache`) por la de IDOR del temario.
+- **Fallos de la plataforma encontrados al preparar I5** (corregidos en commits propios):
+  - `safeRedirect` dejaba pasar `/%09/evil.com` (el navegador borra tabuladores y saltos de línea): *open redirect* tras el login. Ahora resuelve la ruta con WHATWG URL y exige el mismo origen.
+  - El *middleware* no reenviaba los `Set-Cookie` de `auth.api.getSession`: la renovación de la sesión no llegaba al navegador y la caché de *cookies* no se recreaba. Ahora usa `returnHeaders: true`.
+
 ### Criterios de aceptación — Tanda 8 (por sub-tanda)
 
 - [ ] Todos los cursos de la sub-tanda tienen `published: true`, sus secciones (número igual a `plannedSections`) y su evaluación.
