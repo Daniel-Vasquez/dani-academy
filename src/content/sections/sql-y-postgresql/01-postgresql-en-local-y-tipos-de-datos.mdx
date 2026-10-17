@@ -1,0 +1,617 @@
+---
+sectionId: "A3.1"
+course: "A3"
+title: "PostgreSQL en local y tipos de datos"
+order: 1
+minutes: 75
+summary: "Instalas PostgreSQL 18 y usas psql, mides sus tipos (integer que se desborda, numeric exacto, timestamptz, uuidv7, jsonb, arrays) y llevas el esquema de B4 a PostgreSQL con restricciones que rechazan diez errores."
+---
+
+En B4 aprendiste SQL con SQLite: una base de datos en un archivo, perfecta para empezar, pero con tipos flexibles (acepta `'hola'` en una columna `INTEGER`) y sin fechas de verdad. **PostgreSQL** es la base de datos relacional de código abierto más usada en aplicaciones web: un servidor al que se conectan tus programas, con tipos estrictos, fechas con zona horaria, JSON indexable, arrays y restricciones que hacen cumplir las reglas del modelo. En este curso la vas a usar para poder comparar con criterio con MongoDB. En esta sección vas a instalarla, a conocer su cliente `psql`, a medir sus tipos de datos y a llevar el modelo de Dani Academy de B4 a PostgreSQL, con todas sus reglas.
+
+**Lo que tendrás al terminar:** PostgreSQL 18 funcionando, una carpeta `pg-lab` con los archivos `.sql` de la sección, y el esquema de Dani Academy en PostgreSQL, que rechaza por sí solo diez formas distintas de datos incorrectos.
+
+**Requisitos:** el curso B4 (SQL básico y el modelo de Dani Academy, con su `esquema.sql`).
+
+## Paso 1: instalar PostgreSQL y conectar con `psql`
+
+Hay tres formas habituales de tener PostgreSQL en tu equipo:
+
+| Forma                  | Comando                                                                               | Cuándo                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| Docker                 | `docker run --name pg -e POSTGRES_PASSWORD=dev -p 5432:5432 -d postgres:18`           | La más limpia si ya usas Docker: un contenedor que se borra sin dejar rastro |
+| Instalación nativa     | Homebrew en Mac (`postgresql@` y la versión), `sudo apt install postgresql` en Ubuntu | Si no usas Docker                                                            |
+| Un servicio gestionado | Neon, Supabase… (Paso 4)                                                              | Para no instalar nada, o para compartir la base con un despliegue            |
+
+Este laboratorio usa la **instalación nativa en Ubuntu 26.04**, en la máquina virtual de I6, con `sudo apt install postgresql` (no se ha probado con Docker). `apt` instala el servidor, lo arranca como servicio de `systemd` (I6.4) y crea el usuario de base de datos `postgres`, con el que se conecta el resto de la sección:
+
+```text
+$ psql --version
+psql (PostgreSQL) 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1)
+$ systemctl is-active postgresql
+active
+$ sudo -u postgres psql -c "select version();"
+PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1) on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, 64-bit
+```
+
+**`psql`** es el cliente de la terminal. Con Docker, `docker exec -it pg psql -U postgres`; con la instalación nativa de Ubuntu, `sudo -u postgres psql`. Dentro, las órdenes que empiezan por `\` son de `psql`, no de SQL:
+
+| Orden                    | Qué hace                                                                   |
+| ------------------------ | -------------------------------------------------------------------------- |
+| `\l`                     | Lista las bases de datos                                                   |
+| `\c academia`            | Se conecta a otra base                                                     |
+| `\dt`                    | Lista las tablas                                                           |
+| `\d lecturas`            | Describe una tabla: columnas, tipos, índices y restricciones               |
+| `\x`                     | Alterna la vista expandida (una fila por bloque, útil con muchas columnas) |
+| `\i archivo.sql`         | Ejecuta un archivo                                                         |
+| `\?` y `\h CREATE TABLE` | Ayuda de `psql` y de SQL                                                   |
+| `\q`                     | Sale                                                                       |
+
+Crea las dos bases de la sección (una de pruebas y la del ejercicio) y la carpeta de trabajo:
+
+```bash
+sudo -u postgres createdb academy_lab
+sudo -u postgres createdb academia
+mkdir pg-lab && cd pg-lab
+```
+
+Cada archivo de la sección se ejecuta con `psql -f`. Los errores no detienen el archivo, y `psql` dice en qué línea ocurrió cada uno (`psql:01-tipos.sql:6: ERROR: …`):
+
+```bash
+sudo -u postgres psql -X -d academy_lab -f 01-tipos.sql
+```
+
+(Con Docker, `docker exec -i pg psql -U postgres -X -d academy_lab < 01-tipos.sql`, con la diferencia de que los errores dicen `<stdin>` en lugar del nombre del archivo).
+
+<Callout type="risk">
+
+- **El usuario `postgres` es el superusuario:** puede hacerlo todo, en todas las bases. Está bien para aprender en tu equipo; una aplicación nunca debería conectarse con él (lo mismo que con `root` en MongoDB, A2.5). En A3.4 conectarás desde TypeScript con un usuario propio.
+- **Con Docker, `-p 5432:5432` publica el puerto en tu equipo:** si tu equipo está en una red pública y la contraseña es `dev`, cualquiera en esa red puede entrar. Para practicar, `-p 127.0.0.1:5432:5432` lo limita a tu propio equipo.
+
+</Callout>
+
+## Paso 2: los tipos de datos
+
+En SQLite, los tipos son orientativos. En PostgreSQL, cada columna tiene un tipo y la base lo hace cumplir. Crea `01-tipos.sql`:
+
+```sql
+-- Archivo: 01-tipos.sql
+-- Los tipos de PostgreSQL, comprobados uno a uno
+
+\echo '--- integer y bigint: límites'
+SELECT 2147483647::integer AS maximo_integer;
+SELECT 2147483647::integer + 1;
+SELECT 2147483647::bigint + 1 AS con_bigint;
+
+\echo '--- numeric (exacto) frente a double precision (aproximado)'
+SELECT 0.1::double precision + 0.2::double precision AS con_double,
+       0.1::numeric + 0.2::numeric AS con_numeric;
+SELECT 19.99::numeric(10, 2) * 3 AS tres_cuotas;
+
+\echo '--- text: sin límite de longitud; varchar(n) sí lo tiene'
+SELECT length(repeat('a', 10000)::text) AS largo_text;
+SELECT 'Entregar el informe'::varchar(10);
+SELECT CAST('Entregar el informe' AS varchar(10)) AS recortado_con_cast;
+
+\echo '--- boolean'
+SELECT 't'::boolean AS t, 'yes'::boolean AS yes, 'on'::boolean AS on_, 'no'::boolean AS no, '0'::boolean AS cero;
+SELECT 'si'::boolean; -- en español, no
+
+\echo '--- timestamp frente a timestamptz: la zona horaria'
+SHOW TimeZone;
+SELECT '2026-10-17 09:00'::timestamp AS sin_zona, '2026-10-17 09:00'::timestamptz AS con_zona;
+SET TimeZone = 'Europe/Madrid';
+SELECT '2026-10-17 09:00'::timestamptz AS la_misma_hora_en_madrid;
+SELECT '2026-10-17 09:00-06'::timestamptz AS las_9_de_mexico_vistas_en_madrid;
+RESET TimeZone;
+
+\echo '--- uuid: gen_random_uuid() (aleatorio) y uuidv7() (ordenado por tiempo, PostgreSQL 18)'
+SELECT gen_random_uuid() AS v4, uuidv7() AS v7;
+SELECT uuidv7() < uuidv7() AS v7_crece;
+
+\echo '--- jsonb'
+SELECT '{"tema": "dark", "avisos": {"email": true}}'::jsonb -> 'avisos' ->> 'email' AS email,
+       '{"tema": "dark", "etiquetas": ["fuerza"]}'::jsonb @> '{"tema": "dark"}' AS contiene;
+SELECT '{"b": 1, "a": 2, "a": 3}'::jsonb AS jsonb_normaliza, '{"b": 1, "a": 2, "a": 3}'::json AS json_guarda_tal_cual;
+
+\echo '--- arrays'
+SELECT ARRAY['fuerza', 'running'] AS tipos, 'running' = ANY (ARRAY['fuerza', 'running']) AS incluye,
+       ARRAY['fuerza', 'running'] @> ARRAY['running'] AS contiene, (ARRAY['fuerza', 'running'])[1] AS primero;
+
+\echo '--- tipos estrictos: un texto no entra en un integer (en SQLite, sí)'
+SELECT 'hola'::integer;
+```
+
+```text
+--- integer y bigint: límites
+ maximo_integer
+----------------
+     2147483647
+(1 row)
+
+psql:01-tipos.sql:6: ERROR:  integer out of range
+ con_bigint
+------------
+ 2147483648
+(1 row)
+
+--- numeric (exacto) frente a double precision (aproximado)
+     con_double      | con_numeric
+---------------------+-------------
+ 0.30000000000000004 |         0.3
+(1 row)
+
+ tres_cuotas
+-------------
+       59.97
+(1 row)
+
+--- text: sin límite de longitud; varchar(n) sí lo tiene
+ largo_text
+------------
+      10000
+(1 row)
+
+  varchar
+------------
+ Entregar e
+(1 row)
+
+ recortado_con_cast
+--------------------
+ Entregar e
+(1 row)
+
+--- boolean
+ t | yes | on_ | no | cero
+---+-----+-----+----+------
+ t | t   | t   | f  | f
+(1 row)
+
+psql:01-tipos.sql:21: ERROR:  invalid input syntax for type boolean: "si"
+LINE 1: SELECT 'si'::boolean;
+               ^
+--- timestamp frente a timestamptz: la zona horaria
+      TimeZone
+---------------------
+ America/Mexico_City
+(1 row)
+
+      sin_zona       |        con_zona
+---------------------+------------------------
+ 2026-10-17 09:00:00 | 2026-10-17 09:00:00-06
+(1 row)
+
+SET
+ la_misma_hora_en_madrid
+-------------------------
+ 2026-10-17 09:00:00+02
+(1 row)
+
+ las_9_de_mexico_vistas_en_madrid
+----------------------------------
+ 2026-10-17 17:00:00+02
+(1 row)
+
+RESET
+--- uuid: gen_random_uuid() (aleatorio) y uuidv7() (ordenado por tiempo, PostgreSQL 18)
+                  v4                  |                  v7
+--------------------------------------+--------------------------------------
+ 98240173-c571-4425-bfcf-b31e70c1624f | 01a148e1-c58d-79f2-8baf-0b3519f035e6
+(1 row)
+
+ v7_crece
+----------
+ t
+(1 row)
+
+--- jsonb
+ email | contiene
+-------+----------
+ true  | t
+(1 row)
+
+ jsonb_normaliza  |   json_guarda_tal_cual
+------------------+--------------------------
+ {"a": 3, "b": 1} | {"b": 1, "a": 2, "a": 3}
+(1 row)
+
+--- arrays
+      tipos       | incluye | contiene | primero
+------------------+---------+----------+---------
+ {fuerza,running} | t       | t        | fuerza
+(1 row)
+
+--- tipos estrictos: un texto no entra en un integer (en SQLite, sí)
+psql:01-tipos.sql:45: ERROR:  invalid input syntax for type integer: "hola"
+LINE 1: SELECT 'hola'::integer;
+               ^
+```
+
+| Tipo                 | Para qué                   | Lo que se ha medido                                                                                                                             |
+| -------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `integer` / `bigint` | Números enteros            | `integer` llega a 2 147 483 647: uno más es `integer out of range`. Para ids que crecen, `bigint`                                               |
+| `numeric(p, s)`      | Dinero, cantidades exactas | `0.1 + 0.2` da `0.3` exacto; con `double precision`, `0.30000000000000004`                                                                      |
+| `text`               | Textos                     | Sin límite: 10 000 caracteres sin problema. `varchar(n)` limita la longitud                                                                     |
+| `boolean`            | Verdadero o falso          | Acepta `t`, `yes`, `on`, `no`, `0`… pero **no `si`**: los valores son en inglés                                                                 |
+| `timestamptz`        | Fechas y horas             | Guarda un **instante**: las 9:00 de México son las 17:00 en Madrid. `timestamp` sin zona guarda solo "las 9", sin saber de dónde                |
+| `uuid`               | Identificadores            | `gen_random_uuid()` (aleatorio) y, en PostgreSQL 18, `uuidv7()`, que crece con el tiempo                                                        |
+| `jsonb`              | Datos con forma libre      | `->`, `->>` y `@>` (contiene) para consultarlo. Normaliza: ordena las claves y se queda con la última repetida; `json` guarda el texto tal cual |
+| `tipo[]`             | Arrays                     | `= ANY (…)`, `@>`, y los índices empiezan en **1**                                                                                              |
+
+<Callout type="risk">
+
+- **Convertir a `varchar(10)` recorta sin avisar:** `'Entregar el informe'::varchar(10)` da `'Entregar e'`, sin error. En cambio, **insertar** un texto demasiado largo en una columna `varchar(200)` sí es un error (lo verás en el Paso 3). Por eso muchas guías de PostgreSQL recomiendan `text` con un `CHECK (length(…) <= n)`, que se comporta igual en los dos casos.
+- **Usa siempre `timestamptz`, no `timestamp`:** el nombre engaña, porque `timestamptz` no guarda la zona horaria, sino el instante en UTC, y lo muestra en la zona de la conexión. `timestamp` sin zona es la causa de casi todos los errores de horas: dos servidores en zonas distintas interpretan la misma fila de forma distinta.
+- **`jsonb` no es un sustituto de las columnas:** sirve para lo que de verdad no tiene forma fija (preferencias, metadatos). Lo que tiene forma conocida va en columnas, con sus tipos y restricciones.
+
+</Callout>
+
+## Paso 3: restricciones, que la base de datos diga que no
+
+Las restricciones son reglas que PostgreSQL comprueba en cada escritura. Si una no se cumple, la escritura entera se rechaza. Crea `02-restricciones.sql`:
+
+```sql
+-- Archivo: 02-restricciones.sql
+-- Que la base de datos impida por sí sola los datos inconsistentes
+DROP TABLE IF EXISTS entrenos, usuarios;
+
+CREATE TABLE usuarios (
+  id     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre text NOT NULL CHECK (length(trim(nombre)) BETWEEN 2 AND 60),
+  email  text NOT NULL UNIQUE,
+  creado timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE entrenos (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  usuario_id uuid NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  tipo       text NOT NULL CHECK (tipo IN ('fuerza', 'running', 'movilidad')),
+  minutos    integer NOT NULL CHECK (minutos BETWEEN 1 AND 600),
+  km         numeric(5, 2) CHECK (km > 0),
+  notas      varchar(200),
+  CHECK (tipo = 'running' OR km IS NULL) -- solo los de running llevan km
+);
+
+\d entrenos
+
+\echo '--- datos válidos'
+INSERT INTO usuarios (nombre, email) VALUES ('Ana', 'ana@example.com') RETURNING nombre, email, creado;
+INSERT INTO entrenos (usuario_id, tipo, minutos, km)
+  SELECT id, 'running', 45, 9.5 FROM usuarios WHERE email = 'ana@example.com' RETURNING id, tipo, minutos, km;
+
+\echo '--- y los que no deben entrar'
+INSERT INTO usuarios (nombre) VALUES ('Sin correo');
+INSERT INTO usuarios (nombre, email) VALUES ('Ana bis', 'ana@example.com');
+INSERT INTO usuarios (nombre, email) VALUES ('A', 'a@example.com');
+INSERT INTO entrenos (usuario_id, tipo, minutos) VALUES (gen_random_uuid(), 'fuerza', 30);
+INSERT INTO entrenos (usuario_id, tipo, minutos, km) SELECT id, 'fuerza', 30, 5 FROM usuarios LIMIT 1;
+INSERT INTO entrenos (usuario_id, tipo, minutos) SELECT id, 'natación', 30 FROM usuarios LIMIT 1;
+INSERT INTO entrenos (usuario_id, tipo, minutos, notas) SELECT id, 'fuerza', 30, repeat('x', 201) FROM usuarios LIMIT 1;
+INSERT INTO entrenos (id, usuario_id, tipo, minutos) SELECT 99, id, 'fuerza', 30 FROM usuarios LIMIT 1;
+
+\echo '--- UNIQUE distingue mayúsculas: este correo entra'
+INSERT INTO usuarios (nombre, email) VALUES ('Ana otra vez', 'Ana@Example.com') RETURNING email;
+DELETE FROM usuarios WHERE email = 'Ana@Example.com';
+CREATE UNIQUE INDEX usuarios_email_minusculas ON usuarios (lower(email));
+INSERT INTO usuarios (nombre, email) VALUES ('Ana otra vez', 'Ana@Example.com');
+
+\echo '--- ON DELETE CASCADE: borrar el usuario borra sus entrenos'
+SELECT count(*) AS entrenos_antes FROM entrenos;
+DELETE FROM usuarios WHERE email = 'ana@example.com';
+SELECT count(*) AS entrenos_despues FROM entrenos;
+```
+
+```text
+psql:02-restricciones.sql:3: NOTICE:  table "entrenos" does not exist, skipping
+psql:02-restricciones.sql:3: NOTICE:  table "usuarios" does not exist, skipping
+DROP TABLE
+CREATE TABLE
+CREATE TABLE
+                                  Table "public.entrenos"
+   Column   |          Type          | Collation | Nullable |           Default
+------------+------------------------+-----------+----------+------------------------------
+ id         | bigint                 |           | not null | generated always as identity
+ usuario_id | uuid                   |           | not null |
+ tipo       | text                   |           | not null |
+ minutos    | integer                |           | not null |
+ km         | numeric(5,2)           |           |          |
+ notas      | character varying(200) |           |          |
+Indexes:
+    "entrenos_pkey" PRIMARY KEY, btree (id)
+Check constraints:
+    "entrenos_check" CHECK (tipo = 'running'::text OR km IS NULL)
+    "entrenos_km_check" CHECK (km > 0::numeric)
+    "entrenos_minutos_check" CHECK (minutos >= 1 AND minutos <= 600)
+    "entrenos_tipo_check" CHECK (tipo = ANY (ARRAY['fuerza'::text, 'running'::text, 'movilidad'::text]))
+Foreign-key constraints:
+    "entrenos_usuario_id_fkey" FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE
+
+--- datos válidos
+ nombre |      email      |            creado
+--------+-----------------+------------------------------
+ Ana    | ana@example.com | 2026-10-17 02:01:58.28869-06
+(1 row)
+
+INSERT 0 1
+ id |  tipo   | minutos |  km
+----+---------+---------+------
+  1 | running |      45 | 9.50
+(1 row)
+
+INSERT 0 1
+--- y los que no deben entrar
+psql:02-restricciones.sql:30: ERROR:  null value in column "email" of relation "usuarios" violates not-null constraint
+DETAIL:  Failing row contains (54147fac-5ab1-4421-97ca-80fbcd5fa486, Sin correo, null, 2026-10-17 02:01:58.289259-06).
+psql:02-restricciones.sql:31: ERROR:  duplicate key value violates unique constraint "usuarios_email_key"
+DETAIL:  Key (email)=(ana@example.com) already exists.
+psql:02-restricciones.sql:32: ERROR:  new row for relation "usuarios" violates check constraint "usuarios_nombre_check"
+DETAIL:  Failing row contains (cf6d352b-6de2-4538-ab2c-4439464c8388, A, a@example.com, 2026-10-17 02:01:58.289391-06).
+psql:02-restricciones.sql:33: ERROR:  insert or update on table "entrenos" violates foreign key constraint "entrenos_usuario_id_fkey"
+DETAIL:  Key (usuario_id)=(bb87fe98-d426-47cd-8cda-1758ad7d528a) is not present in table "usuarios".
+psql:02-restricciones.sql:34: ERROR:  new row for relation "entrenos" violates check constraint "entrenos_check"
+DETAIL:  Failing row contains (3, 1fccff55-0255-4df3-876b-4cc9507332c9, fuerza, 30, 5.00, null).
+psql:02-restricciones.sql:35: ERROR:  new row for relation "entrenos" violates check constraint "entrenos_tipo_check"
+DETAIL:  Failing row contains (4, 1fccff55-0255-4df3-876b-4cc9507332c9, natación, 30, null, null).
+psql:02-restricciones.sql:36: ERROR:  value too long for type character varying(200)
+psql:02-restricciones.sql:37: ERROR:  cannot insert a non-DEFAULT value into column "id"
+DETAIL:  Column "id" is an identity column defined as GENERATED ALWAYS.
+HINT:  Use OVERRIDING SYSTEM VALUE to override.
+--- UNIQUE distingue mayúsculas: este correo entra
+      email
+-----------------
+ Ana@Example.com
+(1 row)
+
+INSERT 0 1
+DELETE 1
+CREATE INDEX
+psql:02-restricciones.sql:43: ERROR:  duplicate key value violates unique constraint "usuarios_email_minusculas"
+DETAIL:  Key (lower(email))=(ana@example.com) already exists.
+--- ON DELETE CASCADE: borrar el usuario borra sus entrenos
+ entrenos_antes
+----------------
+              1
+(1 row)
+
+DELETE 1
+ entrenos_despues
+------------------
+                0
+(1 row)
+```
+
+| Restricción                  | Qué impide                                            | El error                                                              |
+| ---------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------- |
+| `NOT NULL`                   | Un dato obligatorio vacío                             | `null value in column "email" … violates not-null constraint`         |
+| `UNIQUE`                     | Dos filas con el mismo valor                          | `duplicate key value violates unique constraint "usuarios_email_key"` |
+| `CHECK`                      | Un valor fuera de las reglas (longitud, rango, lista) | `violates check constraint "usuarios_nombre_check"`                   |
+| `FOREIGN KEY` (`REFERENCES`) | Una fila que apunta a algo que no existe              | `violates foreign key constraint "entrenos_usuario_id_fkey"`          |
+| `PRIMARY KEY`                | Ids repetidos o vacíos                                | Es `NOT NULL` + `UNIQUE`                                              |
+
+- **Un `CHECK` puede comparar varias columnas:** `tipo = 'running' OR km IS NULL` es la regla de los km de tu app de entrenos (I3), escrita en la base de datos. Ningún programa, ni uno con un error, puede saltársela.
+- **`GENERATED ALWAYS AS IDENTITY`** numera los entrenos solo, y no deja escribir el `id` a mano (`cannot insert a non-DEFAULT value into column "id"`). Es la forma moderna; la antigua, `serial`, sí deja.
+- **`UNIQUE` distingue mayúsculas:** `Ana@Example.com` entra aunque ya exista `ana@example.com`. Un índice único sobre `lower(email)` lo impide.
+- **`ON DELETE CASCADE`** borra los entrenos al borrar a su usuario. Sin él, borrar un usuario con entrenos sería un error, que es lo que conviene para otras relaciones (el ejercicio).
+
+<Callout type="risk">
+
+- **Los intentos fallidos también gastan números:** en los errores, los entrenos rechazados llevan los `id` 3 y 4. Los números de una columna `IDENTITY` no se devuelven si la inserción falla, así que **habrá huecos**. Un `id` no es un contador de cuántos hay.
+- **Pon nombre a las restricciones que vayas a ver a menudo:** PostgreSQL inventa nombres como `entrenos_check`. Con `CONSTRAINT solo_running_lleva_km CHECK (…)`, el error dice qué regla se incumplió, y la app puede traducirlo a un mensaje para el usuario.
+
+</Callout>
+
+## Paso 4: servicios gestionados
+
+Igual que Atlas con MongoDB, hay servicios que te dan un PostgreSQL sin instalar nada: **Neon** y **Supabase** son dos de los más conocidos, con planes gratuitos. Te dan una cadena de conexión con la forma `postgresql://usuario:contraseña@servidor/base?sslmode=require`, que es lo único que cambia respecto a tu base local: el SQL de esta sección funciona igual. Supabase añade alrededor autenticación, almacenamiento de archivos y una API generada a partir de las tablas; Neon se centra en la base de datos (y permite crear copias de una base para probar cambios). Revisa los límites del plan gratuito de cada uno antes de elegir.
+
+En este laboratorio **no se ha usado ninguno**: todo es local. Las mismas preguntas de A2.5 sirven para elegir: quién hace las copias, quién aplica los parches y qué pasa si el servicio cae.
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Crea en PostgreSQL el esquema de Dani Academy que diseñaste en B4 (usuarios, cursos, secciones, lecturas e intentos), con todas las restricciones.
+2. Aprovecha lo que SQLite no tenía: tipos estrictos, `timestamptz`, `uuid`, arrays y `CHECK` con expresiones regulares.
+3. Escribe una prueba que intente romper cada regla del modelo, y comprueba que la base de datos las rechaza todas.
+
+</Callout>
+
+Solución. `03-esquema.sql`, que se ejecuta en la base `academia`:
+
+```sql
+-- Archivo: 03-esquema.sql
+-- El modelo de Dani Academy de B4 (esquema.sql, en SQLite), en PostgreSQL y con todas sus reglas
+DROP TABLE IF EXISTS intentos, lecturas, secciones, cursos, usuarios;
+
+CREATE TABLE usuarios (
+  id     uuid PRIMARY KEY DEFAULT uuidv7(),           -- ordenado por fecha de creación (PostgreSQL 18)
+  nombre text NOT NULL CHECK (length(trim(nombre)) BETWEEN 2 AND 60),
+  email  text NOT NULL CHECK (email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  creado timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX usuarios_email_unico ON usuarios (lower(email)); -- Ana@… y ana@… son el mismo correo
+
+CREATE TABLE cursos (
+  id     text PRIMARY KEY CHECK (id ~ '^([BIA][1-8]|P1)$'), -- la misma regla que la plataforma
+  titulo text NOT NULL,
+  nivel  text NOT NULL CHECK (nivel IN ('basico', 'intermedio', 'avanzado', 'proyecto')),
+  orden  integer NOT NULL UNIQUE CHECK (orden > 0)
+);
+
+CREATE TABLE secciones (
+  id       text PRIMARY KEY CHECK (id ~ '^([BIA][1-8]|P1)\.[0-9]{1,2}$'),
+  curso_id text NOT NULL REFERENCES cursos(id), -- sin CASCADE: no se borra un curso con secciones
+  titulo   text NOT NULL,
+  orden    integer NOT NULL CHECK (orden > 0),
+  minutos  integer NOT NULL DEFAULT 60 CHECK (minutos BETWEEN 10 AND 240),
+  UNIQUE (curso_id, orden),
+  CHECK (split_part(id, '.', 1) = curso_id) -- "B1.3" solo puede ser del curso "B1"
+);
+
+-- Tabla intermedia N:M entre usuarios y secciones
+CREATE TABLE lecturas (
+  usuario_id uuid NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  seccion_id text NOT NULL REFERENCES secciones(id),
+  leida_en   timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (usuario_id, seccion_id) -- una sección no se lee dos veces
+);
+
+CREATE TABLE intentos (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  usuario_id uuid NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  respuestas smallint[] NOT NULL CHECK (cardinality(respuestas) = 5), -- una respuesta por pregunta
+  nota       smallint NOT NULL CHECK (nota BETWEEN 0 AND 5),
+  enviado_en timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX intentos_usuario_fecha ON intentos (usuario_id, enviado_en DESC);
+
+\dt
+```
+
+```text
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+            List of tables
+ Schema |   Name    | Type  |  Owner
+--------+-----------+-------+----------
+ public | cursos    | table | postgres
+ public | intentos  | table | postgres
+ public | lecturas  | table | postgres
+ public | secciones | table | postgres
+ public | usuarios  | table | postgres
+(5 rows)
+```
+
+Lo que cambia respecto al `esquema.sql` de B4:
+
+- **Los ids de usuario son `uuid` con `uuidv7()`:** no revelan cuántos usuarios hay (un `1, 2, 3…` sí) y, a diferencia de `gen_random_uuid()`, se ordenan por fecha de creación, lo que favorece al índice.
+- **Los ids de curso y de sección comprueban su formato** con la misma expresión regular que la plataforma (`~` es "cumple la expresión regular"), y una sección solo puede pertenecer al curso de su propio id.
+- **Las fechas son `timestamptz` con `now()` por defecto**, no texto ISO como en SQLite.
+- **`respuestas` es un array** de cinco números, comprobado con `cardinality`.
+- **Borrar un usuario borra sus lecturas e intentos** (`ON DELETE CASCADE`); **borrar un curso con secciones está prohibido** (sin `CASCADE`), porque perder un curso entero por un `DELETE` mal escrito sería mucho peor.
+
+Las pruebas, `04-pruebas.sql`:
+
+```sql
+-- Archivo: 04-pruebas.sql
+-- Datos válidos, y después cada forma de romper el modelo: la base de datos tiene que rechazarlas todas
+TRUNCATE intentos, lecturas, secciones, cursos, usuarios;
+
+\echo '--- datos válidos'
+INSERT INTO cursos (id, titulo, nivel, orden) VALUES
+  ('B1', 'TypeScript desde cero', 'basico', 1),
+  ('A3', 'SQL y PostgreSQL', 'avanzado', 18);
+INSERT INTO secciones (id, curso_id, titulo, orden, minutos) VALUES
+  ('B1.1', 'B1', 'Qué es TypeScript', 1, 45),
+  ('A3.1', 'A3', 'PostgreSQL en local y tipos de datos', 1, 60);
+INSERT INTO usuarios (nombre, email) VALUES ('Ana', 'ana@example.com');
+INSERT INTO lecturas (usuario_id, seccion_id) SELECT id, 'B1.1' FROM usuarios;
+INSERT INTO intentos (usuario_id, curso_id, respuestas, nota) SELECT id, 'B1', '{1,0,3,1,2}', 4 FROM usuarios;
+SELECT (SELECT count(*) FROM cursos) AS cursos, (SELECT count(*) FROM secciones) AS secciones,
+       (SELECT count(*) FROM lecturas) AS lecturas, (SELECT count(*) FROM intentos) AS intentos;
+
+\echo '--- 1. un curso con un id que no existe en el temario'
+INSERT INTO cursos (id, titulo, nivel, orden) VALUES ('B9', 'No existe', 'basico', 9);
+\echo '--- 2. una sección que dice ser de otro curso'
+INSERT INTO secciones (id, curso_id, titulo, orden) VALUES ('B1.2', 'A3', 'Mal asignada', 2);
+\echo '--- 3. dos secciones con el mismo orden en un curso'
+INSERT INTO secciones (id, curso_id, titulo, orden) VALUES ('B1.2', 'B1', 'Repite el orden', 1);
+\echo '--- 4. el mismo correo con otras mayúsculas'
+INSERT INTO usuarios (nombre, email) VALUES ('Ana bis', 'ANA@example.com');
+\echo '--- 5. un correo sin @'
+INSERT INTO usuarios (nombre, email) VALUES ('Luis', 'luis.example.com');
+\echo '--- 6. leer dos veces la misma sección'
+INSERT INTO lecturas (usuario_id, seccion_id) SELECT id, 'B1.1' FROM usuarios;
+\echo '--- 7. leer una sección que no existe'
+INSERT INTO lecturas (usuario_id, seccion_id) SELECT id, 'B1.9' FROM usuarios;
+\echo '--- 8. una nota de 6'
+INSERT INTO intentos (usuario_id, curso_id, respuestas, nota) SELECT id, 'B1', '{1,0,3,1,2}', 6 FROM usuarios;
+\echo '--- 9. un intento con 4 respuestas'
+INSERT INTO intentos (usuario_id, curso_id, respuestas, nota) SELECT id, 'B1', '{1,0,3,1}', 3 FROM usuarios;
+\echo '--- 10. borrar un curso que tiene secciones'
+DELETE FROM cursos WHERE id = 'B1';
+\echo '--- 11. borrar a la usuaria: sus lecturas e intentos se van con ella'
+DELETE FROM usuarios WHERE email = 'ana@example.com';
+SELECT (SELECT count(*) FROM lecturas) AS lecturas, (SELECT count(*) FROM intentos) AS intentos;
+```
+
+```text
+TRUNCATE TABLE
+--- datos válidos
+INSERT 0 2
+INSERT 0 2
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1
+ cursos | secciones | lecturas | intentos
+--------+-----------+----------+----------
+      2 |         2 |        1 |        1
+(1 row)
+
+--- 1. un curso con un id que no existe en el temario
+psql:04-pruebas.sql:19: ERROR:  new row for relation "cursos" violates check constraint "cursos_id_check"
+DETAIL:  Failing row contains (B9, No existe, basico, 9).
+--- 2. una sección que dice ser de otro curso
+psql:04-pruebas.sql:21: ERROR:  new row for relation "secciones" violates check constraint "secciones_check"
+DETAIL:  Failing row contains (B1.2, A3, Mal asignada, 2, 60).
+--- 3. dos secciones con el mismo orden en un curso
+psql:04-pruebas.sql:23: ERROR:  duplicate key value violates unique constraint "secciones_curso_id_orden_key"
+DETAIL:  Key (curso_id, orden)=(B1, 1) already exists.
+--- 4. el mismo correo con otras mayúsculas
+psql:04-pruebas.sql:25: ERROR:  duplicate key value violates unique constraint "usuarios_email_unico"
+DETAIL:  Key (lower(email))=(ana@example.com) already exists.
+--- 5. un correo sin @
+psql:04-pruebas.sql:27: ERROR:  new row for relation "usuarios" violates check constraint "usuarios_email_check"
+DETAIL:  Failing row contains (01a148e1-c718-7892-b494-c424192a6141, Luis, luis.example.com, 2026-10-17 02:01:58.552528-06).
+--- 6. leer dos veces la misma sección
+psql:04-pruebas.sql:29: ERROR:  duplicate key value violates unique constraint "lecturas_pkey"
+DETAIL:  Key (usuario_id, seccion_id)=(01a148e1-c717-74bf-9a92-4eb033ea05fb, B1.1) already exists.
+--- 7. leer una sección que no existe
+psql:04-pruebas.sql:31: ERROR:  insert or update on table "lecturas" violates foreign key constraint "lecturas_seccion_id_fkey"
+DETAIL:  Key (seccion_id)=(B1.9) is not present in table "secciones".
+--- 8. una nota de 6
+psql:04-pruebas.sql:33: ERROR:  new row for relation "intentos" violates check constraint "intentos_nota_check"
+DETAIL:  Failing row contains (2, 01a148e1-c717-74bf-9a92-4eb033ea05fb, B1, {1,0,3,1,2}, 6, 2026-10-17 02:01:58.552742-06).
+--- 9. un intento con 4 respuestas
+psql:04-pruebas.sql:35: ERROR:  new row for relation "intentos" violates check constraint "intentos_respuestas_check"
+DETAIL:  Failing row contains (3, 01a148e1-c717-74bf-9a92-4eb033ea05fb, B1, {1,0,3,1}, 3, 2026-10-17 02:01:58.552852-06).
+--- 10. borrar un curso que tiene secciones
+psql:04-pruebas.sql:37: ERROR:  update or delete on table "cursos" violates foreign key constraint "secciones_curso_id_fkey" on table "secciones"
+DETAIL:  Key (id)=(B1) is still referenced from table "secciones".
+--- 11. borrar a la usuaria: sus lecturas e intentos se van con ella
+DELETE 1
+ lecturas | intentos
+----------+----------
+        0 |        0
+(1 row)
+```
+
+Diez formas de romper el modelo, y diez errores: un curso que no existe en el temario, una sección asignada al curso equivocado, dos secciones con el mismo orden, el mismo correo con otras mayúsculas, un correo sin `@`, una lectura repetida, una lectura de una sección que no existe, una nota de 6, un intento con cuatro respuestas y borrar un curso con secciones. Y el borrado de la usuaria se lleva sus lecturas e intentos, como debe.
+
+<Callout type="risk">
+
+- **La expresión regular del correo es una comprobación mínima:** que tenga `@` y un punto en el dominio. Validar un correo de verdad es enviarle un mensaje; la base solo impide los errores evidentes.
+- **Una restricción que añades a una tabla con datos se comprueba sobre los que ya hay:** si alguna fila no la cumple, `ALTER TABLE … ADD CONSTRAINT` falla. Con muchos datos, `NOT VALID` permite añadirla solo para las filas nuevas, y validar las antiguas después.
+
+</Callout>
+
+<Callout type="mastery">
+
+La base de datos impide por sí sola datos inconsistentes: eliges el tipo justo para cada columna (`bigint` para ids que crecen, `numeric` para cantidades exactas, `timestamptz` para fechas, `uuid`, `jsonb` y arrays donde tocan), escribes cada regla del modelo como una restricción (`NOT NULL`, `UNIQUE` con `lower()`, `CHECK` con varias columnas o expresiones regulares, `FOREIGN KEY` con o sin `CASCADE`) y lo compruebas con pruebas que intentan romperlas todas.
+
+</Callout>
+
+## Resumen
+
+- PostgreSQL es un servidor: Docker, instalación nativa o un servicio gestionado (Neon, Supabase). `psql` es su cliente, con órdenes `\l`, `\dt`, `\d`, `\x`.
+- Tipos medidos: `integer` se desborda en 2 147 483 647, `numeric` es exacto, `boolean` no acepta `si`, `timestamptz` guarda instantes, `uuidv7()` crece con el tiempo, `jsonb` normaliza.
+- `NOT NULL`, `UNIQUE`, `CHECK`, `FOREIGN KEY` y `PRIMARY KEY` rechazan la escritura entera si no se cumplen.
+- `UNIQUE` distingue mayúsculas: índice único sobre `lower(email)`. `IDENTITY` deja huecos.
+- El esquema de B4 en PostgreSQL rechazó las diez pruebas de datos incorrectos.
