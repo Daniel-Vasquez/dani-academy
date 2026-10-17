@@ -1,0 +1,385 @@
+---
+sectionId: "A1.5"
+course: "A1"
+title: "Rendimiento del compilador y tipos de terceros"
+order: 5
+minutes: 60
+summary: "Lees errores de tipos de abajo arriba, declaras y amplías tipos de librerías (y ves cómo un import cambia una ampliación en un reemplazo), mides el compilador y decides cuándo un tipo ingenioso cuesta más de lo que da."
+---
+
+Con lo que has visto en A1 puedes escribir tipos muy potentes. Esta última sección trata de convivir con ellos y con los de los demás. Los errores de las librerías ocupan diez líneas y parecen escritos para otra persona; algunas librerías no traen tipos y otras no tienen el campo que tú añadiste; y cada tipo ingenioso hace trabajar más al compilador y al editor. Vas a aprender a leer un error largo sin perderte, a declarar y ampliar tipos de terceros, a medir lo que cuesta comprobar un proyecto y a reconocer cuándo un tipo ha dejado de compensar.
+
+**Lo que tendrás al terminar:** un método para leer cualquier error de tipos, la declaración de una librería sin tipos y la ampliación de otra, las mediciones del compilador en el `ts-playground` y en esta plataforma, y un criterio para decidir cuándo parar.
+
+**Requisitos:** las secciones A1.1 a A1.4.
+
+## Paso 1: leer un error de tipos, de abajo arriba
+
+Un error largo de TypeScript es una **cadena de explicaciones**: la primera línea dice qué asignación falló, en términos de los tipos completos; cada línea siguiente, con más sangría, baja un nivel; y **la última es la causa concreta**. Por eso se leen al revés: primero la última línea (qué no encaja), luego la anterior (dónde), y solo al final la primera (en qué asignación).
+
+Pruébalo en `src/a1/sonda.ts`, con el `DeepReadonly` de A1.2 y un objeto que llega de un JSON:
+
+```ts
+// Archivo: src/a1/sonda.ts
+import type { DeepReadonly } from "./profundo";
+
+interface Config {
+  objetivo: { minutosSemana: number; dias: string[] };
+  notificaciones: { email: { activo: boolean; hora: string }; push: boolean };
+}
+
+const desdeJson = {
+  objetivo: { minutosSemana: 150, dias: ["lunes"] },
+  notificaciones: { email: { activo: "sí", hora: "07:00" }, push: false },
+};
+const config: DeepReadonly<Config> = desdeJson;
+```
+
+```text
+src/a1/sonda.ts(13,7): error TS2322: Type '{ objetivo: { minutosSemana: number; dias: string[]; }; notificaciones: { email: { activo: string; hora: string; }; push: boolean; }; }' is not assignable to type '{ readonly objetivo: { readonly minutosSemana: number; readonly dias: readonly string[]; }; readonly notificaciones: { readonly email: { readonly activo: boolean; readonly hora: string; }; readonly push: boolean; }; }'.
+  The types of 'notificaciones.email.activo' are incompatible between these types.
+    Type 'string' is not assignable to type 'boolean'.
+```
+
+- **De abajo arriba:** `string` no se puede asignar a `boolean` (la causa); está en `notificaciones.email.activo` (dónde); y todo ello al asignar `desdeJson` a `config` (la primera línea, que es la más larga y la que menos dice).
+- **La primera línea repite los dos tipos enteros,** ya calculados: así sabes qué entendió TypeScript de `DeepReadonly<Config>` (todo con `readonly`).
+
+Los errores de las sobrecargas tienen una trampa. Añade al archivo:
+
+```ts
+document.addEventListener("keydown", (e: MouseEvent) => console.log(e.clientX));
+```
+
+```text
+src/a1/sonda.ts(15,38): error TS2769: No overload matches this call.
+  The last overload gave the following error.
+    Argument of type '(e: MouseEvent) => void' is not assignable to parameter of type 'EventListenerOrEventListenerObject'.
+      Type '(e: MouseEvent) => void' is not assignable to type 'EventListener'.
+        Types of parameters 'e' and 'evt' are incompatible.
+          Type 'Event' is missing the following properties from type 'MouseEvent': altKey, button, buttons, clientX, and 23 more.
+```
+
+De abajo arriba: un `Event` no tiene las propiedades de un `MouseEvent`, porque el parámetro `e` no encaja con el que espera `EventListener`. Pero fíjate en la segunda línea: **"The last overload gave the following error"**. `addEventListener` tiene varias firmas, y TypeScript enseña el error de **la última**, la genérica para cualquier nombre de evento, que no es la que te interesa. Para `"keydown"`, el evento es un `KeyboardEvent` (lo dice `DocumentEventMap`, A1.3): el problema es que `keydown` no da un `MouseEvent`, y la solución, `(e: KeyboardEvent) => …`. Borra `sonda.ts`.
+
+<Callout type="risk">
+
+- **No "arregles" un error largo con `as` sin leerlo:** casi siempre la última línea es un fallo real (un campo mal escrito, un tipo cambiado). El `as` lo esconde y el fallo aparece al ejecutar.
+- **TypeScript 7 resume más que las versiones anteriores:** enseña solo la primera propiedad incompatible. Si arreglas esa y el error no desaparece, puede haber otra debajo.
+
+</Callout>
+
+## Paso 2: tipos de librerías que no los traen, y ampliar los que sí
+
+Hay dos situaciones con los tipos de terceros. Para verlas, crea dos paquetes locales pequeños dentro del `ts-playground`. El primero, en JavaScript puro, sin tipos, como muchas librerías antiguas. `paquetes/km-formato/package.json`:
+
+```json
+{ "name": "km-formato", "version": "1.0.0", "type": "module", "main": "index.js" }
+```
+
+`paquetes/km-formato/index.js`:
+
+```js
+// Una librería en JavaScript puro, sin tipos (como muchas antiguas)
+export function formatearKm(km, decimales = 1) {
+  return `${km.toFixed(decimales).replace(".", ",")} km`;
+}
+```
+
+El segundo trae sus tipos, y guarda en el usuario campos que su interfaz no declara, como pasa con las librerías de autenticación. `paquetes/mini-auth/package.json`:
+
+```json
+{ "name": "mini-auth", "version": "1.0.0", "type": "module", "main": "index.js", "types": "index.d.ts" }
+```
+
+`paquetes/mini-auth/index.js`:
+
+```js
+// Una librería de sesiones: guarda en el usuario los campos que le pases
+export function usuarioActual() {
+  return { id: "u1", email: "ana@example.com", rol: "admin" };
+}
+```
+
+`paquetes/mini-auth/index.d.ts`:
+
+```ts
+export interface Usuario {
+  id: string;
+  email: string;
+}
+export declare function usuarioActual(): Usuario;
+```
+
+Instálalos (npm crea un enlace a cada carpeta) y úsalos en `src/a1/22-modulos.ts`:
+
+```bash
+npm install ./paquetes/km-formato ./paquetes/mini-auth
+```
+
+```ts
+// Archivo: src/a1/22-modulos.ts
+import { formatearKm } from "km-formato";
+import { usuarioActual } from "mini-auth";
+
+console.log(formatearKm(8.456));
+const usuario = usuarioActual();
+console.log(usuario.email, usuario.rol);
+```
+
+```text
+src/a1/22-modulos.ts(2,29): error TS7016: Could not find a declaration file for module 'km-formato'. 'paquetes/km-formato/index.js' implicitly has an 'any' type.
+src/a1/22-modulos.ts(7,36): error TS2339: Property 'rol' does not exist on type 'Usuario'.
+```
+
+Al ejecutarlo funciona (`npm start -- src/a1/22-modulos.ts` escribe `8,5 km` y `ana@example.com admin`), pero TypeScript da dos errores distintos:
+
+- **`TS7016`: `km-formato` no tiene tipos**, y con `strict` todo lo que exporta sería `any`. Si existiera un paquete `@types/km-formato` (DefinitelyTyped), se instalaría ese. Si no, se **declara** el módulo.
+- **`TS2339`: `Usuario` no tiene `rol`**, aunque al ejecutar está. Hay que **ampliar** la interfaz de la librería.
+
+La declaración, `src/tipos/km-formato.d.ts`:
+
+```ts
+// Archivo: src/tipos/km-formato.d.ts
+// Los tipos de una librería que no trae los suyos: se declara el módulo entero
+declare module "km-formato" {
+  /** "8,5 km": con coma decimal y el número de decimales indicado (1 por defecto) */
+  export function formatearKm(km: number, decimales?: number): string;
+}
+```
+
+Y la ampliación, `src/tipos/mini-auth.d.ts`:
+
+```ts
+// Archivo: src/tipos/mini-auth.d.ts
+// Ampliar los tipos de una librería que SÍ trae los suyos: se añade un campo a su interfaz
+import "mini-auth"; // este import convierte el archivo en una ampliación, no en una declaración nueva
+
+declare module "mini-auth" {
+  interface Usuario {
+    rol?: "user" | "admin";
+  }
+}
+```
+
+`npm run typecheck`: sin errores. Y ahora los tipos protegen. Añade al final de `22-modulos.ts`:
+
+```ts
+formatearKm("8,5");
+usuarioActual().rol === "superadmin";
+```
+
+```text
+src/a1/22-modulos.ts(9,13): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.
+src/a1/22-modulos.ts(10,1): error TS2367: This comparison appears to be unintentional because the types '"admin" | "user" | undefined' and '"superadmin"' have no overlap.
+```
+
+Borra las dos líneas. La diferencia entre declarar y ampliar está en **una línea**: el `import "mini-auth"` del archivo de la ampliación. Quítalo y vuelve a comprobar:
+
+```text
+src/a1/22-modulos.ts(3,10): error TS2305: Module '"mini-auth"' has no exported member 'usuarioActual'.
+```
+
+Sin el `import`, el `.d.ts` no es un módulo, y su `declare module "mini-auth"` ya no **amplía** el módulo real: lo **sustituye** por una declaración nueva que solo tiene la interfaz `Usuario`. `usuarioActual` desaparece. Vuelve a poner el `import`.
+
+Esta plataforma usa las dos formas de ampliar lo global: `src/env.d.ts` amplía el espacio de nombres `App` de Astro (`declare namespace App { interface Locals { user…; session… } }`), que es de donde sale el tipo de `Astro.locals`; y `src/lib/mongo.ts` declara con `declare global` la variable que guarda el cliente de MongoDB entre recargas.
+
+<Callout type="risk">
+
+- **Una ampliación solo cambia los tipos, nunca el comportamiento:** si `mini-auth` no guardara `rol`, el tipo diría que existe y valdría `undefined`. Con Better Auth, los campos propios se declaran en su configuración (`additionalFields`, I5.2), que los guarda **y** genera los tipos: es mejor que ampliar `User` a mano.
+- **Un `.d.ts` escrito a mano no se comprueba contra el JavaScript:** si `formatearKm` cambia de parámetros en una versión nueva, tu declaración seguirá diciendo lo antiguo. Revísalo al actualizar la librería.
+
+</Callout>
+
+## Paso 3: medir el compilador
+
+`npm run typecheck` (`tsc --noEmit`) comprueba sin generar archivos. Con **`--extendedDiagnostics`**, además, dice cuánto le ha costado: archivos, tipos creados, instanciaciones de genéricos, memoria y tiempo de cada fase. En el `ts-playground`, tres ejecuciones, y otras tres después de añadir un solo tipo caro, la plantilla de 90.000 combinaciones de A1.3. `src/a1/23-caro.ts`:
+
+```ts
+// Archivo: src/a1/23-caro.ts
+// Un tipo caro a propósito: una plantilla de 90.000 combinaciones (A1.3)
+type D = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type Codigo = `${D}${D}${D}${D}${"0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8"}`;
+
+export const codigo: Codigo = "12345";
+```
+
+```bash
+npx tsc --noEmit --extendedDiagnostics
+```
+
+```text
+Sin el tipo caro:
+Types: 17176 Instantiations: 38066 Memory used: 40330K Check time: 0.011s Total time: 0.032s
+Types: 17176 Instantiations: 38066 Memory used: 40259K Check time: 0.010s Total time: 0.030s
+Types: 17176 Instantiations: 38066 Memory used: 40266K Check time: 0.012s Total time: 0.031s
+Con 23-caro.ts:
+Types: 118290 Instantiations: 38066 Memory used: 62353K Check time: 0.064s Total time: 0.088s
+Types: 118290 Instantiations: 38066 Memory used: 62351K Check time: 0.066s Total time: 0.088s
+Types: 118290 Instantiations: 38066 Memory used: 62316K Check time: 0.069s Total time: 0.093s
+```
+
+**Una línea de tipo multiplica por siete los tipos creados** (de 17.176 a 118.290), añade unos 22 MB de memoria y multiplica por seis el tiempo de comprobación. Con TypeScript 7 siguen siendo milisegundos, pero el editor hace este trabajo cada vez que escribes. Borra `23-caro.ts`.
+
+Y un proyecto real, esta plataforma, con el TypeScript 6 que usa y con TypeScript 7 solo para comparar (`npx -p typescript@7.0.2 tsc …`):
+
+```text
+TypeScript 6.0.3 (el del proyecto):
+Files: 1635 Types: 74457 Instantiations: 233247 Memory used: 493244K Check time: 0.62s Total time: 1.56s
+Files: 1635 Types: 74457 Instantiations: 233247 Memory used: 479728K Check time: 0.62s Total time: 1.28s
+TypeScript 7.0.2:
+Files: 1635 Types: 150618 Instantiations: 390707 Memory used: 357264K Check time: 0.159s Total time: 0.257s
+Files: 1635 Types: 150618 Instantiations: 390707 Memory used: 357320K Check time: 0.174s Total time: 0.247s
+```
+
+- **1.635 archivos** (casi todos, tipos de las dependencias) en algo más de un segundo con TypeScript 6, y en un cuarto de segundo con TypeScript 7, el compilador reescrito en Go. Ninguno encontró errores.
+- **El número de tipos no se compara entre versiones:** TypeScript 7 cuenta de otra forma. Compara siempre con la misma versión, antes y después de un cambio.
+- **`tsc` no comprueba los `.astro`:** eso lo hace `astro check` (`npm run check`), que usa TypeScript por debajo.
+
+Si un proyecto se vuelve lento, **`--generateTrace <carpeta>`** graba qué tipos se comprobaron y cuánto costó cada uno (en el `ts-playground`, seis archivos y 15 MB). Es un JSON con el formato de trazas de Chrome: se abre en `chrome://tracing` o en Perfetto, y muestra en una línea de tiempo qué archivo y qué tipo se llevaron el tiempo.
+
+<Callout type="risk">
+
+- **Mide antes de optimizar:** casi siempre un proyecto lento lo es por un tipo concreto (una unión enorme, una recursión profunda), no por su tamaño. `--extendedDiagnostics` antes y después de un cambio dice si ese cambio fue el culpable.
+- **`skipLibCheck: true`** (que tienen el `ts-playground` y `astro/tsconfigs/base.json`) no comprueba los `.d.ts` de las dependencias, solo usa sus tipos. Ahorra mucho tiempo; el precio es que un error dentro de una librería no se detecta.
+
+</Callout>
+
+## Paso 4: cuándo parar
+
+Un tipo merece su complejidad cuando **impide errores reales** que una solución más sencilla no impediría. Compara dos formas de construir URLs con parámetros, `src/a1/24-cuando-parar.ts`:
+
+```ts
+// Archivo: src/a1/24-cuando-parar.ts
+// Dos formas de construir una URL con parámetros: la ingeniosa y la sencilla
+
+// 1. Ingeniosa: los parámetros se sacan del propio patrón con infer y recursión (A1.1 y A1.3)
+type ParamsDe<P extends string> = P extends `${string}:${infer Param}/${infer Resto}`
+  ? { [K in Param | keyof ParamsDe<`/${Resto}`>]: string }
+  : P extends `${string}:${infer Param}`
+    ? { [K in Param]: string }
+    : {};
+
+function ruta<P extends string>(patron: P, params: ParamsDe<P>): string {
+  return patron.replace(/:(\w+)/g, (_, nombre: string) => (params as Record<string, string>)[nombre] ?? "");
+}
+
+// 2. Sencilla: una función por ruta, con sus parámetros escritos
+const rutas = {
+  curso: (slug: string) => `/cursos/${slug}`,
+  seccion: (slug: string, seccion: string) => `/cursos/${slug}/${seccion}`,
+};
+
+console.log(ruta("/cursos/:slug/:seccion", { slug: "testing", seccion: "01-por-que" }));
+console.log(rutas.seccion("testing", "01-por-que"));
+```
+
+```text
+/cursos/testing/01-por-que
+/cursos/testing/01-por-que
+```
+
+Las dos funcionan, y las dos detectan un parámetro que falta. Añade al final:
+
+```ts
+ruta("/cursos/:slug/:seccion", { slug: "testing" });
+rutas.seccion("testing");
+```
+
+```text
+src/a1/24-cuando-parar.ts(24,32): error TS2741: Property 'seccion' is missing in type '{ slug: string; }' but required in type '{ seccion: string; slug: string; }'.
+src/a1/24-cuando-parar.ts(25,7): error TS2554: Expected 2 arguments, but got 1.
+```
+
+Los dos errores son claros. Pero prueba un patrón algo distinto, una extensión detrás del parámetro:
+
+```ts
+console.log(ruta("/descargas/:archivo.pdf", { archivo: "temario" }));
+```
+
+```text
+src/a1/24-cuando-parar.ts(24,47): error TS2353: Object literal may only specify known properties, and 'archivo' does not exist in type '{ "archivo.pdf": string; }'.
+```
+
+**El tipo y la implementación no están de acuerdo.** El tipo saca el nombre del parámetro con una plantilla (`archivo.pdf`, todo lo que hay detrás de los dos puntos); la expresión regular de la implementación, con `\w+` (`archivo`). La llamada correcta es un error, y la que el tipo acepta, `{ "archivo.pdf": "temario" }`, compila y genera una URL rota:
+
+```text
+/descargas/.pdf
+```
+
+Ese es el coste real de los tipos ingeniosos: son **un segundo programa**, escrito en un lenguaje con menos herramientas (sin depurador, sin `console.log`), que tiene que coincidir con el primero. La versión sencilla no puede desincronizarse, porque no repite nada.
+
+Señales de que un tipo ha dejado de compensar:
+
+- **Nadie del equipo puede cambiarlo** sin la persona que lo escribió.
+- **Repite lógica de la implementación** (un _parser_ de rutas, de formatos), y se puede desincronizar.
+- **Necesita `as` por todas partes** para que el código que lo usa compile.
+- **Ralentiza el editor** de forma que se nota al escribir.
+- **Protege de un error que nunca has tenido.**
+
+<Callout type="risk">
+
+- **Los tipos de las librerías pueden ser complejos; los de tu app, mejor que no:** Zod o tRPC compensan su complejidad porque los usan millones de proyectos y tienen sus propios tests de tipos. En tu código, un tipo que solo tú entiendes es una deuda.
+- **Si un tipo ingenioso se queda, pruébalo como el código:** con tests de tipos (`Igual`, A1.1) para los casos normales **y** para los límite, como la extensión de este ejemplo.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Toma el error de tipos más largo que encuentres en tu proyecto y explícalo línea por línea, de abajo arriba.
+2. Di cuál es la causa, dónde está y cómo se arregla sin `as`.
+
+</Callout>
+
+Solución. Un error de la app de entrenos de I3–I8 (con su TypeScript 6.0.3): en `FormRegistro.tsx`, el formulario de registro usa por error el esquema del formulario de entrada:
+
+```tsx
+    handleSubmit,
+    formState: { errors, isSubmitting },
+  } = useForm<RegistroInput>({ resolver: zodResolver(EntrarSchema), mode: "onBlur" });
+```
+
+```text
+src/components/FormRegistro.tsx(16,32): error TS2322: Type 'Resolver<{ email: string; password: string; }>' is not assignable to type 'Resolver<{ nombre: string; email: string; password: string; }, any, { nombre: string; email: string; password: string; }>'.
+  Types of parameters 'options' and 'options' are incompatible.
+    Type 'ResolverOptions<{ nombre: string; email: string; password: string; }>' is not assignable to type 'ResolverOptions<{ email: string; password: string; }>'.
+      Types of property 'names' are incompatible.
+        Type '("email" | "nombre" | "password")[] | undefined' is not assignable to type '("email" | "password")[] | undefined'.
+          Type '("email" | "nombre" | "password")[]' is not assignable to type '("email" | "password")[]'.
+            Type '"email" | "nombre" | "password"' is not assignable to type '"email" | "password"'.
+              Type '"nombre"' is not assignable to type '"email" | "password"'.
+```
+
+De abajo arriba:
+
+1. **`Type '"nombre"' is not assignable to type '"email" | "password"'`:** la causa. El campo `nombre` no existe en algún sitio donde solo hay `email` y `password`.
+2. **La unión `"email" | "nombre" | "password"` no cabe en `"email" | "password"`:** los nombres de los campos del formulario (con `nombre`) frente a los del esquema (sin él).
+3. **Los mismos nombres, como arrays (`(…)[]`), y luego como `… | undefined`:** la propiedad `names` de las opciones del _resolver_, que es una lista opcional de campos.
+4. **`Types of property 'names' are incompatible`:** dónde está, en las opciones.
+5. **`ResolverOptions<{ nombre; email; password }>` frente a `ResolverOptions<{ email; password }>`:** las opciones del formulario de registro frente a las del de entrada.
+6. **`Types of parameters 'options' and 'options' are incompatible`:** el _resolver_ es una función, y sus parámetros no encajan.
+7. **La primera línea:** `zodResolver(EntrarSchema)` da un `Resolver<{ email; password }>`, y el formulario espera un `Resolver<{ nombre; email; password }>`.
+
+**La causa:** el esquema del _resolver_ no corresponde al formulario: `EntrarSchema` no tiene `nombre`. **El arreglo:** `zodResolver(RegistroSchema)`. Nueve líneas para decir "este esquema no es el de este formulario", y la respuesta estaba en la última.
+
+<Callout type="risk">
+
+- **El error señala la línea del `resolver`, no la del esquema:** si el esquema se importara de otro archivo, el fallo estaría lejos de donde aparece el error. Sigue la cadena hasta el tipo que no encaja.
+- **Copia el error entero antes de buscarlo:** la primera línea es demasiado específica (con tus tipos) para encontrarla en internet; las del medio (`Types of parameters 'options' and 'options' are incompatible`) suelen llevar a la explicación.
+
+</Callout>
+
+<Callout type="mastery">
+
+Un error de tipos de treinta líneas no te bloquea: lo lees de abajo arriba (causa, dónde, en qué asignación), desconfías de "the last overload", declaras los tipos de una librería que no los trae y amplías los de otra (con el `import` que distingue ampliar de sustituir), mides el compilador con `--extendedDiagnostics` antes de culpar al proyecto, y sabes parar cuando un tipo repite la lógica del código o nadie más lo entiende.
+
+</Callout>
+
+## Resumen
+
+- Un error largo se lee de abajo arriba: la última línea es la causa. En las sobrecargas, "the last overload" puede no ser la tuya.
+- Librería sin tipos: `@types/…` o `declare module "x" { … }` en un `.d.ts`. Librería con tipos incompletos: ampliación, con un `import "x"` en el archivo; sin él, la declaración sustituye al módulo.
+- Las ampliaciones solo cambian tipos. Para Better Auth, `additionalFields`.
+- `tsc --noEmit --extendedDiagnostics` mide tipos, instanciaciones, memoria y tiempo; `--generateTrace` señala el tipo culpable. Una unión de 90.000 miembros multiplicó por siete los tipos.
+- Un tipo ingenioso es un segundo programa que tiene que coincidir con el primero: si repite lógica, se desincroniza.
