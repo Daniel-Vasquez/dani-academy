@@ -1,0 +1,424 @@
+---
+sectionId: "A1.3"
+course: "A1"
+title: "Template literal types"
+order: 3
+minutes: 60
+summary: "Construyes tipos de texto con plantillas, usas Uppercase y Capitalize, descubres que ${number} acepta 1e3 y 1.5, tipas los IDs de la plataforma como su expresión regular y escribes un bus de eventos tipado."
+---
+
+Muchos textos de una app tienen formato: los IDs de esta plataforma (`B1`, `I8.12`), los nombres de los eventos (`progreso:marcado`), las rutas (`/cursos/testing`), las variables de entorno (`PUBLIC_NOMBRE_APP`). Para TypeScript, todos son `string`, y un `"B9.1"` o un `"progreso:marcdo"` pasan sin queja hasta que algo falla al ejecutar. Los **_template literal types_** son tipos de texto construidos con la misma sintaxis que las plantillas de JavaScript (`` `${a}-${b}` ``), y permiten que el compilador compruebe ese formato. En esta sección vas a construirlos, a medir hasta dónde llegan (y dónde se quedan cortos), y a tipar un sistema de eventos en el que el nombre del evento decide qué datos lleva.
+
+**Lo que tendrás al terminar:** los IDs de curso y de sección de la plataforma como tipos, que coinciden con su expresión regular; un bus de eventos tipado con `on`, `emit` y grupos de eventos, y el evento del navegador de esta plataforma, tipado sin conversiones.
+
+**Requisitos:** las secciones A1.1 y A1.2, con `src/a1/pruebas.ts`.
+
+## Paso 1: plantillas, combinaciones y mayúsculas
+
+Un _template literal type_ se escribe como una plantilla de JavaScript, pero con tipos dentro de `${}`. Si dentro hay uniones, el resultado tiene **todas las combinaciones**. Crea `src/a1/12-plantillas.ts`:
+
+```ts
+// Archivo: src/a1/12-plantillas.ts
+// Template literal types: tipos de texto construidos con la sintaxis de las plantillas de JavaScript
+import type { Afirmar, Igual } from "./pruebas";
+
+type TipoEntreno = "fuerza" | "running" | "movilidad";
+type Accion = "creado" | "borrado";
+
+// 1. Componer: con uniones, salen TODAS las combinaciones (3 × 2 = 6)
+type EventoEntreno = `entreno:${TipoEntreno}:${Accion}`;
+
+// 2. Los cuatro modificadores de texto que trae TypeScript
+type Mayus = Uppercase<"running">; // "RUNNING"
+type Minus = Lowercase<"RUNNING">; // "running"
+type Capital = Capitalize<"running">; // "Running"
+type SinCapital = Uncapitalize<"Running">; // "running"
+
+// Un uso real: el nombre de una variable de entorno a partir de una clave
+type VariableEnv<K extends string> = `PUBLIC_${Uppercase<K>}`;
+
+// 3. infer dentro de una plantilla: separar un texto por sus partes (A1.1)
+type Partes<T extends string> = T extends `${infer Grupo}:${infer Resto}` ? [Grupo, ...Partes<Resto>] : [T];
+
+function evento<T extends TipoEntreno, A extends Accion>(tipo: T, accion: A): `entreno:${T}:${A}` {
+  return `entreno:${tipo}:${accion}`; // TypeScript comprueba que el texto tiene esa forma
+}
+
+const e = evento("running", "creado");
+console.log(e, e.split(":"));
+
+type _pruebas = [
+  Afirmar<Igual<EventoEntreno, "entreno:fuerza:creado" | "entreno:fuerza:borrado" | "entreno:running:creado" | "entreno:running:borrado" | "entreno:movilidad:creado" | "entreno:movilidad:borrado">>,
+  Afirmar<Igual<[Mayus, Minus, Capital, SinCapital], ["RUNNING", "running", "Running", "running"]>>,
+  Afirmar<Igual<VariableEnv<"nombre_app">, "PUBLIC_NOMBRE_APP">>,
+  Afirmar<Igual<typeof e, "entreno:running:creado">>,
+  Afirmar<Igual<Partes<"entreno:running:creado">, ["entreno", "running", "creado"]>>,
+];
+```
+
+```bash
+npm run typecheck
+npm start -- src/a1/12-plantillas.ts
+```
+
+```text
+entreno:running:creado [ 'entreno', 'running', 'creado' ]
+```
+
+- **Tres tipos de entreno por dos acciones dan seis eventos:** TypeScript multiplica las uniones. Escribirlas a mano sería repetirlas, y olvidarse una al añadir un tipo de entreno.
+- **`Uppercase`, `Lowercase`, `Capitalize` y `Uncapitalize`** son los cuatro tipos de texto que trae TypeScript. No se pueden escribir con lo que ya sabes: el compilador los implementa por dentro (en `lib.es5.d.ts` aparecen como `intrinsic`).
+- **`infer` dentro de una plantilla separa un texto:** `` `${infer Grupo}:${infer Resto}` `` captura lo que hay antes y después de los dos puntos. Con recursión (A1.1), `Partes` trocea el nombre entero, como un `split(":")` que se ejecuta al compilar.
+- **La función `evento` devuelve exactamente** `"entreno:running:creado"`, no un `string`: el tipo de retorno se calcula a partir de sus argumentos.
+
+Añade al final:
+
+```ts
+const mal1: EventoEntreno = "entreno:natacion:creado";
+const mal2: EventoEntreno = "entreno:running:editado";
+```
+
+```text
+src/a1/12-plantillas.ts(38,7): error TS2820: Type '"entreno:natacion:creado"' is not assignable to type '"entreno:fuerza:borrado" | "entreno:fuerza:creado" | "entreno:movilidad:borrado" | "entreno:movilidad:creado" | "entreno:running:borrado" | "entreno:running:creado"'. Did you mean '"entreno:running:creado"'?
+src/a1/12-plantillas.ts(39,7): error TS2820: Type '"entreno:running:editado"' is not assignable to type '"entreno:fuerza:borrado" | "entreno:fuerza:creado" | "entreno:movilidad:borrado" | "entreno:movilidad:creado" | "entreno:running:borrado" | "entreno:running:creado"'. Did you mean '"entreno:running:creado"'?
+```
+
+El error enumera los seis válidos y, como el texto se parece a uno de ellos, sugiere el más cercano (`Did you mean…?`). Borra las dos líneas.
+
+<Callout type="risk">
+
+- **Las combinaciones crecen muy rápido:** tres uniones de diez miembros dan mil. Con TypeScript 7, una plantilla de 90.000 combinaciones todavía compila; con 100.000, da `error TS2590: Expression produces a union type that is too complex to represent`. Y bastante antes, el editor se vuelve lento. Para formatos abiertos (cualquier texto, cualquier número) usa `string` o `number` dentro de la plantilla, como en el Paso 2.
+- **El primer `infer` de una plantilla se queda con lo mínimo:** con `"a:b:c"`, `` `${infer A}:${infer B}` `` da `A = "a"` y `B = "b:c"` (se corta en los **primeros** dos puntos). Por eso `Partes` se llama a sí mismo con el resto.
+
+</Callout>
+
+## Paso 2: los IDs de la plataforma, como tipos
+
+Los IDs de esta plataforma tienen un formato fijo: un nivel (`B`, `I` o `A`) y un número del 1 al 8, o `P1`; y las secciones, el curso, un punto y el número de sección (`B1.3`, `I8.12`). La plataforma los comprueba **al ejecutar** con dos expresiones regulares, en `src/lib/constants.ts`:
+
+```ts
+export const COURSE_ID_REGEX = /^([BIA][1-8]|P1)$/;
+export const SECTION_ID_REGEX = /^([BIA][1-8]|P1)\.\d{1,2}$/;
+```
+
+Pero en el código son `string`. La primera idea para tiparlos es `` `${CursoId}.${number}` ``. Antes de usarla, mide qué acepta, frente a la expresión regular y frente a una versión que solo admite uno o dos dígitos:
+
+```text
+texto         ${number}   SeccionId   regex
+B1.3          acepta      acepta      acepta
+B1.03         acepta      acepta      acepta
+B1.1e3        acepta      rechaza     rechaza
+B1.-2         acepta      rechaza     rechaza
+B1.1.5        acepta      rechaza     rechaza
+B1.0x1F       acepta      rechaza     rechaza
+B1. 5         acepta      rechaza     rechaza
+B1.           rechaza     rechaza     rechaza
+B1.Infinity   rechaza     rechaza     rechaza
+B1.123        acepta      rechaza     rechaza
+B9.1          rechaza     rechaza     rechaza
+P1.8          acepta      acepta      acepta
+```
+
+**`${number}` acepta siete textos que no son IDs válidos:** `B1.1e3`, `B1.-2`, `B1.1.5`, `B1.0x1F`, `B1. 5` y `B1.123`. Para TypeScript, `${number}` significa "cualquier texto que JavaScript lea como un número", y `"1e3"`, `"-2"`, `"1.5"` o `"0x1F"` lo son. La versión con dígitos coincide con la expresión regular en los doce casos. Crea `src/a1/ids.ts`:
+
+```ts
+// Archivo: src/a1/ids.ts
+// Los IDs de la plataforma como tipos: "B1", "I8", "P1"… y "B1.3", "I8.12"…
+type Nivel = "B" | "I" | "A";
+type Digito = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+
+export type CursoId = `${Nivel}${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8}` | "P1";
+
+/** La primera idea: cualquier número detrás del punto */
+export type SeccionIdLaxo = `${CursoId}.${number}`;
+
+/** Uno o dos dígitos, como la expresión regular de la plataforma: \d{1,2} */
+export type SeccionId = `${CursoId}.${Digito}` | `${CursoId}.${Digito}${Digito}`;
+
+/** La expresión regular de src/lib/constants.ts: para los textos que llegan de fuera */
+const SECTION_ID_REGEX = /^([BIA][1-8]|P1)\.\d{1,2}$/;
+
+/** Un texto cualquiera (de una URL, de la base de datos) pasa a SeccionId solo si cumple el formato */
+export function esSeccionId(texto: string): texto is SeccionId {
+  return SECTION_ID_REGEX.test(texto);
+}
+
+/** El curso de una sección, sacado del propio tipo: cursoDe("B1.3") es "B1" */
+export type CursoDe<S extends SeccionId> = S extends `${infer C extends CursoId}.${string}` ? C : never;
+
+export function cursoDe<S extends SeccionId>(seccion: S): CursoDe<S> {
+  return seccion.split(".")[0] as CursoDe<S>;
+}
+```
+
+Y úsalos, `src/a1/13-ids.ts`:
+
+```ts
+// Archivo: src/a1/13-ids.ts
+// Que el compilador detecte un ID con formato incorrecto
+import { cursoDe, esSeccionId, type CursoId, type SeccionId, type SeccionIdLaxo } from "./ids";
+import type { Afirmar, Igual } from "./pruebas";
+
+const buenas: SeccionId[] = ["B1.3", "I8.12", "P1.8", "A1.03"];
+const laxas: SeccionIdLaxo[] = ["B1.1e3", "B1.-2", "B1.1.5", "B1.0x1F"]; // ¡todas válidas con ${number}!
+console.log(buenas, laxas);
+
+// Un ID escrito en el código: el formato se comprueba al compilar
+const curso = cursoDe("I8.2"); // tipo "I8"
+console.log("curso de I8.2:", curso);
+
+// Un ID que llega de fuera (la URL): al compilar es un string; se comprueba al ejecutar
+const deLaUrl: string = "B1.1e3";
+if (esSeccionId(deLaUrl)) {
+  console.log("válido:", cursoDe(deLaUrl)); // dentro del if, deLaUrl es SeccionId
+} else {
+  console.log("formato incorrecto:", deLaUrl);
+}
+
+type _pruebas = [Afirmar<Igual<typeof curso, "I8">>, Afirmar<Igual<CursoId, "B1" | "B2" | "B3" | "B4" | "B5" | "B6" | "B7" | "B8" | "I1" | "I2" | "I3" | "I4" | "I5" | "I6" | "I7" | "I8" | "A1" | "A2" | "A3" | "A4" | "A5" | "A6" | "A7" | "A8" | "P1">>];
+```
+
+```text
+[ 'B1.3', 'I8.12', 'P1.8', 'A1.03' ] [ 'B1.1e3', 'B1.-2', 'B1.1.5', 'B1.0x1F' ]
+curso de I8.2: I8
+formato incorrecto: B1.1e3
+```
+
+- **Un ID escrito en el código se comprueba al compilar:** `cursoDe("I8.2")` devuelve el tipo `"I8"`, sacado del propio texto con `` `${infer C extends CursoId}.${string}` ``. El `extends CursoId` dentro del `infer` restringe lo capturado: solo vale un curso.
+- **Un ID que llega de fuera (la URL, la base de datos) es un `string`**, y ningún tipo lo comprueba al ejecutar. `esSeccionId` usa la expresión regular y es un _type guard_ (B1.6): dentro del `if`, TypeScript ya lo trata como `SeccionId`.
+- **El tipo y la expresión regular describen lo mismo**, cada uno en su momento: el tipo al compilar, la expresión regular al ejecutar.
+
+Añade al final:
+
+```ts
+const mal: SeccionId[] = ["B1.1e3", "B1.-2", "B1.1.5", "B1.123", "B9.1", "X1.3"];
+cursoDe("B1");
+```
+
+```text
+src/a1/13-ids.ts(24,27): error TS2820: Type '"B1.1e3"' is not assignable to type 'SeccionId'. Did you mean '"B1.13"'?
+src/a1/13-ids.ts(24,37): error TS2820: Type '"B1.-2"' is not assignable to type 'SeccionId'. Did you mean '"B1.2"'?
+src/a1/13-ids.ts(24,46): error TS2820: Type '"B1.1.5"' is not assignable to type 'SeccionId'. Did you mean '"B1.15"'?
+src/a1/13-ids.ts(24,56): error TS2820: Type '"B1.123"' is not assignable to type 'SeccionId'. Did you mean '"B1.12"'?
+src/a1/13-ids.ts(24,66): error TS2322: Type '"B9.1"' is not assignable to type 'SeccionId'.
+src/a1/13-ids.ts(24,74): error TS2322: Type '"X1.3"' is not assignable to type 'SeccionId'.
+src/a1/13-ids.ts(25,9): error TS2345: Argument of type '"B1"' is not assignable to parameter of type 'SeccionId'.
+```
+
+Los seis IDs incorrectos y el curso pasado como sección son errores al compilar. Borra las dos líneas.
+
+<Callout type="risk">
+
+- **Un tipo no valida datos:** los IDs que llegan en una petición siguen necesitando la expresión regular (o un esquema de Zod con ella). El tipo solo protege lo que escribes en el código, y lo que ha pasado por `esSeccionId`.
+- **Si cambias el formato, cambia los dos:** el tipo y la expresión regular son dos descripciones del mismo formato y se pueden desincronizar. La tabla de arriba es un buen test: los mismos textos, con los dos.
+- **La versión con dígitos genera muchas combinaciones** (25 cursos × 110 números = 2.750). Está muy por debajo del límite, pero no la extiendas a tres dígitos sin medir cómo responde el editor.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Tipa un sistema de eventos `on("progreso:marcado", manejador)` en el que el tipo del _payload_ dependa del nombre del evento, con su `emit`.
+2. Añade una forma de escuchar todos los eventos de un grupo (`progreso:*`), con los grupos y sus eventos sacados de los nombres con _template literal types_.
+3. Comprueba que un evento que no existe, un _payload_ incompleto o un dato con formato incorrecto son errores al compilar.
+
+</Callout>
+
+Solución. El catálogo de eventos es una interfaz: cada nombre, con su _payload_. `on` y `emit` usan su clave como genérico, y el tipo del _payload_ sale de `Eventos[E]` (acceso por índice, I1.2). `src/a1/eventos.ts`:
+
+```ts
+// Archivo: src/a1/eventos.ts
+// Un bus de eventos tipado: el nombre del evento decide el tipo de su payload
+import type { CursoId, SeccionId } from "./ids";
+
+/** El catálogo: cada evento, con su payload. Es la única fuente de verdad */
+export interface Eventos {
+  "progreso:marcado": { seccion: SeccionId; leida: boolean };
+  "progreso:completado": { curso: CursoId };
+  "quiz:enviado": { curso: CursoId; aciertos: number; total: number };
+  "tema:cambiado": { tema: "light" | "dark" };
+}
+
+export type NombreEvento = keyof Eventos;
+
+/** Los eventos de un grupo: EventosDe<"progreso"> = "progreso:marcado" | "progreso:completado" */
+export type EventosDe<G extends string> = Extract<NombreEvento, `${G}:${string}`>;
+
+/** Los grupos que existen, sacados de los nombres: "progreso" | "quiz" | "tema" */
+export type Grupo = NombreEvento extends `${infer G}:${string}` ? G : never;
+
+type Manejador<E extends NombreEvento> = (payload: Eventos[E]) => void;
+
+const manejadores = new Map<NombreEvento, Set<(payload: never) => void>>();
+
+/** Escucha un evento. Devuelve una función para dejar de escucharlo */
+export function on<E extends NombreEvento>(evento: E, manejador: Manejador<E>): () => void {
+  const lista = manejadores.get(evento) ?? new Set();
+  lista.add(manejador);
+  manejadores.set(evento, lista);
+  return () => lista.delete(manejador);
+}
+
+/** Emite un evento: el payload tiene que ser el de ese evento */
+export function emit<E extends NombreEvento>(evento: E, payload: Eventos[E]): void {
+  for (const manejador of manejadores.get(evento) ?? []) (manejador as Manejador<E>)(payload);
+}
+
+/** Escucha todos los eventos de un grupo, con el nombre de cada uno */
+export function onGrupo<G extends Grupo>(grupo: G, manejador: (evento: EventosDe<G>, payload: Eventos[EventosDe<G>]) => void) {
+  const nombres = ["progreso:marcado", "progreso:completado", "quiz:enviado", "tema:cambiado"] satisfies NombreEvento[];
+  const cancelar = nombres
+    .filter((n): n is EventosDe<G> => n.startsWith(`${grupo}:`))
+    .map((n) => on(n, (payload) => manejador(n, payload as Eventos[EventosDe<G>])));
+  return () => cancelar.forEach((c) => c());
+}
+```
+
+Y en uso, `src/a1/14-ejercicio.ts`:
+
+```ts
+// Archivo: src/a1/14-ejercicio.ts
+// El bus en uso: cada manejador recibe el payload de SU evento, sin conversiones
+import { emit, on, onGrupo, type EventosDe, type Grupo } from "./eventos";
+import type { Afirmar, Igual } from "./pruebas";
+
+const dejar = on("progreso:marcado", ({ seccion, leida }) => {
+  // seccion es SeccionId y leida, boolean: TypeScript lo sabe por el nombre del evento
+  console.log(`[progreso:marcado] ${seccion} ${leida ? "leída" : "sin leer"}`);
+});
+
+on("quiz:enviado", ({ curso, aciertos, total }) => {
+  console.log(`[quiz:enviado] ${curso}: ${aciertos}/${total} (${Math.round((aciertos / total) * 100)} %)`);
+});
+
+onGrupo("progreso", (evento, payload) => console.log(`  (grupo progreso) ${evento}`, payload));
+
+emit("progreso:marcado", { seccion: "A1.3", leida: true });
+emit("quiz:enviado", { curso: "A1", aciertos: 4, total: 5 });
+emit("progreso:completado", { curso: "A1" });
+dejar(); // ya no escucha
+emit("progreso:marcado", { seccion: "A1.4", leida: true }); // solo lo recibe el del grupo
+
+type _pruebas = [
+  Afirmar<Igual<EventosDe<"progreso">, "progreso:marcado" | "progreso:completado">>,
+  Afirmar<Igual<Grupo, "progreso" | "quiz" | "tema">>,
+];
+```
+
+```text
+[progreso:marcado] A1.3 leída
+  (grupo progreso) progreso:marcado { seccion: 'A1.3', leida: true }
+[quiz:enviado] A1: 4/5 (80 %)
+  (grupo progreso) progreso:completado { curso: 'A1' }
+  (grupo progreso) progreso:marcado { seccion: 'A1.4', leida: true }
+```
+
+- **Cada manejador recibe el _payload_ de su evento:** en `progreso:marcado`, `seccion` es un `SeccionId` y `leida` un `boolean`, sin conversiones ni comprobaciones.
+- **`EventosDe<G>` usa `Extract` (A1.1) con una plantilla:** se queda con los nombres que empiezan por `` `${G}:` ``. **`Grupo` saca la parte de antes de los dos puntos** con `infer`, y se distribuye sobre la unión de nombres. Si añades un evento `perfil:editado` al catálogo, `"perfil"` aparece como grupo sin tocar nada más.
+- **`on` devuelve la función para dejar de escuchar:** después de `dejar()`, el último `progreso:marcado` solo lo recibe el manejador del grupo.
+
+Lo que no debe compilar. Añade al final:
+
+```ts
+emit("progreso:marcado", { seccion: "A1.3" });
+emit("progreso:marcado", { seccion: "A1.3x", leida: true });
+emit("tema:cambiado", { tema: "azul" });
+emit("progreso:borrado", { seccion: "A1.3" });
+on("quiz:enviado", ({ seccion }) => console.log(seccion));
+onGrupo("perfil", () => {});
+```
+
+```text
+src/a1/14-ejercicio.ts(28,26): error TS2741: Property 'leida' is missing in type '{ seccion: "A1.3"; }' but required in type '{ seccion: SeccionId; leida: boolean; }'.
+src/a1/14-ejercicio.ts(29,28): error TS2820: Type '"A1.3x"' is not assignable to type 'SeccionId'. Did you mean '"A1.3"'?
+src/a1/14-ejercicio.ts(30,25): error TS2322: Type '"azul"' is not assignable to type '"dark" | "light"'.
+src/a1/14-ejercicio.ts(31,6): error TS2345: Argument of type '"progreso:borrado"' is not assignable to parameter of type 'keyof Eventos'.
+src/a1/14-ejercicio.ts(32,23): error TS2339: Property 'seccion' does not exist on type '{ curso: CursoId; aciertos: number; total: number; }'.
+src/a1/14-ejercicio.ts(33,9): error TS2345: Argument of type '"perfil"' is not assignable to parameter of type '"progreso" | "quiz" | "tema"'.
+```
+
+Un _payload_ incompleto, un ID con formato incorrecto (con sugerencia), un tema que no existe, un evento que no existe, una propiedad de otro evento y un grupo que no existe: seis errores, todos al compilar.
+
+<Callout type="risk">
+
+- **Dentro de `on` y `emit` hacen falta dos conversiones:** el `Map` guarda manejadores de eventos distintos, y TypeScript no puede relacionar cada clave con su tipo de manejador. Es el precio de un contenedor genérico. Lo que importa es que las **firmas** de `on` y `emit` son exactas, que es lo que usa el resto del código.
+- **`onGrupo` repite la lista de nombres**, porque los tipos no existen al ejecutar y no se puede recorrer una interfaz. `satisfies NombreEvento[]` detecta una errata en la lista, pero no un evento que falte. Si el catálogo crece, defínelo como un objeto real (con `as const`, I1.2) y saca el tipo de él.
+
+</Callout>
+
+Y la aplicación directa a esta plataforma. El botón "Marcar como leído" avisa al índice lateral con un evento del navegador, `da:section-read`, y el índice lo recibe así:
+
+```ts
+document.addEventListener("da:section-read", (event) => {
+  const { sectionId, read } = (event as CustomEvent<ReadDetail>).detail;
+```
+
+El `as` está porque, para TypeScript, `da:section-read` es un evento desconocido. Pero los eventos del navegador también tienen un catálogo, `DocumentEventMap` (de ahí sale que `"click"` dé un `MouseEvent`), y se puede ampliar. `src/a1/15-dom.ts`:
+
+```ts
+// Archivo: src/a1/15-dom.ts
+// El mismo catálogo para los eventos del navegador: TypeScript lo une a los que ya conoce ("click", "keydown"…)
+import type { SeccionId } from "./ids";
+
+declare global {
+  interface DocumentEventMap {
+    "da:section-read": CustomEvent<{ sectionId: SeccionId; read: boolean }>;
+  }
+}
+
+// Escuchar: event.detail ya tiene su tipo, sin "as CustomEvent<…>"
+export function escucharLecturas() {
+  document.addEventListener("da:section-read", (event) => {
+    const { sectionId, read } = event.detail;
+    console.log(sectionId, read);
+  });
+}
+
+// Avisar: dispatchEvent acepta cualquier Event, y NO comprueba el detail. Esta función sí:
+// saca el tipo del detail del propio mapa, con infer (A1.1)
+type DetalleDe<K extends keyof DocumentEventMap> = DocumentEventMap[K] extends CustomEvent<infer D> ? D : never;
+
+export function avisar<K extends keyof DocumentEventMap>(tipo: K, detail: DetalleDe<K>) {
+  document.dispatchEvent(new CustomEvent(tipo, { detail }));
+}
+
+export const marcarLeida = (sectionId: SeccionId) => avisar("da:section-read", { sectionId, read: true });
+```
+
+`npm run typecheck`: sin errores. Para comprobar que funciona, añade al final:
+
+```ts
+document.addEventListener("da:section-read", (event) => event.detail.seccion);
+document.dispatchEvent(new CustomEvent("da:section-read", { detail: { seccion: "B1.1" } })); // compila: nadie lo comprueba
+avisar("da:section-read", { seccion: "B1.1" });
+```
+
+```text
+src/a1/15-dom.ts(29,70): error TS2339: Property 'seccion' does not exist on type '{ sectionId: SeccionId; read: boolean; }'.
+src/a1/15-dom.ts(31,29): error TS2353: Object literal may only specify known properties, and 'seccion' does not exist in type '{ sectionId: SeccionId; read: boolean; }'.
+```
+
+- **Al escuchar, `event.detail` tiene su tipo:** `seccion` no existe, y se detecta sin ningún `as`.
+- **Al avisar con `dispatchEvent` directamente, no se comprueba nada:** la segunda línea compila (por eso no sale en los errores), porque `dispatchEvent` acepta cualquier `Event`. La función `avisar` saca el tipo del `detail` del propio catálogo con `infer` (A1.1), y ahí sí da error.
+
+<Callout type="risk">
+
+- **La ampliación es global:** vale en todos los archivos del proyecto (los del `include` del `tsconfig.json`), aunque ninguno importe `15-dom.ts`. Comprobado: un archivo aparte que solo escucha `da:section-read` también ve `event.detail.sectionId`. Ponla en un único sitio conocido, junto a los demás tipos globales del proyecto.
+- **El catálogo dice qué lleva el evento, pero no lo garantiza:** cualquier código que haga `dispatchEvent` a mano puede mandar otra cosa. Que todos los avisos pasen por `avisar` es una convención del proyecto.
+
+</Callout>
+
+<Callout type="mastery">
+
+El compilador detecta un ID con formato incorrecto: construyes tipos de texto con plantillas y uniones, los transformas con `Uppercase` o `Capitalize`, los trozas con `infer`, sabes que `${number}` acepta `1e3` y `1.5` y escribes un formato exacto que coincide con la expresión regular de ejecución. Y tipas eventos (propios y del navegador) para que el nombre decida qué datos llevan.
+
+</Callout>
+
+## Resumen
+
+- `` `${A}-${B}` `` construye tipos de texto; con uniones, todas las combinaciones (cuidado con cuántas salen).
+- `Uppercase`, `Lowercase`, `Capitalize` y `Uncapitalize`, implementados por el compilador.
+- `` T extends `${infer A}:${infer B}` `` separa un texto; con recursión, entero.
+- `${number}` acepta cualquier texto numérico (`1e3`, `-2`, `1.5`, `0x1F`): para un formato exacto, uniones de dígitos.
+- Los tipos protegen el código; los datos de fuera siguen necesitando la expresión regular, con un _type guard_.
+- Un catálogo `interface Eventos { "grupo:nombre": Payload }` y `on<E extends keyof Eventos>`: el nombre decide el _payload_. `DocumentEventMap` se amplía igual.
