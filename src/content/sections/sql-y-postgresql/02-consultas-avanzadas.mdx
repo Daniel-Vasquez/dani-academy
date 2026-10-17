@@ -1,0 +1,709 @@
+---
+sectionId: "A3.2"
+course: "A3"
+title: "Consultas avanzadas"
+order: 2
+minutes: 75
+summary: "Con los datos reales de I4.5 en PostgreSQL, caes en las trampas de LEFT JOIN y NOT IN, usas CTE y funciones de ventana para el último de cada grupo, indexas jsonb y reproduces el panel de progreso con la misma salida."
+---
+
+En B4.3 escribiste `JOIN`, `LEFT JOIN` y `GROUP BY` para calcular el progreso de un usuario. Con eso se responde casi todo, pero las preguntas de una app real piden más: "la **última** evaluación de cada curso", "cuánto ha mejorado respecto al intento anterior", "la media de los últimos siete días". Y con consultas más largas aparecen trampas que devuelven resultados incorrectos **sin ningún error**. En esta sección vas a usar los mismos datos del panel de progreso de I4.5 (69 159 lecturas y 3 038 evaluaciones, exportados de MongoDB), a caer en esas trampas a propósito, a resolver "el último de cada grupo" con funciones de ventana, y a reproducir en SQL el panel de I4.5 con exactamente la misma salida.
+
+**Lo que tendrás al terminar:** los datos de I4.5 en una base `progreso` de PostgreSQL, una consulta de cada técnica (subconsultas, CTE, funciones de ventana, `jsonb`) y el panel de progreso en una sola consulta SQL, comparado con la agregación de MongoDB.
+
+**Requisitos:** la sección A3.1 (PostgreSQL y la carpeta `pg-lab`), y los datos de I4.5 en tu MongoDB (`mongo-academy`), con las MongoDB Database Tools de A2.5.
+
+## Paso 1: los datos de I4.5, en PostgreSQL
+
+`mongoexport` saca una colección a CSV, y `\copy` la carga en una tabla. Crea `exportar.sh` en `pg-lab`, con `MONGODB_URI` apuntando a la base de `mongo-academy` (`…/academy_lab`):
+
+```sh
+#!/bin/sh
+# Exporta de MongoDB los datos del panel de I4.5, en CSV, para cargarlos en PostgreSQL
+set -e
+mkdir -p datos
+mongoexport --uri="$MONGODB_URI" -c i4_cursos --type=csv --fields=_id,titulo,secciones -o datos/cursos.csv
+mongoexport --uri="$MONGODB_URI" -c i4_lecturas_b --type=csv --fields=userId,cursoId,seccionId,leidaEn -o datos/lecturas.csv
+mongoexport --uri="$MONGODB_URI" -c i4_evaluaciones --type=csv --fields=userId,cursoId,puntuacion,aprobado,fecha -o datos/evaluaciones.csv
+```
+
+```bash
+./exportar.sh
+sudo -u postgres createdb progreso
+```
+
+Las tablas y la carga, `10-cargar.sql`:
+
+```sql
+-- Archivo: 10-cargar.sql
+-- Los mismos datos del panel de progreso de I4.5, exportados de MongoDB con mongoexport --type=csv
+DROP TABLE IF EXISTS evaluaciones, lecturas, cursos;
+
+CREATE TABLE cursos (
+  id        text PRIMARY KEY,
+  titulo    text NOT NULL,
+  secciones integer NOT NULL CHECK (secciones > 0)
+);
+
+CREATE TABLE lecturas (
+  usuario_id text NOT NULL,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  seccion_id text NOT NULL,
+  leida_en   timestamptz NOT NULL,
+  PRIMARY KEY (usuario_id, seccion_id)
+);
+
+CREATE TABLE evaluaciones (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  usuario_id text NOT NULL,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  puntuacion smallint NOT NULL CHECK (puntuacion BETWEEN 0 AND 5),
+  aprobado   boolean NOT NULL,
+  fecha      timestamptz NOT NULL
+);
+
+\copy cursos FROM '/tmp/datos/cursos.csv' WITH (FORMAT csv, HEADER true)
+\copy lecturas FROM '/tmp/datos/lecturas.csv' WITH (FORMAT csv, HEADER true)
+\copy evaluaciones (usuario_id, curso_id, puntuacion, aprobado, fecha) FROM '/tmp/datos/evaluaciones.csv' WITH (FORMAT csv, HEADER true)
+
+-- Los índices de las consultas de esta sección (los mismos que en MongoDB, I4.5)
+CREATE INDEX ON lecturas (usuario_id, curso_id);
+CREATE INDEX ON evaluaciones (usuario_id, curso_id, fecha DESC);
+ANALYZE;
+
+SELECT (SELECT count(*) FROM cursos) AS cursos, (SELECT count(*) FROM lecturas) AS lecturas, (SELECT count(*) FROM evaluaciones) AS evaluaciones;
+```
+
+```bash
+sudo -u postgres psql -X -d progreso -f 10-cargar.sql
+```
+
+```text
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+COPY 24
+COPY 69159
+COPY 3038
+CREATE INDEX
+CREATE INDEX
+ANALYZE
+ cursos | lecturas | evaluaciones
+--------+----------+--------------
+     24 |    69159 |         3038
+(1 row)
+```
+
+Las 69 159 lecturas entraron sin ningún error, también la clave primaria `(usuario_id, seccion_id)`: en MongoDB no había ninguna lectura repetida. Si la hubiera habido, el `\copy` entero habría fallado, y lo habrías descubierto al migrar.
+
+<Callout type="risk">
+
+- **`\copy` carga desde tu equipo y `COPY` desde el servidor:** `\copy` (con barra) es de `psql`, lee el archivo donde está `psql` y lo envía. `COPY` sin barra lo lee el propio servidor, y en un servicio gestionado no tiene acceso a tus archivos.
+- **Un CSV no tiene tipos:** `fecha` llega como texto ISO y PostgreSQL lo convierte al tipo de la columna. Si una fila trae un formato raro, el `\copy` se detiene en esa línea y dice cuál es. Revisa las fechas y los booleanos al exportar.
+
+</Callout>
+
+## Paso 2: las trampas de `JOIN`, y `HAVING`
+
+`11-joins.sql`, con el progreso de `u_00007`:
+
+```sql
+-- Archivo: 11-joins.sql
+-- JOIN, LEFT JOIN y sus dos trampas, con el progreso de u_00007
+
+\echo '--- INNER JOIN: solo los cursos con alguna lectura'
+SELECT c.id, count(*) AS leidas
+FROM cursos c
+JOIN lecturas l ON l.curso_id = c.id
+WHERE l.usuario_id = 'u_00007'
+GROUP BY c.id
+ORDER BY c.id;
+
+\echo '--- Trampa 1: LEFT JOIN con el filtro en el WHERE (sigue siendo un INNER JOIN)'
+SELECT count(*) AS cursos FROM (
+  SELECT c.id FROM cursos c
+  LEFT JOIN lecturas l ON l.curso_id = c.id
+  WHERE l.usuario_id = 'u_00007'
+  GROUP BY c.id
+) t;
+
+\echo '--- El filtro en el ON: ahora sí, todos los cursos'
+SELECT count(*) AS cursos FROM (
+  SELECT c.id FROM cursos c
+  LEFT JOIN lecturas l ON l.curso_id = c.id AND l.usuario_id = 'u_00007'
+  GROUP BY c.id
+) t;
+
+\echo '--- Trampa 2: count(*) cuenta la fila vacía del LEFT JOIN; count(columna), no'
+SELECT c.id, count(*) AS con_asterisco, count(l.seccion_id) AS con_columna
+FROM cursos c
+LEFT JOIN lecturas l ON l.curso_id = c.id AND l.usuario_id = 'u_00007'
+WHERE c.id IN ('B1', 'B4', 'I2')
+GROUP BY c.id
+ORDER BY c.id;
+
+\echo '--- GROUP BY + HAVING: los cursos que más de 300 personas han empezado, con su media de secciones leídas'
+SELECT curso_id, count(DISTINCT usuario_id) AS personas, round(count(*)::numeric / count(DISTINCT usuario_id), 1) AS media_leidas
+FROM lecturas
+GROUP BY curso_id
+HAVING count(DISTINCT usuario_id) > 300
+ORDER BY personas DESC
+LIMIT 5;
+```
+
+```text
+--- INNER JOIN: solo los cursos con alguna lectura
+ id | leidas
+----+--------
+ A1 |      2
+ A3 |      3
+ A6 |      2
+ B4 |      4
+ B6 |      4
+ I2 |      5
+ I3 |      5
+ I4 |      4
+ I5 |      4
+ I6 |      4
+ I7 |      3
+ P1 |      6
+(12 rows)
+
+--- Trampa 1: LEFT JOIN con el filtro en el WHERE (sigue siendo un INNER JOIN)
+ cursos
+--------
+     12
+(1 row)
+
+--- El filtro en el ON: ahora sí, todos los cursos
+ cursos
+--------
+     24
+(1 row)
+
+--- Trampa 2: count(*) cuenta la fila vacía del LEFT JOIN; count(columna), no
+ id | con_asterisco | con_columna
+----+---------------+-------------
+ B1 |             1 |           0
+ B4 |             4 |           4
+ I2 |             5 |           5
+(3 rows)
+
+--- GROUP BY + HAVING: los cursos que más de 300 personas han empezado, con su media de secciones leídas
+ curso_id | personas | media_leidas
+----------+----------+--------------
+ I4       |      863 |          4.3
+ I5       |      837 |          3.6
+ I1       |      823 |          4.2
+ P1       |      821 |          5.6
+ I8       |      792 |          4.4
+(5 rows)
+```
+
+- **Trampa 1: un `LEFT JOIN` con el filtro en el `WHERE` deja de serlo.** El `LEFT JOIN` rellena con `NULL` los cursos sin lecturas, y el `WHERE l.usuario_id = 'u_00007'` descarta justo esas filas (`NULL` no es igual a nada). Resultado: 12 cursos, como un `JOIN` normal. Con el filtro **en el `ON`**, los 24.
+- **Trampa 2: `count(*)` cuenta la fila vacía.** En B1, que `u_00007` no ha empezado, `count(*)` dice 1, porque el `LEFT JOIN` produjo una fila (llena de `NULL`). `count(l.seccion_id)` cuenta solo los valores que no son `NULL`: 0.
+- **`HAVING` filtra grupos, después de agrupar:** "los cursos con más de 300 personas" no se puede escribir en el `WHERE`, porque el número de personas no existe hasta que se agrupa.
+
+<Callout type="risk">
+
+- **Ninguna de las dos trampas da error:** devuelven un número que parece correcto. Comprueba siempre un caso que conozcas (un curso sin empezar debería dar 0) antes de fiarte de una consulta con `LEFT JOIN`.
+- **`count(DISTINCT …)` es caro con muchos datos:** tiene que recordar cada valor distinto. En una tabla de millones de filas, una agregación previa por usuario suele ser mucho más rápida.
+
+</Callout>
+
+## Paso 3: subconsultas y CTE
+
+`12-subconsultas.sql`:
+
+```sql
+-- Archivo: 12-subconsultas.sql
+-- Subconsultas, EXISTS frente a IN, y CTE con WITH
+
+\echo '--- Subconsulta en el WHERE: quién ha terminado B1 (ha leído todas sus secciones)'
+SELECT count(*) AS terminaron_b1
+FROM (
+  SELECT usuario_id FROM lecturas WHERE curso_id = 'B1'
+  GROUP BY usuario_id
+  HAVING count(*) = (SELECT secciones FROM cursos WHERE id = 'B1')
+) t;
+
+\echo '--- Cursos que u_00007 no ha evaluado nunca: NOT IN y NOT EXISTS dan lo mismo…'
+SELECT count(*) AS con_not_in FROM cursos
+WHERE id NOT IN (SELECT curso_id FROM evaluaciones WHERE usuario_id = 'u_00007');
+SELECT count(*) AS con_not_exists FROM cursos c
+WHERE NOT EXISTS (SELECT 1 FROM evaluaciones e WHERE e.usuario_id = 'u_00007' AND e.curso_id = c.id);
+
+\echo '--- …hasta que la subconsulta devuelve un NULL'
+SELECT count(*) AS con_not_in FROM cursos
+WHERE id NOT IN (SELECT curso_id FROM evaluaciones WHERE usuario_id = 'u_00007' UNION ALL SELECT NULL);
+SELECT count(*) AS con_not_exists FROM cursos c
+WHERE NOT EXISTS (
+  SELECT 1 FROM (SELECT curso_id FROM evaluaciones WHERE usuario_id = 'u_00007' UNION ALL SELECT NULL) e WHERE e.curso_id = c.id
+);
+
+\echo '--- CTE (WITH): cada paso con nombre, de arriba abajo'
+WITH leidas AS (
+  SELECT curso_id, count(*) AS n FROM lecturas WHERE usuario_id = 'u_00007' GROUP BY curso_id
+),
+avance AS (
+  SELECT c.id, c.secciones, coalesce(l.n, 0) AS leidas
+  FROM cursos c LEFT JOIN leidas l ON l.curso_id = c.id
+)
+SELECT count(*) FILTER (WHERE leidas = 0) AS sin_empezar,
+       count(*) FILTER (WHERE leidas > 0 AND leidas < secciones) AS a_medias,
+       count(*) FILTER (WHERE leidas = secciones) AS terminados
+FROM avance;
+```
+
+```text
+--- Subconsulta en el WHERE: quién ha terminado B1 (ha leído todas sus secciones)
+ terminaron_b1
+---------------
+            21
+(1 row)
+
+--- Cursos que u_00007 no ha evaluado nunca: NOT IN y NOT EXISTS dan lo mismo…
+ con_not_in
+------------
+         20
+(1 row)
+
+ con_not_exists
+----------------
+             20
+(1 row)
+
+--- …hasta que la subconsulta devuelve un NULL
+ con_not_in
+------------
+          0
+(1 row)
+
+ con_not_exists
+----------------
+             20
+(1 row)
+
+--- CTE (WITH): cada paso con nombre, de arriba abajo
+ sin_empezar | a_medias | terminados
+-------------+----------+------------
+          12 |       12 |          0
+(1 row)
+```
+
+- **Una subconsulta es una consulta dentro de otra:** en el `HAVING`, `(SELECT secciones FROM cursos WHERE id = 'B1')` trae el número de secciones de B1 para compararlo. 21 personas han terminado B1.
+- **`NOT IN` y `NOT EXISTS` coinciden… hasta que hay un `NULL`.** Con un solo `NULL` en la subconsulta, `NOT IN` devuelve **0 cursos** en lugar de 20. `x NOT IN (a, b, NULL)` significa "x no es a, ni b, ni NULL", y comparar con `NULL` da "desconocido", nunca "verdadero". `NOT EXISTS` no tiene ese problema.
+- **Un CTE (`WITH`) pone nombre a cada paso:** `leidas` y luego `avance`, leídos de arriba abajo, en lugar de subconsultas anidadas que se leen de dentro afuera. `count(*) FILTER (WHERE …)` cuenta según una condición sin escribir tres consultas.
+
+<Callout type="risk">
+
+- **Usa `NOT EXISTS` en lugar de `NOT IN` con subconsultas:** basta con que la columna admita `NULL`, o que un `LEFT JOIN` dentro de la subconsulta los produzca, para que `NOT IN` devuelva vacío sin avisar.
+- **Un CTE no es una caché:** PostgreSQL puede calcularlo como una subconsulta más, y optimizarlo con el resto. Si lo usas varias veces y quieres que se calcule una sola, existe `WITH … AS MATERIALIZED`.
+
+</Callout>
+
+## Paso 4: funciones de ventana
+
+Una **función de ventana** calcula sobre un grupo de filas (la "ventana") **sin agruparlas**: cada fila sigue en el resultado, con un valor más. `OVER (PARTITION BY … ORDER BY …)` define la ventana. `13-ventanas.sql`:
+
+```sql
+-- Archivo: 13-ventanas.sql
+-- Funciones de ventana: calcular sobre un grupo de filas SIN agruparlas
+SET TimeZone = 'America/Mexico_City';
+
+\echo '--- El último de cada grupo: la última evaluación de u_00007 en cada curso'
+WITH numeradas AS (
+  SELECT curso_id, puntuacion, aprobado, fecha,
+         ROW_NUMBER() OVER (PARTITION BY curso_id ORDER BY fecha DESC) AS rn
+  FROM evaluaciones
+  WHERE usuario_id = 'u_00007'
+)
+SELECT curso_id, puntuacion, aprobado, fecha::date FROM numeradas WHERE rn = 1 ORDER BY curso_id;
+
+\echo '--- Lo mismo con DISTINCT ON (solo PostgreSQL): la primera fila de cada grupo, según el ORDER BY'
+SELECT DISTINCT ON (curso_id) curso_id, puntuacion, aprobado, fecha::date
+FROM evaluaciones WHERE usuario_id = 'u_00007'
+ORDER BY curso_id, fecha DESC;
+
+\echo '--- ROW_NUMBER, RANK y DENSE_RANK con empates: quién ha leído más secciones'
+WITH totales AS (SELECT usuario_id, count(*) AS leidas FROM lecturas GROUP BY usuario_id)
+SELECT usuario_id, leidas,
+       ROW_NUMBER() OVER (ORDER BY leidas DESC, usuario_id) AS fila,
+       RANK()       OVER (ORDER BY leidas DESC) AS rank,
+       DENSE_RANK() OVER (ORDER BY leidas DESC) AS dense_rank
+FROM totales ORDER BY leidas DESC, usuario_id LIMIT 8;
+
+\echo '--- LAG: cada intento comparado con el anterior del mismo usuario y curso'
+SELECT usuario_id, curso_id, fecha::date, puntuacion,
+       LAG(puntuacion) OVER w AS anterior,
+       puntuacion - LAG(puntuacion) OVER w AS mejora
+FROM evaluaciones
+WHERE usuario_id = 'u_00001'
+WINDOW w AS (PARTITION BY usuario_id, curso_id ORDER BY fecha)
+ORDER BY curso_id, fecha;
+
+\echo '--- Media móvil de 7 días: lecturas por día en toda la plataforma (los últimos 10 días con datos)'
+WITH por_dia AS (
+  -- El día depende de la zona horaria: se escribe explícitamente, no se deja a la de la conexión
+  SELECT (leida_en AT TIME ZONE 'America/Mexico_City')::date AS dia, count(*) AS lecturas FROM lecturas GROUP BY 1
+),
+con_media AS (
+  SELECT dia, lecturas,
+         round(avg(lecturas) OVER (ORDER BY dia ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 1) AS media_7_dias
+  FROM por_dia
+)
+SELECT * FROM con_media ORDER BY dia DESC LIMIT 10;
+```
+
+```text
+SET
+--- El último de cada grupo: la última evaluación de u_00007 en cada curso
+ curso_id | puntuacion | aprobado |   fecha
+----------+------------+----------+------------
+ B7       |          2 | f        | 2026-09-05
+ I1       |          4 | t        | 2026-09-14
+ I2       |          4 | t        | 2026-09-23
+ I3       |          4 | t        | 2026-09-04
+(4 rows)
+
+--- Lo mismo con DISTINCT ON (solo PostgreSQL): la primera fila de cada grupo, según el ORDER BY
+ curso_id | puntuacion | aprobado |   fecha
+----------+------------+----------+------------
+ B7       |          2 | f        | 2026-09-05
+ I1       |          4 | t        | 2026-09-14
+ I2       |          4 | t        | 2026-09-23
+ I3       |          4 | t        | 2026-09-04
+(4 rows)
+
+--- ROW_NUMBER, RANK y DENSE_RANK con empates: quién ha leído más secciones
+ usuario_id | leidas | fila | rank | dense_rank
+------------+--------+------+------+------------
+ u_00056    |     69 |    1 |    1 |          1
+ u_00024    |     61 |    2 |    2 |          2
+ u_00044    |     61 |    3 |    2 |          2
+ u_00094    |     55 |    4 |    4 |          3
+ u_00154    |     55 |    5 |    4 |          3
+ u_00191    |     55 |    6 |    4 |          3
+ u_00251    |     55 |    7 |    4 |          3
+ u_00288    |     55 |    8 |    4 |          3
+(8 rows)
+
+--- LAG: cada intento comparado con el anterior del mismo usuario y curso
+ usuario_id | curso_id |   fecha    | puntuacion | anterior | mejora
+------------+----------+------------+------------+----------+--------
+ u_00001    | B2       | 2026-07-08 |          1 |          |
+ u_00001    | B2       | 2026-08-08 |          3 |        1 |      2
+ u_00001    | B3       | 2026-08-31 |          3 |          |
+ u_00001    | B4       | 2026-09-10 |          4 |          |
+ u_00001    | I3       | 2026-08-01 |          4 |          |
+ u_00001    | I3       | 2026-08-11 |          5 |        4 |      1
+(6 rows)
+
+--- Media móvil de 7 días: lecturas por día en toda la plataforma (los últimos 10 días con datos)
+    dia     | lecturas | media_7_dias
+------------+----------+--------------
+ 2026-10-06 |      126 |        228.7
+ 2026-10-05 |      207 |        246.0
+ 2026-10-04 |      262 |        260.1
+ 2026-10-03 |      263 |        261.7
+ 2026-10-02 |      268 |        253.3
+ 2026-10-01 |      247 |        241.9
+ 2026-09-30 |      228 |        253.3
+ 2026-09-29 |      247 |        238.9
+ 2026-09-28 |      306 |        241.4
+ 2026-09-27 |      273 |        248.3
+(10 rows)
+```
+
+- **"El último de cada grupo" con `ROW_NUMBER`:** numera las evaluaciones de cada curso de la más reciente a la más antigua, y `rn = 1` se queda con la última. Es la pregunta de la "última evaluación" del panel de I4.5, que en MongoDB necesitaba un `$lookup` con `$sort` y `$limit: 1` por cada curso.
+- **`DISTINCT ON`** es la forma corta de PostgreSQL (no existe en otros motores): la primera fila de cada `curso_id` según el `ORDER BY`. Mismo resultado.
+- **`ROW_NUMBER`, `RANK` y `DENSE_RANK` con empates:** dos personas empatan con 61 lecturas. `ROW_NUMBER` les da 2 y 3 (desempata como pueda); `RANK`, las dos 2 y salta al 4; `DENSE_RANK`, las dos 2 y sigue con el 3.
+- **`LAG`** trae el valor de la fila anterior de la ventana: el segundo intento de B2 mejoró 2 puntos. El primero no tiene anterior (`NULL`).
+- **La media móvil de 7 días** es una ventana de filas (`ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`): cada día, la media de él y los seis anteriores.
+
+<Callout type="risk">
+
+- **El día depende de la zona horaria:** las lecturas se guardaron a medianoche UTC, y con la conexión en México, `::date` las pone en el día anterior:
+
+  ```text
+  SET
+          leida_en        |  dia_utc
+  ------------------------+------------
+   2026-04-12 00:00:00+00 | 2026-04-12
+  (1 row)
+
+  SET
+          leida_en        | dia_mexico |  dia_utc
+  ------------------------+------------+------------
+   2026-04-11 18:00:00-06 | 2026-04-11 | 2026-04-12
+  (1 row)
+  ```
+
+  Para agrupar por día, escribe la zona explícitamente (`AT TIME ZONE 'America/Mexico_City'`), como hizo I4.5 con `$dateTrunc`. Si no, el resultado depende de la configuración de quien ejecuta la consulta.
+
+- **No se puede usar una función de ventana en el `WHERE`:** se calcula después. Por eso `rn = 1` va en una consulta exterior (el CTE `numeradas`).
+
+</Callout>
+
+## Paso 5: `jsonb` y sus índices
+
+`14-jsonb.sql`, con 100 000 usuarios con preferencias de forma libre:
+
+```sql
+-- Archivo: 14-jsonb.sql
+-- jsonb: datos con forma libre dentro de una columna, y cómo consultarlos e indexarlos
+DROP TABLE IF EXISTS preferencias;
+CREATE TABLE preferencias (
+  usuario_id text PRIMARY KEY,
+  prefs      jsonb NOT NULL DEFAULT '{}'
+);
+
+-- 100 000 usuarios con preferencias distintas: tema, avisos, cursos favoritos y, a veces, una zona horaria
+INSERT INTO preferencias
+SELECT 'u_' || lpad(i::text, 6, '0'),
+       jsonb_build_object(
+         'tema', CASE WHEN i % 3 = 0 THEN 'dark' ELSE 'light' END,
+         'avisos', jsonb_build_object('email', i % 2 = 0, 'telegram', i % 5 = 0),
+         'favoritos', jsonb_build_array('B' || (i % 8 + 1), 'I' || (i % 8 + 1))
+       ) || CASE WHEN i % 10 = 0 THEN '{"zona": "Europe/Madrid"}'::jsonb ELSE '{}'::jsonb END
+FROM generate_series(1, 100000) AS i;
+ANALYZE preferencias;
+
+\echo '--- Los operadores'
+SELECT prefs -> 'avisos' AS avisos, prefs -> 'avisos' ->> 'telegram' AS telegram_como_texto,
+       prefs #>> '{favoritos,0}' AS primer_favorito, prefs ? 'zona' AS tiene_zona
+FROM preferencias WHERE usuario_id = 'u_000010';
+
+\echo '--- Cambiar una clave sin reescribir el resto: jsonb_set'
+UPDATE preferencias SET prefs = jsonb_set(prefs, '{avisos,telegram}', 'false') WHERE usuario_id = 'u_000010'
+RETURNING prefs -> 'avisos' AS avisos;
+
+\echo '--- Un array de jsonb, convertido en filas'
+SELECT jsonb_array_elements_text(prefs -> 'favoritos') AS favorito, count(*)
+FROM preferencias GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 3;
+
+\echo '--- Sin índice: quién tiene el tema oscuro y los avisos de Telegram'
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT count(*) FROM preferencias WHERE prefs @> '{"tema": "dark", "avisos": {"telegram": true}}';
+
+CREATE INDEX preferencias_gin ON preferencias USING gin (prefs jsonb_path_ops);
+
+\echo '--- Con un índice GIN: la misma consulta con @> (contiene)'
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT count(*) FROM preferencias WHERE prefs @> '{"tema": "dark", "avisos": {"telegram": true}}';
+
+\echo '--- La misma pregunta con ->> = : el índice GIN no sirve para esta forma'
+EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT count(*) FROM preferencias WHERE prefs ->> 'tema' = 'dark' AND (prefs -> 'avisos' ->> 'telegram')::boolean;
+
+\echo '--- El resultado de las tres formas'
+SELECT count(*) AS con_contiene FROM preferencias WHERE prefs @> '{"tema": "dark", "avisos": {"telegram": true}}';
+SELECT count(*) AS con_flechas FROM preferencias WHERE prefs ->> 'tema' = 'dark' AND (prefs -> 'avisos' ->> 'telegram')::boolean;
+```
+
+```text
+CREATE TABLE
+INSERT 0 100000
+ANALYZE
+--- Los operadores
+              avisos               | telegram_como_texto | primer_favorito | tiene_zona
+-----------------------------------+---------------------+-----------------+------------
+ {"email": true, "telegram": true} | true                | B3              | t
+(1 row)
+
+--- Cambiar una clave sin reescribir el resto: jsonb_set
+               avisos
+------------------------------------
+ {"email": true, "telegram": false}
+(1 row)
+
+UPDATE 1
+--- Un array de jsonb, convertido en filas
+ favorito | count
+----------+-------
+ B1       | 12500
+ B2       | 12500
+ B3       | 12500
+(3 rows)
+
+--- Sin índice: quién tiene el tema oscuro y los avisos de Telegram
+                                     QUERY PLAN
+------------------------------------------------------------------------------------
+ Aggregate (actual time=7.564..7.564 rows=1.00 loops=1)
+   Buffers: shared hit=1852
+   ->  Seq Scan on preferencias (actual time=0.005..7.352 rows=6666.00 loops=1)
+         Filter: (prefs @> '{"tema": "dark", "avisos": {"telegram": true}}'::jsonb)
+         Rows Removed by Filter: 93334
+         Buffers: shared hit=1852
+(6 rows)
+
+CREATE INDEX
+--- Con un índice GIN: la misma consulta con @> (contiene)
+                                            QUERY PLAN
+---------------------------------------------------------------------------------------------------
+ Aggregate (actual time=2.229..2.229 rows=1.00 loops=1)
+   Buffers: shared hit=1868
+   ->  Bitmap Heap Scan on preferencias (actual time=0.642..2.064 rows=6666.00 loops=1)
+         Recheck Cond: (prefs @> '{"tema": "dark", "avisos": {"telegram": true}}'::jsonb)
+         Heap Blocks: exact=1852
+         Buffers: shared hit=1868
+         ->  Bitmap Index Scan on preferencias_gin (actual time=0.532..0.532 rows=6666.00 loops=1)
+               Index Cond: (prefs @> '{"tema": "dark", "avisos": {"telegram": true}}'::jsonb)
+               Index Searches: 1
+               Buffers: shared hit=16
+ Planning:
+   Buffers: shared hit=22
+(12 rows)
+
+--- La misma pregunta con ->> = : el índice GIN no sirve para esta forma
+                                                         QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=5.930..5.930 rows=1.00 loops=1)
+   Buffers: shared hit=1852
+   ->  Seq Scan on preferencias (actual time=0.006..5.760 rows=6666.00 loops=1)
+         Filter: (((prefs ->> 'tema'::text) = 'dark'::text) AND (((prefs -> 'avisos'::text) ->> 'telegram'::text))::boolean)
+         Rows Removed by Filter: 93334
+         Buffers: shared hit=1852
+ Planning:
+   Buffers: shared hit=6
+(8 rows)
+
+--- El resultado de las tres formas
+ con_contiene
+--------------
+         6666
+(1 row)
+
+ con_flechas
+-------------
+        6666
+(1 row)
+```
+
+| Operador | Qué hace                     | Ejemplo                            |
+| -------- | ---------------------------- | ---------------------------------- |
+| `->`     | Saca una clave, como `jsonb` | `prefs -> 'avisos'`                |
+| `->>`    | Saca una clave, como texto   | `prefs -> 'avisos' ->> 'telegram'` |
+| `#>>`    | Sigue una ruta               | `prefs #>> '{favoritos,0}'`        |
+| `?`      | ¿Tiene esta clave?           | `prefs ? 'zona'`                   |
+| `@>`     | ¿Contiene este documento?    | `prefs @> '{"tema": "dark"}'`      |
+
+- **Sin índice, la consulta recorre las 100 000 filas** (`Seq Scan`, 7,6 ms).
+- **Con un índice GIN, la misma consulta con `@>` lo usa** (`Bitmap Index Scan`, 2,2 ms). `jsonb_path_ops` es la variante más pequeña, pensada para `@>`.
+- **Con `->> =` el resultado es el mismo (6 666), pero el índice GIN no se usa:** vuelve el `Seq Scan`. Un índice GIN sobre `jsonb` sirve para `@>` (y, con la variante por defecto, para `?`), no para comparar un valor extraído. Para eso, un índice de expresión: `CREATE INDEX ON preferencias ((prefs ->> 'tema'))`.
+
+<Callout type="risk">
+
+- **Escribe las consultas sobre `jsonb` en la forma que el índice entiende:** dos consultas equivalentes pueden tener planes muy distintos. Comprueba con `EXPLAIN` (A3.3) que la tuya usa el índice.
+- **`jsonb_set` reescribe el documento entero:** cambiar una clave no es más barato que cambiar la fila. Si un campo se actualiza muy a menudo, merece ser una columna.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Reproduce en SQL el panel de progreso de I4.5: por cada curso empezado, las secciones leídas, el porcentaje y la última evaluación; y el total sobre todo el catálogo.
+2. Compara el resultado con el de la agregación de MongoDB, con los mismos datos, línea a línea.
+3. Compara las dos versiones: cómo se escribe cada una y cuánto tarda.
+
+</Callout>
+
+Solución. `15-ejercicio.sql`:
+
+```sql
+-- Archivo: 15-ejercicio.sql
+-- El panel de progreso de I4.5, en SQL: por curso empezado, lecturas, porcentaje y última evaluación; y el total
+\set usuario 'u_00007'
+
+WITH leidas AS (                        -- 1. cuántas secciones ha leído en cada curso
+  SELECT curso_id, count(*) AS n
+  FROM lecturas WHERE usuario_id = :'usuario'
+  GROUP BY curso_id
+),
+ultima AS (                             -- 2. su última evaluación en cada curso (el último de cada grupo)
+  SELECT DISTINCT ON (curso_id) curso_id, puntuacion, aprobado, fecha
+  FROM evaluaciones WHERE usuario_id = :'usuario'
+  ORDER BY curso_id, fecha DESC
+),
+avance AS (                             -- 3. todos los cursos, con sus lecturas (0 si ninguna) y su última nota
+  SELECT c.id, c.titulo, c.secciones, coalesce(l.n, 0) AS leidas,
+         round(100.0 * coalesce(l.n, 0) / c.secciones) AS porcentaje,
+         u.puntuacion, u.aprobado, u.fecha
+  FROM cursos c
+  LEFT JOIN leidas l ON l.curso_id = c.id
+  LEFT JOIN ultima u ON u.curso_id = c.id
+)
+SELECT linea FROM (
+  -- La tabla: solo los cursos empezados (con lecturas o con alguna evaluación)
+  SELECT 1 AS parte, -porcentaje AS orden1, id AS orden2,
+         format('  %s %s %s/%s %s %%  %s', id, rpad(titulo, 40), lpad(leidas::text, 2), secciones, lpad(porcentaje::text, 4),
+                CASE WHEN puntuacion IS NULL THEN 'sin evaluar'
+                     ELSE format('%s/5 %s (%s %s)', puntuacion, CASE WHEN aprobado THEN '✓' ELSE '✗' END,
+                                 extract(day FROM fecha AT TIME ZONE 'America/Mexico_City'),
+                                 (ARRAY['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'])[extract(month FROM fecha AT TIME ZONE 'America/Mexico_City')])
+                END) AS linea
+  FROM avance WHERE leidas > 0 OR puntuacion IS NOT NULL
+  UNION ALL
+  -- El total: sobre TODOS los cursos del catálogo, empezados o no
+  SELECT 2, 0, '', format('  Total: %s de %s secciones (%s %%)', sum(leidas), sum(secciones), round(100.0 * sum(leidas) / sum(secciones), 1))
+  FROM avance
+) t
+ORDER BY parte, orden1, orden2;
+```
+
+```bash
+sudo -u postgres psql -X -d progreso -tA -f 15-ejercicio.sql
+```
+
+```text
+  I2 React intermedio                          5/6   83 %  4/5 ✓ (23 sep)
+  I3 Backend con Astro                         5/6   83 %  4/5 ✓ (4 sep)
+  B4 Fundamentos de bases de datos             4/5   80 %  sin evaluar
+  I5 Autenticación y autorización a fondo      4/5   80 %  sin evaluar
+  P1 Proyecto integrador                       6/8   75 %  sin evaluar
+  I4 Modelado de datos con MongoDB             4/6   67 %  sin evaluar
+  I6 Servidores Linux                          4/6   67 %  sin evaluar
+  I7 Sistema de diseño con Tailwind v4         3/5   60 %  sin evaluar
+  B6 React esencial                            4/7   57 %  sin evaluar
+  A3 SQL y PostgreSQL                          3/6   50 %  sin evaluar
+  A6 Rendimiento y observabilidad              2/4   50 %  sin evaluar
+  A1 TypeScript avanzado                       2/5   40 %  sin evaluar
+  B7 Tailwind CSS v4 esencial                  0/5    0 %  2/5 ✗ (5 sep)
+  I1 TypeScript intermedio                     0/6    0 %  4/5 ✓ (14 sep)
+  Total: 46 de 134 secciones (34.3 %)
+```
+
+Comparado con la salida de `npm start -- src/i4/05-ejercicio.ts` en MongoDB (sin su primera línea, la del tiempo), con `diff`: **idénticas**. Los mismos 14 cursos, en el mismo orden, con las mismas notas y fechas, y el mismo total de 46 de 134 secciones.
+
+- **`leidas` y `ultima` son dos agregaciones independientes**, una por tabla, y `avance` las une a los cursos con dos `LEFT JOIN`. En MongoDB, cada una era un `$lookup` con _pipeline_ que se ejecuta **por cada curso**.
+- **"El último de cada grupo" es un `DISTINCT ON`** (o un `ROW_NUMBER`, Paso 4).
+- **El total se calcula sobre todos los cursos** (`avance`), y la tabla solo sobre los empezados: dos partes unidas con `UNION ALL`, como el `$facet` de I4.5.
+
+El tiempo, 20 ejecuciones de cada una, en el mismo equipo:
+
+```text
+PostgreSQL: mediana 0.2 ms (mín. 0.2, máx. 0.4) en 20 ejecuciones
+MongoDB:    mediana 1.8 ms (mín. 1.6, máx. 2.3) en 20 ejecuciones
+```
+
+Las dos son muy rápidas con estos datos, y la diferencia **no** dice que PostgreSQL sea nueve veces más rápido: `psql` se conectaba por un _socket_ local dentro de la máquina virtual y devolvía texto; Node, por TCP, y convertía el resultado a objetos de JavaScript. Lo comparable es que las dos responden en milisegundos con índices sobre el usuario. La comparación cuidadosa, con las dos desde TypeScript, es A3.6.
+
+<Callout type="risk">
+
+- **Formatear en SQL es posible, pero no es lo habitual:** aquí sirve para comparar con `diff`. En una app, la consulta devuelve columnas y el formato (fechas en español, `✓`) lo pone la interfaz.
+- **El orden de las filas solo está garantizado con `ORDER BY`:** sin él, PostgreSQL puede devolver las filas en cualquier orden, y el mismo `diff` fallaría un día sin que nada haya cambiado.
+
+</Callout>
+
+<Callout type="mastery">
+
+Usas una función de ventana para resolver "el último de cada grupo": `ROW_NUMBER() OVER (PARTITION BY … ORDER BY … DESC)` con `rn = 1`, o `DISTINCT ON` en PostgreSQL. Escribes las consultas con CTE legibles, evitas las trampas que no dan error (`LEFT JOIN` con el filtro en el `WHERE`, `count(*)` en un `LEFT JOIN`, `NOT IN` con `NULL`), sabes qué consultas sobre `jsonb` usan un índice GIN, y has reproducido una agregación de MongoDB con la misma salida.
+
+</Callout>
+
+## Resumen
+
+- `mongoexport --type=csv` y `\copy … WITH (FORMAT csv, HEADER true)`: los datos de MongoDB en PostgreSQL.
+- En un `LEFT JOIN`, el filtro de la tabla de la derecha va en el `ON`; y se cuenta con `count(columna)`, no con `count(*)`.
+- `NOT EXISTS` en lugar de `NOT IN`: un solo `NULL` hizo que `NOT IN` devolviera 0 filas en lugar de 20.
+- CTE (`WITH`) para leer la consulta de arriba abajo; `FILTER (WHERE …)` para contar por condición.
+- Ventanas: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG` y medias móviles. Agrupa por día con la zona horaria explícita.
+- `jsonb`: `->`, `->>`, `?`, `@>`. Un índice GIN sirve para `@>`, no para `->> =`.
