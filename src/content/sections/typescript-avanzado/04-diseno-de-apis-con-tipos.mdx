@@ -1,0 +1,552 @@
+---
+sectionId: "A1.4"
+course: "A1"
+title: "Diseño de APIs con tipos"
+order: 4
+minutes: 70
+summary: "Escribes un mini-Zod que infiere el tipo de los datos a partir del esquema, usas <const T>, marcas los IDs para que curso y sección no se puedan intercambiar y comparas anotar un tipo con satisfies."
+---
+
+Hasta ahora has usado los tipos avanzados para describir datos. En esta sección cambias de lado: diseñas funciones para que **otros** (o tú, dentro de seis meses) las usen bien sin leer la documentación. Una buena API tipada infiere todo lo que puede, para que nadie escriba un tipo a mano; impide las mezclas que el código permite pero que no tienen sentido, como pasar un curso donde va una sección, y comprueba la configuración sin perder lo que sabe de ella. Son las técnicas que hay detrás de Zod, de tRPC o de las Actions de Astro, y vas a escribirlas tú.
+
+**Lo que tendrás al terminar:** un mini-Zod con su propio `Infer`, funciones con parámetros genéricos `const`, IDs con marca (_branded types_) para usuario, curso y sección, y una configuración comprobada con `satisfies`.
+
+**Requisitos:** las secciones A1.1 a A1.3, con `src/a1/pruebas.ts`. En el ejercicio usarás Zod, que instalaste en el `ts-playground` en I1.4.
+
+## Paso 1: inferir a partir de los argumentos
+
+En I1.4 escribiste `const EntrenoSchema = z.object({…})` y `type Entreno = z.infer<typeof EntrenoSchema>`, y el tipo salía solo. El truco es que **el esquema es un valor cuyo tipo lleva dentro el tipo de los datos**: `z.string()` no devuelve "un esquema", sino un esquema **de `string`**. Al combinar esquemas, sus tipos se combinan. Para verlo por dentro, escribe un mini-Zod, `src/a1/mini-zod.ts`:
+
+```ts
+// Archivo: src/a1/mini-zod.ts
+// El truco de Zod: el esquema es un VALOR, y su tipo lleva dentro el tipo de los datos que valida
+
+export interface Esquema<T> {
+  parse(dato: unknown): T;
+}
+
+/** El tipo que valida un esquema (como z.infer): se saca con infer (A1.1) */
+export type Infer<E> = E extends Esquema<infer T> ? T : never;
+
+export const texto = (): Esquema<string> => ({
+  parse(dato) {
+    if (typeof dato !== "string") throw new Error(`se esperaba un texto y llegó ${JSON.stringify(dato)}`);
+    return dato;
+  },
+});
+
+export const numero = (): Esquema<number> => ({
+  parse(dato) {
+    if (typeof dato !== "number" || Number.isNaN(dato)) throw new Error(`se esperaba un número y llegó ${JSON.stringify(dato)}`);
+    return dato;
+  },
+});
+
+/** Una de varias opciones: el tipo son esas opciones exactas (<const T>, Paso 2) */
+export const opcion = <const T extends readonly string[]>(opciones: T): Esquema<T[number]> => ({
+  parse(dato) {
+    if (!opciones.includes(dato as string)) throw new Error(`se esperaba ${opciones.join(" | ")} y llegó ${JSON.stringify(dato)}`);
+    return dato as T[number];
+  },
+});
+
+/** Un objeto: el tipo resultante se calcula a partir de los esquemas de sus campos (mapped type, A1.2) */
+export const objeto = <C extends Record<string, Esquema<unknown>>>(campos: C): Esquema<{ [K in keyof C]: Infer<C[K]> }> => ({
+  parse(dato) {
+    if (typeof dato !== "object" || dato === null) throw new Error("se esperaba un objeto");
+    const resultado: Record<string, unknown> = {};
+    for (const [clave, esquema] of Object.entries(campos)) {
+      resultado[clave] = esquema.parse((dato as Record<string, unknown>)[clave]);
+    }
+    return resultado as { [K in keyof C]: Infer<C[K]> };
+  },
+});
+```
+
+Y úsalo, `src/a1/16-inferencia.ts`:
+
+```ts
+// Archivo: src/a1/16-inferencia.ts
+// Nadie escribe el tipo Entreno: sale del esquema
+import { numero, objeto, opcion, texto, type Infer } from "./mini-zod";
+import type { Afirmar, Igual } from "./pruebas";
+
+const EntrenoSchema = objeto({
+  tipo: opcion(["fuerza", "running", "movilidad"]),
+  minutos: numero(),
+  notas: texto(),
+});
+
+type Entreno = Infer<typeof EntrenoSchema>;
+
+const bueno: Entreno = EntrenoSchema.parse(JSON.parse('{"tipo":"running","minutos":45,"notas":"series"}'));
+console.log(bueno);
+
+for (const json of ['{"tipo":"natacion","minutos":45,"notas":""}', '{"tipo":"fuerza","minutos":"45","notas":""}']) {
+  try {
+    EntrenoSchema.parse(JSON.parse(json));
+  } catch (e) {
+    console.log("rechazado:", (e as Error).message);
+  }
+}
+
+type _pruebas = [Afirmar<Igual<Entreno, { tipo: "fuerza" | "running" | "movilidad"; minutos: number; notas: string }>>];
+```
+
+```bash
+npm run typecheck
+npm start -- src/a1/16-inferencia.ts
+```
+
+```text
+{ tipo: 'running', minutos: 45, notas: 'series' }
+rechazado: se esperaba fuerza | running | movilidad y llegó "natacion"
+rechazado: se esperaba un número y llegó "45"
+```
+
+- **`Esquema<T>` es una interfaz genérica con un `parse` que devuelve `T`:** el tipo de los datos viaja dentro del tipo del esquema.
+- **`objeto` recibe sus campos como genérico `C`** y calcula el resultado con un _mapped type_ (A1.2): para cada campo, `Infer<C[K]>`, el tipo que valida su esquema. Nadie le dice a `objeto` qué devuelve: lo deduce de lo que recibe.
+- **`Infer` es un tipo condicional con `infer`** (A1.1), como el `z.infer` real (que viste por dentro en A1.1).
+
+Añade al final:
+
+```ts
+const mal: Entreno = { tipo: "running", minutos: 45 };
+bueno.minutos.toUpperCase();
+```
+
+```text
+src/a1/16-inferencia.ts(27,7): error TS2741: Property 'notas' is missing in type '{ tipo: "running"; minutos: number; }' but required in type '{ tipo: "fuerza" | "movilidad" | "running"; minutos: number; notas: string; }'.
+src/a1/16-inferencia.ts(28,15): error TS2339: Property 'toUpperCase' does not exist on type 'number'.
+```
+
+El tipo `Entreno` exige las notas y sabe que los minutos son un número, aunque nadie lo ha escrito. Borra las dos líneas.
+
+<Callout type="risk">
+
+- **Dentro de `objeto` hace falta un `as`:** el bucle recorre los campos al ejecutar, y TypeScript no puede seguir qué tipo tiene cada uno. Es lo normal en una función así: la firma es exacta y la implementación se prueba (la salida de arriba). Zod hace lo mismo por dentro.
+- **El tipo y la validación salen del mismo código:** si `numero()` dijera `Esquema<number>` pero dejara pasar textos, el tipo mentiría. En una librería de validación, cada esquema necesita sus propios tests.
+
+</Callout>
+
+## Paso 2: parámetros genéricos `const`
+
+`opcion(["fuerza", "running", "movilidad"])` devuelve un esquema de `"fuerza" | "running" | "movilidad"`, no de `string`. Lo consigue el `const` de `<const T extends readonly string[]>`. Sin él, TypeScript **ensancha** los literales al inferir (I1.2), y quien llama tendría que escribir `as const`. Compruébalo, `src/a1/17-const.ts`:
+
+```ts
+// Archivo: src/a1/17-const.ts
+// <const T>: que TypeScript infiera los valores exactos, sin que quien llama escriba "as const"
+import type { Afirmar, Igual } from "./pruebas";
+
+function sinConst<T extends readonly string[]>(opciones: T): T[number] {
+  return opciones[0]!;
+}
+function conConst<const T extends readonly string[]>(opciones: T): T[number] {
+  return opciones[0]!;
+}
+
+const a = sinConst(["fuerza", "running"]); // string: los literales se "ensanchan" (I1.2)
+const b = sinConst(["fuerza", "running"] as const); // "fuerza" | "running", pero quien llama tiene que acordarse del as const
+const c = conConst(["fuerza", "running"]); // "fuerza" | "running", sin as const
+
+// También con objetos: una tabla de rutas con sus textos exactos
+function definirRutas<const R extends Record<string, string>>(rutas: R): R {
+  return rutas;
+}
+const rutas = definirRutas({ inicio: "/", progreso: "/progreso" });
+console.log(a, b, c, rutas.progreso);
+
+type _pruebas = [
+  Afirmar<Igual<typeof a, string>>,
+  Afirmar<Igual<typeof b, "fuerza" | "running">>,
+  Afirmar<Igual<typeof c, "fuerza" | "running">>,
+  Afirmar<Igual<typeof rutas, { readonly inicio: "/"; readonly progreso: "/progreso" }>>,
+];
+```
+
+```text
+fuerza fuerza fuerza /progreso
+```
+
+Los cuatro tests pasan: sin `const`, `string`; con `as const` al llamar, los valores exactos; con `<const T>`, los valores exactos **sin pedirle nada a quien llama**. Y en objetos, igual: `definirRutas` devuelve las rutas con sus textos exactos y `readonly`. Añade al final:
+
+```ts
+const tipo: "fuerza" | "running" = a;
+const otra: "fuerza" | "running" = conConst(["fuerza", "natacion"]);
+```
+
+```text
+src/a1/17-const.ts(30,7): error TS2322: Type 'string' is not assignable to type '"fuerza" | "running"'.
+src/a1/17-const.ts(31,7): error TS2322: Type '"fuerza" | "natacion"' is not assignable to type '"fuerza" | "running"'.
+```
+
+Con `sinConst`, el resultado es un `string` cualquiera; con `conConst`, la errata `"natacion"` llega hasta el tipo y se detecta. Borra las dos líneas.
+
+<Callout type="risk">
+
+- **`const` solo afecta a lo que se escribe en la llamada:** `conConst(lista)`, con una variable `lista` declarada antes como `string[]`, sigue dando `string`. El tipo ya se ensanchó al declarar la variable.
+- **Con TypeScript 7, la restricción puede ser `string[]` o `readonly string[]`:** las dos infieren los valores exactos. Con TypeScript 5.0, la versión que introdujo `<const T>`, `<const T extends string[]>` daba `string` (comprobado; con 5.3 ya funciona). Por eso verás `readonly` en casi todos los ejemplos, y es la opción segura si tu código tiene que compilar con versiones antiguas.
+
+</Callout>
+
+## Paso 3: _branded types_ para los IDs
+
+En B1.4 viste que un alias no protege: si `CursoId` y `SeccionId` son `string`, son **el mismo tipo**. Esta plataforma guarda el progreso con una función de este estilo, en `src/server/repositories/progress.repo.ts`:
+
+```ts
+async markRead(userId: string, courseId: string, sectionId: string, now = new Date())
+```
+
+Tres textos seguidos. Con alias, el intercambio de dos de ellos pasa sin aviso. `src/a1/18-alias.ts`:
+
+```ts
+// Archivo: src/a1/18-alias.ts
+// Lo mismo con alias simples (B1.4): para TypeScript, los tres son string
+type UsuarioId = string;
+type CursoId = string;
+type SeccionId = string;
+
+function marcarLeida(usuario: UsuarioId, curso: CursoId, seccion: SeccionId) {
+  console.log(`${usuario} leyó ${seccion} (${curso})`);
+}
+
+const usuario: UsuarioId = "6702a1b2c3d4e5f6a7b8c9d0";
+const curso: CursoId = "A1";
+const seccion: SeccionId = "A1.4";
+marcarLeida(usuario, seccion, curso); // curso y sección al revés: compila sin ningún aviso
+```
+
+```text
+6702a1b2c3d4e5f6a7b8c9d0 leyó A1 (A1.4)
+```
+
+Compila, y registra que el usuario leyó la sección "A1" del curso "A1.4". Un **_branded type_** (tipo con marca) añade al tipo una propiedad que **solo existe para el compilador**, distinta para cada clase de ID. Por dentro sigue siendo un `string`, pero dos marcas distintas ya no son compatibles. `src/a1/marcas.ts`:
+
+```ts
+// Archivo: src/a1/marcas.ts
+// Branded types: el mismo string por dentro, tipos distintos para el compilador
+
+declare const marca: unique symbol; // una clave que solo existe en los tipos
+
+export type Brand<T, B extends string> = T & { readonly [marca]: B };
+
+export type UsuarioId = Brand<string, "UsuarioId">;
+export type CursoId = Brand<string, "CursoId">;
+export type SeccionId = Brand<string, "SeccionId">;
+
+// La ÚNICA forma de obtener uno: una función que comprueba el formato (las mismas reglas que la plataforma)
+export function aCursoId(texto: string): CursoId {
+  if (!/^([BIA][1-8]|P1)$/.test(texto)) throw new Error(`"${texto}" no es un id de curso`);
+  return texto as CursoId;
+}
+
+export function aSeccionId(texto: string): SeccionId {
+  if (!/^([BIA][1-8]|P1)\.\d{1,2}$/.test(texto)) throw new Error(`"${texto}" no es un id de sección`);
+  return texto as SeccionId;
+}
+
+export function aUsuarioId(texto: string): UsuarioId {
+  if (!/^[0-9a-f]{24}$/.test(texto)) throw new Error(`"${texto}" no es un id de usuario`);
+  return texto as UsuarioId;
+}
+```
+
+Y el repositorio con marcas, `src/a1/18-marcas.ts`:
+
+```ts
+// Archivo: src/a1/18-marcas.ts
+// Un repositorio de progreso como el de la plataforma: marcarLeida(usuario, curso, sección)
+import { aCursoId, aSeccionId, aUsuarioId, type CursoId, type SeccionId, type UsuarioId } from "./marcas";
+
+const leidas = new Map<UsuarioId, Set<SeccionId>>();
+
+function marcarLeida(usuario: UsuarioId, curso: CursoId, seccion: SeccionId) {
+  const lista = leidas.get(usuario) ?? new Set<SeccionId>();
+  lista.add(seccion);
+  leidas.set(usuario, lista);
+  console.log(`${usuario} leyó ${seccion} (${curso})`);
+}
+
+// Los textos que llegan de fuera (la sesión, la URL) se convierten UNA vez, en la frontera
+const usuario = aUsuarioId("6702a1b2c3d4e5f6a7b8c9d0");
+const curso = aCursoId("A1");
+const seccion = aSeccionId("A1.4");
+
+marcarLeida(usuario, curso, seccion);
+
+// Por dentro siguen siendo textos: la marca no existe al ejecutar y no cuesta nada
+console.log(typeof seccion, JSON.stringify({ seccion }), seccion.startsWith("A1"));
+
+try {
+  aSeccionId("A1");
+} catch (e) {
+  console.log("rechazado:", (e as Error).message);
+}
+```
+
+```text
+6702a1b2c3d4e5f6a7b8c9d0 leyó A1.4 (A1)
+string {"seccion":"A1.4"} true
+rechazado: "A1" no es un id de sección
+```
+
+- **`unique symbol`** declara una clave que no existe al ejecutar (`declare const`) y que nadie más puede usar: la marca no choca con ninguna propiedad real.
+- **La marca no cuesta nada:** `typeof seccion` es `string`, se convierte a JSON como un texto y tiene todos sus métodos. Solo cambia lo que acepta el compilador.
+- **La única forma de obtener un `SeccionId` es `aSeccionId`**, que comprueba el formato. Los textos de fuera se convierten **una vez**, en la frontera (la sesión, la URL), y de ahí en adelante viajan marcados.
+
+Añade al final:
+
+```ts
+marcarLeida(usuario, seccion, curso);
+marcarLeida("6702a1b2c3d4e5f6a7b8c9d0", curso, seccion);
+const comoTexto: string = seccion; // al revés, sí: un SeccionId sigue siendo un string
+const trampa = "cualquier cosa" as SeccionId; // y "as" se salta la marca
+```
+
+```text
+src/a1/18-marcas.ts(30,22): error TS2345: Argument of type 'SeccionId' is not assignable to parameter of type 'CursoId'.
+src/a1/18-marcas.ts(31,13): error TS2345: Argument of type 'string' is not assignable to parameter of type 'UsuarioId'.
+```
+
+- **Curso y sección intercambiados es un error.** TypeScript informa del primer argumento que no encaja en cada llamada; al arreglarlo, informaría del siguiente.
+- **Un texto suelto tampoco vale:** obliga a pasar por `aUsuarioId`.
+- **Las dos últimas líneas compilan**, por eso no aparecen. Un `SeccionId` se puede usar donde se espera un `string` (para mostrarlo o guardarlo), y `as` se salta la marca, como cualquier conversión.
+
+<Callout type="risk">
+
+- **Un `as SeccionId` fuera de la función que comprueba anula toda la protección:** que las conversiones solo estén en `marcas.ts` es una regla del proyecto. Búscalas en la revisión de código: `as UsuarioId`, `as SeccionId`.
+- **Las marcas no viajan por la red ni por la base de datos:** lo que se lee de MongoDB o de una petición es un `string`, y hay que volver a convertirlo (y comprobarlo) en el repositorio o en el _endpoint_.
+- **No marques todo:** un ID que solo se usa en un sitio no lo necesita. Las marcas valen la pena donde hay varios IDs del mismo tipo base que se pueden confundir, como los tres de `markRead`.
+
+</Callout>
+
+## Paso 4: `satisfies`, comprobar sin perder lo que se sabe
+
+Para comprobar que un objeto tiene la forma correcta, lo natural es anotarlo: `const rutas: Record<string, Ruta> = {…}`. Pero entonces **su tipo pasa a ser la anotación**, y TypeScript olvida qué claves y qué valores tiene. `satisfies` comprueba lo mismo y deja el tipo como estaba. Crea `src/a1/19-satisfies.ts`:
+
+```ts
+// Archivo: src/a1/19-satisfies.ts
+// Anotar un tipo frente a "satisfies": las dos comprueban el valor; solo satisfies conserva lo que sabe de él
+import type { Afirmar, Igual } from "./pruebas";
+
+type Ruta = `/${string}`;
+
+// 1. Anotado: el valor se comprueba, pero su tipo pasa a ser Record<string, Ruta>
+const rutasAnotadas: Record<string, Ruta> = { inicio: "/", progreso: "/progreso" };
+
+// 2. Con satisfies: se comprueba igual, y el tipo sigue siendo el del objeto escrito
+const rutas = { inicio: "/", progreso: "/progreso" } satisfies Record<string, Ruta>;
+
+// 3. Una configuración con números y textos: satisfies comprueba, pero aquí los valores se ensanchan
+const config = { objetivoMinutos: 150, tema: "light" } satisfies Record<string, number | string>;
+
+// 4. as const satisfies: los valores exactos, readonly, y comprobados
+const CONFIG = { objetivoMinutos: 150, tema: "light" } as const satisfies Record<string, number | string>;
+
+console.log(rutasAnotadas.progreso, rutas.progreso, config.tema, CONFIG.tema);
+
+type _pruebas = [
+  Afirmar<Igual<typeof rutasAnotadas.progreso, Ruta | undefined>>, // ¿existe? TypeScript ya no lo sabe
+  Afirmar<Igual<typeof rutas, { inicio: "/"; progreso: "/progreso" }>>, // las claves y los textos exactos
+  Afirmar<Igual<typeof config, { objetivoMinutos: number; tema: string }>>, // las claves sí; los valores, ensanchados
+  Afirmar<Igual<typeof CONFIG, { readonly objetivoMinutos: 150; readonly tema: "light" }>>,
+];
+```
+
+```text
+/progreso /progreso light light
+```
+
+Los cuatro tests muestran la diferencia:
+
+- **Anotado:** `rutasAnotadas.progreso` es `` `/${string}` | undefined ``. TypeScript ya no sabe que `progreso` existe, y cualquier clave es válida.
+- **Con `satisfies`:** las claves y los textos exactos (`"/progreso"`). El valor se comprobó contra `Record<string, Ruta>`, pero el tipo es el del objeto escrito. Aquí los textos se conservan porque el tipo de destino es una plantilla, y guía la inferencia.
+- **Con valores `number | string`, `satisfies` conserva las claves, pero ensancha los valores:** `objetivoMinutos` es `number` y `tema`, `string`.
+- **`as const satisfies`** da los valores exactos y `readonly`, y además los comprueba. Es la combinación habitual para la configuración.
+
+Añade al final:
+
+```ts
+const malas = { inicio: "/", progreso: "progreso" } satisfies Record<string, Ruta>;
+console.log(rutasAnotadas.estadisticas, rutas.estadisticas);
+CONFIG.tema = "dark";
+```
+
+```text
+src/a1/19-satisfies.ts(28,30): error TS2322: Type '"progreso"' is not assignable to type '`/${string}`'.
+src/a1/19-satisfies.ts(29,47): error TS2339: Property 'estadisticas' does not exist on type '{ inicio: "/"; progreso: "/progreso"; }'.
+src/a1/19-satisfies.ts(30,8): error TS2540: Cannot assign to 'tema' because it is a read-only property.
+```
+
+- **`satisfies` comprueba el valor:** una ruta sin la barra inicial es un error.
+- **`rutas.estadisticas` es un error y `rutasAnotadas.estadisticas`, no:** la ruta mal escrita solo se detecta con `satisfies`. Con la anotación, compila y vale `undefined` al ejecutar.
+- **`as const` impide reasignar** la configuración.
+
+<Callout type="risk">
+
+- **`satisfies` no convierte nada:** si el valor no encaja, es un error, igual que una anotación. A diferencia de `as`, nunca obliga a TypeScript a creer algo que no es.
+- **Para una variable que va a cambiar, anota el tipo:** `satisfies` deja el tipo exacto del valor inicial. `let tema = "light" satisfies Tema` se queda en `string` (y aceptaría `"azul"` después): con `let tema: Tema = "light"`, no.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Aplica _branded types_ a los IDs de tu app (usuario, curso y sección), con una función que compruebe el formato de cada uno.
+2. Escribe un manejador que reciba los textos de una petición, los convierta en la frontera (422 si no son válidos) y llame a un repositorio que solo acepta IDs marcados.
+3. Aplica `satisfies` al objeto de configuración: objetivos semanales por nivel, rutas y reglas de la evaluación.
+
+</Callout>
+
+Solución. `src/a1/20-ejercicio.ts`:
+
+```ts
+// Archivo: src/a1/20-ejercicio.ts
+// IDs con marca de extremo a extremo y una configuración comprobada con satisfies
+import { aSeccionId, aUsuarioId, type CursoId, type SeccionId, type UsuarioId } from "./marcas";
+
+type Nivel = "B" | "I" | "A" | "P";
+
+const CONFIG = {
+  objetivoSemanal: { B: 150, I: 200, A: 250, P: 300 }, // minutos por nivel
+  rutas: { inicio: "/", progreso: "/progreso", cursos: "/cursos" },
+  evaluacion: { aprobado: 4, preguntas: 5 },
+} as const satisfies {
+  objetivoSemanal: Record<Nivel, number>; // los cuatro niveles, ni uno menos
+  rutas: Record<string, `/${string}`>;
+  evaluacion: { aprobado: number; preguntas: number };
+};
+
+/** El curso de una sección. Recibe un SeccionId y devuelve un CursoId: la marca se conserva de una a otra */
+function cursoDe(seccion: SeccionId): CursoId {
+  return seccion.split(".")[0] as CursoId;
+}
+
+function objetivoDe(curso: CursoId): number {
+  return CONFIG.objetivoSemanal[curso[0] as Nivel];
+}
+
+const leidas = new Map<UsuarioId, Set<SeccionId>>();
+
+function marcarLeida(usuario: UsuarioId, seccion: SeccionId): number {
+  const lista = leidas.get(usuario) ?? new Set<SeccionId>();
+  lista.add(seccion);
+  leidas.set(usuario, lista);
+  return lista.size;
+}
+
+/** La frontera: lo que llega en una petición son textos. Se convierten aquí, una vez, o se rechaza */
+function manejarPeticion(cuerpo: { usuario: string; seccion: string }): { status: number; mensaje: string } {
+  let usuario: UsuarioId;
+  let seccion: SeccionId;
+  try {
+    usuario = aUsuarioId(cuerpo.usuario);
+    seccion = aSeccionId(cuerpo.seccion);
+  } catch (e) {
+    return { status: 422, mensaje: (e as Error).message };
+  }
+  const total = marcarLeida(usuario, seccion);
+  const curso = cursoDe(seccion);
+  return { status: 200, mensaje: `${total} leídas; objetivo de ${curso}: ${objetivoDe(curso)} min/semana` };
+}
+
+console.log(manejarPeticion({ usuario: "6702a1b2c3d4e5f6a7b8c9d0", seccion: "A1.4" }));
+console.log(manejarPeticion({ usuario: "6702a1b2c3d4e5f6a7b8c9d0", seccion: "B2.1" }));
+console.log(manejarPeticion({ usuario: "6702a1b2c3d4e5f6a7b8c9d0", seccion: "A1" }));
+console.log(manejarPeticion({ usuario: "ana", seccion: "A1.4" }));
+console.log(CONFIG.rutas.progreso);
+```
+
+```text
+{ status: 200, mensaje: '1 leídas; objetivo de A1: 250 min/semana' }
+{ status: 200, mensaje: '2 leídas; objetivo de B2: 150 min/semana' }
+{ status: 422, mensaje: '"A1" no es un id de sección' }
+{ status: 422, mensaje: '"ana" no es un id de usuario' }
+/progreso
+```
+
+- **La frontera es `manejarPeticion`:** los textos se convierten ahí, y lo que no tiene formato da un 422 con el motivo. `marcarLeida`, `cursoDe` y `objetivoDe` solo trabajan con IDs marcados.
+- **`cursoDe` recibe un `SeccionId` y devuelve un `CursoId`:** la marca pasa de un tipo de ID a otro, sin volver a ser un `string` suelto.
+- **La configuración usa `as const satisfies`:** los valores exactos para el código y la forma comprobada.
+
+Lo que no debe compilar. Quita la `P` de `objetivoSemanal`, quita la barra de `"/progreso"` y añade al final:
+
+```ts
+const u = aUsuarioId("6702a1b2c3d4e5f6a7b8c9d0");
+const s = aSeccionId("A1.4");
+marcarLeida(s, u);
+objetivoDe("A1");
+CONFIG.evaluacion.aprobado = 3;
+```
+
+```text
+src/a1/20-ejercicio.ts(8,3): error TS2741: Property 'P' is missing in type '{ readonly B: 150; readonly I: 200; readonly A: 250; }' but required in type 'Record<Nivel, number>'.
+src/a1/20-ejercicio.ts(9,25): error TS2322: Type '"progreso"' is not assignable to type '`/${string}`'.
+src/a1/20-ejercicio.ts(23,10): error TS7053: Element implicitly has an 'any' type because expression of type 'Nivel' can't be used to index type '{ readonly B: 150; readonly I: 200; readonly A: 250; }'.
+src/a1/20-ejercicio.ts(58,13): error TS2345: Argument of type 'SeccionId' is not assignable to parameter of type 'UsuarioId'.
+src/a1/20-ejercicio.ts(59,12): error TS2345: Argument of type 'string' is not assignable to parameter of type 'CursoId'.
+src/a1/20-ejercicio.ts(60,19): error TS2540: Cannot assign to 'aprobado' because it is a read-only property.
+```
+
+- **Falta el nivel `P`:** `Record<Nivel, number>` exige los cuatro. Y el error se propaga: `objetivoDe` ya no puede leer `CONFIG.objetivoSemanal` con cualquier nivel (`TS7053`). `satisfies` lo avisa en la configuración, antes de que falle al ejecutar con el proyecto final.
+- **Una ruta sin barra**, los IDs intercambiados, un texto en lugar de un `CursoId` y la reasignación de la configuración: todos al compilar.
+
+Por último, Zod también sabe marcar: `.brand()` hace en un solo sitio la comprobación al ejecutar y la marca del tipo. Con Zod 4, `src/a1/21-zod-brand.ts`:
+
+```ts
+// Archivo: src/a1/21-zod-brand.ts
+// La marca y la comprobación en un solo sitio: Zod valida al ejecutar y marca el tipo
+import { z } from "zod";
+
+const SeccionIdSchema = z
+  .string()
+  .regex(/^([BIA][1-8]|P1)\.\d{1,2}$/, "Formato de sección no válido")
+  .brand<"SeccionId">();
+type SeccionId = z.infer<typeof SeccionIdSchema>; // string & z.$brand<"SeccionId">
+
+const PeticionSchema = z.object({ seccion: SeccionIdSchema });
+
+function marcarLeida(seccion: SeccionId) {
+  console.log("marcada:", seccion);
+}
+
+const buena = PeticionSchema.safeParse({ seccion: "A1.4" });
+if (buena.success) marcarLeida(buena.data.seccion); // ya es SeccionId: sin as
+
+const mala = PeticionSchema.safeParse({ seccion: "A1" });
+if (!mala.success) console.log("rechazada:", z.flattenError(mala.error).fieldErrors);
+```
+
+```text
+marcada: A1.4
+rechazada: { seccion: [ 'Formato de sección no válido' ] }
+```
+
+Con un texto suelto, `marcarLeida("A1.4")` es un error:
+
+```text
+src/a1/21-zod-brand.ts(23,13): error TS2345: Argument of type 'string' is not assignable to parameter of type 'string & $brand<"SeccionId">'.
+```
+
+En una app con Zod, `.brand()` es la forma más cómoda de crear los IDs marcados: el esquema de la petición los valida y los marca a la vez, sin funciones `aSeccionId` aparte.
+
+<Callout type="risk">
+
+- **Aplícalo poco a poco:** marcar los IDs de un proyecto existente obliga a convertir en cada frontera. Empieza por las funciones con varios IDs del mismo tipo base, que es donde están los errores.
+- **Las marcas de Zod y las tuyas no son compatibles entre sí:** un `SeccionId` de `marcas.ts` y otro de Zod son tipos distintos. Elige una forma en el proyecto.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tus tipos impiden errores que antes solo se veían al ejecutar: tus funciones infieren el tipo a partir de lo que reciben (el truco de Zod), usan `<const T>` para conservar los valores exactos, los IDs llevan marca y no se pueden intercambiar aunque todos sean `string`, se convierten una vez en la frontera, y la configuración se comprueba con `as const satisfies` sin perder sus claves ni sus valores.
+
+</Callout>
+
+## Resumen
+
+- Una API que infiere: el tipo de los datos viaja dentro del tipo del valor (`Esquema<T>`), y `Infer` lo saca.
+- `<const T>` infiere los literales exactos sin pedir `as const` a quien llama.
+- `Brand<T, B> = T & { readonly [marca]: B }`: el mismo `string` al ejecutar, tipos incompatibles al compilar. Se crean solo en la frontera, con una comprobación (o con `.brand()` de Zod).
+- Anotar un tipo lo sustituye; `satisfies` lo comprueba y conserva claves y, con plantillas o `as const`, los valores exactos.
