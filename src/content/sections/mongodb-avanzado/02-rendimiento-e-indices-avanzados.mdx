@@ -1,0 +1,494 @@
+---
+sectionId: "A2.2"
+course: "A2"
+title: "Rendimiento e índices avanzados"
+order: 2
+minutes: 75
+summary: "Analizas con explain los índices reales de esta plataforma, consigues consultas covered, mides índices parciales, sparse y multiclave (y cómo un hint devuelve datos incompletos), y paginas un millón de documentos."
+---
+
+En B5.6 aprendiste a leer un `explain`, la regla ESR y los índices TTL. Con eso se resuelve casi todo. Esta sección es para lo demás: decidir si un índice sobra o hace falta, que una consulta no tenga que leer ningún documento, los índices que solo indexan una parte de la colección (y las trampas que traen), cómo encontrar las consultas lentas y los índices que nadie usa, y por qué `skip` deja de servir cuando una lista crece.
+
+**Lo que tendrás al terminar:** un banco de pruebas con la forma de la colección `quiz_attempts` de esta plataforma, mediciones de cada tipo de índice y la paginación por cursor probada con un millón de documentos.
+
+**Requisitos:** el proyecto `mongo-academy`, con `src/a2/` de A2.1. Los números de esta sección son de un MongoDB 8.2 local, con todos los datos en memoria; en Atlas, los tiempos serán mayores, pero las proporciones se mantienen.
+
+## Paso 1: `explain` a fondo, con los índices de esta plataforma
+
+Un banco de pruebas con la forma de `quiz_attempts`, y un ayudante que resume cada `explain` en una línea. `src/a2/banco.ts`:
+
+```ts
+// Archivo: src/a2/banco.ts
+// Un banco de pruebas con la forma de quiz_attempts de esta plataforma, y un resumen de explain()
+import type { Collection, Document } from "mongodb";
+import { db } from "../db";
+
+export interface Intento {
+  userId: string;
+  courseId: string;
+  score: number; // aciertos, de 0 a 5
+  passed: boolean;
+  submittedAt: Date;
+  etiquetas?: string[]; // solo algunos intentos: "repaso", "examen"…
+}
+
+export const intentos: Collection<Intento> = db.collection<Intento>("a2_intentos_banco");
+
+const CURSOS = ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "A1"];
+
+/** Inserta n intentos de `usuarios` usuarios, en lotes de 10 000 (rápido, sin índices) */
+export async function sembrar(n: number, usuarios = 1000) {
+  await intentos.drop().catch(() => {});
+  const inicio = new Date("2026-01-01T00:00:00Z").getTime();
+  for (let hechos = 0; hechos < n; hechos += 10_000) {
+    const lote: Intento[] = [];
+    for (let i = hechos; i < Math.min(n, hechos + 10_000); i++) {
+      const score = (i * 7) % 6;
+      lote.push({
+        userId: `u${String(i % usuarios).padStart(4, "0")}`,
+        courseId: CURSOS[i % CURSOS.length]!,
+        score,
+        passed: score >= 4,
+        submittedAt: new Date(inicio + i * 60_000), // uno por minuto
+        ...(i % 10 === 0 && { etiquetas: i % 20 === 0 ? ["repaso", "examen"] : ["repaso"] }),
+      });
+    }
+    await intentos.insertMany(lote, { ordered: false });
+  }
+}
+
+/** Lo importante de un explain("executionStats"), en una línea */
+export function resumir(explicacion: Document): string {
+  const etapas: string[] = [];
+  let nodo = explicacion.queryPlanner.winningPlan;
+  while (nodo) {
+    etapas.push(nodo.stage === "IXSCAN" ? `IXSCAN ${nodo.indexName}` : nodo.stage);
+    nodo = nodo.inputStage ?? nodo.queryPlan?.inputStage ?? (nodo.queryPlan && nodo.queryPlan !== nodo ? nodo.queryPlan : undefined);
+  }
+  const e = explicacion.executionStats;
+  return `${etapas.join(" ← ")} · devueltos ${e.nReturned} · claves ${e.totalKeysExamined} · documentos ${e.totalDocsExamined} · ${e.executionTimeMillis} ms`;
+}
+```
+
+Esta plataforma crea dos índices en `quiz_attempts` que se parecen mucho, en `scripts/db-setup.ts`: `{ userId, courseId, submittedAt }` y `{ userId, submittedAt }`. ¿Hacen falta los dos? Las dos consultas de su repositorio, con ninguno, con uno y con los dos. `src/a2/07-explain.ts`:
+
+```ts
+// Archivo: src/a2/07-explain.ts
+// Las dos consultas de quiz_attempts de esta plataforma, con ninguno, uno o los dos índices que crea
+import { cliente } from "../db";
+import { intentos, resumir, sembrar } from "./banco";
+
+await sembrar(200_000);
+
+// listByCourse: los últimos intentos de un usuario en un curso
+const porCurso = () => intentos.find({ userId: "u0042", courseId: "B3" }).sort({ submittedAt: -1 }).limit(5);
+// recent: los últimos intentos de un usuario, de cualquier curso
+const recientes = () => intentos.find({ userId: "u0042" }).sort({ submittedAt: -1 }).limit(20);
+
+async function medir(titulo: string) {
+  console.log(titulo);
+  console.log(`  porCurso:   ${resumir(await porCurso().explain("executionStats"))}`);
+  console.log(`  recientes:  ${resumir(await recientes().explain("executionStats"))}`);
+}
+
+await medir("1. Sin índices");
+
+await intentos.createIndex({ userId: 1, courseId: 1, submittedAt: -1 }, { name: "user_course_submittedAt" });
+await medir("2. Solo { userId, courseId, submittedAt }");
+
+await intentos.createIndex({ userId: 1, submittedAt: -1 }, { name: "user_submittedAt" });
+await medir("3. Los dos índices de la plataforma");
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/a2/07-explain.ts
+```
+
+```text
+1. Sin índices
+  porCurso:   SORT ← COLLSCAN · devueltos 5 · claves 0 · documentos 200000 · 33 ms
+  recientes:  SORT ← COLLSCAN · devueltos 20 · claves 0 · documentos 200000 · 31 ms
+2. Solo { userId, courseId, submittedAt }
+  porCurso:   LIMIT ← FETCH ← IXSCAN user_course_submittedAt · devueltos 5 · claves 5 · documentos 5 · 2 ms
+  recientes:  FETCH ← SORT ← IXSCAN user_course_submittedAt · devueltos 20 · claves 200 · documentos 20 · 0 ms
+3. Los dos índices de la plataforma
+  porCurso:   LIMIT ← FETCH ← IXSCAN user_course_submittedAt · devueltos 5 · claves 5 · documentos 5 · 2 ms
+  recientes:  LIMIT ← FETCH ← IXSCAN user_submittedAt · devueltos 20 · claves 20 · documentos 20 · 0 ms
+```
+
+Los tres números que importan, y la relación entre ellos:
+
+| Campo               | Qué cuenta                     | Lo ideal                          |
+| ------------------- | ------------------------------ | --------------------------------- |
+| `nReturned`         | Documentos devueltos           | Lo que pide la consulta           |
+| `totalKeysExamined` | Entradas del índice recorridas | Cerca de `nReturned`              |
+| `totalDocsExamined` | Documentos leídos              | Igual a `nReturned` (o 0, Paso 2) |
+
+- **Sin índices, las dos consultas recorren los 200 000 documentos** para devolver 5 y 20 (`COLLSCAN`), y los ordenan en memoria (`SORT`).
+- **Con el primer índice, la consulta por curso es perfecta:** 5 claves, 5 documentos, 5 devueltos.
+- **Pero "los últimos intentos" sigue ordenando en memoria:** `{ userId, courseId, submittedAt }` sirve para encontrar los intentos de `u0042` (su prefijo `userId`), pero no están ordenados por fecha, porque el curso va en medio. Examina las 200 claves del usuario y ordena. Funciona, pero el coste crece con cada intento del usuario.
+- **Con el segundo índice, examina 20 claves para devolver 20.** El segundo índice de la plataforma no sobra: existe para esta consulta.
+
+<Callout type="risk">
+
+- **Un `SORT` en el plan es una señal:** MongoDB ordena en memoria, con un límite de 100 MB por consulta (el `memLimit` del plan). Por encima, este servidor pasa a ordenar en disco (su parámetro `allowDiskUseByDefault` vale `true`), mucho más lento. Un índice con el campo de orden en el sitio correcto (ESR, B5.6) lo evita.
+- **Los milisegundos de `explain` engañan con pocos datos:** 0 ms con 200 claves y con 20. Mira las claves y los documentos examinados: son los que crecen cuando crecen los datos.
+
+</Callout>
+
+## Paso 2: consultas _covered_
+
+Si todo lo que una consulta filtra y devuelve está en el índice, MongoDB puede responder **sin leer ningún documento**. Se llama consulta **_covered_** (cubierta). `src/a2/08-cubiertas.ts`:
+
+```ts
+// Archivo: src/a2/08-cubiertas.ts
+// Una consulta "covered": todo lo que pide está en el índice, y no hace falta leer ningún documento
+import { cliente } from "../db";
+import { intentos, resumir, sembrar } from "./banco";
+
+await sembrar(200_000);
+await intentos.createIndex({ userId: 1, courseId: 1, submittedAt: -1 }, { name: "user_course_submittedAt" });
+
+const filtro = { userId: "u0042" };
+const casos = [
+  ["documento entero", {}],
+  ["solo campos del índice, con _id", { courseId: 1, submittedAt: 1 }],
+  ["solo campos del índice, sin _id", { _id: 0, courseId: 1, submittedAt: 1 }],
+  ["un campo que no está en el índice", { _id: 0, courseId: 1, submittedAt: 1, score: 1 }],
+] as const;
+
+for (const [nombre, projection] of casos) {
+  const e = await intentos.find(filtro, { projection }).explain("executionStats");
+  let t = performance.now();
+  for (let i = 0; i < 500; i++) await intentos.find(filtro, { projection }).toArray();
+  const ms = (performance.now() - t) / 500;
+  console.log(`${nombre.padEnd(34)} ${resumir(e)} · media de 500: ${ms.toFixed(2)} ms`);
+}
+
+await cliente.close();
+```
+
+```text
+documento entero                   FETCH ← IXSCAN user_course_submittedAt · devueltos 200 · claves 200 · documentos 200 · 2 ms · media de 500: 0.41 ms
+solo campos del índice, con _id    PROJECTION_SIMPLE ← FETCH ← IXSCAN user_course_submittedAt · devueltos 200 · claves 200 · documentos 200 · 0 ms · media de 500: 0.32 ms
+solo campos del índice, sin _id    PROJECTION_COVERED ← IXSCAN user_course_submittedAt · devueltos 200 · claves 200 · documentos 0 · 0 ms · media de 500: 0.25 ms
+un campo que no está en el índice  PROJECTION_SIMPLE ← FETCH ← IXSCAN user_course_submittedAt · devueltos 200 · claves 200 · documentos 200 · 0 ms · media de 500: 0.31 ms
+```
+
+- **Solo la tercera es _covered_:** `PROJECTION_COVERED` y **0 documentos** examinados. Todo sale del índice.
+- **Con `_id` no lo es,** aunque pidas solo campos del índice: `find` devuelve `_id` por defecto, y `_id` no está en este índice. Hay que excluirlo explícitamente (`_id: 0`).
+- **Un campo de más (`score`) obliga a leer los 200 documentos** (`FETCH`).
+- **La diferencia de tiempo aquí es pequeña** (0,41 frente a 0,25 ms), porque en este laboratorio todos los documentos están en memoria. Cuando la colección no cabe en memoria, cada documento leído puede ser una lectura de disco, y ahí la diferencia es grande.
+
+<Callout type="risk">
+
+- **No añadas campos a un índice solo para que una consulta sea _covered_:** cada campo hace el índice más grande y más caro de mantener en cada escritura. Merece la pena en consultas muy frecuentes que devuelven pocos campos (un listado, un recuento).
+- **Con un índice multiclave (Paso 3), no pidas el campo de tipo array:** medido con `{ userId, etiquetas }`, devolver solo `userId` es _covered_ (0 documentos leídos); devolver también `etiquetas` obliga a leer los 200 documentos, porque el índice guarda cada etiqueta por separado y no el array entero.
+
+</Callout>
+
+## Paso 3: índices parciales, _sparse_ y multiclave
+
+Tres tipos de índice para casos concretos, con sus trampas. `src/a2/09-especiales.ts`:
+
+```ts
+// Archivo: src/a2/09-especiales.ts
+// Índices parciales, sparse y multiclave: lo que ocupan, cuándo se usan y sus trampas
+import type { MongoServerError } from "mongodb";
+import { cliente, db } from "../db";
+import { intentos, resumir, sembrar } from "./banco";
+
+await sembrar(200_000);
+// Tamaño de los índices (sin el de _id). fsync: que las estadísticas reflejen lo último escrito
+const tamanos = async () => {
+  await db.admin().command({ fsync: 1 });
+  const [stats] = await intentos
+    .aggregate<{ storageStats: { indexSizes: Record<string, number> } }>([
+      { $collStats: { storageStats: {} } },
+    ])
+    .toArray();
+  return Object.entries(stats!.storageStats.indexSizes)
+    .filter(([nombre]) => nombre !== "_id_")
+    .map(([nombre, b]) => `${nombre} ${(b / 1024).toFixed(0)} KB`)
+    .join(" · ");
+};
+
+// 1. Parcial: solo indexa los intentos aprobados
+await intentos.createIndex(
+  { userId: 1, submittedAt: -1 },
+  { name: "completo" },
+);
+await intentos.createIndex(
+  { userId: 1, submittedAt: -1, passed: 1 },
+  { name: "aprobados", partialFilterExpression: { passed: true } },
+);
+console.log("1. Tamaños:", await tamanos());
+for (const [nombre, filtro] of [
+  ["{ userId, passed: true }", { userId: "u0042", passed: true }],
+  ["{ userId, score >= 4 }", { userId: "u0042", score: { $gte: 4 } }],
+] as const) {
+  const e = await intentos
+    .find(filtro)
+    .sort({ submittedAt: -1 })
+    .hint("aprobados")
+    .explain("executionStats")
+    .catch((err: MongoServerError) => err);
+  console.log(
+    `   con hint("aprobados") y ${nombre.padEnd(25)} → ${"queryPlanner" in e ? resumir(e) : `${e.codeName}: ${e.message.slice(0, 90)}`}`,
+  );
+}
+// Un intento con nota 5 que no cuenta como aprobado (por ejemplo, entregado fuera de plazo)
+await intentos.insertOne({ userId: "u0042", courseId: "A1", score: 5, passed: false, submittedAt: new Date("2027-01-01") });
+const notaAlta = { userId: "u0042", score: { $gte: 4 } };
+const sin = (await intentos.find(notaAlta).toArray()).length;
+const con = (await intentos.find(notaAlta).hint("aprobados").toArray()).length;
+console.log(`   { userId, score >= 4 }: sin hint ${sin} intentos · con hint("aprobados") ${con}`);
+await intentos.dropIndexes();
+
+// 2. Multiclave: un índice sobre un array indexa cada elemento
+await intentos.createIndex({ etiquetas: 1 }, { name: "etiquetas" });
+const m = await intentos
+  .find({ etiquetas: "examen" })
+  .explain("executionStats");
+console.log(
+  `2. { etiquetas: "examen" } → ${resumir(m)} · isMultiKey: ${m.queryPlanner.winningPlan.inputStage?.isMultiKey}`,
+);
+await intentos.updateOne(
+  { etiquetas: "examen" },
+  { $set: { respuestas: [1, 3, 0, 2, 4] } },
+); // un documento con dos arrays
+try {
+  await intentos.createIndex(
+    { etiquetas: 1, respuestas: 1 },
+    { name: "dos_arrays" },
+  );
+} catch (e) {
+  const err = e as MongoServerError;
+  console.log(
+    `   índice compuesto con dos arrays → ${err.codeName}: ${err.message.replace(/^.*:: caused by :: /, "")}`,
+  );
+}
+await intentos.dropIndexes();
+
+// 3. Sparse: solo indexa los documentos que tienen el campo (1 de cada 10)
+await intentos.createIndex(
+  { etiquetas: 1 },
+  { name: "etiquetas_sparse", sparse: true },
+);
+console.log("3. Tamaños:", await tamanos());
+const total = await intentos.countDocuments();
+const conHint = await intentos
+  .find({})
+  .sort({ etiquetas: 1 })
+  .hint("etiquetas_sparse")
+  .toArray();
+const sinHint = await intentos.find({}).sort({ etiquetas: 1 }).toArray();
+console.log(
+  `   ordenar por etiquetas: sin hint ${sinHint.length} de ${total} · con hint("etiquetas_sparse") ${conHint.length} de ${total}`,
+);
+
+await cliente.close();
+```
+
+```text
+1. Tamaños: completo 3584 KB · aprobados 1336 KB
+   con hint("aprobados") y { userId, passed: true }  → FETCH ← IXSCAN aprobados · devueltos 67 · claves 68 · documentos 67 · 0 ms
+   con hint("aprobados") y { userId, score >= 4 }    → SORT ← FETCH ← IXSCAN aprobados · devueltos 67 · claves 66666 · documentos 66666 · 36 ms
+   { userId, score >= 4 }: sin hint 68 intentos · con hint("aprobados") 67
+2. { etiquetas: "examen" } → FETCH ← IXSCAN etiquetas · devueltos 10000 · claves 10000 · documentos 10000 · 4 ms · isMultiKey: true
+   índice compuesto con dos arrays → CannotIndexParallelArrays: cannot index parallel arrays [respuestas] [etiquetas]
+3. Tamaños: etiquetas_sparse 176 KB
+   ordenar por etiquetas: sin hint 200001 de 200001 · con hint("etiquetas_sparse") 20000 de 200001
+```
+
+**1. Parcial:** indexa solo los documentos que cumplen `partialFilterExpression`, aquí los aprobados (un tercio). Ocupa **1.336 KB frente a 3.584 KB** del índice completo. MongoDB lo usa cuando la consulta pide **exactamente** esa condición (`passed: true`): 68 claves para 67 resultados. Con un filtro que tú sabes equivalente pero que no es el mismo (`score >= 4`), MongoDB no puede garantizar que el índice tenga todos los documentos, y no lo elige. Forzarlo con `hint` es peor: recorre el índice entero (66 666 claves) y, en cuanto hay un intento con nota 5 sin aprobar, **devuelve 67 en lugar de 68, sin ningún error**. El documento que falta no está en el índice.
+
+**2. Multiclave:** un índice sobre un array crea una entrada **por cada elemento**, y `{ etiquetas: "examen" }` lo usa (`isMultiKey: true`). Pero un índice compuesto no puede tener **dos** campos de tipo array en el mismo documento: `cannot index parallel arrays`, en cuanto un documento tiene los dos.
+
+**3. _Sparse_:** indexa solo los documentos que **tienen** el campo (uno de cada diez): 176 KB. Su trampa es la misma que la del parcial: al ordenar, MongoDB no lo usa por su cuenta, porque le faltan documentos; forzado con `hint`, la consulta devuelve **20 000 de 200 001**. Hoy, un índice parcial con `{ campo: { $exists: true } }` hace lo mismo que `sparse`, y es más explícito.
+
+Y el TTL (B5.6) es otro índice especial: borra los documentos al caducar. Esta plataforma lo usa en `rate_limits`, para que cada ventana de límite de peticiones desaparezca sola.
+
+<Callout type="risk">
+
+- **Nunca uses `hint` con un índice parcial o _sparse_ sin entenderlo:** el resultado puede estar incompleto, y nada avisa. `hint` es para depurar el planificador, no para el código de producción.
+- **Escribe en la consulta la misma condición del índice parcial:** si el índice es `{ passed: true }`, la consulta tiene que incluir `passed: true`, aunque otro campo lo implique. MongoDB no razona sobre tus datos.
+
+</Callout>
+
+## Paso 4: el _profiler_ y los índices que nadie usa
+
+Para encontrar las consultas lentas de una app en marcha no hace falta adivinar: el **_profiler_** de MongoDB guarda en `system.profile` las operaciones que tardan más de `slowms`. Y `$indexStats` cuenta cuántas veces se ha usado cada índice. `src/a2/10-profiler.ts`:
+
+```ts
+// Archivo: src/a2/10-profiler.ts
+// ¿Qué consultas son lentas? ¿Qué índices no usa nadie? El profiler y $indexStats lo dicen
+import { cliente, db } from "../db";
+import { intentos, sembrar } from "./banco";
+
+await sembrar(200_000);
+await intentos.createIndex({ userId: 1, courseId: 1, submittedAt: -1 }, { name: "user_course_submittedAt" });
+await intentos.createIndex({ userId: 1, submittedAt: -1 }, { name: "user_submittedAt" });
+await intentos.createIndex({ courseId: 1, score: -1 }, { name: "course_score" }); // ¿alguien lo usa?
+
+// 1. El profiler guarda en system.profile las operaciones que tardan más de slowms
+await db.command({ profile: 0 });
+await db.collection("system.profile").drop().catch(() => {});
+await db.command({ profile: 1, slowms: 5 });
+
+for (let i = 0; i < 20; i++) await intentos.find({ userId: `u00${10 + i}` }).sort({ submittedAt: -1 }).limit(20).toArray(); // rápidas, con índice
+await intentos.find({ score: 5, passed: true }).sort({ submittedAt: -1 }).limit(20).toArray(); // sin índice que la sirva
+await intentos.countDocuments({ etiquetas: "examen" }); // sin índice
+
+await db.command({ profile: 0 });
+const lentas = await db
+  .collection("system.profile")
+  .find({ ns: intentos.namespace })
+  .project({ _id: 0, op: 1, millis: 1, planSummary: 1, docsExamined: 1, nreturned: 1, "command.filter": 1, "command.pipeline": 1 })
+  .toArray();
+console.log(`1. Operaciones de más de 5 ms (de 22 consultas): ${lentas.length}`);
+for (const l of lentas) {
+  const que = l.command?.filter ?? l.command?.pipeline?.[0]; // countDocuments es un aggregate: su filtro va en el $match
+  console.log(`   ${l.millis} ms · ${l.op} · ${l.planSummary} · ${JSON.stringify(que)} · documentos ${l.docsExamined} · devueltos ${l.nreturned}`);
+}
+
+// 2. $indexStats: cuántas veces se ha usado cada índice desde que arrancó el servidor
+const uso = await intentos.aggregate<{ name: string; accesses: { ops: number } }>([{ $indexStats: {} }]).toArray();
+console.log("2. Uso de los índices:", uso.map((u) => `${u.name} ${u.accesses.ops}`).join(" · "));
+
+await cliente.close();
+```
+
+```text
+1. Operaciones de más de 5 ms (de 22 consultas): 2
+   35 ms · query · COLLSCAN · {"score":5,"passed":true} · documentos 200000 · devueltos 20
+   22 ms · command · COLLSCAN · {"$match":{"etiquetas":"examen"}} · documentos 200000 · devueltos 1
+2. Uso de los índices: user_submittedAt 20 · user_course_submittedAt 0 · _id_ 0 · course_score 0
+```
+
+- **De 22 consultas, el _profiler_ recogió las 2 lentas**, con lo necesario para arreglarlas: el plan (`COLLSCAN`), el filtro y los documentos examinados (200 000 para devolver 20 y 1). La segunda es un `countDocuments`, que por dentro es un `aggregate`: su filtro está en el `$match`.
+- **`$indexStats` dice que `course_score` no se ha usado nunca:** ocupa espacio y ralentiza cada escritura sin ayudar a ninguna consulta. Es candidato a borrarse.
+- **En Atlas**, _Query Profiler_ y _Performance Advisor_ hacen este trabajo desde la interfaz: analizan las consultas lentas y sugieren índices. Lo que ofrece cada uno depende de tu plan; las ideas son las mismas que aquí.
+
+<Callout type="risk">
+
+- **Apaga el _profiler_ al terminar** (`profile: 0`): con `slowms` bajo, cada operación lenta escribe en `system.profile`, y eso también cuesta. En producción, se activa durante un tiempo o con `slowms` alto.
+- **Los contadores de `$indexStats` empiezan de cero cada vez que arranca el servidor:** un índice con 0 usos justo después de un reinicio no está necesariamente sin usar. Míralo tras días de tráfico normal, y piensa en los informes mensuales que solo se ejecutan una vez al mes.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Inserta 1 millón de documentos de prueba.
+2. Compara la paginación con `skip` y por cursor (`_id` menor que el último de la página anterior) en varias páginas: el tiempo y las claves examinadas.
+3. Comprueba que las dos dan los mismos resultados, y qué pasa si llegan documentos nuevos mientras alguien pasa de página.
+
+</Callout>
+
+Solución. `src/a2/11-ejercicio.ts`:
+
+```ts
+// Archivo: src/a2/11-ejercicio.ts
+// Un millón de intentos de un mismo usuario: paginar con skip frente a paginar por cursor
+import type { ObjectId } from "mongodb";
+import { cliente } from "../db";
+import { intentos, sembrar } from "./banco";
+
+const POR_PAGINA = 20;
+const USUARIO = "u0000";
+
+let t = performance.now();
+await sembrar(1_000_000, 1); // un solo usuario: el millón es suyo
+await intentos.createIndex({ userId: 1, _id: -1 }, { name: "user_id" });
+console.log(`Sembrar 1 000 000 de intentos y crear el índice: ${((performance.now() - t) / 1000).toFixed(1)} s`);
+
+/** Página n (desde 0) saltando las anteriores */
+const conSkip = (pagina: number) =>
+  intentos.find({ userId: USUARIO }).sort({ _id: -1 }).skip(pagina * POR_PAGINA).limit(POR_PAGINA);
+
+/** La página siguiente a la que terminó en `despuesDe` */
+const conCursor = (despuesDe?: ObjectId) =>
+  intentos.find({ userId: USUARIO, ...(despuesDe && { _id: { $lt: despuesDe } }) }).sort({ _id: -1 }).limit(POR_PAGINA);
+
+async function mediana(f: () => Promise<unknown>) {
+  const tiempos: number[] = [];
+  for (let i = 0; i < 5; i++) {
+    const t0 = performance.now();
+    await f();
+    tiempos.push(performance.now() - t0);
+  }
+  return tiempos.sort((a, b) => a - b)[2]!;
+}
+
+console.log("\nPágina      skip: ms · claves          cursor: ms · claves");
+for (const pagina of [1, 100, 1_000, 10_000, 49_999]) {
+  // El _id con el que terminó la página anterior (lo que la app guardaría en el enlace "siguiente")
+  const anterior = pagina === 0 ? undefined : (await conSkip(pagina - 1).toArray()).at(-1)!._id;
+  const s = await conSkip(pagina).explain("executionStats");
+  const c = await conCursor(anterior).explain("executionStats");
+  const msSkip = await mediana(() => conSkip(pagina).toArray());
+  const msCursor = await mediana(() => conCursor(anterior).toArray());
+  const iguales = JSON.stringify(await conSkip(pagina).toArray()) === JSON.stringify(await conCursor(anterior).toArray());
+  console.log(
+    `${String(pagina).padStart(6)}   ${msSkip.toFixed(1).padStart(8)} · ${String(s.executionStats.totalKeysExamined).padStart(7)}   ${msCursor.toFixed(1).padStart(10)} · ${String(c.executionStats.totalKeysExamined).padStart(3)}   ${iguales ? "mismos resultados" : "¡distintos!"}`,
+  );
+}
+
+// Llegan 5 intentos nuevos mientras alguien está en la página 1 y pasa a la 2
+console.log("\nCon 5 intentos nuevos entre la página 1 y la 2:");
+const pagina1 = await conSkip(0).toArray();
+await intentos.insertMany(Array.from({ length: 5 }, (_, i) => ({ userId: USUARIO, courseId: "A2", score: 5, passed: true, submittedAt: new Date(Date.now() + i) })));
+const pagina2Skip = await conSkip(1).toArray();
+const pagina2Cursor = await conCursor(pagina1.at(-1)!._id).toArray();
+const repetidos = (lista: typeof pagina1) => lista.filter((d) => pagina1.some((p) => p._id.equals(d._id))).length;
+console.log(`  skip:   la página 2 repite ${repetidos(pagina2Skip)} intentos que ya estaban en la 1`);
+console.log(`  cursor: la página 2 repite ${repetidos(pagina2Cursor)}`);
+
+await cliente.close();
+```
+
+```text
+Sembrar 1 000 000 de intentos y crear el índice: 2.9 s
+Página      skip: ms · claves          cursor: ms · claves
+     1        0.3 ·      40          0.3 ·  20   mismos resultados
+   100        0.5 ·    2020          0.2 ·  20   mismos resultados
+  1000        3.1 ·   20020          0.2 ·  20   mismos resultados
+ 10000       34.0 ·  200020          0.3 ·  20   mismos resultados
+ 49999      148.6 · 1000000          0.3 ·  20   mismos resultados
+Con 5 intentos nuevos entre la página 1 y la 2:
+  skip:   la página 2 repite 5 intentos que ya estaban en la 1
+  cursor: la página 2 repite 0
+```
+
+- **Con `skip`, el coste crece con la página:** para la página 10 000, MongoDB recorre las 200 000 entradas anteriores y las descarta (34 ms); para la última, el millón entero (149 ms). `skip` no salta: cuenta.
+- **Por cursor, siempre 20 claves y unos 0,3 ms**, sea la página 1 o la 49 999. El filtro `_id < último` lleva al índice directamente al punto donde empieza la página.
+- **Los resultados son los mismos** en las cinco páginas comparadas.
+- **Con datos que cambian, `skip` repite:** cinco intentos nuevos al principio desplazan la lista, y la página 2 empieza con cinco de la página 1. El cursor sigue desde el último que viste, y no repite ninguno.
+
+El precio del cursor: no se puede saltar a "la página 2 500". Sirve para "siguiente" y "anterior", y para el _scroll_ infinito, que es lo que necesitan casi todas las listas largas.
+
+<Callout type="risk">
+
+- **El cursor necesita un orden único:** `_id` lo es (y un `ObjectId` crece con el tiempo de creación). Si ordenas por un campo que se repite, como `submittedAt`, usa los dos en el orden y en el filtro (`submittedAt` y, si coincide, `_id`), o te saltarás o repetirás documentos con la misma fecha.
+- **El índice tiene que coincidir con el orden del cursor:** aquí, `{ userId, _id }` para `find({ userId, _id: { $lt } }).sort({ _id: -1 })`. Sin él, el cursor también recorrería la colección.
+
+</Callout>
+
+<Callout type="mastery">
+
+Consigues que `totalDocsExamined` ≈ `nReturned` en tus consultas críticas: lees un `explain` mirando claves y documentos examinados, sabes por qué un índice compuesto no sirve para ordenar si el campo de orden no va en su sitio, haces consultas _covered_ excluyendo `_id`, usas índices parciales, _sparse_ y multiclave conociendo sus trampas (nunca un `hint` sobre ellos), encuentras lo lento con el _profiler_ y lo que sobra con `$indexStats`, y paginas por cursor.
+
+</Callout>
+
+## Resumen
+
+- `explain`: devueltos, claves y documentos examinados. Un `SORT` o un `COLLSCAN` en una consulta frecuente es un índice que falta.
+- _Covered_: todo en el índice y `_id: 0`; 0 documentos leídos.
+- Parcial (indexa los que cumplen una condición) y _sparse_ (los que tienen el campo): más pequeños, y con `hint` pueden devolver resultados incompletos sin avisar.
+- Multiclave: una entrada por elemento del array; nunca dos arrays en el mismo índice compuesto.
+- _Profiler_ (`profile: 1`, `slowms`) para las consultas lentas; `$indexStats` para los índices sin uso.
+- Paginación por cursor: coste constante (20 claves en la página 1 y en la 49 999); `skip` recorre todo lo anterior y repite si los datos cambian.
