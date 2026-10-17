@@ -1,0 +1,426 @@
+---
+sectionId: "A1.1"
+course: "A1"
+title: "Tipos condicionales e infer"
+order: 1
+minutes: 60
+summary: "Escribes tipos que deciden según otro tipo, ves cómo se distribuyen sobre una unión y cómo evitarlo, extraes partes con infer, compruebas tus tipos con tests y lees Awaited en lib.es5.d.ts."
+---
+
+En I1 usaste `ReturnType`, `Awaited`, `Exclude` y `z.infer` como cajas negras: funcionaban, pero no sabías cómo. Por dentro son **tipos condicionales**: tipos que miran otro tipo y deciden qué resultado dar, como un `if` que se ejecuta al compilar. Con ellos y con `infer` se construyen casi todos los tipos "inteligentes" de TypeScript y de las librerías que usas. En esta sección vas a escribir los tuyos, a ver un comportamiento que sorprende a todo el mundo (la distribución sobre uniones), a extraer partes de un tipo con `infer`, y a terminar leyendo la definición real de `Awaited`.
+
+**Lo que tendrás al terminar:** una carpeta `src/a1/` en tu `ts-playground` con tipos condicionales, un archivo de "tests de tipos" que se comprueban con `npm run typecheck`, y tus propias versiones de `Awaited`, `Parameters` y `NonNullable`.
+
+**Requisitos:** el proyecto `ts-playground` de B1 (TypeScript 7 con `strict` y `noUncheckedIndexedAccess`), el que usaste en I1. Durante todo el curso A1 trabajarás ahí:
+
+```bash
+cd ts-playground
+mkdir src/a1
+```
+
+## Paso 1: `T extends U ? X : Y`
+
+Un tipo condicional tiene la forma de un operador ternario: **si `T` encaja en `U`** (si un valor de tipo `T` se puede usar donde se espera un `U`), el resultado es `X`; si no, `Y`. Crea `src/a1/01-condicionales.ts`:
+
+```ts
+// Archivo: src/a1/01-condicionales.ts
+// Un tipo condicional: "si T encaja en U, este tipo; si no, aquel". Se calcula al compilar
+type TipoEntreno = "fuerza" | "running" | "movilidad";
+
+type EsArray<T> = T extends unknown[] ? true : false;
+
+// La unidad con la que se mide cada tipo de entreno
+type Unidad<T extends TipoEntreno> = T extends "running" ? "km" : "min";
+
+interface Medida<T extends TipoEntreno> {
+  tipo: T;
+  cantidad: number;
+  unidad: Unidad<T>;
+}
+
+function medir<T extends TipoEntreno>(tipo: T, cantidad: number): Medida<T> {
+  const unidad = (tipo === "running" ? "km" : "min") as Unidad<T>;
+  return { tipo, cantidad, unidad };
+}
+
+const carrera = medir("running", 10); // Medida<"running">: su unidad solo puede ser "km"
+const fuerza = medir("fuerza", 45); // Medida<"fuerza">: "min"
+console.log(carrera, fuerza);
+
+// TypeScript calcula estos tipos al compilar: si el valor no encaja, es un error
+const esLista: EsArray<string[]> = true;
+const noEsLista: EsArray<string> = false;
+const km: Unidad<"running"> = "km";
+console.log(esLista, noEsLista, km);
+```
+
+```bash
+npm run typecheck
+npm start -- src/a1/01-condicionales.ts
+```
+
+```text
+{ tipo: 'running', cantidad: 10, unidad: 'km' } { tipo: 'fuerza', cantidad: 45, unidad: 'min' }
+true false km
+```
+
+- **`EsArray<string[]>` es `true`**, y `EsArray<string>`, `false`: el tipo se calcula a partir del que le pasas.
+- **`Unidad<"running">` es `"km"`**, y cualquier otro tipo de entreno da `"min"`. `medir("running", 10)` devuelve una `Medida<"running">` cuya unidad **solo** puede ser `"km"`.
+- **`T extends TipoEntreno`** en `<T extends TipoEntreno>` es una **restricción** (I1.1): solo se aceptan tipos de entreno. El `extends` dentro de `? :` es otra cosa, una **pregunta**: "¿encaja?".
+
+Para ver qué tipo calculó TypeScript, pasa el ratón por encima en VS Code, o fuerza un error. Añade al final del archivo:
+
+```ts
+const mal1: EsArray<number[]> = false;
+const mal2: Unidad<"fuerza"> = "km";
+carrera.unidad = "min";
+```
+
+```text
+src/a1/01-condicionales.ts(31,7): error TS2322: Type 'false' is not assignable to type 'true'.
+src/a1/01-condicionales.ts(32,7): error TS2322: Type '"km"' is not assignable to type '"min"'.
+src/a1/01-condicionales.ts(33,1): error TS2322: Type '"min"' is not assignable to type '"km"'.
+```
+
+Los tres mensajes dicen el tipo calculado: `EsArray<number[]>` es `true`, `Unidad<"fuerza">` es `"min"` y la unidad de `carrera` es `"km"`. Borra las tres líneas.
+
+<Callout type="risk">
+
+- **Dentro de la función, TypeScript no sabe qué es `T`:** por eso `medir` necesita el `as Unidad<T>`. Sin él, `const unidad: Unidad<T> = tipo === "running" ? "km" : "min"` da este error:
+
+  ```text
+  src/a1/01-condicionales.ts(17,9): error TS2322: Type '"km" | "min"' is not assignable to type 'Unidad<T>'.
+  ```
+
+  El `if` sobre el **valor** `tipo` no cambia el **tipo** `T`, que podría ser incluso la unión entera. Es una limitación conocida: el `as` es aceptable aquí, en una función pequeña y probada, no esparcido por el código.
+
+- **Un tipo condicional no existe al ejecutar:** como todos los tipos, desaparece al compilar. No puede decidir nada según los datos que llegan; para eso está Zod (I1.4).
+
+</Callout>
+
+## Paso 2: la distribución sobre uniones
+
+¿Qué es `EsTexto<string | number>`? Lo razonable sería `false`: la unión entera no es un texto. Pero TypeScript da **`boolean`**. Cuando el tipo que se pregunta (`T`) es un parámetro genérico y recibe una **unión**, el condicional se aplica **a cada miembro por separado**, y los resultados se unen: `EsTexto<string> | EsTexto<number>`, es decir, `true | false`. Se llama **distribución**, y es lo que hace funcionar a `Exclude` y `Extract`.
+
+Para comprobar tipos sin forzar errores a mano, crea dos ayudantes. `src/a1/pruebas.ts`:
+
+```ts
+// Archivo: src/a1/pruebas.ts
+// "Tests de tipos": se comprueban con npm run typecheck, sin ejecutar nada
+
+/** true si A y B son el mismo tipo (cada uno encaja en el otro). Los [] evitan la distribución (Paso 2) */
+export type Igual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
+/** Solo acepta true: si la comprobación da false, npm run typecheck da un error en esa línea */
+export type Afirmar<T extends true> = T;
+```
+
+- **`Igual<A, B>`** da `true` si cada tipo encaja en el otro. Los corchetes de `[A]` y `[B]` desactivan la distribución, como verás en este paso.
+- **`Afirmar<T extends true>`** solo acepta `true`. Si una comprobación da `false`, `npm run typecheck` marca la línea.
+
+Ahora la distribución, con sus usos y su excepción. `src/a1/02-distribucion.ts`:
+
+```ts
+// Archivo: src/a1/02-distribucion.ts
+// Con una unión, un tipo condicional se aplica a CADA miembro por separado, y une los resultados
+import type { Afirmar, Igual } from "./pruebas";
+
+type TipoEntreno = "fuerza" | "running" | "movilidad";
+
+type EsTexto<T> = T extends string ? true : false;
+type Mezcla = EsTexto<string | number>; // EsTexto<string> | EsTexto<number> = true | false = boolean
+
+// Así están hechos Exclude y Extract (lib.es5.d.ts): quitan o se quedan con los miembros que encajan
+type MiExclude<T, U> = T extends U ? never : T;
+type MiExtract<T, U> = T extends U ? T : never;
+type SinMovilidad = MiExclude<TipoEntreno, "movilidad">; // "fuerza" | "running"
+
+// Con uniones discriminadas: la acción "enviar" del cuestionario de I2.3, sacada de la unión
+type Accion = { type: "elegir"; opcion: number } | { type: "ir"; paso: number } | { type: "enviar"; aciertos: number };
+type Enviar = MiExtract<Accion, { type: "enviar" }>; // { type: "enviar"; aciertos: number }
+
+// Sin distribución: con [T] la unión se compara entera
+type TodoTexto<T> = [T] extends [string] ? true : false;
+
+// never es una unión de cero miembros: distribuido sobre ella, el resultado también es never
+type NadaDistribuido = EsTexto<never>; // never
+type NadaEntero = TodoTexto<never>; // true (never encaja en cualquier tipo)
+
+type _pruebas = [
+  Afirmar<Igual<Mezcla, boolean>>,
+  Afirmar<Igual<SinMovilidad, "fuerza" | "running">>,
+  Afirmar<Igual<Enviar, { type: "enviar"; aciertos: number }>>,
+  Afirmar<Igual<TodoTexto<string | number>, false>>,
+  Afirmar<Igual<TodoTexto<"a" | "b">, true>>,
+  Afirmar<Igual<NadaDistribuido, never>>,
+  Afirmar<Igual<NadaEntero, true>>,
+];
+```
+
+`npm run typecheck` no da ningún error: los siete tests de tipos pasan. Para ver uno fallar, cambia el primero por `Afirmar<Igual<Mezcla, true>>`:
+
+```text
+src/a1/02-distribucion.ts(27,11): error TS2344: Type 'false' does not satisfy the constraint 'true'.
+```
+
+Lo que dicen los tests:
+
+- **`MiExclude<TipoEntreno, "movilidad">`** recorre `"fuerza"`, `"running"` y `"movilidad"`: el que encaja en `"movilidad"` se convierte en `never` (que desaparece de una unión), y los demás se quedan. `MiExtract` hace lo contrario. Son exactamente las definiciones de TypeScript, en `lib.es5.d.ts`:
+
+  ```ts
+  type Exclude<T, U> = T extends U ? never : T;
+  type Extract<T, U> = T extends U ? T : never;
+  type NonNullable<T> = T & {};
+  type Parameters<T extends (...args: any) => any> = T extends (...args: infer P) => any ? P : never;
+  type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
+  ```
+
+- **`MiExtract<Accion, { type: "enviar" }>`** saca de una unión discriminada (I2.3) el miembro con ese `type`: útil para tipar el _handler_ de una sola acción.
+- **Con `[T] extends [string]`** la unión se compara **entera**: `TodoTexto<string | number>` es `false`. Envolver en una tupla quita la distribución, porque `[T]` ya no es "un parámetro desnudo".
+- **`never` es una unión de cero miembros:** distribuir sobre ella da cero resultados, `never`. Con corchetes, `[never]` encaja en `[string]` (`never` encaja en todo) y da `true`.
+
+<Callout type="risk">
+
+- **La distribución solo ocurre con un parámetro genérico "desnudo"** (`T extends …`). `string | number extends string ? …` escrito directamente, sin genérico, no distribuye. Por eso el mismo condicional puede comportarse distinto dentro y fuera de un genérico.
+- **`Igual` tiene un límite: `any`.** `Afirmar<Igual<any, string>>` pasa, porque `any` encaja en todo y todo encaja en `any`. Para tus tests basta; librerías como `expect-type` usan comprobaciones más estrictas.
+- **Si un tipo te devuelve `never` inesperadamente**, sospecha de la distribución sobre `never`: un genérico que recibe `never` (por ejemplo, de un filtro que no dejó nada) contagia `never` a todo lo que lo usa.
+
+</Callout>
+
+## Paso 3: `infer`, extraer una parte
+
+`infer` solo se usa dentro de la condición de un tipo condicional, y significa: "si `T` tiene esta forma, **captura** el tipo que hay en esta posición y llámalo así". `T extends (infer U)[] ? U : never` se lee "si `T` es un array de algo, dame ese algo". Crea `src/a1/03-infer.ts`:
+
+```ts
+// Archivo: src/a1/03-infer.ts
+// infer: "si T tiene esta forma, dame la parte que está en esta posición"
+import type { Afirmar, Igual } from "./pruebas";
+
+type Elemento<T> = T extends (infer U)[] ? U : never;
+type MiReturnType<F> = F extends (...args: any[]) => infer R ? R : never;
+type Desenvolver<T> = T extends Promise<infer V> ? V : T;
+type Primero<T extends unknown[]> = T extends [infer P, ...unknown[]] ? P : never;
+
+// Una función como las de I1.3
+async function cargarResumen(usuarioId: string, semanas: number) {
+  return { usuarioId, semanas, minutos: 320, ultimo: undefined as string | undefined };
+}
+
+type Retorno = MiReturnType<typeof cargarResumen>; // Promise<{ usuarioId: string; … }>
+type Resumen = Desenvolver<Retorno>; // { usuarioId: string; semanas: number; … }
+
+// Desenvolver quita UNA capa. Para quitarlas todas, el tipo se llama a sí mismo
+type DobleUnaCapa = Desenvolver<Promise<Promise<number>>>; // Promise<number>
+type DesenvolverTodo<T> = T extends Promise<infer V> ? DesenvolverTodo<V> : T;
+
+type _pruebas = [
+  Afirmar<Igual<Elemento<string[]>, string>>,
+  Afirmar<Igual<Elemento<("fuerza" | "running")[]>, "fuerza" | "running">>,
+  Afirmar<Igual<Elemento<string>, never>>, // no es un array: la rama "si no"
+  Afirmar<Igual<Resumen, { usuarioId: string; semanas: number; minutos: number; ultimo: string | undefined }>>,
+  Afirmar<Igual<Primero<[string, number]>, string>>,
+  Afirmar<Igual<DobleUnaCapa, Promise<number>>>,
+  Afirmar<Igual<DesenvolverTodo<Promise<Promise<number>>>, number>>,
+];
+
+const resumen: Resumen = await cargarResumen("ana", 1);
+console.log(resumen);
+```
+
+```bash
+npm run typecheck
+npm start -- src/a1/03-infer.ts
+```
+
+```text
+{ usuarioId: 'ana', semanas: 1, minutos: 320, ultimo: undefined }
+```
+
+- **`infer` puede ir en cualquier posición:** el elemento de un array, el retorno de una función, lo que hay dentro de una `Promise`, el primer elemento de una tupla (`[infer P, ...unknown[]]`).
+- **`Desenvolver` quita una sola capa:** `Promise<Promise<number>>` da `Promise<number>`. **`DesenvolverTodo` se llama a sí mismo** en la rama "sí" hasta que no queda ninguna `Promise`. Un tipo recursivo, como una función recursiva.
+- **`MiReturnType` es casi el `ReturnType` de TypeScript.** La definición real, del bloque de arriba:
+
+  ```ts
+  type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
+  ```
+
+  Añade una restricción (solo funciones) y un `any` en la rama "si no", que con la restricción nunca se alcanza.
+
+¿Y por qué `(...args: any[])` y no `(...args: unknown[])`, si en B1 aprendiste a preferir `unknown`? Compruébalo con un archivo de prueba, `src/a1/prueba-unknown.ts`:
+
+```ts
+// Archivo: src/a1/prueba-unknown.ts
+// ¿Qué cambia si los parámetros se escriben con unknown[] en lugar de any[]?
+import type { Afirmar, Igual } from "./pruebas";
+
+type ConAny<F> = F extends (...args: any[]) => infer R ? R : never;
+type ConUnknown<F> = F extends (...args: unknown[]) => infer R ? R : never;
+
+type Formatear = (km: number) => string;
+
+type _pruebas = [
+  Afirmar<Igual<ConAny<Formatear>, string>>,
+  Afirmar<Igual<ConUnknown<Formatear>, never>>, // ¡never!
+];
+```
+
+Tal como está, `npm run typecheck` pasa. Si cambias el `never` del segundo test por `string`:
+
+```text
+src/a1/prueba-unknown.ts(12,11): error TS2344: Type 'false' does not satisfy the constraint 'true'.
+```
+
+**Con `unknown[]`, el retorno de `(km: number) => string` es `never`**: una función que solo acepta números no encaja donde se espera una que acepta **cualquier cosa** (`unknown`), porque alguien podría llamarla con un texto. Con `any`, la comprobación de los parámetros se desactiva, que es lo que se quiere al preguntar solo por el retorno. Borra el archivo de prueba.
+
+<Callout type="risk">
+
+- **`infer` captura un tipo, no lo comprueba:** `Elemento<string>` no es un error, es `never` (la rama "si no"). Si quieres que un tipo incorrecto sea un error, añade una restricción al genérico, como hace `ReturnType` con `T extends (...args: any) => any`.
+- **Los tipos recursivos tienen un límite de profundidad:** si un tipo se llama a sí mismo demasiadas veces (miles), TypeScript corta con `error TS2589: Type instantiation is excessively deep and possibly infinite`. Con unas pocas capas de `Promise`, no hay problema; con estructuras generadas, puede aparecer.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Reimplementa `Awaited`, `Parameters` y `NonNullable` sin mirar su definición. Llámalos `MiAwaited`, `MisParametros` y `MiNoNulo`.
+2. Escribe tests de tipos con `Igual` y `Afirmar` para cada uno, con los casos límite: sin promesa, varias capas, una función sin parámetros, una unión con `null`.
+3. Compara los tuyos con los de TypeScript: busca un caso en el que den resultados distintos.
+
+</Callout>
+
+Solución. `src/a1/04-ejercicio.ts`:
+
+```ts
+// Archivo: src/a1/04-ejercicio.ts
+// Awaited, Parameters y NonNullable, reimplementados con tipos condicionales e infer
+import type { Afirmar, Igual } from "./pruebas";
+
+/** Lo que da un await: quita todas las capas de Promise */
+type MiAwaited<T> = T extends Promise<infer V> ? MiAwaited<V> : T;
+
+/** Los parámetros de una función, como tupla */
+type MisParametros<F extends (...args: any) => any> = F extends (...args: infer P) => any ? P : never;
+
+/** Quita null y undefined (distribuye sobre la unión: cada miembro por separado) */
+type MiNoNulo<T> = T extends null | undefined ? never : T;
+
+async function cargarResumen(usuarioId: string, semanas: number) {
+  return { usuarioId, semanas, minutos: 320 };
+}
+type Resumen = { usuarioId: string; semanas: number; minutos: number };
+
+type _pruebas = [
+  // MiAwaited
+  Afirmar<Igual<MiAwaited<Promise<number>>, number>>,
+  Afirmar<Igual<MiAwaited<Promise<Promise<number>>>, number>>,
+  Afirmar<Igual<MiAwaited<string>, string>>, // sin promesa, igual
+  Afirmar<Igual<MiAwaited<ReturnType<typeof cargarResumen>>, Resumen>>,
+  Afirmar<Igual<MiAwaited<Promise<string> | number>, string | number>>, // distribuye
+  // MisParametros
+  Afirmar<Igual<MisParametros<typeof cargarResumen>, [usuarioId: string, semanas: number]>>,
+  Afirmar<Igual<MisParametros<() => void>, []>>,
+  Afirmar<Igual<MisParametros<(...km: number[]) => number>, number[]>>,
+  // MiNoNulo
+  Afirmar<Igual<MiNoNulo<string | null | undefined>, string>>,
+  Afirmar<Igual<MiNoNulo<"km" | "min" | null>, "km" | "min">>,
+  Afirmar<Igual<MiNoNulo<null>, never>>,
+];
+```
+
+`npm run typecheck` no da ningún error: los once tests pasan.
+
+- **`MiAwaited` es recursivo** (`MiAwaited<V>` en la rama "sí"), para quitar todas las capas. Y **distribuye**: `MiAwaited<Promise<string> | number>` es `string | number`.
+- **`MisParametros` captura la lista completa de parámetros** con `(...args: infer P)`, y conserva sus nombres: `[usuarioId: string, semanas: number]`.
+- **`MiNoNulo` usa la distribución:** de `string | null | undefined`, `null` y `undefined` se convierten en `never` y desaparecen.
+
+Ahora, la comparación. `src/a1/05-comparar.ts`:
+
+```ts
+// Archivo: src/a1/05-comparar.ts
+// Las tuyas frente a las de TypeScript: ¿en qué se diferencian?
+import type { Afirmar, Igual } from "./pruebas";
+
+type MiAwaited<T> = T extends Promise<infer V> ? MiAwaited<V> : T;
+type MiNoNulo<T> = T extends null | undefined ? never : T;
+type MisParametros<F extends (...args: any) => any> = F extends (...args: infer P) => any ? P : never;
+
+// 1. Un "thenable": un objeto con then() que no es una Promise (await también lo espera)
+interface Thenable {
+  then(alResolver: (valor: number) => void): void;
+}
+type _awaited = [
+  Afirmar<Igual<Awaited<Thenable>, number>>, // la de TypeScript lo desenvuelve, como await
+  Afirmar<Igual<MiAwaited<Thenable>, Thenable>>, // la tuya solo conoce Promise
+];
+
+// 2. NonNullable es T & {} en lib.es5.d.ts: el mismo resultado, sin tipo condicional
+type _noNulo = [
+  Afirmar<Igual<NonNullable<string | null>, MiNoNulo<string | null>>>,
+  Afirmar<Igual<NonNullable<unknown>, {}>>, // unknown & {}: "cualquier cosa menos null y undefined"
+  Afirmar<Igual<MiNoNulo<unknown>, unknown>>, // unknown no es una unión: el condicional no puede quitar nada
+];
+
+// 3. Parameters exige una función: con otra cosa, error al compilar en lugar de un never silencioso
+type _parametros = [Afirmar<Igual<Parameters<(km: number) => void>, MisParametros<(km: number) => void>>>];
+```
+
+`npm run typecheck`: sin errores, así que cada afirmación es cierta. Y si añades `type _x = Parameters<string>;` al final:
+
+```text
+src/a1/05-comparar.ts(27,22): error TS2344: Type 'string' does not satisfy the constraint '(...args: any) => any'.
+```
+
+Tres diferencias:
+
+- **`await` espera cualquier objeto con un método `then`** (un _thenable_), no solo una `Promise`. `Awaited<Thenable>` da `number`, como `await`; tu `MiAwaited` solo conoce `Promise` y lo deja como está.
+- **`NonNullable` ya no es un tipo condicional:** desde TypeScript 4.8 es `T & {}`. `{}` significa "cualquier valor salvo `null` y `undefined`", y la intersección los quita. Da lo mismo que el tuyo con una unión, pero no con `unknown`: `unknown` no es una unión, así que tu condicional no tiene miembros que quitar, mientras que `unknown & {}` es `{}`.
+- **`Parameters` tiene una restricción:** con algo que no es una función, es un error al compilar. Una versión sin restricción daría un `never` silencioso.
+
+Y la definición real de `Awaited`, en `lib.es5.d.ts`:
+
+```ts
+type Awaited<T> = T extends null | undefined ? T : // special case for `null | undefined` when not in `--strictNullChecks` mode
+    T extends object & { then(onfulfilled: infer F, ...args: infer _): any; } ? // `await` only unwraps object types with a callable `then`. Non-object types are not unwrapped
+        F extends ((value: infer V, ...args: infer _) => any) ? // if the argument to `then` is callable, extracts the first argument
+            Awaited<V> : // recursively unwrap the value
+        never : // the argument to `then` was not callable
+    T; // non-object or non-thenable
+```
+
+Ya puedes leerla línea a línea: si `T` es `null` o `undefined`, se queda igual (un caso especial para cuando `strict` está desactivado). Si es un objeto con un método `then`, **infiere** el tipo `F` de su primer parámetro; si `F` es una función, infiere el tipo `V` del valor que recibe y **se llama a sí mismo** con `V` (recursión); si `F` no es una función, `never`. Y si no es un _thenable_, `T` tal cual. Las mismas piezas que has usado: condicionales anidados, `infer` y recursión. En TypeScript 7 los archivos de `lib` están en el paquete de tu plataforma (`node_modules/@typescript/typescript-darwin-arm64/lib/` en un Mac con Apple Silicon); lo más cómodo es hacer Cmd+clic (Ctrl+clic) sobre `Awaited` en VS Code.
+
+<Callout type="risk">
+
+- **Reimplementar no es para usarlo en tu código:** usa siempre los de TypeScript, que cubren casos que el tuyo no (el _thenable_, `unknown`). El ejercicio sirve para entenderlos y para escribir los que TypeScript no trae.
+- **Prueba tus tipos como pruebas tu código:** un tipo condicional mal escrito no da ningún error; simplemente calcula otra cosa, y el error aparece lejos, en el código que lo usa. Los tests de `Igual` y `Afirmar` lo detectan donde está.
+
+</Callout>
+
+Una última lectura: `z.infer` de Zod, que usas desde I1.4. En Zod 4.6.5, `z.infer` es otro nombre de `z.output`, definido así en `zod/v4/core/core.d.ts`:
+
+```ts
+export type output<T> = T extends {
+    _zod: {
+        output: any;
+    };
+} ? T["_zod"]["output"] : unknown;
+export type { output as infer };
+```
+
+Un tipo condicional: si `T` es un esquema de Zod (tiene `_zod.output`), el resultado es ese tipo de salida, sacado con acceso por índice (I1.2); si no, `unknown`.
+
+<Callout type="mastery">
+
+Lees la definición de un _utility type_ de `lib.es5.d.ts` y la entiendes: un tipo condicional pregunta si un tipo encaja en otro, se distribuye sobre las uniones (salvo que lo envuelvas en `[T]`), extrae partes con `infer` y puede llamarse a sí mismo. Escribes los tuyos, los compruebas con tests de tipos y sabes por qué `ReturnType` usa `any[]` y por qué `Awaited` mira `then` y no `Promise`.
+
+</Callout>
+
+## Resumen
+
+- `T extends U ? X : Y`: si `T` encaja en `U`, `X`; si no, `Y`. Se calcula al compilar.
+- Con un genérico desnudo y una unión, el condicional se **distribuye** sobre cada miembro: así funcionan `Exclude` y `Extract`. `[T] extends [U]` lo evita. Sobre `never`, da `never`.
+- `infer X` captura el tipo de una posición: el elemento, el retorno, el contenido de una `Promise`.
+- Un tipo condicional puede ser recursivo (`DesenvolverTodo`, `Awaited`).
+- `Igual` y `Afirmar`: tests de tipos que comprueba `npm run typecheck`.
+- `NonNullable` es `T & {}`, `Awaited` desenvuelve cualquier _thenable_ y `Parameters` exige una función.
