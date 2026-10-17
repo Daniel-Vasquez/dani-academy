@@ -1,0 +1,449 @@
+---
+sectionId: "A2.5"
+course: "A2"
+title: "Operación: backups, seguridad y monitorización"
+order: 5
+minutes: 75
+summary: "Creas usuarios con el mínimo privilegio (y ves que readWrite puede borrar colecciones), haces un backup coherente con --oplog, lo restauras y lo verificas con dbHash, y lees las métricas que importan."
+---
+
+Con A2.1 a A2.4, tu base de datos es correcta y rápida. Esta sección trata de que siga así cuando algo va mal: una contraseña filtrada, un `drop` por error, un disco que se rompe, una consulta que de pronto tarda diez veces más. Las defensas son pocas y concretas: que cada programa entre con un usuario que **solo** pueda lo que necesita, tener copias de seguridad **que se han restaurado** alguna vez, y mirar unas pocas métricas antes de que el problema lo encuentre un usuario.
+
+**Lo que tendrás al terminar:** usuarios con roles mínimos (incluido uno a medida), un _backup_ coherente de un servidor con escrituras en marcha, su restauración verificada con `dbHash`, las métricas clave de un MongoDB y el criterio para elegir entre MongoDB propio y Atlas.
+
+**Requisitos:**
+
+- el proyecto `mongo-academy` con `src/a2/`;
+- las MongoDB Database Tools (`mongodump`, `mongorestore`), que instalaste en I6.6; en un Mac, el `.zip` para macOS de la misma página de descargas (aquí, la versión 100.13.0);
+- para el Paso 1, un MongoDB con la autenticación activada. El de este laboratorio es un segundo `mongod`, en el puerto 27210, arrancado con `--auth` y una carpeta de datos vacía. En Atlas la autenticación está siempre activada, y los usuarios se crean en _Database Access_.
+
+## Paso 1: usuarios y roles con el mínimo privilegio
+
+MongoDB trae **roles** predefinidos que se asignan por base de datos: `read` (leer), `readWrite` (leer y escribir), `dbAdmin` (índices, estadísticas), `root` (todo). El principio del **mínimo privilegio** dice: cada programa, con un usuario que solo pueda lo que necesita. Si la contraseña de la app se filtra, el daño se limita a lo que ese usuario podía hacer. `src/a2/20-roles.ts`:
+
+```ts
+// Archivo: src/a2/20-roles.ts
+// Mínimo privilegio: cada programa con un usuario que solo puede lo que necesita
+import { randomBytes } from "node:crypto";
+import { MongoClient, type MongoServerError } from "mongodb";
+
+const HOST = "127.0.0.1:27210"; // un mongod arrancado con --auth
+const clave = () => randomBytes(18).toString("base64url"); // contraseñas de prueba: no se muestran ni se guardan
+const conectar = (usuario?: string, password?: string) =>
+  MongoClient.connect(usuario ? `mongodb://${usuario}:${password}@${HOST}/?authSource=admin` : `mongodb://${HOST}/`);
+
+// 1. Sin usuarios, solo se puede crear el primero desde el propio servidor (la "excepción de localhost")
+const anonimo = await conectar();
+const passAdmin = clave();
+await anonimo.db("admin").command({ createUser: "admin", pwd: passAdmin, roles: ["root"] });
+try {
+  await anonimo.db("planificador").collection("tareas").countDocuments();
+} catch (e) {
+  console.log(`sin usuario, tras crear el primero: ${(e as MongoServerError).codeName}`);
+}
+await anonimo.close();
+
+// 2. Como administrador: los datos y los dos usuarios de la app
+const admin = await conectar("admin", passAdmin);
+await admin.db("planificador").collection("tareas").insertMany([{ titulo: "Informe", hecha: false }, { titulo: "Médico", hecha: true }]);
+await admin.db("contabilidad").collection("facturas").insertOne({ total: 120 });
+const passApp = clave();
+const passAnalitica = clave();
+await admin.db("admin").command({ createUser: "app_planificador", pwd: passApp, roles: [{ role: "readWrite", db: "planificador" }] });
+await admin.db("admin").command({ createUser: "analitica", pwd: passAnalitica, roles: [{ role: "read", db: "planificador" }] });
+
+// Un rol propio: leer y escribir documentos, pero sin borrar colecciones ni crear índices
+await admin.db("planificador").command({
+  createRole: "documentos",
+  privileges: [{ resource: { db: "planificador", collection: "" }, actions: ["find", "insert", "update", "remove"] }],
+  roles: [],
+});
+const passDocs = clave();
+await admin.db("admin").command({ createUser: "app_documentos", pwd: passDocs, roles: [{ role: "documentos", db: "planificador" }] });
+
+// 3. Qué puede hacer cada uno
+const pruebas: [string, (c: MongoClient) => Promise<unknown>][] = [
+  ["leer tareas", (c) => c.db("planificador").collection("tareas").countDocuments()],
+  ["crear una tarea", (c) => c.db("planificador").collection("tareas").insertOne({ titulo: "Prueba", hecha: false })],
+  ["borrar la colección", (c) => c.db("planificador").collection("copia").insertOne({}).then(() => c.db("planificador").collection("copia").drop())],
+  ["borrar la base de datos", (c) => c.db("planificador").dropDatabase()],
+  ["leer otra base de datos", (c) => c.db("contabilidad").collection("facturas").countDocuments()],
+  ["crear un usuario", (c) => c.db("admin").command({ createUser: "intruso", pwd: clave(), roles: ["root"] })],
+];
+for (const [usuario, password] of [["app_planificador", passApp], ["app_documentos", passDocs], ["analitica", passAnalitica]] as const) {
+  const c = await conectar(usuario, password);
+  console.log(`\n${usuario}:`);
+  for (const [nombre, prueba] of pruebas) {
+    try {
+      await prueba(c);
+      console.log(`  ✔ ${nombre}`);
+    } catch (e) {
+      console.log(`  ✖ ${nombre.padEnd(24)} ${(e as MongoServerError).codeName}`);
+    }
+  }
+  await c.close();
+}
+
+// 4. Una contraseña incorrecta
+try {
+  await conectar("analitica", "no-es-la-clave");
+} catch (e) {
+  console.log(`\ncontraseña incorrecta: ${(e as MongoServerError).codeName ?? (e as Error).name}: ${(e as Error).message}`);
+}
+await admin.close();
+```
+
+```bash
+npm start -- src/a2/20-roles.ts
+```
+
+```text
+sin usuario, tras crear el primero: Unauthorized
+app_planificador:
+  ✔ leer tareas
+  ✔ crear una tarea
+  ✔ borrar la colección
+  ✖ borrar la base de datos  Unauthorized
+  ✖ leer otra base de datos  Unauthorized
+  ✖ crear un usuario         Unauthorized
+app_documentos:
+  ✔ leer tareas
+  ✔ crear una tarea
+  ✖ borrar la colección      Unauthorized
+  ✖ borrar la base de datos  Unauthorized
+  ✖ leer otra base de datos  Unauthorized
+  ✖ crear un usuario         Unauthorized
+analitica:
+  ✔ leer tareas
+  ✖ crear una tarea          Unauthorized
+  ✖ borrar la colección      Unauthorized
+  ✖ borrar la base de datos  Unauthorized
+  ✖ leer otra base de datos  Unauthorized
+  ✖ crear un usuario         Unauthorized
+contraseña incorrecta: AuthenticationFailed: Authentication failed.
+```
+
+- **Sin usuarios, la "excepción de _localhost_"** permite crear el primero desde el propio servidor; en cuanto existe, cualquier conexión sin credenciales es `Unauthorized`.
+- **`readWrite` en una base no da acceso a otras**, ni permite borrar la base entera ni crear usuarios.
+- **Pero `readWrite` sí permite borrar colecciones enteras:** `app_planificador` borró `copia` sin problema. Si la contraseña de la app se filtra, se puede vaciar cualquier colección de su base.
+- **Un rol propio cierra ese hueco:** `documentos` permite `find`, `insert`, `update` y `remove` (leer y escribir documentos), y nada más. `app_documentos` trabaja con normalidad, pero no puede borrar colecciones.
+- **`read`** es lo justo para informes, analítica… y copias de seguridad (Paso 2).
+
+Una regla más, que no se programa: **limita desde dónde se puede conectar.** En Atlas, la lista de IPs permitidas (_Network Access_); en un servidor propio, `bindIp` y el _firewall_ (I6.3). Una contraseña filtrada no sirve de nada desde una IP que no está en la lista.
+
+<Callout type="risk">
+
+- **El rol propio impide crear índices:** sin `createIndex`, el _script_ de índices de la app (B5.6) tiene que ejecutarse con otro usuario. Es lo normal: los cambios de estructura, con un usuario de despliegue; el día a día, con el de la app.
+- **"Read and write to any database" en Atlas es `readWriteAnyDatabase`:** acceso a todas las bases del clúster. Esta plataforma usa un solo usuario así para desarrollo y producción, separando los entornos por base de datos; es una decisión consciente (menos usuarios que gestionar), con el precio de que una contraseña filtrada alcanza a todas las bases.
+
+</Callout>
+
+## Paso 2: copias de seguridad que se restauran
+
+En I6.6 hiciste un `mongodump` programado con `cron` y lo restauraste en otra base con `--nsFrom` y `--nsTo`. Aquí, tres pasos más: el tamaño real, verificar que lo restaurado es **idéntico** y la coherencia cuando hay escrituras durante la copia. Con la base del laboratorio, que incluye una colección de 1,5 millones de documentos:
+
+```text
+$ mongodump --uri="$MONGODB_URI" --db=academy_lab --archive=academy.gz --gzip
+done dumping academy_lab.a2_resumen (1 document)
+done dumping academy_lab.a2_intentos_banco (1500000 documents)
+  (2 s ·  15M en disco)
+```
+
+```text
+$ mongorestore --uri="$MONGODB_URI" --archive=academy.gz --gzip --nsFrom="academy_lab.*" --nsTo="academy_restaurada.*" --drop
+1589951 document(s) restored successfully. 0 document(s) failed to restore.
+  (17 s)
+```
+
+1,59 millones de documentos en 15 MB comprimidos, dos segundos para copiar y 17 para restaurar (crear los índices y escribir con la espera del diario, A2.1). Pero "0 failed" no demuestra que los datos sean los mismos. `src/a2/21-verificar.ts` lo comprueba con `dbHash`, que calcula un _hash_ del contenido de cada colección:
+
+```ts
+// Archivo: src/a2/21-verificar.ts
+// ¿Lo restaurado es idéntico al original? dbHash calcula un hash de cada colección; y se comparan los índices
+import { cliente } from "../db";
+
+const [original, restaurada] = ["academy_lab", "academy_restaurada"].map((n) => cliente.db(n));
+const h1 = await original!.command({ dbHash: 1 });
+const h2 = await restaurada!.command({ dbHash: 1 });
+
+let iguales = 0;
+const distintas: string[] = [];
+for (const [coleccion, hash] of Object.entries(h1.collections as Record<string, string>)) {
+  if (h2.collections[coleccion] === hash) iguales++;
+  else distintas.push(coleccion);
+}
+console.log(`colecciones con el mismo hash: ${iguales} de ${Object.keys(h1.collections).length}${distintas.length ? ` · distintas: ${distintas.join(", ")}` : ""}`);
+console.log(`hash de toda la base: ${h1.md5 === h2.md5 ? "idéntico" : "distinto"} (${h1.md5.slice(0, 12)}…)`);
+
+const indices = async (db: typeof original) => {
+  let n = 0;
+  for (const c of await db!.listCollections({}, { nameOnly: true }).toArray()) n += (await db!.collection(c.name).indexes()).length;
+  return n;
+};
+console.log(`índices: ${await indices(original)} en el original · ${await indices(restaurada)} en la restaurada`);
+
+await cliente.close();
+```
+
+```text
+colecciones con el mismo hash: 18 de 18
+hash de toda la base: idéntico (05acf658feb8…)
+índices: 26 en el original · 26 en la restaurada
+```
+
+Las 18 colecciones con el mismo _hash_ y los mismos 26 índices: la copia es **idéntica**.
+
+**¿Y si alguien escribe mientras se hace la copia?** `mongodump` copia las colecciones una detrás de otra, cada una en un momento distinto. Con `--oplog` (solo para el servidor entero, en un _replica set_), guarda además lo que cambió mientras duraba la copia. Con un proceso insertando sin parar durante seis segundos:
+
+```text
+$ mongodump --uri="$MONGODB_URI" --oplog --archive=todo.gz --gzip
+done dumping academy_lab.a2_flujo (711 documents)
+writing captured oplog to
+	dumped 1061 oplog entries
+```
+
+La colección que se estaba escribiendo se copió con 711 documentos, y se guardaron 1 061 entradas del _oplog_. Restaurado con `--oplogReplay` en otro servidor:
+
+```text
+$ mongorestore --uri="$OTRO_SERVIDOR" --archive=todo.gz --gzip --oplogReplay
+replaying oplog
+applied 1061 oplog entries
+3180635 document(s) restored successfully. 0 document(s) failed to restore.
+  (9 s)
+a2_flujo restaurada: 1199 documentos · el último es n=1198 · sin huecos: true
+```
+
+**1 199 documentos sin huecos, las 1 199 inserciones que hizo el proceso:** la copia es coherente hasta el final del volcado. Sin `--oplog`, esa colección habría quedado con 711, y otras colecciones en otros momentos.
+
+**¿Y los _backups_ de Atlas?** Los planes de pago dedicados hacen copias automáticas, que se restauran desde la interfaz de Atlas. El plan gratuito M0 no las incluye. Por eso esta plataforma hace las suyas con `npm run db:backup` (un _script_ con el _driver_, con un usuario de solo lectura) y comprueba que se pueden restaurar con `npm run db:restore-test`.
+
+<Callout type="risk">
+
+- **`--oplogReplay` no admite filtros:** con `--nsInclude` para restaurar una sola colección, `mongorestore` responde `cannot use --oplogReplay with includes specified`. Una copia coherente se restaura entera, en un servidor aparte, y de ahí se saca lo que haga falta.
+- **Restaurar necesita permiso de escritura en la base de destino:** el ejercicio lo comprueba. El usuario de la app no puede restaurar en otra base, y no debería poder.
+- **Una copia en el mismo servidor no es una copia:** si el disco o la cuenta se pierden, se pierde con los datos. Guárdala fuera (otro servicio, otro equipo) y cífrala: contiene todos tus datos.
+
+</Callout>
+
+## Paso 3: las métricas que importan
+
+`serverStatus` devuelve cientos de contadores. Cuatro bastan para saber si un MongoDB va bien. `src/a2/22-metricas.ts`, alrededor de una carga de trabajo de unos segundos:
+
+```ts
+// Archivo: src/a2/22-metricas.ts
+// Las métricas clave de un MongoDB, sacadas de serverStatus: dos fotos y la diferencia entre ellas
+import type { Document } from "mongodb";
+import { cliente, db } from "../db";
+import { intentos } from "./banco";
+
+await intentos.createIndex({ userId: 1, submittedAt: -1 }, { name: "user_submittedAt" }); // las consultas de abajo lo usan
+
+const foto = async () => (await db.admin().command({ serverStatus: 1 })) as Document;
+
+const antes = await foto();
+const t0 = performance.now();
+
+// Una carga de trabajo de unos segundos: lecturas con índice, escrituras y un recorrido completo
+for (let i = 0; i < 2000; i++) await intentos.find({ userId: `u0${String(i % 1000).padStart(3, "0")}` }).sort({ submittedAt: -1 }).limit(20).toArray();
+for (let i = 0; i < 300; i++) await db.collection("a2_metricas").insertOne({ i, en: new Date() });
+await intentos.countDocuments({ etiquetas: "examen" }); // sin índice: lee toda la colección
+
+const segundos = (performance.now() - t0) / 1000;
+const despues = await foto();
+
+// 1. Conexiones
+console.log(`conexiones: ${despues.connections.current} abiertas · ${despues.connections.available} disponibles`);
+
+// 2. Operaciones por segundo (opcounters cuenta desde que arrancó el servidor: se restan dos fotos)
+const ops = ["query", "insert", "update", "delete", "command"].map((k) => `${k} ${((despues.opcounters[k] - antes.opcounters[k]) / segundos).toFixed(0)}/s`);
+console.log(`operaciones en ${segundos.toFixed(1)} s: ${ops.join(" · ")}`);
+
+// 3. Latencia media de lecturas y escrituras en ese intervalo (opLatencies, en microsegundos)
+const latencia = (tipo: "reads" | "writes") => {
+  const l = (despues.opLatencies[tipo].latency - antes.opLatencies[tipo].latency) / (despues.opLatencies[tipo].ops - antes.opLatencies[tipo].ops);
+  return `${(l / 1000).toFixed(2)} ms`;
+};
+console.log(`latencia media: lecturas ${latencia("reads")} · escrituras ${latencia("writes")}`);
+
+// 4. La caché de WiredTiger: cuántas páginas se pidieron y cuántas hubo que traer del disco
+const cache = (d: Document, k: string) => Number(d.wiredTiger.cache[k]);
+const pedidas = cache(despues, "pages requested from the cache") - cache(antes, "pages requested from the cache");
+const leidas = cache(despues, "pages read into cache") - cache(antes, "pages read into cache");
+console.log(`caché: ${pedidas} páginas pedidas · ${leidas} leídas del disco · cache hit ratio ${((1 - leidas / pedidas) * 100).toFixed(2)} %`);
+console.log(
+  `caché ocupada: ${(cache(despues, "bytes currently in the cache") / 1024 ** 2).toFixed(0)} MB de ${(cache(despues, "maximum bytes configured") / 1024 ** 3).toFixed(1)} GB`,
+);
+
+await db.collection("a2_metricas").drop();
+await cliente.close();
+```
+
+```text
+conexiones: 7 abiertas · 209708 disponibles
+operaciones en 2.0 s: query 1021/s · insert 153/s · update 0/s · delete 0/s · command 1/s
+latencia media: lecturas 0.15 ms · escrituras 4.41 ms
+caché: 49872 páginas pedidas · 1289 leídas del disco · cache hit ratio 97.42 %
+caché ocupada: 821 MB de 7.5 GB
+```
+
+| Métrica                 | De dónde sale                                                | Qué vigilar                                                                                  |
+| ----------------------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Conexiones              | `connections.current`                                        | Que no crezcan sin parar: una app que abre un cliente por petición (B5.2) las agota          |
+| Operaciones por segundo | La diferencia de `opcounters` entre dos fotos                | Cambios bruscos: un pico (un bucle, un ataque) o una caída (la app no llega)                 |
+| Latencia                | `opLatencies` (microsegundos)                                | Que no suba. Aquí, lecturas en 0,15 ms y escrituras en 4,41 ms: la espera del diario de A2.1 |
+| _Cache hit ratio_       | Páginas pedidas a la caché frente a páginas leídas del disco | Cerca del 100 %. Si baja, los datos que se usan ya no caben en memoria                       |
+
+- **Los contadores son acumulados desde que arrancó el servidor:** lo que importa es la **diferencia** entre dos momentos. Herramientas como `mongostat` (en las Database Tools) o los gráficos de Atlas hacen esa resta por ti.
+- **El _cache hit ratio_ fue del 97,42 %:** de casi 50 000 páginas pedidas, 1 289 hubo que leerlas del disco, sobre todo por el recorrido completo de la colección sin índice.
+
+<Callout type="risk">
+
+- **Una métrica sin alerta no sirve de mucho:** nadie mira un gráfico a las tres de la mañana. Define umbrales (conexiones cerca del límite, latencia muy por encima de la habitual) y que te avisen.
+- **No te fíes de una sola foto:** una latencia alta durante un segundo puede ser un recorrido completo puntual. Lo preocupante es la tendencia.
+
+</Callout>
+
+## Paso 4: MongoDB propio o Atlas
+
+|                                                         | MongoDB en tu servidor                                | Atlas                                     |
+| ------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------- |
+| Instalar, actualizar y aplicar parches de seguridad     | Tú                                                    | Atlas                                     |
+| _Replica set_ (tres nodos) y su recuperación si uno cae | Tú: tres servidores y su configuración                | Incluido                                  |
+| _Backups_                                               | Tú (`mongodump`, `cron`, guardarlos fuera, probarlos) | Automáticos en los planes de pago         |
+| Monitorización y alertas                                | Tú (métricas, avisos)                                 | Incluidas                                 |
+| Atlas Search, Triggers, Performance Advisor             | No (salvo componentes aparte)                         | Sí                                        |
+| Coste                                                   | El servidor, y sobre todo **tu tiempo**               | La cuota del plan; M0 gratis, con límites |
+
+La pregunta no es solo "cuánto cuesta el servidor": es **quién se despierta cuando algo falla**. Un MongoDB propio de un solo nodo es barato hasta el día en que el disco se rompe y no había copia probada. Para un proyecto personal o pequeño, el plan gratuito de Atlas más _backups_ propios (como esta plataforma) es un buen equilibrio; un servidor propio (A4) tiene sentido cuando necesitas control total o los costes de Atlas ya no compensan, y sabiendo todo lo que pasa a ser tuyo.
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Crea un usuario de solo lectura para analítica y otro de lectura y escritura solo sobre la base de la app.
+2. Haz un _backup_ de la base de la app y restáuralo en otra base.
+3. Comprueba que la restauración es idéntica y que cada usuario sigue viendo solo lo suyo.
+
+</Callout>
+
+Solución. Con el `mongod` de `--auth` recién arrancado, `src/a2/23-usuarios.ts` crea el administrador, los datos y tres usuarios, y guarda sus credenciales (de prueba) en un archivo **fuera de git**:
+
+```ts
+// Archivo: src/a2/23-usuarios.ts
+// Ejercicio: el administrador, los datos del Planificador y tres usuarios con lo justo.
+// Las contraseñas (aleatorias, de prueba) se guardan en .credenciales-a2.env, fuera de git, para los comandos de backup
+import { randomBytes } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { MongoClient } from "mongodb";
+
+const HOST = "127.0.0.1:27210";
+const clave = () => randomBytes(18).toString("base64url");
+const uri = (usuario: string, password: string) => `mongodb://${usuario}:${encodeURIComponent(password)}@${HOST}/?authSource=admin`;
+
+// El primer usuario, con la excepción de localhost
+const anonimo = await MongoClient.connect(`mongodb://${HOST}/`);
+const pass = { admin: clave(), analitica: clave(), app: clave(), restaurador: clave() };
+await anonimo.db("admin").command({ createUser: "admin", pwd: pass.admin, roles: ["root"] });
+await anonimo.close();
+
+const admin = await MongoClient.connect(uri("admin", pass.admin));
+await admin.db("planificador").collection("tareas").insertMany(
+  Array.from({ length: 120 }, (_, i) => ({ titulo: `Tarea ${i + 1}`, prioridad: i % 4 === 0 ? "alta" : "normal", hecha: i % 3 === 0 })),
+);
+await admin.db("planificador").collection("tareas").createIndex({ hecha: 1, prioridad: 1 });
+const usuario = (nombre: string, pwd: string, role: string, db: string) => admin.db("admin").command({ createUser: nombre, pwd, roles: [{ role, db }] });
+await usuario("analitica", pass.analitica, "read", "planificador"); // informes (y backups: leer basta)
+await usuario("app_planificador", pass.app, "readWrite", "planificador"); // la app
+await usuario("restaurador", pass.restaurador, "readWrite", "planificador_restaurada"); // solo para probar restauraciones
+await admin.close();
+
+await writeFile(
+  ".credenciales-a2.env",
+  [`URI_ANALITICA=${uri("analitica", pass.analitica)}`, `URI_APP=${uri("app_planificador", pass.app)}`, `URI_RESTAURADOR=${uri("restaurador", pass.restaurador)}`].join("\n") + "\n",
+  { mode: 0o600 },
+);
+console.log("usuarios creados: admin, analitica (read planificador), app_planificador (readWrite planificador), restaurador (readWrite planificador_restaurada)");
+```
+
+```text
+usuarios creados: admin, analitica (read planificador), app_planificador (readWrite planificador), restaurador (readWrite planificador_restaurada)
+```
+
+El _backup_, con el usuario de **analítica** (leer basta para copiar), y la restauración en otra base, primero con el usuario de la app y después con el de restaurar. Las URI salen de `.credenciales-a2.env` con `set -a; . ./.credenciales-a2.env; set +a`, sin escribirlas en la terminal:
+
+```text
+$ mongodump --uri="$URI_ANALITICA" --db=planificador --archive=planificador.gz --gzip
+done dumping planificador.tareas (120 documents)
+$ mongorestore --uri="$URI_APP" --archive=planificador.gz --gzip --nsFrom="planificador.*" --nsTo="planificador_restaurada.*"
+Failed: planificador_restaurada.tareas: error reading database: (Unauthorized) not authorized on planificador_restaurada to execute command { listCollections: 1, filter: {}, cursor: {}, lsid: { id: UU
+0 document(s) restored successfully. 0 document(s) failed to restore.
+$ mongorestore --uri="$URI_RESTAURADOR" --archive=planificador.gz --gzip --nsFrom="planificador.*" --nsTo="planificador_restaurada.*"
+restoring indexes for collection planificador_restaurada.tareas from metadata
+120 document(s) restored successfully. 0 document(s) failed to restore.
+```
+
+Y la comprobación, `src/a2/24-comprobar.ts`:
+
+```ts
+// Archivo: src/a2/24-comprobar.ts
+// ¿La restauración es idéntica? ¿Y cada usuario sigue viendo solo lo suyo?
+import { MongoClient, type MongoServerError } from "mongodb";
+
+process.loadEnvFile(".credenciales-a2.env"); // las URI de los usuarios de prueba
+
+const restaurador = await MongoClient.connect(process.env.URI_RESTAURADOR!);
+const analitica = await MongoClient.connect(process.env.URI_ANALITICA!);
+
+const resumen = async (c: MongoClient, db: string) => {
+  const col = c.db(db).collection("tareas");
+  const docs = await col.find({}, { projection: { _id: 1, titulo: 1, prioridad: 1, hecha: 1 } }).sort({ _id: 1 }).toArray();
+  return { n: docs.length, json: JSON.stringify(docs), indices: (await col.indexes()).map((i) => i.name).join(", ") };
+};
+
+const original = await resumen(analitica, "planificador");
+const copia = await resumen(restaurador, "planificador_restaurada");
+console.log(`original:    ${original.n} tareas · índices: ${original.indices}`);
+console.log(`restaurada:  ${copia.n} tareas · índices: ${copia.indices}`);
+console.log(`mismos documentos (con sus _id): ${original.json === copia.json}`);
+
+try {
+  await analitica.db("planificador_restaurada").collection("tareas").countDocuments();
+} catch (e) {
+  console.log(`analitica leyendo la copia: ${(e as MongoServerError).codeName}`);
+}
+
+await restaurador.close();
+await analitica.close();
+```
+
+```text
+original:    120 tareas · índices: _id_, hecha_1_prioridad_1
+restaurada:  120 tareas · índices: _id_, hecha_1_prioridad_1
+mismos documentos (con sus _id): true
+analitica leyendo la copia: Unauthorized
+```
+
+- **El usuario de solo lectura basta para el _backup_:** el proceso de copias no necesita poder escribir, y si se filtra su contraseña, no puede borrar nada.
+- **El usuario de la app no puede restaurar en otra base:** `Unauthorized` en `planificador_restaurada`. Restaurar es una operación de mantenimiento, con su propio usuario.
+- **La copia es idéntica:** 120 tareas con los mismos `_id` y el mismo índice. Y el usuario de analítica no puede leerla: su permiso es sobre `planificador`, no sobre cualquier base.
+
+<Callout type="risk">
+
+- **Las credenciales de los usuarios de prueba también son secretos:** el archivo tiene permisos `600` y está en `.gitignore`. En producción, van en el gestor de secretos de tu despliegue, nunca en el repositorio.
+- **Prueba la restauración con regularidad, no solo una vez:** un _backup_ que se restauró hace un año puede haber dejado de funcionar (una versión nueva, un usuario sin permisos, un disco lleno).
+
+</Callout>
+
+<Callout type="mastery">
+
+Has restaurado un _backup_ con éxito al menos una vez, y lo has verificado: cada programa entra con un usuario con el mínimo privilegio (sabiendo que `readWrite` permite borrar colecciones, y cómo evitarlo con un rol propio), las copias se hacen con un usuario de solo lectura y con `--oplog` si hay escrituras, se restauran en otra base o en otro servidor, se comprueban con `dbHash`, y vigilas conexiones, operaciones, latencia y caché.
+
+</Callout>
+
+## Resumen
+
+- Mínimo privilegio: `read` para analítica y copias, `readWrite` (o un rol propio sin `dropCollection`) para la app, y solo desde IPs permitidas.
+- `mongodump --archive --gzip` y `mongorestore --nsFrom --nsTo`; `--oplog` y `--oplogReplay` para una copia coherente con escrituras en marcha.
+- Verifica con `dbHash`: mismo _hash_ en cada colección, mismos índices.
+- Métricas: conexiones, operaciones por segundo, latencia y _cache hit ratio_, siempre como diferencias entre dos momentos.
+- Atlas frente a un servidor propio: la diferencia es quién se ocupa de las copias, los parches y las caídas.

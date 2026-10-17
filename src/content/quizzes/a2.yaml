@@ -1,0 +1,47 @@
+course: A2
+passingScore: 4
+questions:
+  - prompt: "¿Cuándo se necesita una transacción multidocumento?"
+    options:
+      - "Siempre que se escribe en MongoDB, para que la escritura sea atómica."
+      - "Cuando varios documentos tienen que cambiar juntos (todos o ninguno) y no se pueden reunir en un solo documento; si lo que cambia cabe en un documento, un updateOne con operadores ya es atómico."
+      - "Solo para leer datos de varias colecciones a la vez."
+      - "Cuando se usa `$inc`, porque sin transacción pierde sumas."
+    answer: 1
+    explanation: "En A2.1, 50 `$inc` simultáneos contaron los 50 sin transacción, mientras que leer y escribir por separado solo dejó 2. Una transacción hizo falta para guardar un intento y actualizar el resumen (dos documentos): sin ella, una caída a mitad dejaba un intento huérfano."
+
+  - prompt: "¿Qué indica `totalDocsExamined` en un explain?"
+    options:
+      - "Cuántos documentos devuelve la consulta."
+      - "Cuántas entradas del índice se recorrieron."
+      - "El tamaño en bytes de los documentos devueltos."
+      - "Cuántos documentos tuvo que leer MongoDB para responder; lo ideal es que sea igual a `nReturned` (o 0 en una consulta covered)."
+    answer: 3
+    explanation: "En A2.2, sin índices, una consulta de la plataforma leía los 200 000 documentos para devolver 20; con el índice adecuado, 20 para 20. En una consulta covered (todo en el índice y _id: 0), no lee ninguno."
+
+  - prompt: "¿Por qué la paginación con `skip` es lenta en páginas avanzadas?"
+    options:
+      - "Porque MongoDB tiene que recorrer y descartar todos los documentos anteriores a la página: el coste crece con el número de página."
+      - "Porque skip no puede usar índices de ninguna forma."
+      - "Porque skip bloquea la colección mientras se ejecuta."
+      - "No es lenta: tarda lo mismo en cualquier página."
+    answer: 0
+    explanation: "Medido en A2.2 con un millón de documentos: la página 1 examinó 40 claves y la última, el millón entero (149 ms). Por cursor (_id menor que el último visto), siempre 20 claves y unos 0,3 ms. Además, con datos que cambian, skip repitió 5 documentos entre páginas."
+
+  - prompt: "¿Qué ventaja tiene Atlas Search sobre el índice `text` nativo?"
+    options:
+      - "Que no necesita índices."
+      - "Que funciona en cualquier MongoDB, también en local."
+      - "Que tolera erratas (fuzzy), autocompleta mientras se escribe, resalta el fragmento que coincide y admite varios índices por colección."
+      - "Que ignora las tildes, algo que el índice text no hace."
+    answer: 2
+    explanation: "En A2.3, el índice text ya ignoraba tildes (genericos encontraba Genéricos; también, ano encontraba año), pero no toleraba erratas (genricos no encontraba nada), no buscaba prefijos y solo admite uno por colección. Atlas Search necesita Atlas: en local, $search responde SearchNotEnabled."
+
+  - prompt: "¿Para qué sirve un resume token de un change stream?"
+    options:
+      - "Para cifrar los eventos del stream."
+      - "Para retomar el stream justo después del último evento procesado, sin perder los cambios ocurridos mientras el proceso estaba caído (mientras sigan en el oplog)."
+      - "Para filtrar los eventos por tipo de operación."
+      - "Para que MongoDB no envíe el mismo evento a dos procesos."
+    answer: 1
+    explanation: "En A2.4, al reiniciar sin token se perdieron los dos eventos de mientras el proceso estaba caído; con resumeAfter y el token guardado, llegaron todos. Se guarda después de procesar cada evento, y un registro de avisos enviados evita repetirlos si un evento llega dos veces."
