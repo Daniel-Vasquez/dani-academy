@@ -167,7 +167,14 @@ export async function actualizarEntreno(
 ): Promise<EntrenoDTO | null> {
   const _id = aObjectId(id);
   if (!_id) return null;
-  const doc = await entrenos.findOneAndUpdate({ _id, userId }, { $set: cambios }, { returnDocument: "after" });
+  // Una clave que llega con undefined ("quitar los km") se BORRA con $unset:
+  // con ignoreUndefined, $set la ignoraría y el valor antiguo se quedaría
+  const quitar = Object.entries(cambios).flatMap(([campo, valor]) => (valor === undefined ? [[campo, ""]] : []));
+  const doc = await entrenos.findOneAndUpdate(
+    { _id, userId },
+    { $set: cambios, ...(quitar.length > 0 && { $unset: Object.fromEntries(quitar) }) },
+    { returnDocument: "after" },
+  );
   return doc ? aDTO(doc) : null;
 }
 
@@ -365,6 +372,7 @@ Fíjate en los detalles:
 <Callout type="risk">
 
 - **Un `undefined` se guarda en MongoDB como `null`:** al enviar el formulario sin JavaScript con el campo km vacío, Zod lo convierte en `undefined` (correcto), pero el _driver_ de MongoDB lo guardó como `km: null`. Ese `null` no es un km válido para `EntrenoDTOSchema`, y **un solo documento así** hizo que el listado del navegador mostrara "No se pudieron cargar los entrenos". Por eso la colección se abre con `{ ignoreUndefined: true }`: los `undefined` no se guardan. (Con `fetch` no pasaba, porque `JSON.stringify` ya elimina los `undefined`).
+- **`ignoreUndefined` también afecta a los cambios, y por eso `actualizarEntreno` usa `$unset`:** para pasar un entreno de running a fuerza hay que quitarle los km, y el `PATCH` lo pide con `{"tipo":"fuerza","km":null}` (Zod convierte el `null` en `undefined`). Pero un `$set` con `km: undefined` no borra nada: el _driver_ descarta la clave, y el entreno quedaba como **fuerza con 9 km**, justo lo que la regla prohíbe. Lo descubrió un test de integración en I8.4. `$unset` borra explícitamente las claves que llegan con `undefined`.
 - **Una página que lee la URL no puede ser estática:** la primera versión de `nuevo.astro` no tenía `prerender = false`, y el mensaje de `?error=1` **nunca aparecía**: la página se generó en el _build_, cuando no había ninguna URL que leer (I3.1). Todo lo que lea `Astro.url.searchParams`, cookies o la sesión va en servidor.
 - **Un `PATCH` que valida solo los campos que llegan deja pasar estados inválidos:** cada campo puede ser válido y la combinación no. Valida el resultado, o las reglas de negocio en el servicio (I3.5).
 - **`checkOrigin` protege los formularios:** Astro rechaza con 403 un `POST` de formulario que venga de otro origen (CSRF, Tanda 9). Los `curl` de esta lección llevan la cabecera `Origin` por eso.

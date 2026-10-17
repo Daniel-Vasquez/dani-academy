@@ -94,7 +94,14 @@ export function crearEntrenosRepo(db: Db) {
     async actualizar(userId: string, id: string, cambios: CambiosEntreno): Promise<EntrenoDTO | null> {
       const _id = aObjectId(id);
       if (!_id) return null;
-      const doc = await col.findOneAndUpdate({ _id, userId }, { $set: cambios }, { returnDocument: "after" });
+      // Una clave que llega con undefined ("quitar los km") se BORRA con $unset:
+      // con ignoreUndefined, $set la ignoraría y el valor antiguo se quedaría (I3.2)
+      const quitar = Object.entries(cambios).flatMap(([campo, valor]) => (valor === undefined ? [[campo, ""]] : []));
+      const doc = await col.findOneAndUpdate(
+        { _id, userId },
+        { $set: cambios, ...(quitar.length > 0 && { $unset: Object.fromEntries(quitar) }) },
+        { returnDocument: "after" },
+      );
       return doc ? aDTO(doc) : null;
     },
 
@@ -134,6 +141,7 @@ export const repos = {
 - **`crearEntrenosRepo(db)` es una "fábrica":** una función que recibe sus dependencias y devuelve un objeto con las operaciones. Es la forma más simple de **inyección de dependencias**, sin librerías ni decoradores.
 - **`EntrenosRepo = ReturnType<typeof crearEntrenosRepo>`**: el tipo sale del código, así que nunca se desincroniza.
 - **El repositorio devuelve DTOs, nunca documentos:** `_id`, `userId` y el resto de detalles de MongoDB no salen de esta capa.
+- **`actualizar` borra con `$unset` lo que llega como `undefined`**, como `actualizarEntreno` en I3.2: así un `PATCH` con `"km": null` quita de verdad los km.
 - **`totales` y `entre`** son consultas nuevas para la página de estadísticas y para el ejercicio. El `aggregate` que estaba en `estadisticas.astro` (I3.1) se muda aquí.
 
 <Callout type="risk">
