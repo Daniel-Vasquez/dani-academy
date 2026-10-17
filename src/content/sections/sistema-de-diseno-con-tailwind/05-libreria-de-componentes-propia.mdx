@@ -1,0 +1,734 @@
+---
+sectionId: "I7.5"
+course: "I7"
+title: "Librería de componentes propia"
+order: 5
+minutes: 75
+summary: "Defines las variantes de Button, Badge, Card y Alerta con cva y tipos que avisan de errores, escribes Checkbox, ProgressBar y Tabs accesibles con teclado, y montas una página /ui sin fallos de axe en ambos temas."
+---
+
+Con los _tokens_ (I7.1), el tema (I7.2), la tipografía (I7.3) y la accesibilidad (I7.4), lo que falta es no repetir. Cada botón de la app debería ser **el** botón: mismas formas, mismos estados, mismo foco, sin que cada página reinvente sus clases. Una **librería de componentes** es ese conjunto de piezas, cada una con sus variantes (primario o secundario, pequeño o grande), y una página donde verlas todas juntas. En esta sección vas a definir las variantes con `cva`, de forma que TypeScript avise si alguien pide una que no existe, vas a escribir siete componentes y vas a montar la página `/ui`, revisada en los dos temas.
+
+**Lo que tendrás al terminar:** `src/components/ui/variantes.ts` con las variantes de todos los componentes; `Button`, `Badge`, `Card`, `Checkbox`, `ProgressBar`, `Alerta` y `Tabs`, y la página `/ui`.
+
+**Requisitos:** el proyecto `tw-lab` de I7.4, con `cn()` de B7.5.
+
+```bash
+npm install class-variance-authority
+```
+
+## Paso 1: el inventario y `cva`
+
+| Componente    | Para qué                              | Variantes                                                                    |
+| ------------- | ------------------------------------- | ---------------------------------------------------------------------------- |
+| `Button`      | Acciones                              | `variante` (primario, secundario, fantasma, peligro) y `tamano` (sm, md, lg) |
+| `Badge`       | Estados cortos ("Completado")         | `tono` (neutral, accent, warning, danger)                                    |
+| `Card`        | Agrupar contenido                     | `relieve` (plana, contorno); interactiva si es un enlace                     |
+| `Checkbox`    | Marcar una opción                     | —                                                                            |
+| `ProgressBar` | Progreso de un curso                  | `tamano` (sm, md)                                                            |
+| `Alerta`      | Mensajes de la interfaz               | `tipo` (info, exito, warning, danger)                                        |
+| `Tabs`        | Alternar contenidos en el mismo sitio | —                                                                            |
+
+En B7.5 escribiste las variantes con un objeto (`VARIANTES[variante]`). **`cva`** (_class-variance-authority_) hace lo mismo con una estructura fija: unas clases base, las variantes y sus valores por defecto, y devuelve una función que da las clases de cada combinación. Crea `src/components/ui/variantes.ts`, con las de todos los componentes:
+
+```ts
+// Archivo: src/components/ui/variantes.ts
+// Las variantes de cada componente, en un solo sitio: las usan tanto los .astro como los .tsx
+import { cva, type VariantProps } from "class-variance-authority";
+
+export const boton = cva(
+  "inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition disabled:cursor-not-allowed disabled:opacity-50",
+  {
+    variants: {
+      variante: {
+        primario: "bg-accent-strong text-accent-contrast hover:bg-accent", // 5,47:1 (I7.4)
+        secundario: "bg-surface text-fg ring-1 ring-surface-2 ring-inset hover:bg-surface-2",
+        fantasma: "text-fg hover:bg-surface",
+        peligro: "bg-danger-strong text-danger-contrast hover:opacity-90",
+      },
+      tamano: {
+        sm: "px-3 py-1.5 text-sm",
+        md: "px-5 py-2.5 text-sm",
+        lg: "px-6 py-3 text-base",
+      },
+    },
+    defaultVariants: { variante: "primario", tamano: "md" },
+  },
+);
+export type VariantesBoton = VariantProps<typeof boton>;
+
+export const insignia = cva("inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset", {
+  variants: {
+    tono: {
+      neutral: "bg-surface text-fg ring-surface-2",
+      accent: "bg-accent/10 text-accent-strong ring-accent/30",
+      warning: "bg-warning/10 text-fg ring-warning/40",
+      danger: "bg-danger/10 text-danger-strong ring-danger/30",
+    },
+  },
+  defaultVariants: { tono: "neutral" },
+});
+export type VariantesInsignia = VariantProps<typeof insignia>;
+
+export const tarjeta = cva("rounded-2xl border border-surface-2 p-5", {
+  variants: {
+    relieve: {
+      plana: "bg-surface",
+      contorno: "bg-bg",
+    },
+    // Una tarjeta que es un enlace: se nota al pasar por encima y al enfocarla
+    interactiva: {
+      true: "transition hover:border-accent hover:shadow-sm",
+      false: "",
+    },
+  },
+  defaultVariants: { relieve: "plana", interactiva: false },
+});
+export type VariantesTarjeta = VariantProps<typeof tarjeta>;
+
+export const alerta = cva("rounded-r-xl border-l-4 px-5 py-3", {
+  variants: {
+    tipo: {
+      info: "border-info bg-info/10",
+      exito: "border-accent bg-accent/10",
+      warning: "border-warning bg-warning/10",
+      danger: "border-danger bg-danger/10",
+    },
+  },
+  defaultVariants: { tipo: "info" },
+});
+export type VariantesAlerta = VariantProps<typeof alerta>;
+```
+
+Lo que devuelve, en `src/lib/prueba-cva.ts`:
+
+```ts
+// Archivo: src/lib/prueba-cva.ts
+// Qué clases devuelve cva para cada combinación (node src/lib/prueba-cva.ts)
+import { boton, insignia } from "../components/ui/variantes.ts";
+
+console.log("por defecto:      ", boton());
+console.log("secundario sm:    ", boton({ variante: "secundario", tamano: "sm" }));
+console.log("insignia danger:  ", insignia({ tono: "danger" }));
+```
+
+```bash
+node src/lib/prueba-cva.ts
+```
+
+```text
+por defecto:       inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 bg-accent-strong text-accent-contrast hover:bg-accent px-5 py-2.5 text-sm
+secundario sm:     inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 bg-surface text-fg ring-1 ring-surface-2 ring-inset hover:bg-surface-2 px-3 py-1.5 text-sm
+insignia danger:   inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset bg-danger/10 text-danger-strong ring-danger/30
+```
+
+- **`defaultVariants`:** sin argumentos, `boton()` es primario y mediano.
+- **`VariantProps<typeof boton>`** saca el tipo de las propiedades a partir de las variantes: `{ variante?: "primario" | "secundario" | …; tamano?: … }`. No hay que escribirlo a mano ni mantenerlo.
+- **Todo en un archivo `.ts`:** las variantes valen igual para componentes de Astro (`.astro`) y de React (`.tsx`). Hay que poder usar el mismo `boton()` en un enlace de Astro y en un botón de React.
+
+<Callout type="risk">
+
+- **Los nombres de clase, completos y literales:** `cva` funciona con Tailwind porque las clases están escritas enteras en el archivo (`"bg-accent-strong"`), y Tailwind las encuentra al escanear (B7.1). Nunca construyas una clase con plantillas (`` `bg-${color}` ``): Tailwind no la generaría.
+- **Una variante, una decisión de diseño:** si un botón necesita algo que ninguna variante tiene, piensa si es una variante nueva (para toda la app) o una excepción. Con `className` desde fuera, la excepción queda en esa página y no ensucia la librería.
+
+</Callout>
+
+## Paso 2: `Button` y `Badge`
+
+Sustituye `src/components/ui/Button.tsx`:
+
+```tsx
+// Archivo: src/components/ui/Button.tsx
+import type { ButtonHTMLAttributes } from "react";
+import { cn } from "../../lib/cn";
+import { boton, type VariantesBoton } from "./variantes";
+
+interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement>, VariantesBoton {}
+
+export function Button({ variante, tamano, className, type = "button", ...resto }: ButtonProps) {
+  // cn() deja que una clase de fuera gane a la de la variante (px-2 sobre px-5), como en B7.5
+  return <button type={type} className={cn(boton({ variante, tamano }), className)} {...resto} />;
+}
+```
+
+Y `src/components/ui/Badge.astro`:
+
+```astro
+---
+// Archivo: src/components/ui/Badge.astro
+import { cn } from "../../lib/cn";
+import { insignia, type VariantesInsignia } from "./variantes";
+
+interface Props extends VariantesInsignia {
+  class?: string;
+}
+const { tono, class: className } = Astro.props;
+---
+
+<span class={cn(insignia({ tono }), className)}><slot /></span>
+```
+
+Los dos componentes heredan sus propiedades de las variantes, así que TypeScript conoce los valores válidos. Prueba con una variante que no existe, `<Button variante="enorme">`:
+
+```text
+src/pages/prueba.astro:5:9 - error ts(2322): Type '"enorme"' is not assignable to type '"primario" | "secundario" | "fantasma" | "peligro" | null | undefined'.
+```
+
+El error sale al escribirlo (y en `npm run check`), no en el navegador. Al hacer este cambio en `tw-lab`, `astro check` encontró, de la misma forma, tres usos antiguos con variantes que ya no existían en otra página.
+
+<Callout type="risk">
+
+- **`cn()` sigue siendo necesario:** `cva` junta las clases, pero no resuelve conflictos. Sin `cn()`, `<Button className="px-2">` dejaría `px-5 px-2` en el HTML, y ganaría la que Tailwind haya escrito después en el CSS, no la tuya.
+- **No metas lógica de negocio en un componente de la librería:** un `Button` no sabe qué es una sección leída. Los componentes de la librería reciben datos y pintan; los de la app (`MarcarLeida`) los usan.
+
+</Callout>
+
+## Paso 3: `Card`, `Checkbox`, `ProgressBar` y `Alerta`
+
+`src/components/ui/Card.astro`. Con `href`, la tarjeta entera es un enlace, y se comporta como tal con el teclado:
+
+```astro
+---
+// Archivo: src/components/ui/Card.astro
+// Una tarjeta. Con href, toda la tarjeta es un enlace (y se enfoca con Tab)
+import { cn } from "../../lib/cn";
+import { tarjeta, type VariantesTarjeta } from "./variantes";
+
+interface Props extends Omit<VariantesTarjeta, "interactiva"> {
+  titulo: string;
+  href?: string;
+  class?: string;
+}
+const { titulo, href, relieve, class: className } = Astro.props;
+const Elemento = href ? "a" : "div";
+---
+
+<Elemento href={href} class={cn(tarjeta({ relieve, interactiva: Boolean(href) }), "block", className)}>
+  <h3 class="font-semibold text-fg">{titulo}</h3>
+  <div class="mt-1 text-sm text-muted"><slot /></div>
+</Elemento>
+```
+
+`src/components/ui/Checkbox.astro`. Una casilla **nativa**, con su etiqueta y una descripción opcional enlazada:
+
+```astro
+---
+// Archivo: src/components/ui/Checkbox.astro
+// Una casilla nativa (teclado y lector de pantalla gratis), con el color de acento y su etiqueta
+interface Props {
+  name: string;
+  etiqueta: string;
+  descripcion?: string;
+  checked?: boolean;
+  disabled?: boolean;
+}
+const { name, etiqueta, descripcion, checked = false, disabled = false } = Astro.props;
+const id = `casilla-${name}`;
+---
+
+<div class="flex items-start gap-3">
+  <input
+    type="checkbox"
+    id={id}
+    name={name}
+    checked={checked}
+    disabled={disabled}
+    aria-describedby={descripcion ? `${id}-desc` : undefined}
+    class="mt-0.5 size-4 accent-accent-strong disabled:opacity-50"
+  />
+  <div>
+    <label for={id} class="text-sm font-medium text-fg">{etiqueta}</label>
+    {descripcion && <p id={`${id}-desc`} class="text-sm text-muted">{descripcion}</p>}
+  </div>
+</div>
+```
+
+`src/components/ui/ProgressBar.astro`, como la de esta plataforma:
+
+```astro
+---
+// Archivo: src/components/ui/ProgressBar.astro
+// Una barra de progreso con lo que necesita un lector de pantalla: role, valores y texto
+interface Props {
+  valor: number;
+  max: number;
+  etiqueta: string;
+  tamano?: "sm" | "md";
+}
+const { valor, max, etiqueta, tamano = "sm" } = Astro.props;
+const porcentaje = max === 0 ? 0 : Math.round((valor / max) * 100);
+---
+
+<div
+  role="progressbar"
+  aria-label={etiqueta}
+  aria-valuemin={0}
+  aria-valuemax={max}
+  aria-valuenow={valor}
+  aria-valuetext={`${valor} de ${max}`}
+  class:list={["w-full overflow-hidden rounded-full bg-surface-2", tamano === "sm" ? "h-1.5" : "h-2.5"]}
+>
+  <div class="h-full rounded-full bg-accent transition-[width] duration-300" style={`width: ${porcentaje}%`}></div>
+</div>
+```
+
+Y `src/components/ui/Alerta.astro`, para los mensajes de la interfaz. Con `vivo`, los lectores de pantalla lo anuncian al aparecer: `role="alert"` para los errores (interrumpe) y `role="status"` para lo demás (espera a que el usuario termine):
+
+```astro
+---
+// Archivo: src/components/ui/Alerta.astro
+// Un mensaje de la interfaz. Con "vivo", los lectores de pantalla lo anuncian al aparecer (role="alert" o "status")
+import { cn } from "../../lib/cn";
+import { alerta, type VariantesAlerta } from "./variantes";
+
+const TITULOS = { info: "Nota", exito: "Hecho", warning: "Atención", danger: "Error" } as const;
+
+interface Props extends VariantesAlerta {
+  titulo?: string;
+  vivo?: boolean;
+  class?: string;
+}
+const { tipo = "info", titulo, vivo = false, class: className } = Astro.props;
+const rol = vivo ? (tipo === "danger" ? "alert" : "status") : undefined;
+---
+
+<div role={rol} class={cn(alerta({ tipo }), className)}>
+  <p class="text-xs font-semibold tracking-wider text-muted uppercase">{titulo ?? TITULOS[tipo ?? "info"]}</p>
+  <div class="mt-1 text-sm text-fg"><slot /></div>
+</div>
+```
+
+- **`accent-accent-strong`** es la utilidad de Tailwind para la propiedad CSS `accent-color`: colorea la casilla nativa sin rehacerla. Una casilla dibujada con `<div>` habría que hacerla accesible a mano (teclado, estado, etiqueta).
+- **`role="progressbar"`** con `aria-valuenow`, `aria-valuemax` y `aria-valuetext`: el lector de pantalla dice "Progreso de TypeScript desde cero, 3 de 8".
+- **`Alerta` es distinto del `Aviso` de B7.5:** `Aviso` son los bloques de una lección (Nota, Ejercicio, Riesgos); `Alerta`, los mensajes de la app (guardado, error). Mezclarlos en un componente con siete variantes lo haría inmanejable.
+
+<Callout type="risk">
+
+- **`role="alert"` solo para lo urgente:** el lector de pantalla interrumpe lo que esté leyendo. Un "Guardado" que interrumpe en cada cambio es insoportable; para eso está `role="status"`.
+- **El `h3` de `Card` supone que va dentro de una sección con `h2`:** si la usas directamente bajo el `h1` de una página, el orden de los títulos se rompe (I7.4). Una librería más completa recibiría el nivel como propiedad.
+
+</Callout>
+
+## Paso 4: `Tabs`, con el teclado de verdad
+
+Las pestañas son el componente más fácil de hacer mal: con un `<div>` por pestaña, no se pueden usar con el teclado ni las entiende un lector de pantalla. El patrón de WAI-ARIA dice cómo deben comportarse: `role="tablist"`, `tab` y `tabpanel`, Tab para **entrar** en la pestaña activa y las flechas para **cambiar** de pestaña. Crea `src/components/ui/Tabs.tsx`:
+
+```tsx
+// Archivo: src/components/ui/Tabs.tsx
+// Pestañas accesibles (patrón WAI-ARIA): Tab entra en la pestaña activa, las flechas cambian de pestaña
+import { useId, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { cn } from "../../lib/cn";
+
+interface Pestana {
+  id: string;
+  titulo: string;
+  contenido: ReactNode;
+}
+
+export function Tabs({ pestanas, etiqueta }: { pestanas: Pestana[]; etiqueta: string }) {
+  const [activa, setActiva] = useState(0);
+  const botones = useRef<(HTMLButtonElement | null)[]>([]);
+  const base = useId();
+
+  function alPulsar(evento: KeyboardEvent<HTMLButtonElement>) {
+    const ultima = pestanas.length - 1;
+    const destino = { ArrowRight: activa === ultima ? 0 : activa + 1, ArrowLeft: activa === 0 ? ultima : activa - 1, Home: 0, End: ultima }[evento.key];
+    if (destino === undefined) return;
+    evento.preventDefault();
+    setActiva(destino);
+    botones.current[destino]?.focus();
+  }
+
+  return (
+    <div>
+      <div role="tablist" aria-label={etiqueta} className="flex gap-1 border-b border-surface-2">
+        {pestanas.map((p, i) => (
+          <button
+            key={p.id}
+            ref={(el) => {
+              botones.current[i] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`${base}-tab-${p.id}`}
+            aria-selected={i === activa}
+            aria-controls={`${base}-panel-${p.id}`}
+            tabIndex={i === activa ? 0 : -1} // solo la activa entra en el orden de Tab
+            onClick={() => setActiva(i)}
+            onKeyDown={alPulsar}
+            className={cn(
+              "-mb-px border-b-2 px-4 py-2 text-sm font-medium",
+              i === activa ? "border-accent-strong text-accent-strong" : "border-transparent text-muted hover:text-fg",
+            )}
+          >
+            {p.titulo}
+          </button>
+        ))}
+      </div>
+      {pestanas.map((p, i) => (
+        <div key={p.id} role="tabpanel" id={`${base}-panel-${p.id}`} aria-labelledby={`${base}-tab-${p.id}`} hidden={i !== activa} tabIndex={0} className="py-4 text-sm text-fg">
+          {p.contenido}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+- **`tabIndex` móvil:** solo la pestaña activa tiene `tabIndex={0}`; las demás, `-1`. Así, Tab entra en el grupo una sola vez y el siguiente Tab sale al panel, en lugar de recorrer todas las pestañas.
+- **Las flechas cambian la pestaña y mueven el foco a la vez;** Inicio y Fin van a la primera y a la última; las flechas dan la vuelta al llegar a un extremo.
+- **`aria-selected`, `aria-controls` y `aria-labelledby`** enlazan cada pestaña con su panel; `useId()` da _ids_ únicos aunque haya dos grupos de pestañas en la página.
+
+<Callout type="risk">
+
+- **Si la isla de React deja de funcionar tras instalar un paquete** (en la consola del servidor, `_jsxDEV is not a function` o `Invalid hook call`), es la caché de Vite: para el servidor y arráncalo con `npm run dev -- --force` (I5.2).
+- **Las pestañas no sustituyen a la navegación:** si cada pestaña es una página distinta con su propia URL, son enlaces (`<nav>` con `aria-current`), no pestañas.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Crea la página `/ui` con todos tus componentes en todas sus variantes.
+2. Revísala en claro y en oscuro con axe, y corrige lo que encuentre.
+3. Comprueba con el teclado que las pestañas siguen el patrón de WAI-ARIA, y que la casilla y la barra de progreso tienen su nombre accesible.
+
+</Callout>
+
+Solución. `src/pages/ui.astro`:
+
+```astro
+---
+// Archivo: src/pages/ui.astro
+// La librería de componentes: cada uno con sus variantes, para revisarlos en claro y en oscuro
+import Layout from "../layouts/Layout.astro";
+import { Button } from "../components/ui/Button";
+import Badge from "../components/ui/Badge.astro";
+import Card from "../components/ui/Card.astro";
+import Checkbox from "../components/ui/Checkbox.astro";
+import ProgressBar from "../components/ui/ProgressBar.astro";
+import Alerta from "../components/ui/Alerta.astro";
+import { Tabs } from "../components/ui/Tabs";
+
+const seccion = "space-y-4 border-t border-surface-2 pt-8";
+---
+
+<Layout titulo="Librería de componentes">
+  <main id="contenido" class="mx-auto max-w-3xl space-y-10 px-4 py-10">
+    <div>
+      <h1 class="text-3xl font-bold">Librería de componentes</h1>
+      <p class="mt-2 text-muted">Todos los componentes de la app y sus variantes. Usa el botón de arriba para verlos en oscuro.</p>
+    </div>
+
+    <section class={seccion} aria-labelledby="t-boton">
+      <h2 id="t-boton" class="text-xl font-semibold">Button</h2>
+      <p class="text-sm text-muted"><code>variante</code>: primario, secundario, fantasma, peligro · <code>tamano</code>: sm, md, lg</p>
+      <div class="flex flex-wrap items-center gap-3">
+        <Button>Primario</Button>
+        <Button variante="secundario">Secundario</Button>
+        <Button variante="fantasma">Fantasma</Button>
+        <Button variante="peligro">Peligro</Button>
+        <Button disabled>Desactivado</Button>
+      </div>
+      <div class="flex flex-wrap items-center gap-3">
+        <Button tamano="sm">Pequeño</Button>
+        <Button tamano="md">Mediano</Button>
+        <Button tamano="lg">Grande</Button>
+      </div>
+    </section>
+
+    <section class={seccion} aria-labelledby="t-badge">
+      <h2 id="t-badge" class="text-xl font-semibold">Badge</h2>
+      <p class="text-sm text-muted"><code>tono</code>: neutral, accent, warning, danger</p>
+      <div class="flex flex-wrap gap-2">
+        <Badge>Sin empezar</Badge>
+        <Badge tono="accent">Completado</Badge>
+        <Badge tono="warning">En curso</Badge>
+        <Badge tono="danger">Suspendido</Badge>
+      </div>
+    </section>
+
+    <section class={seccion} aria-labelledby="t-card">
+      <h2 id="t-card" class="text-xl font-semibold">Card</h2>
+      <p class="text-sm text-muted"><code>relieve</code>: plana, contorno · con <code>href</code>, interactiva</p>
+      <div class="grid gap-4 sm:grid-cols-3">
+        <Card titulo="Plana">Sobre la superficie.</Card>
+        <Card titulo="Contorno" relieve="contorno">Solo el borde.</Card>
+        <Card titulo="Con enlace" href="#t-card">Toda la tarjeta es un enlace.</Card>
+      </div>
+    </section>
+
+    <section class={seccion} aria-labelledby="t-checkbox">
+      <h2 id="t-checkbox" class="text-xl font-semibold">Checkbox</h2>
+      <Checkbox name="leida" etiqueta="Marcar como leída" descripcion="Cuenta para tu progreso del curso." checked />
+      <Checkbox name="avisos" etiqueta="Recibir avisos" />
+      <Checkbox name="bloqueada" etiqueta="Opción no disponible" disabled />
+    </section>
+
+    <section class={seccion} aria-labelledby="t-progreso">
+      <h2 id="t-progreso" class="text-xl font-semibold">ProgressBar</h2>
+      <ProgressBar valor={3} max={8} etiqueta="Progreso de TypeScript desde cero" />
+      <ProgressBar valor={6} max={6} etiqueta="Progreso de MongoDB esencial" tamano="md" />
+    </section>
+
+    <section class={seccion} aria-labelledby="t-alerta">
+      <h2 id="t-alerta" class="text-xl font-semibold">Alerta</h2>
+      <p class="text-sm text-muted"><code>tipo</code>: info, exito, warning, danger · <code>vivo</code>: se anuncia al aparecer</p>
+      <Alerta>Esta sección tarda unos 60 minutos.</Alerta>
+      <Alerta tipo="exito">Has completado el curso.</Alerta>
+      <Alerta tipo="warning">Te falta una sección para hacer la evaluación.</Alerta>
+      <Alerta tipo="danger" titulo="No se pudo guardar">Revisa tu conexión y vuelve a intentarlo.</Alerta>
+    </section>
+
+    <section class={seccion} aria-labelledby="t-tabs">
+      <h2 id="t-tabs" class="text-xl font-semibold">Tabs</h2>
+      <Tabs
+        client:load
+        etiqueta="Formas de instalar Node"
+        pestanas={[
+          { id: "brew", titulo: "Homebrew", contenido: "brew install node" },
+          { id: "nvm", titulo: "nvm", contenido: "nvm install --lts" },
+          { id: "apt", titulo: "apt", contenido: "sudo apt install nodejs" },
+        ]}
+      />
+    </section>
+  </main>
+</Layout>
+```
+
+La primera pasada de axe, en los dos temas:
+
+```text
+light /ui                sin infracciones
+dark  /ui                color-contrast(1)
+```
+
+El botón "Peligro", en oscuro. `danger-strong` vale `#be123c` en claro y `#fda4af` en oscuro, un rosa claro, y el texto blanco encima no se lee:
+
+```text
+claro:  #ffffff sobre #be123c 6.29:1
+oscuro: #ffffff sobre #fda4af 1.89:1 (el error)
+oscuro: #2a0a12 sobre #fda4af 9.65:1
+```
+
+Es el mismo caso que el acento en I7.2: el texto sobre un color de estado necesita su propio _token_. Añade `--danger-contrast` a `src/styles/global.css` (blanco en claro, casi negro en oscuro) y úsalo en la variante. El archivo completo:
+
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/source-serif-4";
+@import "@fontsource-variable/jetbrains-mono";
+@plugin "@tailwindcss/typography";
+
+/* dark: deja de seguir al sistema y obedece al atributo data-theme del <html> */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* 1. Tokens semánticos: el PAPEL de cada color (la paleta oficial de Dani Academy) */
+:root {
+  color-scheme: light; /* barras de desplazamiento y controles del navegador, en claro */
+  --bg: #fafafa; /* fondo de la página */
+  --surface: #eaedf2; /* tarjetas, cajas */
+  --surface-2: #e2e8f0; /* bordes, separadores, superficies sobre superficie */
+  --fg: #0f172a; /* texto principal */
+  --muted: #475569; /* texto secundario */
+  --accent: #0d9488; /* acento: botones, enlaces, foco */
+  --accent-strong: #0f766e; /* acento para texto (más contraste, I7.4) */
+  --accent-contrast: #ffffff; /* texto SOBRE el acento */
+  --info: #0284c7;
+  --warning: #d97706;
+  --danger: #f25c76;
+  --danger-strong: #be123c;
+  --danger-contrast: #ffffff; /* texto SOBRE danger-strong */
+}
+
+/* 1b. Los mismos papeles, con valores oscuros: solo cambian los valores */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #222a35;
+  --fg: #e6edf3;
+  --muted: #9aa4b2;
+  --accent: #2dd4bf;
+  --accent-strong: #5eead4;
+  --accent-contrast: #04201d; /* el acento oscuro es claro: el texto encima, casi negro */
+  --info: #38bdf8;
+  --warning: #fbbf24;
+  --danger: #f87191;
+  --danger-strong: #fda4af;
+  --danger-contrast: #2a0a12; /* el rojo oscuro es claro: el texto encima, casi negro */
+}
+
+/* 2. Tokens → utilidades de Tailwind: bg-surface, text-muted, border-accent… */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-info: var(--info);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-danger-strong: var(--danger-strong);
+  --color-danger-contrast: var(--danger-contrast);
+}
+
+@theme {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --font-serif: "Source Serif 4 Variable", Georgia, serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, monospace;
+
+  /* Planificador 2026: un color por categoría (B7.1) */
+  --color-trabajo: #0284c7;
+  --color-personal: #d97706;
+  --color-salud: #0d9488;
+  --color-estudio: #f25c76;
+}
+
+@layer base {
+  html {
+    background-color: var(--bg);
+    color: var(--fg);
+  }
+  /* Foco visible para quien navega con el teclado, con el color de acento con contraste */
+  :focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
+  }
+}
+
+/* Movimiento reducido: sin animaciones ni transiciones para quien lo pide en su sistema */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* prose ligado a los tokens: la misma regla vale para claro y oscuro (no hace falta prose-invert) */
+.prose {
+  --tw-prose-body: var(--fg);
+  --tw-prose-headings: var(--fg);
+  --tw-prose-lead: var(--muted);
+  --tw-prose-links: var(--accent-strong);
+  --tw-prose-bold: var(--fg);
+  --tw-prose-counters: var(--muted);
+  --tw-prose-bullets: var(--accent);
+  --tw-prose-hr: var(--surface-2);
+  --tw-prose-quotes: var(--fg);
+  --tw-prose-quote-borders: var(--accent);
+  --tw-prose-captions: var(--muted);
+  --tw-prose-code: var(--fg);
+  --tw-prose-pre-code: inherit;
+  --tw-prose-pre-bg: var(--surface);
+  --tw-prose-th-borders: var(--surface-2);
+  --tw-prose-td-borders: var(--surface-2);
+}
+/* El código en línea, como una pastilla, sin las comillas invertidas que pone prose */
+.prose :where(code):not(:where(pre code)) {
+  background-color: var(--surface);
+  border-radius: 0.375rem;
+  padding: 0.15em 0.35em;
+  font-weight: 500;
+}
+.prose :where(code):not(:where(pre code))::before,
+.prose :where(code):not(:where(pre code))::after {
+  content: none;
+}
+
+/* Bloques de código de Shiki: cada palabra trae --shiki-light y --shiki-dark; se elige uno */
+.astro-code {
+  background-color: var(--surface) !important;
+  border: 1px solid var(--surface-2);
+  border-radius: 0.75rem;
+  font-family: var(--font-mono);
+}
+.astro-code,
+.astro-code span {
+  color: var(--shiki-light);
+}
+[data-theme="dark"] .astro-code,
+[data-theme="dark"] .astro-code span {
+  color: var(--shiki-dark);
+}
+/* Tres colores de los temas de GitHub no llegan a 4,5:1 sobre --surface: el mismo tono, ajustado (I7.4) */
+:root:not([data-theme="dark"]) .astro-code span[style*="--shiki-light:#D73A49"] {
+  color: #b31d28; /* palabras clave: 3,90 → 5,73:1 */
+}
+:root:not([data-theme="dark"]) .astro-code span[style*="--shiki-light:#6A737D"] {
+  color: #4b5563; /* comentarios: 4,10 → 6,44:1 */
+}
+[data-theme="dark"] .astro-code span[style*="--shiki-dark:#6A737D"] {
+  color: #8b949e; /* comentarios: 3,59 → 5,62:1 */
+}
+
+/* Una utilidad propia: funciona con variantes (lg:scrollbar-fino) */
+@utility scrollbar-fino {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-2) transparent;
+}
+```
+
+Y en `variantes.ts`, `peligro: "bg-danger-strong text-danger-contrast hover:opacity-90"`. Después:
+
+```text
+light /ui                sin infracciones
+light /componentes       sin infracciones
+light /leccion           sin infracciones
+dark  /ui                sin infracciones
+dark  /componentes       sin infracciones
+dark  /leccion           sin infracciones
+
+Resumen:
+```
+
+Con el teclado, en Chrome:
+
+```text
+Tab:          foco: tab «Homebrew» · seleccionada: Homebrew · panel visible: «brew install node» · tabindex: 0/-1/-1
+ArrowRight    foco: tab «nvm» · seleccionada: nvm · panel visible: «nvm install --lts» · tabindex: -1/0/-1
+ArrowRight    foco: tab «apt» · seleccionada: apt · panel visible: «sudo apt install nodejs» · tabindex: -1/-1/0
+ArrowRight    foco: tab «Homebrew» · seleccionada: Homebrew · panel visible: «brew install node» · tabindex: 0/-1/-1
+End           foco: tab «apt» · seleccionada: apt · panel visible: «sudo apt install nodejs» · tabindex: -1/-1/0
+Home          foco: tab «Homebrew» · seleccionada: Homebrew · panel visible: «brew install node» · tabindex: 0/-1/-1
+ArrowLeft     foco: tab «apt» · seleccionada: apt · panel visible: «sudo apt install nodejs» · tabindex: -1/-1/0
+Tab otra vez: foco: tabpanel «sudo apt install nodejs» · seleccionada: apt · panel visible: «sudo apt install nodejs» · tabindex: -1/-1/0
+Casilla: nombre accesible «Marcar como leída» · descripción «Cuenta para tu progreso del curso.» · marcada true
+Clic en la etiqueta «Recibir avisos»: marcada true
+Barra: «Progreso de TypeScript desde cero» · 3 de 8 · relleno 38%
+```
+
+- **Tab entra en la pestaña activa** (`tabindex` 0/-1/-1), las flechas cambian a la vez el foco, la selección y el panel visible, y dan la vuelta al llegar a un extremo.
+- **El siguiente Tab sale al panel**, sin pasar por las otras pestañas.
+- **La casilla tiene nombre y descripción** (la etiqueta y el texto enlazado con `aria-describedby`), y un clic en la etiqueta la marca, porque `<label for>` la conecta. La barra de progreso anuncia "3 de 8".
+
+<Callout type="risk">
+
+- **Revisa `/ui` en los dos temas cada vez que añadas una variante:** el fallo del botón de peligro solo existía en oscuro, y ninguna otra página tenía un botón de peligro.
+- **La página `/ui` es interna:** si no quieres que sea pública en producción, ponle `prerender = false` y protégela con el _middleware_ (I5.3), o no la incluyas en el _build_.
+
+</Callout>
+
+<Callout type="mastery">
+
+Construyes una página nueva solo combinando tus componentes: cada pieza tiene sus variantes definidas con `cva` y tipadas con `VariantProps` (TypeScript avisa de una variante que no existe), usa los _tokens_ para funcionar en los dos temas, es accesible con el teclado y con un lector de pantalla, y la página `/ui` te deja verlas y revisarlas todas a la vez.
+
+</Callout>
+
+## Resumen
+
+- Un inventario de componentes y sus variantes, en un solo `variantes.ts` que comparten Astro y React.
+- `cva(base, { variants, defaultVariants })` da las clases de cada combinación; `VariantProps` da sus tipos.
+- `cn()` sigue haciendo falta para que una clase de fuera gane a la de la variante.
+- Componentes nativos siempre que se pueda (`<input type="checkbox">`, `<button>`); ARIA para lo que el HTML no trae (`role="progressbar"`, `role="tab"`).
+- Pestañas con el patrón WAI-ARIA: `tabIndex` móvil, flechas, Inicio y Fin.
+- Una página `/ui` con todo, revisada con axe en claro y en oscuro.

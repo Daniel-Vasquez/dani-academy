@@ -1,0 +1,548 @@
+---
+sectionId: "I7.4"
+course: "I7"
+title: "Accesibilidad (a11y)"
+order: 4
+minutes: 75
+summary: "Mides el contraste de cada token con la fórmula de WCAG, descubres que #0d9488 sobre #fafafa no pasa AA, auditas con axe y Lighthouse, corriges lo que encuentran y recorres la página entera solo con el teclado."
+---
+
+Una página accesible es una página que puede usar cualquiera: quien ve mal y necesita contraste, quien usa un lector de pantalla, quien no puede usar el ratón y navega con el teclado, quien se marea con las animaciones. No es un extra para unos pocos: es calidad, y en muchos países, una obligación legal. La buena noticia es que casi todo se resuelve con HTML bien escrito y unos pocos detalles de CSS. En esta sección vas a medir el contraste de tus _tokens_, a auditar `tw-lab` con dos herramientas que no siempre coinciden, a corregir lo que encuentren y a comprobar que la página se puede usar entera con el teclado.
+
+**Lo que tendrás al terminar:** `scripts/contraste.ts`, que mide el contraste de cada par de _tokens_; un enlace para saltar al contenido; foco visible en todo; respeto a `prefers-reduced-motion`, y cinco páginas sin infracciones de axe en claro y en oscuro.
+
+**Requisitos:** el proyecto `tw-lab` de I7.3, Chrome con la extensión axe DevTools (gratuita) y Lighthouse, que viene en las DevTools de Chrome.
+
+## Paso 1: el contraste, medido
+
+WCAG (_Web Content Accessibility Guidelines_) define el **contraste** entre dos colores como una relación que va de 1:1 (iguales) a 21:1 (negro sobre blanco), calculada a partir de su luminancia. Los mínimos del nivel AA, el que se exige normalmente:
+
+| Contenido                                    | Mínimo AA | Mínimo AAA |
+| -------------------------------------------- | --------- | ---------- |
+| Texto normal                                 | 4,5:1     | 7:1        |
+| Texto grande (24 px, o 18,7 px en negrita)   | 3:1       | 4,5:1      |
+| Iconos, bordes de campos y otros componentes | 3:1       | —          |
+
+No hace falta calcularlo a mano. Crea `scripts/contraste.ts`, que aplica la fórmula de WCAG a cada par de _tokens_ en los dos temas:
+
+```ts
+// Archivo: scripts/contraste.ts
+// Relación de contraste WCAG 2.x entre pares de tokens, en claro y en oscuro
+// Uso: node scripts/contraste.ts
+type Hex = `#${string}`;
+
+/** Luminancia relativa de un color (fórmula de WCAG 2.x) */
+function luminancia(hex: Hex): number {
+  const canales = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const lineal = canales.map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * lineal[0]! + 0.7152 * lineal[1]! + 0.0722 * lineal[2]!;
+}
+
+/** De 1:1 (iguales) a 21:1 (negro sobre blanco) */
+export function contraste(a: Hex, b: Hex): number {
+  const [claro, oscuro] = [luminancia(a), luminancia(b)].sort((x, y) => y - x);
+  return (claro! + 0.05) / (oscuro! + 0.05);
+}
+
+const TEMAS = {
+  claro: { bg: "#fafafa", surface: "#eaedf2", fg: "#0f172a", muted: "#475569", accent: "#0d9488", "accent-strong": "#0f766e", "accent-contrast": "#ffffff", danger: "#f25c76", "danger-strong": "#be123c" },
+  oscuro: { bg: "#0d1117", surface: "#161b22", fg: "#e6edf3", muted: "#9aa4b2", accent: "#2dd4bf", "accent-strong": "#5eead4", "accent-contrast": "#04201d", danger: "#f87191", "danger-strong": "#fda4af" },
+} as const;
+
+// [texto, fondo, uso]
+const PARES = [
+  ["fg", "bg", "texto normal"],
+  ["muted", "bg", "texto secundario"],
+  ["muted", "surface", "texto secundario en tarjeta"],
+  ["accent", "bg", "acento como TEXTO"],
+  ["accent-strong", "bg", "enlaces y texto de acento"],
+  ["accent-contrast", "accent", "texto de un botón"],
+  ["danger", "bg", "error como TEXTO"],
+  ["danger-strong", "bg", "texto de error"],
+] as const;
+
+for (const [tema, t] of Object.entries(TEMAS)) {
+  console.log(`${tema}:`);
+  for (const [texto, fondo, uso] of PARES) {
+    const r = contraste(t[texto] as Hex, t[fondo] as Hex);
+    const nota = r >= 7 ? "AAA" : r >= 4.5 ? "AA" : r >= 3 ? "solo texto grande (AA ≥ 18,7 px negrita o 24 px)" : "✗ no pasa";
+    console.log(`  ${`${texto} sobre ${fondo}`.padEnd(30)} ${r.toFixed(2).padStart(5)}:1  ${nota.padEnd(10)} ${uso}`);
+  }
+}
+```
+
+```bash
+node scripts/contraste.ts
+```
+
+```text
+claro:
+  fg sobre bg                    17.10:1  AAA        texto normal
+  muted sobre bg                  7.26:1  AAA        texto secundario
+  muted sobre surface             6.46:1  AA         texto secundario en tarjeta
+  accent sobre bg                 3.59:1  solo texto grande (AA ≥ 18,7 px negrita o 24 px) acento como TEXTO
+  accent-strong sobre bg          5.24:1  AA         enlaces y texto de acento
+  accent-contrast sobre accent    3.74:1  solo texto grande (AA ≥ 18,7 px negrita o 24 px) texto de un botón
+  danger sobre bg                 3.06:1  solo texto grande (AA ≥ 18,7 px negrita o 24 px) error como TEXTO
+  danger-strong sobre bg          6.02:1  AA         texto de error
+oscuro:
+  fg sobre bg                    16.02:1  AAA        texto normal
+  muted sobre bg                  7.50:1  AAA        texto secundario
+  muted sobre surface             6.86:1  AA         texto secundario en tarjeta
+  accent sobre bg                10.17:1  AAA        acento como TEXTO
+  accent-strong sobre bg         12.79:1  AAA        enlaces y texto de acento
+  accent-contrast sobre accent    9.18:1  AAA        texto de un botón
+  danger sobre bg                 7.00:1  AA         error como TEXTO
+  danger-strong sobre bg         10.01:1  AAA        texto de error
+```
+
+- **El acento de la plataforma, `#0d9488`, sobre el fondo `#fafafa` da 3,59:1:** no llega a 4,5. Sirve para fondos, bordes, iconos y texto grande, pero **no** para texto normal. Por eso existe `--accent-strong` (`#0f766e`, 5,24:1), y por eso los enlaces y el texto de acento lo usan.
+- **El texto blanco sobre un botón de acento también falla** (3,74:1). Los botones con texto van sobre `accent-strong` (5,47:1, Paso 5).
+- **En oscuro todo pasa con holgura:** el acento claro (`#2dd4bf`) sobre fondo oscuro da 10,17:1. Un color puede servir en un tema y no en el otro; mide los dos.
+
+<Callout type="risk">
+
+- **El contraste depende del fondo real, no del de la página:** el texto secundario da 7,26:1 sobre `bg`, pero 6,46:1 dentro de una tarjeta (`surface`). Mide cada combinación que uses.
+- **La opacidad engaña:** `text-fg/60` es un color distinto, mezclado con el fondo, y su contraste es mucho menor. Para texto, usa un _token_ con su propio valor (`muted`), no una opacidad.
+- **El contraste no es lo único:** un enlace que solo se distingue por el color (sin subrayado) no se ve para quien no distingue ese color. `prose` subraya los enlaces del texto; mantenlo.
+
+</Callout>
+
+## Paso 2: HTML semántico, _landmarks_ y títulos
+
+Un lector de pantalla no "ve" la página: recorre su estructura. Usa los **landmarks** (las zonas de la página) para saltar entre ellas y los títulos para hacerse un índice:
+
+| Elemento   | Zona (_landmark_)   | Uso                                                   |
+| ---------- | ------------------- | ----------------------------------------------------- |
+| `<header>` | Cabecera (`banner`) | La barra superior. **Una por página**                 |
+| `<nav>`    | Navegación          | Los menús. Si hay varios, cada uno con `aria-label`   |
+| `<main>`   | Contenido principal | **Una por página**. Lo que no se repite entre páginas |
+| `<aside>`  | Complementario      | El índice lateral del curso                           |
+| `<footer>` | Pie (`contentinfo`) | El pie de página                                      |
+
+Y los títulos, en orden: un único `<h1>` por página y, debajo, `<h2>`, `<h3>`… sin saltar niveles. El nivel lo decide la estructura, no el tamaño: si quieres un `<h2>` pequeño, cambia su clase, no lo conviertas en `<h3>`.
+
+<Callout type="risk">
+
+- **Un `<div>` con un `onClick` no es un botón:** no se alcanza con Tab, no se activa con Enter ni con Espacio y el lector de pantalla no dice que es un botón. Usa `<button>` para acciones y `<a href>` para ir a otra página.
+- **Las imágenes necesitan `alt`:** que describa lo que aporta la imagen, o `alt=""` si es decorativa (así el lector de pantalla la salta).
+
+</Callout>
+
+## Paso 3: foco visible, teclado y enlace para saltar
+
+Quien navega con el teclado pulsa Tab para ir de un elemento al siguiente, y necesita **ver** dónde está. Y si cada página empieza con la misma barra de enlaces, tendrá que pasar por todos ellos antes de llegar al contenido, en cada página. Las dos soluciones son un **foco visible** en todo y un **enlace para saltar al contenido**, oculto hasta que recibe el foco. Crea `src/components/SaltarAlContenido.astro`:
+
+```astro
+---
+// Archivo: src/components/SaltarAlContenido.astro
+// El primer elemento con foco: oculto hasta que se llega con Tab, y salta al <main id="contenido">
+---
+
+<a
+  href="#contenido"
+  class="sr-only rounded-lg bg-accent-strong px-4 py-2 text-accent-contrast focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-50"
+>
+  Saltar al contenido
+</a>
+```
+
+Úsalo en el _layout_ como el primer elemento con foco, dentro de la cabecera. Para las páginas que tienen su propia cabecera (las de curso, de B7), el _layout_ ya no pone la suya: así nunca hay dos `<header>`. Sustituye `src/layouts/Layout.astro`:
+
+```astro
+---
+// Archivo: src/layouts/Layout.astro
+import "../styles/global.css";
+import { ClientRouter } from "astro:transitions";
+import BotonTema from "../components/BotonTema.astro";
+import SaltarAlContenido from "../components/SaltarAlContenido.astro";
+
+interface Props {
+  titulo: string;
+  /** Para las páginas que traen su propia cabecera (y ponen en ella el botón de tema) */
+  sinCabecera?: boolean;
+}
+const { titulo, sinCabecera = false } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · Tailwind lab</title>
+    <!-- 1. El tema, ANTES de que el navegador pinte nada. is:inline: Astro no lo aplaza ni lo empaqueta -->
+    <script is:inline>
+      (() => {
+        const aplicarTema = () => {
+          let guardado = null;
+          try {
+            guardado = localStorage.getItem("tema");
+          } catch {
+            // Almacenamiento bloqueado: se sigue la preferencia del sistema
+          }
+          const oscuro = guardado ? guardado === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.dataset.theme = oscuro ? "dark" : "light";
+        };
+        aplicarTema();
+        // 2. View Transitions: al navegar, el <html> nuevo llega sin data-theme. Se reaplica antes de pintarlo
+        if (!window.__temaEscuchando) {
+          window.__temaEscuchando = true;
+          document.addEventListener("astro:after-swap", aplicarTema);
+        }
+      })();
+    </script>
+    <ClientRouter />
+    <slot name="head" />
+  </head>
+  <body class="bg-bg font-sans text-fg">
+    {
+      !sinCabecera && (
+        <header class="flex justify-end p-3">
+          <SaltarAlContenido />
+          <BotonTema />
+        </header>
+      )
+    }
+    {sinCabecera && <SaltarAlContenido />}
+    <slot />
+  </body>
+</html>
+```
+
+Y en las páginas:
+
+- **Cada `<main>` lleva `id="contenido"`,** el destino del enlace.
+- **`curso.astro` y `curso-responsive.astro`** pasan `sinCabecera` al _layout_, importan `BotonTema` y lo ponen dentro de su `<nav>`.
+
+<Callout type="risk">
+
+- **Nunca quites el contorno del foco** (`outline: none`) sin poner otro igual de visible: es la única forma de saber dónde estás con el teclado. `:focus-visible` (Paso 5) lo muestra al usar el teclado, pero no al hacer clic con el ratón.
+- **`sr-only` oculta visualmente, no para el lector de pantalla:** el enlace de salto sigue en la página. `focus:not-sr-only` lo hace visible al recibir el foco. Con `display: none` o `hidden`, nadie podría usarlo.
+
+</Callout>
+
+## Paso 4: ARIA, solo cuando el HTML no basta
+
+**ARIA** son atributos que dan a los lectores de pantalla información que el HTML no tiene. La primera regla de ARIA es **no usarlo** si un elemento HTML ya lo hace: un `<button>` ya es un botón; `role="button"` en un `<div>` es peor que un `<button>`.
+
+| Necesitas…                                | HTML       | ARIA, solo si no hay HTML           |
+| ----------------------------------------- | ---------- | ----------------------------------- |
+| Un botón                                  | `<button>` | —                                   |
+| Un botón que se activa y desactiva        | `<button>` | `aria-pressed="true"` / `"false"`   |
+| Nombrar algo sin texto visible (un icono) | —          | `aria-label="Cerrar"`               |
+| Enlazar un campo con su error             | —          | `aria-describedby` (I5.5)           |
+| Avisar de un cambio                       | —          | `role="alert"` o `aria-live` (I5.5) |
+| La página actual en un menú               | —          | `aria-current="page"` (B7.4)        |
+
+`BotonTema` (I7.2) es el caso de `aria-pressed`: es un **interruptor**, y su texto ("Modo oscuro") no cambia, pero su estado sí. Con `aria-pressed`, el lector de pantalla dice "Modo oscuro, botón, activado" o "desactivado".
+
+<Callout type="risk">
+
+- **`aria-pressed` es para interruptores, no para cualquier botón:** "Guardar" no tiene estado, así que no lleva `aria-pressed`. Si el texto del botón cambia con el estado ("Ver más" / "Ver menos"), tampoco: el texto ya lo dice.
+- **ARIA no añade comportamiento:** `role="button"` no hace que un `<div>` responda a Enter. Solo cambia lo que se anuncia.
+
+</Callout>
+
+## Paso 5: movimiento reducido y los cambios en `global.css`
+
+Algunas personas sufren mareos o náuseas con las animaciones, y lo indican en su sistema operativo. CSS lo recibe como `prefers-reduced-motion: reduce`. Este paso y el foco visible del Paso 3 son las dos reglas nuevas de `src/styles/global.css`, junto con los ajustes de contraste del código del ejercicio. Sustituye el archivo:
+
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/source-serif-4";
+@import "@fontsource-variable/jetbrains-mono";
+@plugin "@tailwindcss/typography";
+
+/* dark: deja de seguir al sistema y obedece al atributo data-theme del <html> */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* 1. Tokens semánticos: el PAPEL de cada color (la paleta oficial de Dani Academy) */
+:root {
+  color-scheme: light; /* barras de desplazamiento y controles del navegador, en claro */
+  --bg: #fafafa; /* fondo de la página */
+  --surface: #eaedf2; /* tarjetas, cajas */
+  --surface-2: #e2e8f0; /* bordes, separadores, superficies sobre superficie */
+  --fg: #0f172a; /* texto principal */
+  --muted: #475569; /* texto secundario */
+  --accent: #0d9488; /* acento: botones, enlaces, foco */
+  --accent-strong: #0f766e; /* acento para texto (más contraste, I7.4) */
+  --accent-contrast: #ffffff; /* texto SOBRE el acento */
+  --info: #0284c7;
+  --warning: #d97706;
+  --danger: #f25c76;
+  --danger-strong: #be123c;
+}
+
+/* 1b. Los mismos papeles, con valores oscuros: solo cambian los valores */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #222a35;
+  --fg: #e6edf3;
+  --muted: #9aa4b2;
+  --accent: #2dd4bf;
+  --accent-strong: #5eead4;
+  --accent-contrast: #04201d; /* el acento oscuro es claro: el texto encima, casi negro */
+  --info: #38bdf8;
+  --warning: #fbbf24;
+  --danger: #f87191;
+  --danger-strong: #fda4af;
+}
+
+/* 2. Tokens → utilidades de Tailwind: bg-surface, text-muted, border-accent… */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-info: var(--info);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-danger-strong: var(--danger-strong);
+}
+
+@theme {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --font-serif: "Source Serif 4 Variable", Georgia, serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, monospace;
+
+  /* Planificador 2026: un color por categoría (B7.1) */
+  --color-trabajo: #0284c7;
+  --color-personal: #d97706;
+  --color-salud: #0d9488;
+  --color-estudio: #f25c76;
+}
+
+@layer base {
+  html {
+    background-color: var(--bg);
+    color: var(--fg);
+  }
+  /* Foco visible para quien navega con el teclado, con el color de acento con contraste */
+  :focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
+  }
+}
+
+/* Movimiento reducido: sin animaciones ni transiciones para quien lo pide en su sistema */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* prose ligado a los tokens: la misma regla vale para claro y oscuro (no hace falta prose-invert) */
+.prose {
+  --tw-prose-body: var(--fg);
+  --tw-prose-headings: var(--fg);
+  --tw-prose-lead: var(--muted);
+  --tw-prose-links: var(--accent-strong);
+  --tw-prose-bold: var(--fg);
+  --tw-prose-counters: var(--muted);
+  --tw-prose-bullets: var(--accent);
+  --tw-prose-hr: var(--surface-2);
+  --tw-prose-quotes: var(--fg);
+  --tw-prose-quote-borders: var(--accent);
+  --tw-prose-captions: var(--muted);
+  --tw-prose-code: var(--fg);
+  --tw-prose-pre-code: inherit;
+  --tw-prose-pre-bg: var(--surface);
+  --tw-prose-th-borders: var(--surface-2);
+  --tw-prose-td-borders: var(--surface-2);
+}
+/* El código en línea, como una pastilla, sin las comillas invertidas que pone prose */
+.prose :where(code):not(:where(pre code)) {
+  background-color: var(--surface);
+  border-radius: 0.375rem;
+  padding: 0.15em 0.35em;
+  font-weight: 500;
+}
+.prose :where(code):not(:where(pre code))::before,
+.prose :where(code):not(:where(pre code))::after {
+  content: none;
+}
+
+/* Bloques de código de Shiki: cada palabra trae --shiki-light y --shiki-dark; se elige uno */
+.astro-code {
+  background-color: var(--surface) !important;
+  border: 1px solid var(--surface-2);
+  border-radius: 0.75rem;
+  font-family: var(--font-mono);
+}
+.astro-code,
+.astro-code span {
+  color: var(--shiki-light);
+}
+[data-theme="dark"] .astro-code,
+[data-theme="dark"] .astro-code span {
+  color: var(--shiki-dark);
+}
+/* Tres colores de los temas de GitHub no llegan a 4,5:1 sobre --surface: el mismo tono, ajustado (I7.4) */
+:root:not([data-theme="dark"]) .astro-code span[style*="--shiki-light:#D73A49"] {
+  color: #b31d28; /* palabras clave: 3,90 → 5,73:1 */
+}
+:root:not([data-theme="dark"]) .astro-code span[style*="--shiki-light:#6A737D"] {
+  color: #4b5563; /* comentarios: 4,10 → 6,44:1 */
+}
+[data-theme="dark"] .astro-code span[style*="--shiki-dark:#6A737D"] {
+  color: #8b949e; /* comentarios: 3,59 → 5,62:1 */
+}
+
+/* Una utilidad propia: funciona con variantes (lg:scrollbar-fino) */
+@utility scrollbar-fino {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-2) transparent;
+}
+```
+
+- **`:focus-visible`** pone un contorno de 2 px con `--accent-strong` a cualquier elemento enfocado con el teclado, en toda la app.
+- **Con movimiento reducido**, todas las transiciones y animaciones duran prácticamente cero. Medido en el primer botón de `/estados`: `transition-duration` pasa de `0.15s` a `1e-05s`. Las View Transitions de Astro ya respetan esta preferencia por su cuenta: su `viewtransitions.css` quita las animaciones con `@media (prefers-reduced-motion)`.
+
+<Callout type="risk">
+
+- **Reducir no es quitar la información:** si una animación comunica algo (una barra de progreso que avanza), con movimiento reducido el cambio tiene que seguir viéndose, aunque sea de golpe.
+- **El `!important` es intencionado:** tiene que ganar a las clases `transition` y `duration-*` de cualquier componente, sin revisarlos uno a uno.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Pasa Lighthouse y axe DevTools por tu página de curso (y por el resto de páginas), en claro y en oscuro, y corrige todos los problemas de accesibilidad.
+2. Verifica el contraste de `#0d9488` sobre `#fafafa`.
+3. Comprueba que puedes usar la página de curso entera solo con el teclado.
+
+</Callout>
+
+Solución. Lo que encontró axe (versión 4.14, reglas de WCAG 2.1 A y AA y buenas prácticas) en cinco páginas de `tw-lab`, antes de corregir:
+
+```text
+light /                  color-contrast(1)
+light /curso-responsive  sin infracciones
+light /componentes       page-has-heading-one(1)
+light /estados           page-has-heading-one(1)
+light /lectura           color-contrast(4)
+dark  /                  sin infracciones
+dark  /curso-responsive  sin infracciones
+dark  /componentes       page-has-heading-one(1)
+dark  /estados           page-has-heading-one(1)
+dark  /lectura           color-contrast(1)
+
+Resumen:
+  color-contrast           6 elementos · serious · p. ej. .mt-4
+  page-has-heading-one     4 elementos · moderate · p. ej. html
+```
+
+El detalle de los fallos de contraste:
+
+```text
+light /:
+  "Continuar" #ffffff sobre #0d9488 = 3.74:1 (mínimo 4.5:1) · 12.0pt (16px) normal
+light /lectura:
+  "const" #d73a49 sobre #eaedf2 = 3.89:1 (mínimo 4.5:1) · 10.7pt (14.2222px) normal
+  "await" #d73a49 sobre #eaedf2 = 3.89:1 (mínimo 4.5:1) · 10.7pt (14.2222px) normal
+  "new" #d73a49 sobre #eaedf2 = 3.89:1 (mínimo 4.5:1) · 10.7pt (14.2222px) normal
+  "// 1" #6a737d sobre #eaedf2 = 4.1:1 (mínimo 4.5:1) · 10.7pt (14.2222px) normal
+dark /lectura:
+  "// 1" #6a737d sobre #161b22 = 3.59:1 (mínimo 4.5:1) · 10.7pt (14.2222px) normal
+```
+
+Lighthouse, en el _build_ de producción, antes de corregir nada:
+
+```text
+curso-responsive accesibilidad 100 · sin fallos
+inicio accesibilidad 100 · sin fallos
+```
+
+**Lighthouse da 100 a la portada, y axe encuentra en ella un fallo de contraste** (el mismo _build_, comprobado con las dos). Las herramientas automáticas no coinciden siempre y ninguna lo detecta todo. Usa más de una, y después revisa a mano.
+
+Las correcciones:
+
+- **El botón "Continuar"** y los de `flex.astro` y `grid.astro` pasan de `bg-accent` a `bg-accent-strong`: blanco sobre `#0f766e` da 5,47:1.
+- **Shiki:** tres colores de los temas de GitHub no llegan a 4,5:1 sobre `--surface`. En `global.css` (Paso 5) se sustituyen por el mismo tono, más oscuro o más claro: el rojo de las palabras clave (`#d73a49` → `#b31d28`, de 3,90 a 5,73:1) y el gris de los comentarios en claro (`#6a737d` → `#4b5563`, de 4,10 a 6,44:1) y en oscuro (`#6a737d` → `#8b949e`, de 3,59 a 5,62:1). Esta plataforma hace el mismo tipo de ajuste en su `global.css`.
+- **`componentes.astro` y `estados.astro`** reciben su `<h1>` (`page-has-heading-one`).
+
+Al corregir aparecieron tres problemas nuevos: arreglar accesibilidad también puede romperla.
+
+- **`landmark-no-duplicate-banner`:** el primer _layout_ ponía un `<header>` con el botón de tema en todas las páginas, y las de curso ya tenían el suyo. De ahí sale `sinCabecera` (Paso 3).
+- **`heading-order`:** el `<h1>` nuevo de `/estados` iba seguido de un `<h3>`. Pasó a `<h2>`.
+- **`region`:** el enlace de salto, fuera de la cabecera, quedaba fuera de toda zona de la página. Dentro del `<header>`, se resolvió.
+
+Después:
+
+```text
+light /                  sin infracciones
+light /curso-responsive  sin infracciones
+light /componentes       sin infracciones
+light /estados           sin infracciones
+light /lectura           sin infracciones
+dark  /                  sin infracciones
+dark  /curso-responsive  sin infracciones
+dark  /componentes       sin infracciones
+dark  /estados           sin infracciones
+dark  /lectura           sin infracciones
+
+Resumen:
+```
+
+Lighthouse, en las dos páginas:
+
+```text
+curso-responsive  accesibilidad 100
+inicio            accesibilidad 100
+```
+
+Y solo con el teclado, en la página de curso:
+
+```text
+Pulsando Tab desde el principio:
+  1. <a> «Saltar al contenido» · contorno solid 2px rgb(94, 234, 212) · visible: true
+  2. <a> «DADani Academy» · contorno solid 2px rgb(94, 234, 212) · visible: true
+  3. <a> «Temario» · contorno solid 2px rgb(94, 234, 212) · visible: true
+  4. <a> «Progreso» · contorno solid 2px rgb(94, 234, 212) · visible: true
+  5. <button> «Modo oscuro» · contorno solid 2px rgb(94, 234, 212) · visible: true · aria-pressed=true
+  Espacio en el botón: <button> «Modo oscuro» · contorno solid 2px rgb(15, 118, 110) · visible: true · aria-pressed=false · data-theme=light
+Enter en «Saltar al contenido» y Tab: <a> «← Tipos primitivos e inferen» · contorno solid 2px rgb(15, 118, 110) · visible: true · ¿dentro de <main>? true
+prefers-reduced-motion: no-preference → transition-duration del primer botón de /estados: 0.15s
+prefers-reduced-motion: reduce        → transition-duration del primer botón de /estados: 1e-05s
+```
+
+- **El primer Tab llega a "Saltar al contenido"**, que aparece al recibir el foco. Después, el logo, los enlaces y el botón de tema, en el orden en que se leen, todos con su contorno visible.
+- **Espacio activa el botón** y cambia `aria-pressed`.
+- **Enter en el enlace de salto y Tab** llevan al primer enlace **dentro** de `<main>`, sin pasar otra vez por la barra.
+
+<Callout type="risk">
+
+- **Las herramientas automáticas detectan solo una parte de los problemas:** no saben si un `alt` describe bien la imagen, si el orden del foco tiene sentido o si un mensaje de error se entiende. Recorre tus páginas con el teclado, y prueba alguna con un lector de pantalla (VoiceOver en el Mac: Cmd+F5).
+- **Repite la auditoría en los dos temas:** el comentario gris de Shiki fallaba en oscuro con un valor distinto del de claro.
+
+</Callout>
+
+<Callout type="mastery">
+
+Puedes usar tu página entera solo con el teclado: mides el contraste de cada _token_ con la fórmula de WCAG (y sabes que `#0d9488` sobre `#fafafa`, 3,59:1, no sirve para texto normal), estructuras con _landmarks_ y títulos en orden, das foco visible a todo, ofreces un enlace para saltar al contenido, usas ARIA solo donde el HTML no llega (`aria-pressed` en un interruptor) y respetas el movimiento reducido. Y auditas con más de una herramienta.
+
+</Callout>
+
+## Resumen
+
+- AA exige 4,5:1 para texto normal y 3:1 para texto grande e iconos. El acento `#0d9488` sobre `#fafafa` da 3,59:1: para texto, `accent-strong` (5,24:1).
+- Un `<header>`, un `<main>`, títulos en orden y un único `<h1>`. `<button>` para acciones, `<a>` para navegar.
+- Foco visible con `:focus-visible` y un enlace "Saltar al contenido" como primer elemento con foco.
+- ARIA solo si el HTML no basta: `aria-pressed` para los interruptores.
+- `prefers-reduced-motion: reduce` quita las transiciones (de 0,15 s a casi cero).
+- Lighthouse y axe no siempre coinciden (100 frente a un fallo): usa las dos y revisa a mano, en claro y en oscuro.

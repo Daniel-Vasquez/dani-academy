@@ -1,0 +1,404 @@
+---
+sectionId: "I7.2"
+course: "I7"
+title: "Modo light/dark sin parpadeo"
+order: 2
+minutes: 60
+summary: "Defines los tokens oscuros, ligas dark: a data-theme, mides por qué el tema se aplica con un script en línea en el head y no desde React, lo guardas en localStorage y lo conservas al navegar con View Transitions."
+---
+
+Con los _tokens_ de I7.1, el modo oscuro ya no es añadir `dark:` a cada clase: es dar **otros valores** a los mismos _tokens_. La parte difícil es **cuándo** se decide qué tema toca. Si el navegador pinta la página en claro y, un instante después, el código la pasa a oscuro, el usuario ve un destello blanco en cada visita. Es el **_flash of unstyled content_** (FOUC), y con el modo oscuro es especialmente molesto: un fogonazo blanco a medianoche. En esta sección vas a definir los _tokens_ oscuros, a decidir el tema en el momento exacto (medido, no supuesto), a guardarlo y a mantenerlo al navegar con View Transitions.
+
+**Lo que tendrás al terminar:** los _tokens_ oscuros de la plataforma, un _script_ en el `<head>` que aplica el tema antes de pintar, el componente `BotonTema` y una app que conserva el tema al recargar y al navegar.
+
+**Requisitos:** el proyecto `tw-lab` con los _tokens_ de I7.1 y sin colores directos.
+
+## Paso 1: los _tokens_ oscuros y la variante `dark`
+
+Añade a `src/styles/global.css` los valores oscuros (la paleta oscura de esta plataforma), la variante `dark` ligada a un atributo y el fondo del documento. Sustituye el archivo:
+
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/source-serif-4";
+@plugin "@tailwindcss/typography";
+
+/* dark: deja de seguir al sistema y obedece al atributo data-theme del <html> */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* 1. Tokens semánticos: el PAPEL de cada color (la paleta oficial de Dani Academy) */
+:root {
+  color-scheme: light; /* barras de desplazamiento y controles del navegador, en claro */
+  --bg: #fafafa; /* fondo de la página */
+  --surface: #eaedf2; /* tarjetas, cajas */
+  --surface-2: #e2e8f0; /* bordes, separadores, superficies sobre superficie */
+  --fg: #0f172a; /* texto principal */
+  --muted: #475569; /* texto secundario */
+  --accent: #0d9488; /* acento: botones, enlaces, foco */
+  --accent-strong: #0f766e; /* acento para texto (más contraste, I7.4) */
+  --accent-contrast: #ffffff; /* texto SOBRE el acento */
+  --info: #0284c7;
+  --warning: #d97706;
+  --danger: #f25c76;
+  --danger-strong: #be123c;
+}
+
+/* 1b. Los mismos papeles, con valores oscuros: solo cambian los valores */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface-2: #222a35;
+  --fg: #e6edf3;
+  --muted: #9aa4b2;
+  --accent: #2dd4bf;
+  --accent-strong: #5eead4;
+  --accent-contrast: #04201d; /* el acento oscuro es claro: el texto encima, casi negro */
+  --info: #38bdf8;
+  --warning: #fbbf24;
+  --danger: #f87191;
+  --danger-strong: #fda4af;
+}
+
+/* 2. Tokens → utilidades de Tailwind: bg-surface, text-muted, border-accent… */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-contrast: var(--accent-contrast);
+  --color-info: var(--info);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-danger-strong: var(--danger-strong);
+}
+
+@theme {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --font-serif: "Source Serif 4 Variable", Georgia, serif;
+
+  /* Planificador 2026: un color por categoría (B7.1) */
+  --color-trabajo: #0284c7;
+  --color-personal: #d97706;
+  --color-salud: #0d9488;
+  --color-estudio: #f25c76;
+}
+
+@layer base {
+  html {
+    background-color: var(--bg);
+    color: var(--fg);
+  }
+}
+
+/* Una utilidad propia: funciona con variantes (lg:scrollbar-fino) */
+@utility scrollbar-fino {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-2) transparent;
+}
+```
+
+- **`[data-theme="dark"]` redefine los mismos papeles:** `--bg`, `--fg`, `--accent`… Ningún componente cambia, porque todos usan `bg-surface` o `text-muted` (I7.1), y `@theme inline` hace que lean el valor en cada elemento.
+- **`--accent-contrast` cambia de blanco a casi negro** (`#04201d`): el acento oscuro (`#2dd4bf`) es claro, y el texto blanco encima no se leería.
+- **`@custom-variant dark`:** por defecto, la variante `dark:` de Tailwind sigue la preferencia del sistema (`prefers-color-scheme`), como en B7.4. Con esta línea obedece al atributo `data-theme`, que puedes cambiar desde un botón. Con los _tokens_, casi no la necesitarás; queda para casos especiales (una imagen que se invierte).
+- **`color-scheme`** avisa al navegador del tema: las barras de desplazamiento, los campos de formulario y el autocompletado se pintan en oscuro también.
+
+<Callout type="risk">
+
+- **El oscuro no es el claro invertido:** el texto no va en blanco puro (`#e6edf3`, no `#ffffff`, que deslumbra), el fondo no es negro puro (`#0d1117`) y los colores de acento se aclaran para mantener el contraste. Elige cada valor, y mídelo (I7.4).
+- **`html { background-color: var(--bg) }` importa:** sin él, cuando la página es más corta que la ventana o al hacer _scroll_ elástico en el móvil, se ve el blanco del navegador por debajo del `body`.
+
+</Callout>
+
+## Paso 2: el sistema o el usuario
+
+Hay dos fuentes para decidir el tema:
+
+| Fuente                     | Cómo se lee                                          | Cuándo se usa                                        |
+| -------------------------- | ---------------------------------------------------- | ---------------------------------------------------- |
+| La preferencia del sistema | `matchMedia("(prefers-color-scheme: dark)").matches` | En la primera visita, o si el usuario nunca eligió   |
+| Lo que eligió el usuario   | `localStorage.getItem("tema")`                       | Si pulsó el botón alguna vez: manda sobre el sistema |
+
+La regla es: **si el usuario eligió, su elección; si no, la del sistema.** Y tiene que aplicarse antes de que el navegador pinte nada. Eso es lo que decide el paso siguiente.
+
+## Paso 3: antes del primer pintado
+
+Hay tres sitios habituales para el código que aplica el tema. Para compararlos, crea dos páginas de prueba que lo aplican "tarde". Una, con un `<script>` normal de Astro, que se empaqueta y se aplaza: `src/layouts/LayoutTardio.astro` y `src/pages/tema-tardio.astro`:
+
+```astro
+---
+// Archivo: src/layouts/LayoutTardio.astro
+// ✗ Para comparar: el mismo código del tema, pero en un <script> normal (Astro lo empaqueta y lo aplaza)
+import "../styles/global.css";
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Tema tardío · Tailwind lab</title>
+    <script>
+      const guardado = localStorage.getItem("tema");
+      const oscuro = guardado ? guardado === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = oscuro ? "dark" : "light";
+      (window as unknown as { __temaAplicado: number }).__temaAplicado = performance.now();
+    </script>
+  </head>
+  <body class="bg-bg font-sans text-fg">
+    <script is:inline>window.__alEmpezarBody = document.documentElement.dataset.theme ?? "(sin tema)";</script>
+    <slot />
+  </body>
+</html>
+```
+
+```astro
+---
+// Archivo: src/pages/tema-tardio.astro
+import LayoutTardio from "../layouts/LayoutTardio.astro";
+---
+
+<LayoutTardio>
+  <main class="p-8"><h1 class="text-2xl font-bold">Tema aplicado tarde</h1><p class="text-muted">Mira el fondo al recargar.</p></main>
+</LayoutTardio>
+```
+
+Otra, desde una isla de React, en un `useEffect`: `src/components/TemaIsla.tsx` y `src/pages/tema-isla.astro`:
+
+```tsx
+// Archivo: src/components/TemaIsla.tsx
+// ✗ Para comparar: el tema aplicado desde una isla de React, al hidratarse
+import { useEffect } from "react";
+
+export default function TemaIsla() {
+  useEffect(() => {
+    const guardado = localStorage.getItem("tema");
+    const oscuro = guardado ? guardado === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = oscuro ? "dark" : "light";
+    (window as unknown as { __temaAplicado: number }).__temaAplicado = performance.now();
+  }, []);
+  return null;
+}
+```
+
+```astro
+---
+// Archivo: src/pages/tema-isla.astro
+import "../styles/global.css";
+import TemaIsla from "../components/TemaIsla";
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>Tema desde una isla · Tailwind lab</title>
+  </head>
+  <body class="bg-bg font-sans text-fg">
+    <script is:inline>window.__alEmpezarBody = document.documentElement.dataset.theme ?? "(sin tema)";</script>
+    <TemaIsla client:load />
+    <main class="p-8"><h1 class="text-2xl font-bold">Tema aplicado desde React</h1></main>
+  </body>
+</html>
+```
+
+Y el tercero, el bueno: un _script_ **en línea en el `<head>`**, que está en el _layout_ del Paso 4. Las tres versiones registran qué valor tiene `data-theme` cuando el navegador **empieza a leer el `<body>`** y en qué milisegundo se aplica el tema. La línea de tiempo de rendimiento del navegador (`performance.getEntriesByType("paint")`) dice cuándo fue el **primer pintado**. Con el _build_ de producción, el tema `dark` guardado, la CPU 6 veces más lenta y una red lenta (300 ms de latencia), tres cargas de cada una:
+
+```text
+Script empaquetado
+  data-theme al empezar el <body>: (sin tema) · tema aplicado:  687 ms · primer pintado:  696 ms → antes de pintar
+  data-theme al empezar el <body>: (sin tema) · tema aplicado:  635 ms · primer pintado:  636 ms → antes de pintar
+  data-theme al empezar el <body>: (sin tema) · tema aplicado:  635 ms · primer pintado:  632 ms → DESPUÉS de pintar
+Isla de React (useEffect)
+  data-theme al empezar el <body>: (sin tema) · tema aplicado: 1374 ms · primer pintado:  644 ms → DESPUÉS de pintar
+  data-theme al empezar el <body>: (sin tema) · tema aplicado: 1262 ms · primer pintado:  632 ms → DESPUÉS de pintar
+  data-theme al empezar el <body>: (sin tema) · tema aplicado: 1256 ms · primer pintado:  644 ms → DESPUÉS de pintar
+Script en línea en <head>
+  data-theme al empezar el <body>: dark       · tema aplicado:  327 ms · primer pintado:  640 ms → antes de pintar
+  data-theme al empezar el <body>: dark       · tema aplicado:  324 ms · primer pintado:  640 ms → antes de pintar
+  data-theme al empezar el <body>: dark       · tema aplicado:  326 ms · primer pintado:  640 ms → antes de pintar
+```
+
+- **Desde React, el destello está garantizado:** el tema llega más de 600 ms **después** del primer pintado. Durante ese tiempo, la página se ve en claro. La isla tiene que descargar React, hidratarse y ejecutar el efecto, y el navegador no espera.
+- **El _script_ empaquetado juega a la ruleta:** gana por 1 a 9 ms o pierde (la tercera carga, 3 ms tarde). Astro lo convierte en un _script_ de tipo módulo, que se ejecuta cuando el navegador ha leído toda la página, y el primer pintado solo espera a la hoja de estilos. Que gane depende de la red, del tamaño de la página y del dispositivo.
+- **En línea, siempre antes, con unos 310 ms de margen:** el navegador lo ejecuta en cuanto lo lee, en el `<head>`, antes de seguir. El `<body>` empieza con `data-theme` ya puesto (`dark`), así que no hay nada que pintar en claro.
+
+Borra las páginas de prueba cuando acabes (`LayoutTardio.astro`, `tema-tardio.astro`, `TemaIsla.tsx` y `tema-isla.astro`).
+
+<Callout type="risk">
+
+- **Un _script_ en línea en el `<head>` bloquea el resto de la página mientras se ejecuta:** por eso tiene que ser diminuto, sin `import` ni dependencias, como el del Paso 4 (una lectura de `localStorage` y una asignación). Todo lo demás (el botón, por ejemplo) va en _scripts_ normales.
+- **Con una CSP estricta (Tanda 9), un _script_ en línea necesita su _hash_:** esta plataforma incrusta el suyo (`src/scripts/theme-init.js`) en el `<head>` y registra el _hash_ en la CSP. Sin eso, el navegador lo bloquearía y volvería el destello.
+- **El _script_ en línea de Astro (`is:inline`) no pasa por TypeScript ni por el empaquetador:** escríbelo en JavaScript simple y pruébalo en el navegador.
+
+</Callout>
+
+## Paso 4: el _script_ del tema y View Transitions
+
+Sustituye `src/layouts/Layout.astro`:
+
+```astro
+---
+// Archivo: src/layouts/Layout.astro
+import "../styles/global.css";
+import { ClientRouter } from "astro:transitions";
+import BotonTema from "../components/BotonTema.astro";
+
+interface Props {
+  titulo: string;
+}
+const { titulo } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo} · Tailwind lab</title>
+    <!-- 1. El tema, ANTES de que el navegador pinte nada. is:inline: Astro no lo aplaza ni lo empaqueta -->
+    <script is:inline>
+      (() => {
+        const aplicarTema = () => {
+          let guardado = null;
+          try {
+            guardado = localStorage.getItem("tema");
+          } catch {
+            // Almacenamiento bloqueado: se sigue la preferencia del sistema
+          }
+          const oscuro = guardado ? guardado === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.dataset.theme = oscuro ? "dark" : "light";
+        };
+        aplicarTema();
+        // 2. View Transitions: al navegar, el <html> nuevo llega sin data-theme. Se reaplica antes de pintarlo
+        if (!window.__temaEscuchando) {
+          window.__temaEscuchando = true;
+          document.addEventListener("astro:after-swap", aplicarTema);
+        }
+      })();
+    </script>
+    <ClientRouter />
+  </head>
+  <body class="bg-bg font-sans text-fg">
+    <div class="flex justify-end p-3"><BotonTema /></div>
+    <slot />
+  </body>
+</html>
+```
+
+- **`try`/`catch` alrededor de `localStorage`:** en algunos modos privados, o con el almacenamiento bloqueado, leerlo **lanza un error**. Sin el `catch`, el _script_ se detendría y no habría tema.
+- **`<ClientRouter />`** activa las View Transitions de Astro: al navegar, en lugar de cargar la página entera, Astro descarga la nueva y **sustituye** el documento, con una animación.
+- **`astro:after-swap`:** el `<html>` de la página nueva llega **sin** `data-theme`, porque el _script_ solo lo pone al cargar. Este evento se dispara justo después de sustituir el documento y antes de pintarlo, y es el momento de volver a aplicar el tema.
+
+Medido sin la línea del _listener_ y con ella, con el tema oscuro guardado:
+
+```text
+Sin el listener astro:after-swap:
+En /tokens:              data-theme=dark · fondo rgb(13, 17, 23)
+Tras navegar (sin recarga): data-theme=undefined · fondo rgb(250, 250, 250)
+Con el listener:
+En /tokens:              data-theme=dark · fondo rgb(13, 17, 23)
+Tras navegar (sin recarga): data-theme=dark · fondo rgb(13, 17, 23)
+```
+
+Sin el _listener_, la página nueva pierde el tema (`data-theme=undefined`) y vuelve a claro, sin recargar. Con él, se mantiene.
+
+<Callout type="risk">
+
+- **El _listener_ se registra una sola vez** (`window.__temaEscuchando`): con View Transitions, el _script_ del `<head>` no se vuelve a ejecutar al navegar, pero si alguna vez se ejecutara dos veces, habría dos _listeners_ haciendo lo mismo.
+- **No uses `astro:page-load` para el tema:** se dispara después de pintar la página nueva, y volvería el destello en cada navegación. `astro:after-swap` es el que llega a tiempo.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Implementa el botón para cambiar de tema en tu app: que alterne claro y oscuro, guarde la elección en `localStorage` e indique su estado a los lectores de pantalla.
+2. Comprueba que, al recargar, se mantiene la elección, y que en la primera visita se sigue la preferencia del sistema.
+3. Comprueba que el tema se mantiene al navegar con View Transitions y que el botón sigue funcionando en la página nueva.
+
+</Callout>
+
+Solución. `src/components/BotonTema.astro`, que el _layout_ del Paso 4 ya incluye:
+
+```astro
+---
+// Archivo: src/components/BotonTema.astro
+// El botón que alterna claro y oscuro. aria-pressed dice si el modo oscuro está activo
+---
+
+<button
+  type="button"
+  data-boton-tema
+  aria-pressed="false"
+  class="rounded-lg border border-surface-2 bg-surface px-3 py-1.5 text-sm text-fg hover:bg-surface-2"
+>
+  Modo oscuro
+</button>
+
+<script>
+  // Se ejecuta UNA vez (Astro empaqueta este script). Con View Transitions los botones se
+  // sustituyen al navegar, así que se escucha en document y se sincroniza en cada página.
+  const sincronizar = () => {
+    const oscuro = document.documentElement.dataset.theme === "dark";
+    for (const b of document.querySelectorAll("[data-boton-tema]")) b.setAttribute("aria-pressed", String(oscuro));
+  };
+
+  document.addEventListener("click", (evento) => {
+    if (!(evento.target instanceof Element) || !evento.target.closest("[data-boton-tema]")) return;
+    const tema = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    document.documentElement.dataset.theme = tema;
+    try {
+      localStorage.setItem("tema", tema);
+    } catch {
+      // Almacenamiento bloqueado (modo privado estricto): el cambio vale solo para esta página
+    }
+    sincronizar();
+  });
+
+  document.addEventListener("astro:page-load", sincronizar); // al cargar y tras cada navegación
+</script>
+```
+
+- **`aria-pressed`:** el botón es un interruptor, y `aria-pressed="true"` hace que un lector de pantalla diga "Modo oscuro, botón, activado". El texto no cambia: lo que cambia es su estado (I7.4).
+- **El clic se escucha en `document`:** con View Transitions, Astro sustituye el botón en cada navegación, y un _listener_ puesto en el botón antiguo dejaría de funcionar. Escuchar en `document` sirve para el botón de cualquier página.
+- **`astro:page-load`** se dispara al cargar y tras cada navegación, y sincroniza `aria-pressed` con el tema actual. Aquí sí vale, porque no afecta a lo que se pinta.
+
+Probado en Chrome, desde la primera visita:
+
+```text
+Primera visita, sistema en light: data-theme=light · fondo rgb(250, 250, 250) · aria-pressed=false · localStorage=null
+Primera visita, sistema en dark: data-theme=dark · fondo rgb(13, 17, 23) · aria-pressed=true · localStorage=null
+Tras pulsar el botón:           data-theme=dark · fondo rgb(13, 17, 23) · aria-pressed=true · localStorage=dark
+Tras recargar:                  data-theme=dark · fondo rgb(13, 17, 23) · aria-pressed=true · localStorage=dark
+Tras navegar a /componentes:    data-theme=dark · fondo rgb(13, 17, 23) · aria-pressed=true · localStorage=dark · documento cargado: /tokens (sin recarga)
+Botón en la página nueva:       data-theme=light · fondo rgb(250, 250, 250) · aria-pressed=false · localStorage=light
+```
+
+- **En la primera visita manda el sistema:** `light` o `dark` según `prefers-color-scheme`, sin nada guardado (`localStorage=null`). `aria-pressed` ya está sincronizado.
+- **Al pulsar, se guarda, y al recargar se mantiene:** `localStorage=dark`.
+- **Al navegar, sin recarga** (el documento sigue siendo el de `/tokens`), el tema se mantiene, y el botón de la página nueva funciona y vuelve a claro.
+
+<Callout type="risk">
+
+- **Ofrece una forma de volver a "como el sistema":** con este botón, una vez elegido, el tema ya no sigue al sistema. Un selector de tres estados (sistema, claro y oscuro) que borre `localStorage` en "sistema" lo resuelve.
+- **El modo oscuro en una página estática no puede venir del servidor:** el servidor no sabe qué guardó el navegador en `localStorage`. Si necesitaras que el HTML ya llegara oscuro, haría falta una _cookie_ que el servidor lea, y entonces la página no podría ser estática (I3.1).
+
+</Callout>
+
+<Callout type="mastery">
+
+Recargar la página en modo oscuro nunca muestra un destello blanco: los _tokens_ tienen valores oscuros bajo `[data-theme="dark"]`, un _script_ en línea en el `<head>` aplica el tema guardado (o el del sistema) antes del primer pintado, se reaplica en `astro:after-swap` al navegar, y el botón guarda la elección e informa de su estado con `aria-pressed`.
+
+</Callout>
+
+## Resumen
+
+- Modo oscuro = los mismos _tokens_ con otros valores bajo `[data-theme="dark"]`, más `color-scheme`.
+- `@custom-variant dark` liga `dark:` al atributo en lugar de al sistema.
+- El tema se aplica en un _script_ en línea en el `<head>`: desde React llega 600 ms tarde (medido) y un _script_ empaquetado gana o pierde por milisegundos.
+- Si el usuario eligió, `localStorage`; si no, `prefers-color-scheme`. Siempre con `try`/`catch`.
+- Con View Transitions, se reaplica en `astro:after-swap` (no en `astro:page-load`), y los _listeners_ del botón van en `document`.
