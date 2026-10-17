@@ -1,0 +1,413 @@
+---
+sectionId: "A2.3"
+course: "A2"
+title: "Búsqueda de texto"
+order: 3
+minutes: 60
+summary: "Buscas en español con el índice text (sin tildes, con plurales y por relevancia), mides lo que no sabe hacer (erratas, prefijos, un solo índice por colección) y ves cuándo merece la pena Atlas Search o un motor dedicado."
+---
+
+Buscar en las notas con `{ titulo: /fuerza/i }` funciona con diez notas, pero falla en lo que más importa a quien busca: no encuentra "genéricos" si escribes "genericos", no encuentra "entrenamientos" si escribes "entrenamiento" y no sabe cuál de los resultados es el más relevante. Una **búsqueda de texto** entiende el idioma: quita las tildes, reduce las palabras a su raíz (_stemming_), ignora las palabras vacías ("de", "la") y ordena por relevancia. MongoDB trae una propia, el índice `text`, y Atlas añade otra mucho más potente, Atlas Search. En esta sección vas a medir hasta dónde llega la primera, a conocer la segunda y a decidir cuándo hace falta un motor de búsqueda aparte.
+
+**Lo que tendrás al terminar:** la búsqueda de las notas del Planificador con el índice `text`, en español y por relevancia; sus limitaciones medidas; y la versión con Atlas Search, tolerante a erratas y con autocompletado.
+
+**Requisitos:** el proyecto `mongo-academy` con `src/a2/`. El índice `text` funciona en cualquier MongoDB. **Atlas Search necesita un clúster de Atlas** (también el M0 gratuito, con límites) o MongoDB con su componente de búsqueda: en el MongoDB local de este laboratorio no está disponible, y su código (Paso 3) **no se ha ejecutado aquí**, solo se ha comprobado que compila.
+
+## Paso 1: el índice `text`, en español
+
+Unas notas de prueba, las mismas para todos los _scripts_ de la sección. `src/a2/notas-busqueda.ts`:
+
+```ts
+// Archivo: src/a2/notas-busqueda.ts
+// Unas notas del Planificador para probar la búsqueda (las mismas en todos los scripts de A2.3)
+import { db } from "../db";
+
+export interface Nota {
+  titulo: string;
+  contenido: string;
+  categoria: "entreno" | "estudio" | "personal";
+}
+
+export const notas = db.collection<Nota>("a2_notas_busqueda");
+
+export const NOTAS: Nota[] = [
+  { titulo: "Genéricos en TypeScript", contenido: "Repasar los genéricos con restricciones y el truco de const.", categoria: "estudio" },
+  { titulo: "Plan de fuerza", contenido: "Tres días de fuerza: sentadilla, peso muerto y press de banca.", categoria: "entreno" },
+  { titulo: "Correr el domingo", contenido: "Salí a correr 10 km con lluvia; corrí más lento de lo previsto.", categoria: "entreno" },
+  { titulo: "Entrenamientos de la semana", contenido: "Cuatro entrenamientos: dos de fuerza y dos corriendo suave.", categoria: "entreno" },
+  { titulo: "Índices en MongoDB", contenido: "La regla ESR y los índices parciales: cuidado con hint.", categoria: "estudio" },
+  { titulo: "Lectura pendiente", contenido: "Terminar el libro de diseño de bases de datos.", categoria: "personal" },
+  { titulo: "Movilidad diaria", contenido: "Diez minutos de movilidad de cadera antes del entrenamiento.", categoria: "entreno" },
+  { titulo: "Repaso de transacciones", contenido: "Cuándo una transacción es imprescindible y cuándo basta un updateOne.", categoria: "estudio" },
+];
+
+export async function sembrarNotas() {
+  await notas.drop().catch(() => {});
+  await notas.insertMany(NOTAS.map((n) => ({ ...n })));
+}
+```
+
+Y la búsqueda. `src/a2/12-texto.ts`:
+
+```ts
+// Archivo: src/a2/12-texto.ts
+// El índice text nativo, en español: qué encuentra y en qué orden
+import type { MongoServerError } from "mongodb";
+import { cliente } from "../db";
+import { notas, sembrarNotas } from "./notas-busqueda";
+
+await sembrarNotas();
+
+// Sin índice text, $text no funciona
+try {
+  await notas.find({ $text: { $search: "fuerza" } }).toArray();
+} catch (e) {
+  console.log(
+    `Sin índice: ${(e as MongoServerError).codeName}: ${(e as MongoServerError).message}`,
+  );
+}
+
+// Un índice text sobre título y contenido, en español; el título pesa el triple
+await notas.createIndex(
+  { titulo: "text", contenido: "text" },
+  {
+    name: "busqueda",
+    default_language: "spanish",
+    weights: { titulo: 3, contenido: 1 },
+  },
+);
+
+async function buscar(texto: string) {
+  const res = await notas
+    .find<{ titulo: string; puntuacion: number }>(
+      { $text: { $search: texto } },
+      { projection: { _id: 0, titulo: 1, puntuacion: { $meta: "textScore" } } },
+    )
+    .sort({ puntuacion: { $meta: "textScore" } })
+    .toArray();
+  const lista = res
+    .map((r) => `${r.titulo} (${r.puntuacion.toFixed(2)})`)
+    .join(" · ");
+  console.log(
+    `${JSON.stringify(texto).padEnd(26)} → ${res.length ? lista : "nada"}`,
+  );
+}
+
+console.log("\nBúsquedas:");
+await buscar("genericos"); // sin tilde
+await buscar("GENÉRICOS"); // mayúsculas
+await buscar("entrenamiento"); // singular: ¿encuentra "entrenamientos"?
+await buscar("correr"); // ¿y "corriendo", "corrí"?
+await buscar("fuerza"); // en el título de una nota y en el contenido de otra
+await buscar("de la"); // solo palabras vacías
+await buscar('"peso muerto"'); // una frase exacta
+await buscar("fuerza -sentadilla"); // fuerza, pero sin sentadilla
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/a2/12-texto.ts
+```
+
+```text
+Sin índice: IndexNotFound: text index required for $text query
+Búsquedas:
+"genericos"                → Genéricos en TypeScript (2.85)
+"GENÉRICOS"                → Genéricos en TypeScript (2.85)
+"entrenamiento"            → Entrenamientos de la semana (2.82) · Movilidad diaria (0.60)
+"correr"                   → Correr el domingo (3.19) · Entrenamientos de la semana (0.57)
+"fuerza"                   → Plan de fuerza (2.81) · Entrenamientos de la semana (0.57)
+"de la"                    → nada
+"\"peso muerto\""          → Plan de fuerza (1.13)
+"fuerza -sentadilla"       → Entrenamientos de la semana (0.57)
+```
+
+- **Sin índice `text`, `$text` no funciona:** `IndexNotFound`. A diferencia de un `find` normal, que recorre la colección si no hay índice, la búsqueda de texto lo exige.
+- **"genericos" y "GENÉRICOS" encuentran "Genéricos":** el índice ignora mayúsculas y tildes, y también la diéresis y la virgulilla de la ñ. Comprobado aparte: "pinguino" encuentra "pingüino", y **"ano" encuentra "año"**. Para el español, esto último puede dar resultados que no esperas.
+- **"entrenamiento" encuentra "Entrenamientos"**, y "correr" encuentra también la nota que dice "corriendo": con `default_language: "spanish"`, el índice guarda la **raíz** de cada palabra, y la búsqueda también la calcula.
+- **"de la" no encuentra nada:** son palabras vacías en español, y no se indexan.
+- **La relevancia:** `textScore` pesa cuántas veces y dónde aparece cada palabra. Con `weights`, el título cuenta el triple: "Plan de fuerza" (en el título) sale por delante de "Entrenamientos de la semana" (solo en el contenido).
+- **Comillas para una frase exacta** (`"peso muerto"`) y **un guion para excluir** (`fuerza -sentadilla`).
+
+<Callout type="risk">
+
+- **El idioma se elige al crear el índice:** con el inglés por defecto, el _stemming_ y las palabras vacías son los del inglés (lo verás en el Paso 2). Para un texto en español, `default_language: "spanish"` siempre.
+- **`$text` no se combina con cualquier cosa:** solo puede haber un `$text` por consulta, y no admite `hint` (`text and hint not allowed in same query`). Si necesitas filtrar por otro campo, ponlo en el mismo índice (como `categoria` en el ejercicio).
+
+</Callout>
+
+## Paso 2: lo que el índice `text` no sabe hacer
+
+`src/a2/13-limites.ts`:
+
+```ts
+// Archivo: src/a2/13-limites.ts
+// Lo que el índice text NO hace
+import type { MongoServerError } from "mongodb";
+import { cliente } from "../db";
+import { notas, sembrarNotas } from "./notas-busqueda";
+
+await sembrarNotas();
+await notas.createIndex({ titulo: "text", contenido: "text" }, { name: "busqueda", default_language: "spanish" });
+
+const titulos = async (texto: string) =>
+  (await notas.find({ $text: { $search: texto } }).toArray()).map((n) => n.titulo).join(" · ") || "nada";
+
+console.log("1. Erratas y trozos de palabra:");
+for (const texto of ["genricos", "jenéricos", "gen", "entrena", "corrí"]) console.log(`   ${JSON.stringify(texto).padEnd(12)} → ${await titulos(texto)}`);
+
+console.log("2. Un segundo índice text en la misma colección:");
+try {
+  await notas.createIndex({ categoria: "text" }, { name: "otro" });
+} catch (e) {
+  const err = e as MongoServerError;
+  console.log(`   ${err.codeName}: ${err.message.split(", name:")[0]} …`); // la clave interna de TODO índice text
+}
+
+console.log("3. El mismo índice con el idioma por defecto (inglés):");
+await notas.dropIndex("busqueda");
+await notas.createIndex({ titulo: "text", contenido: "text" }, { name: "busqueda_en" }); // default_language: "english"
+for (const texto of ["entrenamiento", "genericos", "de la"]) console.log(`   ${JSON.stringify(texto).padEnd(16)} → ${await titulos(texto)}`);
+
+console.log("4. La alternativa habitual para prefijos, una expresión regular:");
+for (const patron of [/^gen/i, /^genericos/i]) {
+  console.log(`   ${String(patron).padEnd(14)} → ${(await notas.find({ titulo: patron }).toArray()).map((n) => n.titulo).join(" · ") || "nada"}`);
+}
+
+await cliente.close();
+```
+
+```text
+1. Erratas y trozos de palabra:
+   "genricos"   → nada
+   "jenéricos"  → nada
+   "gen"        → nada
+   "entrena"    → Entrenamientos de la semana · Movilidad diaria
+   "corrí"      → Correr el domingo · Entrenamientos de la semana
+2. Un segundo índice text en la misma colección:
+   IndexOptionsConflict: An equivalent index already exists with a different name and options. Requested index: { v: 2, key: { _fts: "text", _ftsx: 1 } …
+3. El mismo índice con el idioma por defecto (inglés):
+   "entrenamiento"  → Entrenamientos de la semana · Movilidad diaria
+   "genericos"      → Genéricos en TypeScript
+   "de la"          → Plan de fuerza · Entrenamientos de la semana · Lectura pendiente · Movilidad diaria · Repaso de transacciones · Genéricos en TypeScript · Correr el domingo · Índices en MongoDB
+4. La alternativa habitual para prefijos, una expresión regular:
+   /^gen/i        → Genéricos en TypeScript
+   /^genericos/i  → nada
+```
+
+1. **No tolera erratas:** "genricos" (una letra menos) y "jenéricos" no encuentran nada. Busca palabras enteras (o su raíz), no palabras parecidas.
+2. **No busca prefijos:** "gen" no encuentra "Genéricos". "entrena" sí encuentra notas, pero por casualidad: su raíz en español, `entren`, es la misma que la de "entrenamiento". No sirve para autocompletar mientras se escribe.
+3. **Solo uno por colección:** todo índice `text` tiene la misma clave interna, `{ _fts: "text", _ftsx: 1 }`, así que un segundo choca con el primero. Si quieres buscar en más campos, van todos en el mismo índice.
+4. **Con el idioma equivocado, las palabras vacías cuentan:** con el inglés, "de la" devuelve las ocho notas, porque para el inglés "de" y "la" son palabras normales y casi todas las notas las tienen.
+5. **La expresión regular no es una alternativa:** `/^gen/i` encuentra "Genéricos", pero `/^genericos/i` no, porque una expresión regular compara letra a letra, con tilde. Y con `i` (sin distinguir mayúsculas), MongoDB no puede aprovechar bien un índice normal.
+
+<Callout type="risk">
+
+- **El índice `text` ocupa mucho y ralentiza las escrituras:** guarda una entrada por cada raíz distinta de cada documento. En una colección grande de textos largos puede pesar más que los propios datos. Indexa solo los campos que de verdad se buscan.
+- **No hay sinónimos ni corrección:** si alguien busca "pesas" y la nota dice "fuerza", no la encuentra. Para eso hace falta un motor de búsqueda (Paso 3).
+
+</Callout>
+
+## Paso 3: Atlas Search
+
+**Atlas Search** es un motor de búsqueda (basado en Apache Lucene, el mismo que usan Elasticsearch y OpenSearch) integrado en Atlas. Los datos siguen en tu colección; Atlas mantiene a su lado un índice de búsqueda que se actualiza solo, y se consulta con la etapa `$search` en un `aggregate`. Resuelve justo lo que el índice `text` no hace:
+
+| Necesidad                                        | Índice `text`     | Atlas Search                                    |
+| ------------------------------------------------ | ----------------- | ----------------------------------------------- |
+| Ignorar tildes y mayúsculas, raíces en español   | Sí                | Sí (analizador `lucene.spanish`)                |
+| Tolerar erratas                                  | No                | Sí (`fuzzy`)                                    |
+| Autocompletar mientras se escribe                | No                | Sí (tipo `autocomplete`)                        |
+| Devolver el fragmento que coincide, resaltado    | No                | Sí (`highlight`)                                |
+| Varios índices por colección, sinónimos, facetas | No                | Sí                                              |
+| Dónde funciona                                   | Cualquier MongoDB | Atlas (o MongoDB con su componente de búsqueda) |
+
+Contra el MongoDB local de este laboratorio, `$search` y `createSearchIndex` responden:
+
+```text
+$search en local: SearchNotEnabled Using $search and $vectorSearch aggregation stages requires additional configuration. Please connect to Atlas or an AtlasCLI local deployment to enable.For more
+createSearchIndex en local: SearchNotEnabled Using Atlas Search Database Commands and the $listSearchIndexes aggregation stage requires additional configuration. Please connect to Atlas or an AtlasCLI loca
+```
+
+Este es el código para Atlas. **No se ha ejecutado en este laboratorio** (solo se ha comprobado que compila con `npm run typecheck`): pruébalo en tu clúster, en una base de datos de pruebas. `src/a2/15-atlas-search.ts`:
+
+```ts
+// Archivo: src/a2/15-atlas-search.ts
+// La misma búsqueda con Atlas Search: tolerante a erratas, con autocompletado y fragmentos resaltados.
+// Necesita un clúster de Atlas (o MongoDB con el componente de búsqueda mongot): no funciona contra un MongoDB local normal
+import { cliente } from "../db";
+import { notas, type Nota } from "./notas-busqueda";
+
+// 1. El índice de búsqueda (se crea una vez; Atlas tarda unos segundos en construirlo)
+await notas.createSearchIndex({
+  name: "notas",
+  definition: {
+    mappings: {
+      dynamic: false,
+      fields: {
+        titulo: [
+          { type: "string", analyzer: "lucene.spanish" },
+          { type: "autocomplete", analyzer: "lucene.spanish", tokenization: "edgeGram", minGrams: 2, maxGrams: 15 },
+        ],
+        contenido: { type: "string", analyzer: "lucene.spanish" },
+        categoria: { type: "token" },
+      },
+    },
+  },
+});
+
+/** Búsqueda tolerante a erratas (una letra de diferencia), filtrada por categoría y con el fragmento que coincide */
+export function buscarNotas(texto: string, categoria?: Nota["categoria"]) {
+  return notas
+    .aggregate([
+      {
+        $search: {
+          index: "notas",
+          compound: {
+            must: [{ text: { query: texto, path: ["titulo", "contenido"], fuzzy: { maxEdits: 1 } } }],
+            ...(categoria && { filter: [{ equals: { path: "categoria", value: categoria } }] }),
+          },
+          highlight: { path: "contenido" },
+        },
+      },
+      { $limit: 10 },
+      { $project: { _id: 0, titulo: 1, puntuacion: { $meta: "searchScore" }, resaltado: { $meta: "searchHighlights" } } },
+    ])
+    .toArray();
+}
+
+/** Autocompletado del título mientras se escribe: "gen" → "Genéricos en TypeScript" */
+export function sugerir(prefijo: string) {
+  return notas
+    .aggregate([
+      { $search: { index: "notas", autocomplete: { query: prefijo, path: "titulo" } } },
+      { $limit: 5 },
+      { $project: { _id: 0, titulo: 1 } },
+    ])
+    .toArray();
+}
+
+console.log(await buscarNotas("genricos"), await sugerir("gen"));
+await cliente.close();
+```
+
+- **El índice de búsqueda es un documento JSON:** qué campos se indexan y con qué analizador. `titulo` se indexa dos veces: como texto, para buscar, y como `autocomplete` con `edgeGram` (los trozos iniciales de cada palabra, de 2 a 15 letras), para sugerir mientras se escribe.
+- **`fuzzy: { maxEdits: 1 }`** acepta palabras a una letra de distancia: "genricos" encontraría "genéricos".
+- **`compound`** combina condiciones: lo que **debe** coincidir (`must`, cuenta para la relevancia) y lo que solo **filtra** (`filter`, como la categoría).
+- **`searchScore` y `searchHighlights`** son la relevancia y los fragmentos resaltados, que se leen con `$meta`, como `textScore`.
+
+<Callout type="risk">
+
+- **El índice de búsqueda se construye en segundo plano:** justo después de `createSearchIndex`, las búsquedas pueden no devolver nada durante unos segundos. Comprueba su estado con `listSearchIndexes` antes de probar.
+- **El plan gratuito tiene límites:** el M0 admite pocos índices de búsqueda y comparte recursos. Revisa los límites de tu plan antes de diseñar alrededor de Atlas Search.
+- **Prueba el analizador con tus palabras:** cómo trata `lucene.spanish` cada término (raíces, tildes) es fácil de comprobar en la propia interfaz de Atlas, y es mejor hacerlo antes de depender de ello.
+
+</Callout>
+
+## Paso 4: ¿cuándo un motor de búsqueda aparte?
+
+| Situación                                                                                                     | Lo razonable                                                                                    |
+| ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Buscar en las notas o los títulos de un usuario (decenas o cientos de documentos)                             | Índice `text` (o incluso una expresión regular sobre pocos documentos ya filtrados por usuario) |
+| Una búsqueda pública con erratas, autocompletado y resaltado, con los datos en Atlas                          | Atlas Search: sin servidor aparte y sin sincronizar datos                                       |
+| Millones de documentos, varias fuentes de datos, búsqueda en el centro del producto (una tienda, un buscador) | Un motor dedicado (Elasticsearch, OpenSearch, Meilisearch, Typesense)                           |
+
+Un motor dedicado da más control y más funciones, pero tiene un coste que no se ve en el código: es **otro sistema** que mantener, y los datos tienen que **copiarse** hasta él y mantenerse sincronizados. Si un documento cambia en MongoDB y no llega al buscador, la búsqueda devuelve datos viejos. Mientras los datos vivan en Atlas, Atlas Search evita ese problema.
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade búsqueda a las notas de tu Planificador: en español, ordenada por relevancia y con un filtro opcional por categoría.
+2. Comprueba que encuentra "genericos" cuando el texto dice "genéricos".
+3. Comprueba qué pasa con una errata, y escribe la versión tolerante a erratas con Atlas Search.
+
+</Callout>
+
+Solución con el índice `text`, `src/a2/14-ejercicio.ts`:
+
+```ts
+// Archivo: src/a2/14-ejercicio.ts
+// La búsqueda de notas del Planificador con el índice text: en español, por relevancia y con filtro
+import { cliente } from "../db";
+import { notas, sembrarNotas, type Nota } from "./notas-busqueda";
+
+await sembrarNotas();
+await notas.createIndex(
+  { titulo: "text", contenido: "text", categoria: 1 },
+  { name: "busqueda", default_language: "spanish", weights: { titulo: 3, contenido: 1 } },
+);
+
+interface Resultado {
+  titulo: string;
+  categoria: Nota["categoria"];
+  puntuacion: number;
+}
+
+/** Busca en título y contenido; opcionalmente, solo en una categoría. Las mejores primero */
+async function buscarNotas(texto: string, opciones: { categoria?: Nota["categoria"]; limite?: number } = {}): Promise<Resultado[]> {
+  const termino = texto.trim();
+  if (termino.length < 2) return []; // una letra suelta no es una búsqueda
+  return notas
+    .find<Resultado>(
+      { $text: { $search: termino }, ...(opciones.categoria && { categoria: opciones.categoria }) },
+      { projection: { _id: 0, titulo: 1, categoria: 1, puntuacion: { $meta: "textScore" } } },
+    )
+    .sort({ puntuacion: { $meta: "textScore" } })
+    .limit(opciones.limite ?? 10)
+    .toArray();
+}
+
+const mostrar = (titulo: string, r: Resultado[]) =>
+  console.log(`${titulo.padEnd(38)} → ${r.map((n) => `${n.titulo} [${n.categoria}]`).join(" · ") || "nada"}`);
+
+mostrar('"genericos"', await buscarNotas("genericos"));
+mostrar('"entrenamiento"', await buscarNotas("entrenamiento"));
+mostrar('"entrenamiento", solo entreno', await buscarNotas("entrenamiento", { categoria: "entreno" }));
+mostrar('"repaso", solo estudio', await buscarNotas("repaso", { categoria: "estudio" }));
+mostrar('"indices mongo"', await buscarNotas("indices mongo"));
+mostrar('"x"', await buscarNotas("x"));
+mostrar('"genricos" (con errata)', await buscarNotas("genricos"));
+
+const plan = await notas.find({ $text: { $search: "fuerza" }, categoria: "entreno" }).explain("executionStats");
+console.log(`plan con filtro de categoría: documentos examinados ${plan.executionStats.totalDocsExamined}, devueltos ${plan.executionStats.nReturned}`);
+
+await cliente.close();
+```
+
+```text
+"genericos"                            → Genéricos en TypeScript [estudio]
+"entrenamiento"                        → Entrenamientos de la semana [entreno] · Movilidad diaria [entreno]
+"entrenamiento", solo entreno          → Entrenamientos de la semana [entreno] · Movilidad diaria [entreno]
+"repaso", solo estudio                 → Repaso de transacciones [estudio] · Genéricos en TypeScript [estudio]
+"indices mongo"                        → Índices en MongoDB [estudio]
+"x"                                    → nada
+"genricos" (con errata)                → nada
+plan con filtro de categoría: documentos examinados 2, devueltos 2
+```
+
+- **"genericos" encuentra "Genéricos en TypeScript"**, y "entrenamiento", las dos notas que lo mencionan.
+- **La categoría va dentro del índice `text`** (`categoria: 1`, detrás de los campos de texto): la búsqueda filtrada examina 2 documentos para devolver 2.
+- **Las búsquedas de una letra se descartan** antes de llegar a la base de datos.
+- **Con la errata "genricos" no encuentra nada:** es el límite del índice `text`. La versión tolerante a erratas es la de Atlas Search del Paso 3 (`fuzzy: { maxEdits: 1 }`), que **no se ha ejecutado en este laboratorio**: pruébala en tu clúster de Atlas.
+
+<Callout type="risk">
+
+- **No construyas la búsqueda con lo que escribe el usuario dentro de una expresión regular sin escaparla:** un `.*` o un paréntesis en el texto cambia la expresión, y una mal formada puede hacer que la consulta tarde muchísimo. `$text` y `$search` reciben el texto como texto, sin ese riesgo.
+- **Una búsqueda que no encuentra nada necesita una respuesta:** "No hay notas con «genricos»" y, si puedes, una sugerencia. Con Atlas Search, `fuzzy` hace que ese caso sea mucho más raro.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tu buscador encuentra "genericos" cuando el texto dice "genéricos": usas el índice `text` con el idioma español (tildes, raíces, palabras vacías y relevancia con pesos), conoces lo que no hace (erratas, prefijos, un índice por colección) y sabes cuándo pasar a Atlas Search (erratas, autocompletado, resaltado) o a un motor dedicado, y lo que cuesta cada uno.
+
+</Callout>
+
+## Resumen
+
+- `createIndex({ titulo: "text", contenido: "text" }, { default_language: "spanish", weights })`: búsqueda sin tildes ni mayúsculas, por raíces y por relevancia (`textScore`).
+- `$text: { $search }` admite frases entre comillas y exclusiones con `-`.
+- Límites medidos: sin erratas ni prefijos, un solo índice `text` por colección, y el idioma cambia las palabras vacías.
+- Atlas Search (`$search`): `fuzzy`, `autocomplete`, `highlight`, varios índices. Necesita Atlas; no funciona en un MongoDB local normal.
+- Un motor dedicado es otro sistema que mantener y sincronizar: solo cuando la búsqueda es el centro del producto.
