@@ -1,0 +1,584 @@
+---
+sectionId: "A2.1"
+course: "A2"
+title: "Transacciones y consistencia"
+order: 1
+minutes: 75
+summary: "Mides que $inc no pierde escrituras y leer-y-escribir sí, usas withTransaction (y ves qué pasa si olvidas la sesión), entiendes write y read concern, concurrencia optimista con version, y comparas tres diseños."
+---
+
+En B4.5 viste las transacciones con SQLite: una transferencia que se queda a medias y cómo `BEGIN`/`COMMIT` lo evita. Y viste la regla de MongoDB solo en teoría: un documento se actualiza de forma atómica, y para varios documentos hay transacciones, más caras. En esta sección vas a comprobarlo en MongoDB de verdad: cuándo un único `updateOne` basta, cómo se escribe una transacción (y el error que la anula sin avisar), qué significan _write concern_ y _read concern_, cómo evitar que dos personas se pisen al editar, y qué cuesta cada opción.
+
+**Lo que tendrás al terminar:** seis _scripts_ en `src/a2/` con los experimentos, y el criterio para decidir, en cada operación de tu app, entre un solo documento, una transacción o un diseño que no la necesite.
+
+**Requisitos:** el proyecto `mongo-academy` de B5 e I4, conectado a un _replica set_. Las transacciones solo funcionan en un _replica set_ (o en un clúster fragmentado): tu clúster de Atlas lo es, también el M0 gratuito. Este laboratorio usa un MongoDB 8.2 local, con un _replica set_ de **un solo nodo** (`?replicaSet=rs0` en el `MONGODB_URI`), y eso se nota en el Paso 3. Crea la carpeta:
+
+```bash
+mkdir src/a2
+```
+
+## Paso 1: lo atómico de un solo documento
+
+Cada vez que alguien termina una evaluación, hay que sumar 1 a su contador. Dos formas de hacerlo, con 50 peticiones a la vez. `src/a2/01-atomico.ts`:
+
+```ts
+// Archivo: src/a2/01-atomico.ts
+// 50 peticiones a la vez suman 1 al contador de evaluaciones de Ana: ¿cuántas cuentan?
+import { cliente, db } from "../db";
+
+const resumen = db.collection<{ _id: string; evaluaciones: number; mejorNota: Record<string, number> }>("a2_resumen");
+const VECES = 50;
+
+async function empezar() {
+  await resumen.deleteMany({});
+  await resumen.insertOne({ _id: "ana", evaluaciones: 0, mejorNota: {} });
+}
+
+// 1. Leer, sumar en JavaScript y escribir: dos operaciones separadas
+await empezar();
+await Promise.all(
+  Array.from({ length: VECES }, async () => {
+    const doc = await resumen.findOne({ _id: "ana" });
+    await resumen.updateOne({ _id: "ana" }, { $set: { evaluaciones: doc!.evaluaciones + 1 } });
+  }),
+);
+console.log(`leer y escribir: ${(await resumen.findOne({ _id: "ana" }))!.evaluaciones} de ${VECES}`);
+
+// 2. Un solo updateOne con $inc: MongoDB suma dentro del documento, de forma atómica
+await empezar();
+await Promise.all(Array.from({ length: VECES }, () => resumen.updateOne({ _id: "ana" }, { $inc: { evaluaciones: 1 } })));
+console.log(`$inc:            ${(await resumen.findOne({ _id: "ana" }))!.evaluaciones} de ${VECES}`);
+
+// 3. Varios cambios en el mismo documento, también atómicos: contar y guardar la mejor nota a la vez
+await empezar();
+const notas = [3, 5, 4, 2, 5, 1];
+await Promise.all(
+  notas.map((nota) => resumen.updateOne({ _id: "ana" }, { $inc: { evaluaciones: 1 }, $max: { "mejorNota.A2": nota } })),
+);
+console.log("varios cambios:", await resumen.findOne({ _id: "ana" }));
+
+await cliente.close();
+```
+
+```bash
+npm start -- src/a2/01-atomico.ts
+```
+
+Tres ejecuciones:
+
+```text
+leer y escribir: 2 de 50
+$inc:            50 de 50
+varios cambios: { _id: 'ana', evaluaciones: 6, mejorNota: { A2: 5 } }
+
+leer y escribir: 2 de 50
+$inc:            50 de 50
+varios cambios: { _id: 'ana', evaluaciones: 6, mejorNota: { A2: 5 } }
+
+leer y escribir: 2 de 50
+$inc:            50 de 50
+varios cambios: { _id: 'ana', evaluaciones: 6, mejorNota: { A2: 5 } }
+```
+
+- **Leer, sumar en JavaScript y escribir pierde 48 de cada 50 sumas.** Las 50 peticiones leen casi a la vez el mismo valor (0), suman 1 y escriben 1, y cada escritura borra la anterior. Es la **escritura perdida** de B4.5, ahora en MongoDB.
+- **`$inc` no pierde ninguna:** la suma la hace MongoDB **dentro** del documento, en una sola operación atómica. Nadie lee un valor viejo, porque nadie lee.
+- **Varios operadores en el mismo `updateOne` también son atómicos:** `$inc` del contador y `$max` de la mejor nota se aplican juntos, o ninguno. Seis evaluaciones, mejor nota 5.
+
+Por eso, antes de pensar en transacciones, la pregunta es: **¿puede vivir en un solo documento lo que tiene que cambiar a la vez?** Si sí, un `updateOne` con operadores es atómico, rápido y no necesita nada más.
+
+<Callout type="risk">
+
+- **El patrón "leer, cambiar en JavaScript y guardar" es el error de concurrencia más común:** funciona en desarrollo, con una sola persona, y pierde datos en producción. Busca en tu código un `findOne` seguido de un `updateOne` con `$set` de un valor calculado: casi siempre se puede escribir con `$inc`, `$max`, `$push` o `$addToSet`.
+- **Atómico no significa "en orden":** las 50 sumas cuentan, pero no sabes en qué orden se aplicaron. Si el orden importa (una cola, un historial), hace falta otro diseño.
+
+</Callout>
+
+## Paso 2: una transacción de varios documentos
+
+Guardar una evaluación toca **dos** documentos: el intento (en `a2_intentos`) y el resumen del usuario (en `a2_resumen`). Si el proceso se cae entre las dos escrituras, queda un intento que el resumen no cuenta. Para que las dos ocurran o ninguna, hace falta una **transacción**. `src/a2/02-transaccion.ts`:
+
+```ts
+// Archivo: src/a2/02-transaccion.ts
+// Guardar una evaluación y actualizar el resumen: dos documentos que tienen que cambiar juntos
+import type { ClientSession } from "mongodb";
+import { cliente, db } from "../db";
+
+interface Intento { userId: string; cursoId: string; puntuacion: number; fecha: Date }
+const intentos = db.collection<Intento>("a2_intentos");
+const resumen = db.collection<{ _id: string; evaluaciones: number; mejorNota: Record<string, number> }>("a2_resumen");
+
+async function empezar() {
+  await intentos.deleteMany({});
+  await resumen.deleteMany({});
+}
+const estado = async () => `intentos=${await intentos.countDocuments()} · resumen=${JSON.stringify(await resumen.findOne({ _id: "ana" }))}`;
+
+/** Simula que el proceso se cae entre las dos escrituras (un despliegue, un error, falta de memoria) */
+function caida() {
+  throw new Error("el proceso se cae aquí");
+}
+
+// 1. Sin transacción
+await empezar();
+try {
+  await intentos.insertOne({ userId: "ana", cursoId: "A2", puntuacion: 4, fecha: new Date() });
+  caida();
+  await resumen.updateOne({ _id: "ana" }, { $inc: { evaluaciones: 1 }, $max: { "mejorNota.A2": 4 } }, { upsert: true });
+} catch (e) {
+  console.log(`sin transacción:     ${(e as Error).message} → ${await estado()}`);
+}
+
+// 2. Con transacción: todo dentro de withTransaction, y cada operación con { session }
+async function guardar(session: ClientSession, puntuacion: number, fallar: boolean) {
+  await intentos.insertOne({ userId: "ana", cursoId: "A2", puntuacion, fecha: new Date() }, { session });
+  if (fallar) caida();
+  await resumen.updateOne(
+    { _id: "ana" },
+    { $inc: { evaluaciones: 1 }, $max: { "mejorNota.A2": puntuacion } },
+    { session, upsert: true },
+  );
+}
+
+await empezar();
+const session = cliente.startSession();
+try {
+  await session.withTransaction(() => guardar(session, 4, true));
+} catch (e) {
+  console.log(`con transacción:     ${(e as Error).message} → ${await estado()}`);
+}
+await session.withTransaction(() => guardar(session, 4, false));
+console.log(`con transacción, ok: ${await estado()}`);
+
+// 3. El error más fácil: olvidar { session } en UNA operación. Esa operación queda fuera de la transacción
+await empezar();
+try {
+  await session.withTransaction(async () => {
+    await intentos.insertOne({ userId: "ana", cursoId: "A2", puntuacion: 4, fecha: new Date() }); // ← sin { session }
+    caida();
+  });
+} catch (e) {
+  console.log(`sin { session }:     ${(e as Error).message} → ${await estado()}`);
+}
+await session.endSession();
+await cliente.close();
+```
+
+```text
+sin transacción:     el proceso se cae aquí → intentos=1 · resumen=null
+con transacción:     el proceso se cae aquí → intentos=0 · resumen=null
+con transacción, ok: intentos=1 · resumen={"_id":"ana","evaluaciones":1,"mejorNota":{"A2":4}}
+sin { session }:     el proceso se cae aquí → intentos=1 · resumen=null
+```
+
+- **Sin transacción, la caída deja un intento sin resumen:** `intentos=1` y `resumen=null`. Dos documentos que deberían estar de acuerdo y no lo están.
+- **Con transacción, la caída no deja nada:** el error dentro de `withTransaction` **aborta** la transacción, y el intento que ya se había insertado se deshace.
+- **Si todo va bien, se guardan los dos**, y nadie fuera de la transacción ve uno sin el otro.
+- **Olvidar `{ session }` en una operación la saca de la transacción:** ese `insertOne` se guarda nada más ejecutarse, y el aborto no lo deshace. No hay ningún error ni aviso: el código parece correcto.
+
+`withTransaction` hace tres cosas por ti: empieza la transacción, la confirma (_commit_) si la función termina bien o la aborta si lanza un error, y **la repite** si falla por un error temporal (lo verás en el Paso 3).
+
+<Callout type="risk">
+
+- **Cada operación dentro de la transacción necesita `{ session }`**, también las lecturas. Es el error del caso 3, y es fácil de cometer al añadir una línea meses después. Pasa la sesión siempre como parámetro, como `guardar(session, …)`, para que no se pueda olvidar.
+- **La función de `withTransaction` se puede ejecutar varias veces:** no pongas dentro nada que no se pueda repetir (enviar un correo, llamar a una API de pago). Hazlo después, cuando la transacción ya se ha confirmado.
+- **Una transacción tiene un límite de tiempo:** por defecto, 60 segundos. Mantenlas cortas: unas pocas escrituras, nada de esperar al usuario o a la red dentro.
+
+</Callout>
+
+## Paso 3: conflictos, _write concern_ y _read concern_
+
+Tres cosas que rodean a una transacción. `src/a2/03-concerns.ts`:
+
+```ts
+// Archivo: src/a2/03-concerns.ts
+// Lo que hay alrededor de una transacción: conflictos, reintentos, write concern y read concern
+import { MongoServerError } from "mongodb";
+import { cliente, db } from "../db";
+
+const resumen = db.collection<{ _id: string; evaluaciones: number }>("a2_resumen");
+const intentos = db.collection<{ userId: string; puntuacion: number }>("a2_intentos");
+await resumen.deleteMany({});
+await intentos.deleteMany({});
+await resumen.insertOne({ _id: "ana", evaluaciones: 0 });
+
+// 1. Dos transacciones a la vez sobre el MISMO documento: una choca (WriteConflict) y withTransaction la repite
+let ejecuciones = 0;
+async function sumar(nombre: string) {
+  const session = cliente.startSession();
+  try {
+    await session.withTransaction(async () => {
+      ejecuciones++;
+      await resumen.updateOne({ _id: "ana" }, { $inc: { evaluaciones: 1 } }, { session });
+      await new Promise((r) => setTimeout(r, 100)); // la transacción sigue abierta un momento
+      await intentos.insertOne({ userId: nombre, puntuacion: 4 }, { session });
+    });
+  } finally {
+    await session.endSession();
+  }
+}
+await Promise.all([sumar("a"), sumar("b")]);
+console.log(`1. dos transacciones: evaluaciones=${(await resumen.findOne({ _id: "ana" }))!.evaluaciones}, intentos=${await intentos.countDocuments()}, la función se ejecutó ${ejecuciones} veces`);
+
+// 2. Write concern: cuántos nodos tienen que confirmar la escritura. Este replica set tiene UNO
+const { members } = await db.admin().command({ replSetGetStatus: 1 });
+console.log(`2. nodos en el replica set: ${members.length}`);
+for (const w of [1, "majority", 2] as const) {
+  try {
+    await intentos.insertOne({ userId: "w", puntuacion: 1 }, { writeConcern: { w, wtimeoutMS: 2000 } });
+    console.log(`   w: ${JSON.stringify(w).padEnd(10)} → confirmada`);
+  } catch (e) {
+    const err = e as MongoServerError;
+    console.log(`   w: ${JSON.stringify(w).padEnd(10)} → ${err.codeName ?? err.name}: ${err.message}`);
+  }
+}
+console.log(`   escrituras con userId "w" guardadas: ${await intentos.countDocuments({ userId: "w" })} de 3`);
+
+// 3. Read concern "snapshot": dentro de la transacción, lo que se lee es una foto del principio
+const session = cliente.startSession();
+session.startTransaction({ readConcern: { level: "snapshot" }, writeConcern: { w: "majority" } });
+const dentroAntes = await intentos.countDocuments({}, { session });
+await intentos.insertOne({ userId: "otra-conexion", puntuacion: 5 }); // otra petición escribe, fuera de la transacción
+const dentroDespues = await intentos.countDocuments({}, { session });
+const fuera = await intentos.countDocuments();
+await session.commitTransaction();
+await session.endSession();
+console.log(`3. dentro de la transacción: ${dentroAntes} → ${dentroDespues} · fuera: ${fuera}`);
+
+await cliente.close();
+```
+
+```text
+1. dos transacciones: evaluaciones=2, intentos=2, la función se ejecutó 8 veces
+2. nodos en el replica set: 1
+   w: 1          → confirmada
+   w: "majority" → confirmada
+   w: 2          → UnsatisfiableWriteConcern: Not enough data-bearing nodes
+   escrituras con userId "w" guardadas: 3 de 3
+3. dentro de la transacción: 5 → 5 · fuera: 6
+```
+
+Y el punto 1, cinco veces más:
+
+```text
+Cinco ejecuciones más del punto 1:
+evaluaciones=2, intentos=2, la función se ejecutó 9 veces
+evaluaciones=2, intentos=2, la función se ejecutó 9 veces
+evaluaciones=2, intentos=2, la función se ejecutó 9 veces
+evaluaciones=2, intentos=2, la función se ejecutó 8 veces
+evaluaciones=2, intentos=2, la función se ejecutó 9 veces
+```
+
+**1. Conflictos y reintentos.** Dos transacciones modifican el mismo documento a la vez. MongoDB no las hace esperar: a la segunda le da un error de conflicto (_WriteConflict_) con la etiqueta `TransientTransactionError`, y `withTransaction` la **repite** desde el principio. El resultado es siempre correcto (2 evaluaciones, 2 intentos), pero la función se ejecutó 8 o 9 veces en lugar de 2: mientras la primera mantenía la transacción abierta 100 ms, la segunda chocaba una y otra vez. Cuanto más dura una transacción y más se disputa un documento, más reintentos.
+
+**2. _Write concern_:** cuántos nodos del _replica set_ tienen que confirmar una escritura antes de que MongoDB responda.
+
+| _Write concern_               | Responde cuando…                 | Si el primario se cae justo después |
+| ----------------------------- | -------------------------------- | ----------------------------------- |
+| `w: 1`                        | La ha escrito el primario        | La escritura puede perderse         |
+| `w: "majority"` (por defecto) | La tiene la mayoría de los nodos | No se pierde: la tiene otro nodo    |
+| `w: 2`, `w: 3`…               | La tienen ese número de nodos    | Depende de cuántos haya             |
+
+En este laboratorio, con un solo nodo, `w: "majority"` es ese nodo, y `w: 2` es imposible: `UnsatisfiableWriteConcern`. Pero fíjate en la línea siguiente: **las tres escrituras se guardaron, también la que dio error**. Un error de _write concern_ no deshace la escritura: solo dice que no se pudo confirmar en tantos nodos. En Atlas (tres nodos), `w: 2` funcionaría.
+
+**3. _Read concern_ `"snapshot"`:** dentro de la transacción, las lecturas ven una **foto** del momento en que empezó. Otra conexión inserta un intento, y la transacción sigue contando 5; fuera ya hay 6. Es el **aislamiento** de ACID: lo que hace la transacción no se mezcla con lo que hacen los demás mientras dura.
+
+<Callout type="risk">
+
+- **Un error de _write concern_ no significa "no se guardó":** si reintentas a ciegas, puedes duplicar la escritura. Para las operaciones que no se pueden repetir, usa un índice único o un identificador de la operación, para que el segundo intento falle o no haga nada.
+- **El _read concern_ por defecto fuera de una transacción es `"local"`:** lee lo que tiene el primario, aunque aún no esté en la mayoría. Si lees justo después de escribir con `w: 1` y el primario cambia, puedes leer algo que luego desaparezca. Con `w: "majority"` (el valor por defecto) no pasa.
+- **En CI, un _replica set_ recién arrancado tarda en tener primario:** esta plataforma tuvo un E2E que fallaba a veces por eso, y se arregló esperando a `isWritablePrimary` antes de empezar (I8.6).
+
+</Callout>
+
+## Paso 4: concurrencia optimista con `version`
+
+Hay un tipo de conflicto que ni `$inc` ni una transacción resuelven: dos personas que **editan** lo mismo a la vez. Cada una cargó la nota, la cambió en su pantalla y guarda. `src/a2/04-version.ts`:
+
+```ts
+// Archivo: src/a2/04-version.ts
+// Dos pestañas editan la misma nota: sin control, la última escritura borra la otra sin avisar
+import { cliente, db } from "../db";
+
+interface Nota { _id: string; texto: string; version: number }
+const notas = db.collection<Nota>("a2_notas");
+
+async function empezar() {
+  await notas.deleteMany({});
+  await notas.insertOne({ _id: "n1", texto: "Plan: 3 días de fuerza", version: 1 });
+}
+
+// 1. Sin control: cada pestaña cargó la nota y guarda su versión entera
+await empezar();
+const enA = (await notas.findOne({ _id: "n1" }))!; // pestaña A
+const enB = (await notas.findOne({ _id: "n1" }))!; // pestaña B, a la vez
+await notas.updateOne({ _id: "n1" }, { $set: { texto: `${enA.texto} + correr el domingo` } });
+await notas.updateOne({ _id: "n1" }, { $set: { texto: `${enB.texto} + movilidad diaria` } });
+console.log("sin control:", (await notas.findOne({ _id: "n1" }))!.texto);
+
+// 2. Concurrencia optimista: solo se guarda si la versión sigue siendo la que se cargó, y se sube en 1
+async function guardar(cargada: Nota, texto: string): Promise<"guardada" | "conflicto"> {
+  const r = await notas.updateOne({ _id: cargada._id, version: cargada.version }, { $set: { texto }, $inc: { version: 1 } });
+  return r.matchedCount === 1 ? "guardada" : "conflicto"; // en una API: 409 Conflict
+}
+
+await empezar();
+const a = (await notas.findOne({ _id: "n1" }))!;
+const b = (await notas.findOne({ _id: "n1" }))!;
+console.log("pestaña A:", await guardar(a, `${a.texto} + correr el domingo`));
+console.log("pestaña B:", await guardar(b, `${b.texto} + movilidad diaria`));
+console.log("en la base:", await notas.findOne({ _id: "n1" }));
+
+// La pestaña B recarga, ve el cambio de A y vuelve a aplicar el suyo
+const recargada = (await notas.findOne({ _id: "n1" }))!;
+console.log("pestaña B, tras recargar:", await guardar(recargada, `${recargada.texto} + movilidad diaria`));
+console.log("en la base:", await notas.findOne({ _id: "n1" }));
+
+await cliente.close();
+```
+
+```text
+sin control: Plan: 3 días de fuerza + movilidad diaria
+pestaña A: guardada
+pestaña B: conflicto
+en la base: {
+  _id: 'n1',
+  texto: 'Plan: 3 días de fuerza + correr el domingo',
+  version: 2
+}
+pestaña B, tras recargar: guardada
+en la base: {
+  _id: 'n1',
+  texto: 'Plan: 3 días de fuerza + correr el domingo + movilidad diaria',
+  version: 3
+}
+```
+
+- **Sin control, gana la última escritura:** el texto final tiene "movilidad diaria" pero no "correr el domingo". El cambio de la pestaña A se perdió, y nadie se enteró.
+- **Con `version` en el filtro, la segunda escritura no encuentra el documento:** la pestaña B cargó la versión 1, pero ya es la 2. `matchedCount` es 0, y la API puede responder **409 Conflict** para que la persona recargue.
+- **Tras recargar, B ve el cambio de A** y aplica el suyo encima: los dos se conservan, en la versión 3.
+
+Se llama **optimista** porque no bloquea nada: supone que casi nunca habrá conflicto y solo lo detecta al guardar. Es lo adecuado para formularios de edición, donde el tiempo entre cargar y guardar son segundos o minutos. Una transacción no serviría: duraría todo ese tiempo.
+
+<Callout type="risk">
+
+- **Todas las escrituras de ese documento tienen que respetar la versión:** un `updateOne` en otra parte del código que no compruebe ni suba `version` vuelve a permitir que se pisen.
+- **El 409 necesita una respuesta en la interfaz:** decirle a la persona que alguien cambió la nota y enseñarle la versión actual. Un "Error" genérico hará que pierda su cambio igualmente.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Implementa "guardar evaluación + actualizar resumen" sin transacción y con transacción.
+2. Añade una tercera versión sin documento de resumen, que lo calcule al leerlo a partir de los intentos.
+3. Ponlas a prueba: una caída a mitad, veinte envíos a la vez y el tiempo de escribir y de leer. Analiza qué puede fallar en cada una.
+
+</Callout>
+
+Solución. `src/a2/05-ejercicio.ts`:
+
+```ts
+// Archivo: src/a2/05-ejercicio.ts
+// "Guardar evaluación + actualizar resumen", de tres formas, puestas a prueba
+import { cliente, db } from "../db";
+
+interface Intento { userId: string; cursoId: string; puntuacion: number; fecha: Date }
+interface Resumen { _id: string; evaluaciones: number; mejorNota: Record<string, number> }
+const intentos = db.collection<Intento>("a2_intentos");
+const resumen = db.collection<Resumen>("a2_resumen");
+
+type Guardar = (userId: string, cursoId: string, puntuacion: number, opciones?: { caer?: boolean }) => Promise<void>;
+const caida = () => {
+  throw new Error("caída");
+};
+const nuevo = (userId: string, cursoId: string, puntuacion: number): Intento => ({ userId, cursoId, puntuacion, fecha: new Date() });
+const cambio = (cursoId: string, puntuacion: number) => ({ $inc: { evaluaciones: 1 }, $max: { [`mejorNota.${cursoId}`]: puntuacion } });
+
+// A. Sin transacción: dos escrituras seguidas
+const sinTransaccion: Guardar = async (userId, cursoId, puntuacion, { caer } = {}) => {
+  await intentos.insertOne(nuevo(userId, cursoId, puntuacion));
+  if (caer) caida();
+  await resumen.updateOne({ _id: userId }, cambio(cursoId, puntuacion), { upsert: true });
+};
+
+// B. Con transacción: las dos o ninguna
+let ejecucionesB = 0;
+const conTransaccion: Guardar = async (userId, cursoId, puntuacion, { caer } = {}) => {
+  const session = cliente.startSession();
+  try {
+    await session.withTransaction(async () => {
+      ejecucionesB++;
+      await intentos.insertOne(nuevo(userId, cursoId, puntuacion), { session });
+      if (caer) caida();
+      await resumen.updateOne({ _id: userId }, cambio(cursoId, puntuacion), { session, upsert: true });
+    });
+  } finally {
+    await session.endSession();
+  }
+};
+
+// C. Sin documento de resumen: una sola escritura; el resumen se CALCULA al leerlo (como esta plataforma)
+const soloIntento: Guardar = async (userId, cursoId, puntuacion, { caer } = {}) => {
+  if (caer) caida(); // la caída solo puede pasar antes o después de la única escritura
+  await intentos.insertOne(nuevo(userId, cursoId, puntuacion));
+};
+
+/** El resumen calculado a partir de los intentos: también sirve para reparar el documento de A */
+async function calcularResumen(userId: string): Promise<Omit<Resumen, "_id">> {
+  const porCurso = await intentos
+    .aggregate<{ _id: string; n: number; mejor: number }>([
+      { $match: { userId } },
+      { $group: { _id: "$cursoId", n: { $sum: 1 }, mejor: { $max: "$puntuacion" } } },
+    ])
+    .toArray();
+  return {
+    evaluaciones: porCurso.reduce((s, c) => s + c.n, 0),
+    mejorNota: Object.fromEntries(porCurso.map((c) => [c._id, c.mejor])),
+  };
+}
+
+async function empezar() {
+  await intentos.deleteMany({});
+  await resumen.deleteMany({});
+}
+async function estado(conResumen: boolean) {
+  const n = await intentos.countDocuments();
+  const r = conResumen ? await resumen.findOne({ _id: "ana" }) : await calcularResumen("ana");
+  return `intentos=${n} · resumen: ${r?.evaluaciones ?? 0} evaluaciones, mejor ${JSON.stringify(r?.mejorNota ?? {})}`;
+}
+
+const formas: [string, Guardar, boolean][] = [
+  ["A. sin transacción", sinTransaccion, true],
+  ["B. con transacción", conTransaccion, true],
+  ["C. solo el intento", soloIntento, false],
+];
+
+console.log("1. Una evaluación buena (4) y luego una caída a mitad de la segunda (5):");
+for (const [nombre, guardar, conResumen] of formas) {
+  await empezar();
+  await guardar("ana", "A2", 4);
+  await guardar("ana", "A2", 5, { caer: true }).catch(() => {});
+  console.log(`   ${nombre}: ${await estado(conResumen)}`);
+}
+
+console.log("2. Veinte envíos a la vez (notas del 1 al 5):");
+for (const [nombre, guardar, conResumen] of formas) {
+  await empezar();
+  ejecucionesB = 0;
+  await Promise.all(Array.from({ length: 20 }, (_, i) => guardar("ana", "A2", (i % 5) + 1)));
+  const extra = nombre.startsWith("B") ? ` (la función se ejecutó ${ejecucionesB} veces)` : "";
+  console.log(`   ${nombre}: ${await estado(conResumen)}${extra}`);
+}
+
+console.log("3. Tiempo de 200 envíos seguidos, y de leer el resumen (tras calentar las conexiones; dos rondas, en orden distinto):");
+for (const [, guardar] of formas) for (let i = 0; i < 50; i++) await guardar("ana", "A1", 3); // calentamiento
+for (const [nombre, guardar, conResumen] of [...formas, ...[...formas].reverse()]) {
+  await empezar();
+  let t = performance.now();
+  for (let i = 0; i < 200; i++) await guardar("ana", `A${(i % 8) + 1}`, (i % 5) + 1);
+  const escribir = performance.now() - t;
+  t = performance.now();
+  for (let i = 0; i < 50; i++) conResumen ? await resumen.findOne({ _id: "ana" }) : await calcularResumen("ana");
+  const leer = (performance.now() - t) / 50;
+  console.log(`   ${nombre}: escribir ${escribir.toFixed(0)} ms · leer el resumen ${leer.toFixed(2)} ms`);
+}
+
+console.log("4. Reparar el resumen de A tras la caída, recalculándolo desde los intentos:");
+await empezar();
+await sinTransaccion("ana", "A2", 4);
+await sinTransaccion("ana", "A2", 5, { caer: true }).catch(() => {});
+console.log(`   antes:   ${await estado(true)}`);
+await resumen.replaceOne({ _id: "ana" }, await calcularResumen("ana"), { upsert: true });
+console.log(`   después: ${await estado(true)}`);
+
+await cliente.close();
+```
+
+```text
+1. Una evaluación buena (4) y luego una caída a mitad de la segunda (5):
+   A. sin transacción: intentos=2 · resumen: 1 evaluaciones, mejor {"A2":4}
+   B. con transacción: intentos=1 · resumen: 1 evaluaciones, mejor {"A2":4}
+   C. solo el intento: intentos=1 · resumen: 1 evaluaciones, mejor {"A2":4}
+2. Veinte envíos a la vez (notas del 1 al 5):
+   A. sin transacción: intentos=20 · resumen: 20 evaluaciones, mejor {"A2":5}
+   B. con transacción: intentos=20 · resumen: 20 evaluaciones, mejor {"A2":5} (la función se ejecutó 70 veces)
+   C. solo el intento: intentos=20 · resumen: 20 evaluaciones, mejor {"A2":5}
+3. Tiempo de 200 envíos seguidos, y de leer el resumen (tras calentar las conexiones; dos rondas, en orden distinto):
+   A. sin transacción: escribir 2484 ms · leer el resumen 0.34 ms
+   B. con transacción: escribir 1436 ms · leer el resumen 0.31 ms
+   C. solo el intento: escribir 1213 ms · leer el resumen 0.85 ms
+   C. solo el intento: escribir 1197 ms · leer el resumen 0.83 ms
+   B. con transacción: escribir 1360 ms · leer el resumen 0.30 ms
+   A. sin transacción: escribir 2431 ms · leer el resumen 0.34 ms
+4. Reparar el resumen de A tras la caída, recalculándolo desde los intentos:
+   antes:   intentos=2 · resumen: 1 evaluaciones, mejor {"A2":4}
+   después: intentos=2 · resumen: 2 evaluaciones, mejor {"A2":5}
+```
+
+Qué puede fallar en cada una:
+
+- **A, sin transacción:** una caída entre las dos escrituras deja el resumen desincronizado (2 intentos, 1 evaluación contada). Con muchos envíos a la vez **no** falla, porque el resumen se actualiza con `$inc` y `$max`, que son atómicos. Y es la más lenta, como verás más abajo. Si la eliges, necesitas una forma de reparar el resumen: el punto 4 lo recalcula a partir de los intentos.
+- **B, con transacción:** ni la caída ni la concurrencia la desincronizan. El precio está en la concurrencia: veinte envíos a la vez del mismo usuario disputan su documento de resumen, y la función se ejecutó **70 veces** para 20 envíos. Con más tráfico sobre el mismo documento, más reintentos.
+- **C, solo el intento:** una sola escritura, siempre consistente, sin nada que reparar. El precio es leer: calcular el resumen con un `aggregate` cuesta unos 0,8 ms frente a 0,3 ms de leer un documento, y crece con el número de intentos. Es el diseño de esta plataforma: `quiz_attempts` guarda un documento por intento, y el panel de progreso calcula las estadísticas al leerlas.
+
+Y el tiempo de escribir tiene una sorpresa: **A, con dos escrituras sueltas, tarda casi el doble que B**, que hace las mismas dos dentro de una transacción. `src/a2/06-diario.ts` lo explica:
+
+```ts
+// Archivo: src/a2/06-diario.ts
+// ¿Por qué dos escrituras sueltas cuestan casi el doble que las mismas dos dentro de una transacción?
+import { cliente, db } from "../db";
+
+const c = db.collection<{ i: number }>("a2_diario");
+for (let i = 0; i < 50; i++) await c.insertOne({ i }); // calentamiento
+
+const opciones = [
+  ["por defecto del servidor", {}],
+  ["w: 1, journal: true", { writeConcern: { w: 1, journal: true } }],
+  ["w: 1, journal: false", { writeConcern: { w: 1, journal: false } }],
+] as const;
+
+for (const [nombre, opcion] of opciones) {
+  await c.deleteMany({});
+  const t = performance.now();
+  for (let i = 0; i < 200; i++) await c.insertOne({ i }, opcion);
+  console.log(`${nombre.padEnd(26)} 200 escrituras en ${(performance.now() - t).toFixed(0)} ms`);
+}
+const { defaultWriteConcern } = await db.admin().command({ getDefaultRWConcern: 1 });
+console.log("write concern por defecto:", JSON.stringify(defaultWriteConcern));
+
+await c.drop();
+await cliente.close();
+```
+
+```text
+por defecto del servidor   200 escrituras en 1172 ms
+w: 1, journal: true        200 escrituras en 1170 ms
+w: 1, journal: false       200 escrituras en 49 ms
+write concern por defecto: {"w":"majority","wtimeout":0}
+```
+
+Cada escritura con el _write concern_ por defecto (`w: "majority"`) espera a que MongoDB la anote en su diario (_journal_) en disco: unos 6 ms en este Mac, frente a menos de uno sin esperar. Dos escrituras sueltas esperan dos veces; una transacción espera **una**, al confirmar. Por eso B cuesta casi lo mismo que C.
+
+<Callout type="risk">
+
+- **No bajes el _write concern_ para ir más rápido:** `journal: false` es unas 24 veces más rápido porque no garantiza que la escritura sobreviva a un corte de luz. Para datos que importan, el valor por defecto es el correcto.
+- **Los tiempos de este laboratorio son de un MongoDB local:** en Atlas, cada escritura añade además la latencia de la red y la confirmación de otros nodos. Las proporciones se mantienen; los números, no.
+- **La decisión no es solo técnica:** un resumen desincronizado durante unos segundos puede ser aceptable (un contador de visitas) o no (un saldo). Pregunta qué pasa si los dos documentos no están de acuerdo, y cuánto tiempo puede durar.
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes cuándo una transacción es imprescindible y cuándo basta un único `updateOne`: si lo que cambia a la vez cabe en un documento, `$inc`, `$max` y compañía son atómicos y no pierden escrituras; si son varios documentos que no pueden discrepar, `withTransaction` con `{ session }` en cada operación; si es una edición de una persona, concurrencia optimista con `version`. Y sabes que una transacción puede repetirse, que un error de _write concern_ no deshace la escritura, y que a veces el mejor diseño es no necesitar la transacción.
+
+</Callout>
+
+## Resumen
+
+- Un `updateOne` con varios operadores es atómico. Leer, cambiar en JavaScript y escribir pierde escrituras (2 de 50).
+- `session.withTransaction(…)`: todo o nada, con reintentos automáticos. Cada operación necesita `{ session }`; sin ella, queda fuera.
+- _Write concern_: cuántos nodos confirman (`"majority"` por defecto). Un error de _write concern_ no deshace la escritura.
+- _Read concern_ `"snapshot"`: la transacción ve una foto del principio.
+- Concurrencia optimista: `{ _id, version }` en el filtro y `$inc: { version: 1 }`; si no encaja, 409.
+- Tres diseños para dos documentos: sin transacción (reparable), con transacción (reintentos bajo concurrencia) o un solo documento y calcular al leer.
