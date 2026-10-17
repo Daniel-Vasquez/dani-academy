@@ -1,0 +1,272 @@
+---
+sectionId: "I8.1"
+course: "I8"
+title: "Por qué y qué testear"
+order: 1
+minutes: 50
+summary: "Decides qué merece un test con la pirámide y el trofeo, mides lo que cuesta cada capa, configuras Vitest con getViteConfig para que entienda astro:env y escribes tus primeros tests con la estructura AAA."
+---
+
+Un test es un programa que comprueba otro programa. Lo escribes una vez y lo ejecutas miles: antes de cada _commit_, en cada _push_ y cada vez que cambias algo que "no debería afectar". Su valor no está en el día que lo escribes, sino en el día, meses después, en que alguien (tú) rompe una regla sin darse cuenta y el test lo avisa en un segundo, en lugar de un usuario en producción. Pero los tests también cuestan: hay que escribirlos, mantenerlos y esperar a que terminen. En esta sección vas a decidir qué merece un test, a medir lo que cuesta cada tipo y a preparar Vitest para que entienda los módulos de Astro.
+
+**Lo que tendrás al terminar:** los tests de tu app de entrenos (I3) ordenados en `tests/unit` y `tests/integration`, Vitest configurado con `getViteConfig` y una función nueva, `ritmo()`, con cinco tests.
+
+**Requisitos:** la app de entrenos de I5, con los 13 tests de I3.5. Este curso la usa de principio a fin.
+
+## Paso 1: la pirámide y el trofeo
+
+Hay tres tipos de test, según cuánto de la app ponen en marcha:
+
+| Tipo                   | Qué prueba                                        | Ejemplo en tu app                                 | Velocidad          | Si falla, el fallo está… |
+| ---------------------- | ------------------------------------------------- | ------------------------------------------------- | ------------------ | ------------------------ |
+| **Unitario**           | Una función o un módulo, aislado                  | `lunesDe()`, el servicio con un repositorio falso | Milisegundos       | En esa función           |
+| **Integración**        | Varias piezas juntas, con sus dependencias reales | El repositorio contra un MongoDB de verdad        | Décimas de segundo | Entre esas piezas        |
+| **_End-to-end_** (E2E) | La app entera, desde un navegador                 | Registrarse, crear un entreno y verlo en la lista | Segundos           | En cualquier parte       |
+
+La **pirámide** clásica dice: muchos unitarios en la base, menos de integración y pocos E2E en la punta, porque cuanto más arriba, más lentos y más difíciles de depurar. El **trofeo** (de Kent C. Dodds) pone el grueso en la integración: en una app web, la mayoría de los fallos están en cómo encajan las piezas (una consulta mal escrita, un esquema que no coincide con lo que guarda la base), y un unitario con todo simulado no los ve.
+
+Las dos están de acuerdo en lo importante: **cada capa atrapa fallos distintos**, y los E2E son pocos y solo para los flujos críticos. En este curso escribirás de las tres.
+
+Y no todo merece un test. Merecen uno:
+
+- **Las reglas de negocio:** "solo los entrenos de running llevan km", "el objetivo se cumple con 150 minutos". Si se rompen, la app hace algo incorrecto sin dar ningún error.
+- **Los bugs que ya ocurrieron:** si un bug pasó una vez, un test impide que vuelva (lo harás en I8.6).
+- **Los flujos críticos:** registrarse, entrar, guardar un entreno. Si fallan, la app no sirve.
+- **Los casos límite:** la semana vacía, el último día del mes, un id mal formado.
+
+No lo merecen: el código sin lógica (un componente que solo pinta un texto), lo que ya comprueba TypeScript (que una función recibe un `number`) ni las librerías de otros (que Zod valida bien un correo es cosa de Zod; lo tuyo es **qué** esquema usas).
+
+<Callout type="risk">
+
+- **Un test que nunca puede fallar no prueba nada:** si cambias el código a algo claramente incorrecto y el test sigue en verde, ese test sobra. Comprueba de vez en cuando que tus tests fallan cuando deben.
+- **No testees la implementación, sino el comportamiento:** "`calcularResumen` devuelve `cumplido: true` con 150 minutos" sobrevive a reescribir la función; "`calcularResumen` llama a `reduce` dos veces" se rompe con cualquier cambio, aunque el resultado sea el mismo.
+
+</Callout>
+
+## Paso 2: Vitest con la configuración de Astro
+
+En I3.5 configuraste Vitest "a secas", con `defineConfig` de `vitest/config`, porque los servicios y repositorios no importaban nada de Astro. Pero en cuanto un test toca un módulo que usa `astro:env`, `astro:actions` o `astro:middleware`, Vitest no sabe qué es. Prueba con un test que importa los servicios reales, `tests/unit/servicios.test.ts`:
+
+```ts
+// Archivo: tests/unit/servicios.test.ts
+// Un test que importa los servicios reales: pasan por src/lib/mongo.ts, que usa astro:env
+import { describe, expect, it } from "vitest";
+import { servicios } from "../../src/services";
+
+describe("servicios", () => {
+  it("expone el servicio de entrenos y el de resumen", () => {
+    expect(Object.keys(servicios)).toEqual(["entrenos", "resumen"]);
+  });
+});
+```
+
+Con la configuración de I3.5:
+
+```text
+ FAIL  tests/unit/servicios.test.ts [ tests/unit/servicios.test.ts ]
+Error: Cannot find package 'astro:env/server' imported from /mi-entreno/src/services/index.ts
+ ❯ src/services/index.ts:3:1
+      1| // Archivo: src/services/index.ts
+      2| // Los servicios de la app, conectados a los repositorios reales
+      3| import { OBJETIVO_SEMANAL_MINUTOS } from "astro:env/server";
+       | ^
+      4| import { repos } from "../repositories";
+      5| import { crearServicioEntrenos } from "./entrenos.service";
+```
+
+`astro:env/server` no es un paquete de npm: es un **módulo virtual** que genera Astro a partir de `astro.config.mjs`. Vitest usa Vite, pero sin la configuración de Astro no sabe generarlo. La solución es **`getViteConfig`**, que le pasa a Vitest la misma configuración de Vite que usa Astro. Ordena primero los tests por capas:
+
+```bash
+mkdir -p tests/unit tests/integration
+git mv tests/entrenos.repo.test.ts tests/integration/
+git mv tests/entrenos.service.test.ts tests/resumen.service.test.ts tests/unit/
+```
+
+En los tres archivos movidos, cambia los _imports_ de `"../src/…"` a `"../../src/…"` (ahora están una carpeta más abajo). Y sustituye `vitest.config.ts`:
+
+```ts
+// Archivo: vitest.config.ts
+// getViteConfig: Vitest usa la configuración de Astro (astro:env, astro:actions, alias…)
+/// <reference types="vitest/config" />
+import { getViteConfig } from "astro/config";
+
+export default getViteConfig({
+  test: {
+    include: ["tests/{unit,integration}/**/*.test.ts"],
+    hookTimeout: 120_000, // la primera vez, mongodb-memory-server descarga MongoDB
+  },
+});
+```
+
+Con eso, el test de los servicios pasa. Bórralo al terminar el ejercicio (`rm tests/unit/servicios.test.ts`): solo sirve para la demostración, y el Callout de abajo explica por qué no conviene.
+
+- **`/// <reference types="vitest/config" />`** le dice a TypeScript que la configuración de Astro acepta la clave `test`. Sin esa línea, `test: {…}` sale subrayado como error.
+- **El `include` con dos carpetas** deja fuera, a propósito, los E2E de I8.5 (`tests/e2e`), que no los ejecuta Vitest sino Playwright.
+- **`getViteConfig` lee tu `.env`,** como `astro dev`, y el esquema de `astro:env` se valida también en los tests: con un `BETTER_AUTH_SECRET` de menos de 32 caracteres, el archivo que importa los servicios falla al cargar (`The following environment variables defined in env.schema are invalid`). Los que no importan nada de Astro siguen pasando.
+
+<Callout type="risk">
+
+- **Que un test pueda importar la base de datos real no significa que deba:** `servicios.test.ts` importa `src/repositories/index.ts`, que crea un `MongoClient` con el `MONGODB_URI` de tu `.env`. Este test no llama a nada y no llega a conectarse, pero uno que llamara a `servicios.entrenos.crear()` escribiría en tu base real. Los tests unitarios reciben repositorios falsos (I3.5) y los de integración, un MongoDB en memoria (I8.4).
+- **Al actualizar Astro, revisa que los tests siguen arrancando:** `getViteConfig` es parte de la API de Astro, y Vitest depende de que el Vite que trae Astro sea compatible con su versión.
+
+</Callout>
+
+## Paso 3: la estructura AAA
+
+Cada test sigue el mismo esquema, en tres partes:
+
+- **_Arrange_** (preparar): los datos y el estado que necesita la prueba.
+- **_Act_** (actuar): **una** llamada a lo que se prueba.
+- **_Assert_** (comprobar): lo que tiene que haber salido.
+
+Tu app muestra los minutos y los km de cada entreno, pero no el **ritmo**, lo que más mira quien corre: cuántos minutos tarda en cada km. Crea `src/lib/ritmo.ts`:
+
+```ts
+// Archivo: src/lib/ritmo.ts
+// El ritmo medio de un entreno de running: cuánto se tarda en cada km
+
+/** "m:ss min/km", o null si no hay km (no se puede dividir entre 0) */
+export function ritmo(minutos: number, km: number | undefined): string | null {
+  if (!km || km <= 0) return null;
+  const minutosPorKm = minutos / km;
+  const min = Math.floor(minutosPorKm);
+  const seg = Math.round((minutosPorKm - min) * 60);
+  return `${min}:${String(seg).padStart(2, "0")} min/km`;
+}
+```
+
+Y muéstralo en la lista de `src/components/Entrenos.tsx`. Importa la función junto a los demás _imports_:
+
+```tsx
+import { ritmo } from "../lib/ritmo";
+```
+
+y añade una línea debajo de la de los km, dentro del `<li>`:
+
+```tsx
+            {e.km !== undefined && ` · ${e.km} km`}
+            {e.tipo === "running" && e.km !== undefined && ` · ${ritmo(e.minutos, e.km)}`}
+```
+
+Ahora sus tests, `tests/unit/ritmo.test.ts`. El primero marca las tres partes con comentarios; en los demás, cada parte cabe en una línea:
+
+```ts
+// Archivo: tests/unit/ritmo.test.ts
+import { describe, expect, it } from "vitest";
+import { ritmo } from "../../src/lib/ritmo";
+
+describe("ritmo", () => {
+  it("45 minutos en 9 km son 5:00 min/km", () => {
+    // Arrange: los datos de entrada
+    const minutos = 45;
+    const km = 9;
+    // Act: UNA llamada a lo que se prueba
+    const resultado = ritmo(minutos, km);
+    // Assert: lo que tiene que salir
+    expect(resultado).toBe("5:00 min/km");
+  });
+
+  it("convierte la fracción de minuto en segundos", () => {
+    expect(ritmo(50, 8)).toBe("6:15 min/km"); // 6,25 min = 6 min 15 s
+  });
+
+  it("redondea al segundo más cercano", () => {
+    expect(ritmo(25, 5.5)).toBe("4:33 min/km"); // 4,5454… min = 4 min 32,7 s
+  });
+
+  it("los segundos de una cifra llevan un cero delante", () => {
+    expect(ritmo(61, 10)).toBe("6:06 min/km");
+  });
+
+  it("sin km no hay ritmo", () => {
+    expect(ritmo(30, undefined)).toBeNull();
+    expect(ritmo(30, 0)).toBeNull();
+  });
+});
+```
+
+- **Un comportamiento por test, y el nombre lo dice:** cuando uno falle, el nombre ("los segundos de una cifra llevan un cero delante") te dirá qué se ha roto sin abrir el archivo.
+- **Un comentario con la cuenta** (`6,25 min = 6 min 15 s`) explica de dónde sale el valor esperado. Sin él, quien lea el test no sabe si `"6:15"` es correcto o solo lo que devolvía la función.
+- **Los casos límite van en su propio test:** "sin km no hay ritmo" cubre `undefined` y `0`, la división entre cero.
+
+<Callout type="risk">
+
+- **El valor esperado se calcula a mano, nunca copiando lo que devuelve la función:** si ejecutas `ritmo(25, 5.5)` y pegas el resultado en el `expect`, el test solo comprueba que la función hace lo que ya hacía, aunque esté mal.
+- **Un solo _Act_ por test:** si un test crea, edita y borra, y falla, no sabrás cuál de las tres cosas ha fallado. Los pasos previos van en el _Arrange_.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Configura Vitest con `getViteConfig` en tu app de entrenos y ordena los tests en `tests/unit` y `tests/integration`.
+2. Escribe 5 tests para una función pura, `ritmo()`, con la estructura AAA.
+3. Mide cuánto tarda cada capa y explica qué justifica la diferencia.
+
+</Callout>
+
+Solución. Los pasos 2 y 3 son la solución de los dos primeros puntos. La suite entera, con `npx vitest run --reporter=verbose`:
+
+```text
+✓ tests/unit/ritmo.test.ts > ritmo > 45 minutos en 9 km son 5:00 min/km 1ms
+✓ tests/unit/ritmo.test.ts > ritmo > convierte la fracción de minuto en segundos 0ms
+✓ tests/unit/ritmo.test.ts > ritmo > redondea al segundo más cercano 0ms
+✓ tests/unit/ritmo.test.ts > ritmo > los segundos de una cifra llevan un cero delante 0ms
+✓ tests/unit/ritmo.test.ts > ritmo > sin km no hay ritmo 0ms
+✓ tests/unit/resumen.service.test.ts > lunesDe > 2026-10-12 → 2026-10-12 1ms
+✓ tests/unit/resumen.service.test.ts > lunesDe > 2026-10-15 → 2026-10-12 0ms
+✓ tests/unit/resumen.service.test.ts > lunesDe > 2026-10-18 → 2026-10-12 0ms
+✓ tests/unit/resumen.service.test.ts > lunesDe > 2026-11-01 → 2026-10-26 0ms
+✓ tests/unit/resumen.service.test.ts > calcularResumen > objetivo cumplido justo en el límite y porcentaje tope 100 0ms
+✓ tests/unit/resumen.service.test.ts > calcularResumen > una semana vacía no divide entre cero 0ms
+✓ tests/unit/resumen.service.test.ts > servicio de resumen con un repositorio en memoria > compara con la semana anterior 1ms
+✓ tests/unit/entrenos.service.test.ts > servicio de entrenos > editar aplica cambios válidos 2ms
+✓ tests/unit/entrenos.service.test.ts > servicio de entrenos > editar rechaza un resultado inválido aunque el cambio sea válido por sí solo 1ms
+✓ tests/unit/entrenos.service.test.ts > servicio de entrenos > editar y borrar un entreno que no existe lanzan NoEncontradoError 1ms
+✓ tests/unit/servicios.test.ts > servicios > expone el servicio de entrenos y el de resumen 1ms
+✓ tests/integration/entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales 27ms
+✓ tests/integration/entrenos.repo.test.ts > repositorio de entrenos > no guarda los campos undefined (ni como null) 2ms
+✓ tests/integration/entrenos.repo.test.ts > repositorio de entrenos > un id mal formado es 'no existe', no una excepción 0ms
+Test Files  5 passed (5)
+Tests  19 passed (19)
+Duration  549ms (tests 50%, import 35%, transform 13%, worker 1%)
+```
+
+Y cada capa por separado, tres veces:
+
+```text
+npx vitest run tests/unit         (3 ejecuciones)
+  16 tests · 161ms
+  16 tests · 156ms
+  16 tests · 152ms
+npx vitest run tests/integration  (3 ejecuciones)
+  3 tests · 465ms
+  3 tests · 456ms
+  3 tests · 464ms
+```
+
+- **16 tests unitarios (con el de los servicios) en unos 155 ms**, la mayor parte en cargar y transformar los archivos: cada test tarda 0 o 1 ms.
+- **3 tests de integración en unos 460 ms:** arrancar un MongoDB en memoria (`beforeAll`) es casi todo el tiempo. Tres veces más para cinco veces menos tests.
+- **Los E2E serán más lentos:** levantan la app y un navegador (I8.5). Por eso se reservan para los flujos críticos.
+
+<Callout type="risk">
+
+- **Cinco tests en verde no significan que la función esté bien:** prueban cinco casos. `ritmo()` tiene un bug que ninguno de ellos encuentra, y lo descubrirás en I8.6. Los casos límite se buscan a propósito, no salen solos.
+- **Los tiempos dependen del ordenador:** compara las capas entre sí, en la misma máquina, no con los números de otra.
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes justificar por qué algo merece (o no) un test: es una regla de negocio, un bug que ya ocurrió, un flujo crítico o un caso límite; no lo es lo que ya comprueba TypeScript o una librería. Sabes qué cubre y cuánto cuesta cada capa (unitario, integración y E2E), configuras Vitest con `getViteConfig` para que entienda los módulos de Astro y escribes cada test con la estructura AAA.
+
+</Callout>
+
+## Resumen
+
+- Unitario (una pieza, milisegundos), integración (piezas reales juntas, décimas) y E2E (la app entera, segundos).
+- Pirámide o trofeo: muchos unitarios y de integración, pocos E2E y solo para los flujos críticos.
+- Merecen un test las reglas de negocio, los bugs que ya ocurrieron, los flujos críticos y los casos límite.
+- `getViteConfig` de `astro/config` hace que Vitest entienda `astro:env` y los demás módulos de Astro.
+- AAA: preparar, **una** acción y comprobar. El valor esperado se calcula a mano.

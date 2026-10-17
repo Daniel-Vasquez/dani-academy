@@ -1,0 +1,516 @@
+---
+sectionId: "I8.3"
+course: "I8"
+title: "Testing de componentes React"
+order: 3
+minutes: 75
+summary: "Pruebas componentes como los usa una persona, con Testing Library, userEvent y jsdom; ves que buscar por clase falla sin motivo y no ve un error de accesibilidad, y simulas la API con MSW."
+---
+
+Los componentes de React tienen lógica: validan, muestran errores, desactivan botones, piden datos y los pintan. Esa lógica merece tests, pero un test de componente mal escrito es frágil: se rompe cada vez que cambias una clase de Tailwind o el HTML de dentro, aunque el componente siga funcionando igual. **Testing Library** propone otra forma: buscar los elementos como lo hace una persona (por su papel y su texto: "el botón Crear cuenta", "el campo Correo") y comprobar lo que esa persona vería. En esta sección vas a probar tus componentes así, a medir la diferencia con buscar por clase y a simular la API con MSW.
+
+**Lo que tendrás al terminar:** `tests/components/` con los tests de `CampoTexto`, `Entrenos` y `FormRegistro`; un archivo de _setup_ que prepara el DOM y un servidor falso de MSW, y 14 tests de componentes.
+
+**Requisitos:** la app de entrenos de I8.2.
+
+```bash
+npm install --save-dev @testing-library/react @testing-library/user-event @testing-library/jest-dom jsdom msw
+```
+
+## Paso 1: jsdom, el _setup_ y el primer test
+
+Los componentes necesitan un DOM, y en Node no lo hay. **jsdom** es un navegador simulado en JavaScript: tiene `document`, eventos y formularios, pero no pinta nada en pantalla. Cada archivo de tests elige su entorno con un comentario en la primera línea, `// @vitest-environment jsdom`; los demás siguen en Node, que es más rápido.
+
+Añade los tests de componentes a `vitest.config.ts` y un archivo de _setup_. Sustituye `vitest.config.ts`:
+
+```ts
+// Archivo: vitest.config.ts
+// getViteConfig: Vitest usa la configuración de Astro (astro:env, astro:actions, alias…)
+/// <reference types="vitest/config" />
+import { getViteConfig } from "astro/config";
+
+export default getViteConfig({
+  test: {
+    include: ["tests/{unit,integration,components}/**/*.test.{ts,tsx}"],
+    setupFiles: ["./tests/setup.ts"],
+    hookTimeout: 120_000, // la primera vez, mongodb-memory-server descarga MongoDB
+    // Una zona horaria que NO es UTC: los bugs de fechas salen también en un servidor en UTC (I8.2)
+    env: { TZ: "America/Mexico_City" },
+  },
+});
+```
+
+Y crea `tests/msw.ts`, el servidor falso que usarás en el Paso 3:
+
+```ts
+// Archivo: tests/msw.ts
+// Un servidor falso para fetch: cada test le dice qué responder con servidor.use(...)
+import { setupServer } from "msw/node";
+
+export const servidor = setupServer();
+```
+
+Y `tests/setup.ts`, que Vitest ejecuta antes de cada archivo de tests:
+
+```ts
+// Archivo: tests/setup.ts
+// Se ejecuta antes de cada archivo de tests, y ANTES de que ese archivo importe nada
+import "@testing-library/jest-dom/vitest"; // matchers del DOM: toBeInTheDocument, toBeDisabled…
+import { cleanup } from "@testing-library/react";
+import { afterAll, afterEach } from "vitest";
+import { servidor } from "./msw";
+
+// Aquí arriba, no en un beforeAll: el cliente de Better Auth guarda fetch al importarse,
+// y un beforeAll se ejecuta después de los imports del test (cuando ya tiene el fetch real)
+servidor.listen({ onUnhandledFrame: "error" }); // una petición sin respuesta preparada es un error (en MSW 2: onUnhandledRequest)
+
+afterEach(() => {
+  cleanup(); // sin `globals: true`, Testing Library no desmonta solo lo que pintó cada test
+  servidor.resetHandlers(); // las respuestas de un test no pasan al siguiente
+});
+afterAll(() => servidor.close());
+```
+
+Las líneas de MSW se explican en el Paso 3. Ahora el primer componente, el campo de I5.5, `tests/components/CampoTexto.test.tsx`:
+
+```tsx
+// Archivo: tests/components/CampoTexto.test.tsx
+// @vitest-environment jsdom
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { CampoTexto } from "../../src/components/CampoTexto";
+
+describe("CampoTexto", () => {
+  it("la etiqueta da nombre al campo", () => {
+    render(<CampoTexto etiqueta="Correo" type="email" />);
+    expect(screen.getByLabelText("Correo")).toHaveAttribute("type", "email");
+  });
+
+  it("sin error, el campo es válido y no tiene descripción", () => {
+    render(<CampoTexto etiqueta="Correo" />);
+    const campo = screen.getByRole("textbox", { name: "Correo" });
+    expect(campo).not.toHaveAttribute("aria-invalid");
+    expect(campo).not.toHaveAccessibleDescription();
+  });
+
+  it("con error, el campo es inválido y el error es su descripción", () => {
+    render(<CampoTexto etiqueta="Correo" error="Introduce un correo válido" />);
+    const campo = screen.getByRole("textbox", { name: "Correo" });
+    expect(campo).toBeInvalid();
+    expect(campo).toHaveAccessibleDescription("Introduce un correo válido"); // lo que lee el lector de pantalla
+  });
+});
+```
+
+- **`render(<Componente />)`** monta el componente en el `document` de jsdom.
+- **`screen`** busca en toda la página. `getByLabelText("Correo")` encuentra el campo cuya etiqueta dice "Correo"; `getByRole("textbox", { name: "Correo" })`, el cuadro de texto con ese nombre accesible.
+- **Los _matchers_ de `jest-dom`** (`toBeInvalid`, `toHaveAccessibleDescription`, `toBeDisabled`…) comprueban el DOM como lo ve un lector de pantalla: `toHaveAccessibleDescription` lee el texto enlazado con `aria-describedby`.
+
+Y por qué `cleanup()` está en el _setup_: sin él, el primer test deja su campo montado y el segundo encuentra dos:
+
+```text
+× sin error, el campo es válido y no tiene descripción 35ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+TestingLibraryElementError: Found multiple elements with the role "textbox" and name "Correo"
+Tests  1 failed | 1 passed (2)
+```
+
+Testing Library solo limpia sola si Vitest tiene `globals: true` (que no usas: importas `it` y `expect` de `vitest`). Por eso se pide en cada `afterEach`.
+
+<Callout type="risk">
+
+- **Sin el comentario `@vitest-environment jsdom`**, el test se ejecuta en Node y falla con `document is not defined`. Ponlo en la primera línea de cada archivo de componentes.
+- **jsdom no es un navegador:** no calcula el diseño (no sabe si algo está tapado o fuera de la pantalla), no navega entre páginas y no ejecuta CSS. Lo que depende de eso se prueba con Playwright (I8.5).
+
+</Callout>
+
+## Paso 2: buscar como una persona, no por clase
+
+Testing Library tiene varias formas de buscar, y un orden de preferencia: primero las que usa todo el mundo.
+
+| Consulta                                   | Encuentra                          | Cuándo                                       |
+| ------------------------------------------ | ---------------------------------- | -------------------------------------------- |
+| `getByRole("button", { name: "Guardar" })` | Por su papel y su nombre accesible | **Casi siempre**                             |
+| `getByLabelText("Correo")`                 | El campo de esa etiqueta           | Campos de formulario                         |
+| `getByText("Cargando…")`                   | Por el texto visible               | Textos sin papel propio (párrafos, mensajes) |
+| `getByTestId("…")`                         | Por un atributo `data-testid`      | Último recurso                               |
+| `container.querySelector(".error")`        | Por selector CSS                   | Evítalo                                      |
+
+Y cada una tiene tres variantes: **`getBy`** lanza un error si no lo encuentra (para lo que tiene que estar); **`queryBy`** devuelve `null` (para comprobar que algo **no** está), y **`findBy`** espera a que aparezca (para lo que llega después, como la respuesta de una API).
+
+Para ver la diferencia con hechos, escribe el mismo test de dos formas, `tests/components/clases.test.tsx`:
+
+```tsx
+// Archivo: tests/components/clases.test.tsx
+// @vitest-environment jsdom
+// El mismo comportamiento, consultado de dos formas
+import { render, screen } from "@testing-library/react";
+import { expect, it } from "vitest";
+import { CampoTexto } from "../../src/components/CampoTexto";
+
+it("por clase: busca el <p class='error'>", () => {
+  const { container } = render(<CampoTexto etiqueta="Correo" error="Introduce un correo válido" />);
+  expect(container.querySelector("p.error")).toHaveTextContent("Introduce un correo válido");
+});
+
+it("como una persona: el campo «Correo» anuncia el error", () => {
+  render(<CampoTexto etiqueta="Correo" error="Introduce un correo válido" />);
+  expect(screen.getByRole("textbox", { name: "Correo" })).toHaveAccessibleDescription("Introduce un correo válido");
+});
+```
+
+Y ejecútalo tres veces: con `CampoTexto` como está, cambiando la clase del error por las de Tailwind (`className="mt-1 text-sm text-red-600"`, un cambio solo visual) y quitando el `aria-describedby` del campo (un fallo real: el lector de pantalla ya no lee el error):
+
+```text
+Con className="error":
+✓ por clase: busca el <p class='error'>
+✓ como una persona: el campo «Correo» anuncia el error
+Tests  2 passed (2)
+
+Con className="mt-1 text-sm text-red-600" (las clases de Tailwind):
+× por clase: busca el <p class='error'>
+✓ como una persona: el campo «Correo» anuncia el error
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+Error: expect(received).toHaveTextContent()
+Tests  1 failed | 1 passed (2)
+
+Y si el error deja de enlazarse (sin aria-describedby):
+✓ por clase: busca el <p class='error'>
+× como una persona: el campo «Correo» anuncia el error
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+Error: expect(element).toHaveAccessibleDescription()
+Tests  1 failed | 1 passed (2)
+```
+
+- **Con un cambio solo visual, el test por clase falla** y el otro sigue pasando: el componente funciona igual.
+- **Con un fallo real de accesibilidad, el test por clase sigue pasando:** el `<p class="error">` sigue ahí, aunque nadie que use un lector de pantalla vaya a oírlo. El que busca como una persona lo detecta.
+
+El test por clase está atado a cómo está hecho el componente; el otro, a lo que el componente hace. Borra `clases.test.tsx` cuando lo hayas comprobado.
+
+<Callout type="risk">
+
+- **Si no encuentras un elemento por su papel, puede que el problema sea el componente:** en `Entrenos` (Paso 3), los errores son párrafos sueltos, no enlazados a su campo, y el test solo puede buscarlos por texto. Es la misma carencia que tendría un lector de pantalla. `CampoTexto` lo resuelve con `aria-describedby`.
+- **`data-testid` no es accesible:** sirve cuando no hay otra forma, pero un test lleno de `getByTestId` deja de comprobar lo que ve el usuario.
+
+</Callout>
+
+## Paso 3: interacción con `userEvent` y la API con MSW
+
+`Entrenos` (I3.2) pide la lista con `fetch("/api/entrenos")` al montarse y envía el formulario con otro `fetch`. Para probarlo hace falta que **alguien responda** a esas peticiones. Puedes sustituir `fetch` con `vi.spyOn(globalThis, "fetch")`, pero entonces el test depende de cómo llama el componente a `fetch` (con qué argumentos, en qué orden). **MSW** (_Mock Service Worker_) intercepta las peticiones a nivel de red y responde según la URL y el método, como lo haría el servidor. El componente no sabe que no es la API real.
+
+`tests/components/Entrenos.test.tsx`:
+
+```tsx
+// Archivo: tests/components/Entrenos.test.tsx
+// @vitest-environment jsdom
+// La lista y el formulario de entrenos, con la API simulada por MSW
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { http, HttpResponse } from "msw";
+import { describe, expect, it } from "vitest";
+import Entrenos from "../../src/components/Entrenos";
+import { servidor } from "../msw";
+
+// Así llegan por la red: las fechas, como texto ISO
+const CARRERA = { id: "e1", tipo: "running", minutos: 45, km: 9, fecha: "2026-10-12T00:00:00.000Z", sensacion: 4, creado: "2026-10-12T08:00:00.000Z" };
+const FUERZA = { id: "e2", tipo: "fuerza", minutos: 30, fecha: "2026-10-13T00:00:00.000Z", notas: "pierna", sensacion: 3, creado: "2026-10-13T08:00:00.000Z" };
+
+const lista = () => within(screen.getByRole("list")).queryAllByRole("listitem").map((li) => li.textContent);
+
+describe("Entrenos", () => {
+  it("muestra los entrenos de la API, con el ritmo de los de running", async () => {
+    servidor.use(http.get("*/api/entrenos", () => HttpResponse.json({ entrenos: [CARRERA, FUERZA] })));
+    render(<Entrenos />);
+
+    expect(screen.getByText("Cargando…")).toBeInTheDocument();
+    expect(await screen.findAllByRole("listitem")).toHaveLength(2);
+    expect(lista()).toEqual([
+      "2026-10-12 · running · 45 min · 9 km · 5:00 min/km · sensación 4/5",
+      "2026-10-13 · fuerza · 30 min · pierna · sensación 3/5",
+    ]);
+    expect(screen.queryByText("Cargando…")).not.toBeInTheDocument();
+  });
+
+  it("si la API no responde, lo dice", async () => {
+    servidor.use(http.get("*/api/entrenos", () => HttpResponse.error())); // un fallo de red
+    render(<Entrenos />);
+    expect(await screen.findByText("No se pudieron cargar los entrenos")).toBeInTheDocument();
+  });
+
+  it("guardar un entreno lo envía a la API y lo pone el primero de la lista", async () => {
+    let enviado: unknown;
+    servidor.use(
+      http.get("*/api/entrenos", () => HttpResponse.json({ entrenos: [FUERZA] })),
+      http.post("*/api/entrenos", async ({ request }) => {
+        enviado = await request.json();
+        return HttpResponse.json({ ...CARRERA, id: "nuevo", minutos: 50, km: 10, fecha: "2026-10-15T00:00:00.000Z" }, { status: 201 });
+      }),
+    );
+    const usuario = userEvent.setup();
+    render(<Entrenos />);
+    await screen.findAllByRole("listitem");
+
+    await usuario.type(screen.getByLabelText("Minutos"), "50");
+    await usuario.type(screen.getByLabelText("Km"), "10");
+    await usuario.clear(screen.getByLabelText("Fecha"));
+    await usuario.type(screen.getByLabelText("Fecha"), "2026-10-15");
+    await usuario.click(screen.getByRole("button", { name: "Guardar" }));
+
+    await screen.findByText(/50 min/);
+    expect(enviado).toMatchObject({ tipo: "running", minutos: 50, km: 10, fecha: "2026-10-15T00:00:00.000Z", sensacion: 3 });
+    expect(lista()[0]).toBe("2026-10-15 · running · 50 min · 10 km · 5:00 min/km · sensación 4/5");
+    expect(screen.getByLabelText("Minutos")).toHaveValue(""); // el formulario se vacía
+  });
+
+  it("un dato incorrecto se avisa sin llamar a la API", async () => {
+    let posts = 0;
+    servidor.use(
+      http.get("*/api/entrenos", () => HttpResponse.json({ entrenos: [] })),
+      http.post("*/api/entrenos", () => {
+        posts++;
+        return HttpResponse.json({}, { status: 201 });
+      }),
+    );
+    const usuario = userEvent.setup();
+    render(<Entrenos />);
+
+    await usuario.selectOptions(screen.getByLabelText("Tipo"), "fuerza");
+    await usuario.type(screen.getByLabelText("Minutos"), "30");
+    await usuario.type(screen.getByLabelText("Km"), "5"); // km en un entreno de fuerza
+    await usuario.click(screen.getByRole("button", { name: "Guardar" }));
+
+    expect(await screen.findByText("Solo los entrenos de running llevan km")).toBeInTheDocument();
+    expect(posts).toBe(0);
+  });
+
+  it("los errores que devuelve el servidor (422) también se muestran", async () => {
+    servidor.use(
+      http.get("*/api/entrenos", () => HttpResponse.json({ entrenos: [] })),
+      http.post("*/api/entrenos", () => HttpResponse.json({ error: "Revisa los datos", campos: { minutos: ["Máximo 600 minutos"] } }, { status: 422 })),
+    );
+    const usuario = userEvent.setup();
+    render(<Entrenos />);
+
+    await usuario.type(screen.getByLabelText("Minutos"), "45");
+    await usuario.click(screen.getByRole("button", { name: "Guardar" }));
+
+    expect(await screen.findByText("Máximo 600 minutos")).toBeInTheDocument();
+  });
+});
+```
+
+- **`servidor.use(http.get("*/api/entrenos", …))`** prepara la respuesta **solo para ese test**; `resetHandlers()`, en el _setup_, la borra al terminar. El `*` delante acepta cualquier origen: jsdom usa `http://localhost:3000`, y el `fetch` relativo del componente va a `http://localhost:3000/api/entrenos`.
+- **`userEvent.setup()`** simula a una persona: `type` pulsa tecla a tecla (con sus eventos `keydown`, `input`, `keyup`), `click` mueve el foco, `tab` sale del campo y `selectOptions` elige en un `<select>`. Es más fiel que `fireEvent`, que solo dispara un evento suelto.
+- **`findBy…`** espera a que la lista llegue de la API (hasta 1 segundo, por defecto); justo después de `render`, todavía dice "Cargando…".
+- **El cuerpo que recibe MSW se comprueba también:** las fechas llegan como texto ISO, y la sensación por defecto es 3.
+- **`HttpResponse.error()`** simula un fallo de red, no un error HTTP: es lo que pasa cuando el servidor no responde.
+
+Ahora, el detalle del _setup_: **`servidor.listen()` está en el nivel superior del archivo, no en un `beforeAll`**. Muchas guías lo ponen en `beforeAll`, y con `Entrenos` funcionaría, porque el componente llama a `fetch` en el momento de hacer la petición. Pero el cliente de Better Auth guarda una referencia a `fetch` **al importarse**, y los `import` de un archivo de tests se ejecutan antes que sus `beforeAll`. Con el `beforeAll`, los tests del ejercicio dan esto:
+
+```text
+✓ FormRegistro > enviar vacío muestra los tres errores y no llama a la API
+✓ FormRegistro > valida cada campo al salir de él
+✓ FormRegistro > mientras se envía, el botón está desactivado
+× FormRegistro > si el registro va bien, envía los datos y vuelve a la página de origen
+× FormRegistro > un 422 muestra su mensaje y no sale de la página
+× FormRegistro > un 429 muestra su mensaje y no sale de la página
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 3 ⎯⎯⎯⎯⎯⎯⎯
+AssertionError: expected [] to deeply equal [ { name: 'Ana', …(2) } ]
+Error: expect(element).toHaveTextContent()
+Error: expect(element).toHaveTextContent()
+Tests  3 failed | 3 passed (6)
+```
+
+Las peticiones no pasan por MSW (`expected []`: el servidor falso no recibió nada) y salen a la red, a `http://localhost:3000`. En este laboratorio había otra aplicación escuchando en ese puerto y respondió `200` a todo. Por eso el test del botón desactivado **pasó por casualidad**, y el 422 y el 429 recibieron un éxito. El _setup_ se ejecuta antes que los `import` del test: escuchando ahí, MSW sustituye `fetch` antes de que nadie lo guarde.
+
+Y **`onUnhandledFrame: "error"`** convierte una petición sin respuesta preparada en un fallo del test, en lugar de dejarla salir:
+
+```text
+[MSW] Error: intercepted a request without a matching request handler:
+• POST /api/auth/sign-up/email
+× una petición sin respuesta preparada 1171ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+Caused by: InternalError: [MSW] Cannot bypass a request when using the "error" strategy for the "onUnhandledFrame" option.
+Tests  1 failed (1)
+```
+
+<Callout type="risk">
+
+- **En MSW 3, la opción se llama `onUnhandledFrame`.** En MSW 2 era `onUnhandledRequest`, y la mayoría de los ejemplos que encontrarás la usan. MSW 3 ignora el nombre antiguo y se queda en `"warn"` (un aviso y la petición sale a la red). `npm run check` lo detecta: `'onUnhandledRequest' does not exist in type…`. Revisa también los tests con el _check_.
+- **MSW solo intercepta lo que pasa por `fetch`, `XMLHttpRequest` o `http` de Node:** la conexión de MongoDB va por _sockets_ y no la ve. Los tests de integración (I8.4) siguen funcionando con el _setup_ activo.
+- **Una respuesta falsa es una suposición sobre la API:** si cambias lo que devuelve `GET /api/entrenos` y no el _handler_, el test seguirá en verde. Los tests de integración y los E2E comprueban la API real.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Testea el formulario de registro (`FormRegistro`, I5.5): los errores de validación, el botón desactivado mientras se envía y el envío correcto.
+2. Prueba también los errores del servidor: un 422 y un 429.
+3. Que ningún test dependa de las clases CSS.
+
+</Callout>
+
+Solución. `tests/components/FormRegistro.test.tsx`:
+
+```tsx
+// Archivo: tests/components/FormRegistro.test.tsx
+// @vitest-environment jsdom
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { delay, http, HttpResponse } from "msw";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import FormRegistro from "../../src/components/FormRegistro";
+import { servidor } from "../msw";
+
+const REGISTRO = "*/api/auth/sign-up/email";
+
+/** Registra en MSW una respuesta para el registro, y devuelve las peticiones que llegaron */
+function registroResponde(respuesta: () => Response | Promise<Response>) {
+  const recibidas: unknown[] = [];
+  servidor.use(
+    http.post(REGISTRO, async ({ request }) => {
+      recibidas.push(await request.json());
+      return respuesta();
+    }),
+  );
+  return recibidas;
+}
+
+/** Rellena el formulario como lo haría una persona: por la etiqueta de cada campo */
+async function rellenar(usuario: ReturnType<typeof userEvent.setup>, datos: { nombre: string; email: string; password: string }) {
+  await usuario.type(screen.getByLabelText("Nombre"), datos.nombre);
+  await usuario.type(screen.getByLabelText("Correo"), datos.email);
+  await usuario.type(screen.getByLabelText("Contraseña"), datos.password);
+}
+
+const ANA = { nombre: "Ana", email: "ana@example.com", password: "una-clave-larga" };
+const assign = vi.fn();
+
+beforeEach(() => {
+  // jsdom no navega ("Not implemented: navigation"): se sustituye location por uno con assign falso
+  vi.stubGlobal("location", { ...window.location, assign });
+});
+afterEach(() => vi.unstubAllGlobals()); // Vitest no lo deshace solo (unstubGlobals: false por defecto)
+
+describe("FormRegistro", () => {
+  it("enviar vacío muestra los tres errores y no llama a la API", async () => {
+    const recibidas = registroResponde(() => HttpResponse.json({}));
+    const usuario = userEvent.setup();
+    render(<FormRegistro volver="/" />);
+
+    await usuario.click(screen.getByRole("button", { name: "Crear cuenta" }));
+
+    expect(screen.getByLabelText("Nombre")).toHaveAccessibleDescription("Mínimo 2 caracteres");
+    expect(screen.getByLabelText("Correo")).toHaveAccessibleDescription("Introduce un correo válido");
+    expect(screen.getByLabelText("Contraseña")).toHaveAccessibleDescription("Mínimo 8 caracteres");
+    expect(recibidas).toHaveLength(0);
+  });
+
+  it("valida cada campo al salir de él", async () => {
+    const usuario = userEvent.setup();
+    render(<FormRegistro volver="/" />);
+
+    await usuario.type(screen.getByLabelText("Correo"), "ana@");
+    await usuario.tab(); // sale del campo: mode "onBlur"
+
+    expect(screen.getByLabelText("Correo")).toBeInvalid();
+    expect(screen.getByLabelText("Nombre")).toBeValid(); // los que no ha tocado, todavía no
+  });
+
+  it("mientras se envía, el botón está desactivado", async () => {
+    registroResponde(async () => {
+      await delay(200);
+      return HttpResponse.json({ token: null, user: { id: "u1" } });
+    });
+    const usuario = userEvent.setup();
+    render(<FormRegistro volver="/" />);
+    await rellenar(usuario, ANA);
+
+    await usuario.click(screen.getByRole("button", { name: "Crear cuenta" }));
+
+    expect(screen.getByRole("button", { name: "Creando cuenta…" })).toBeDisabled();
+    await vi.waitFor(() => expect(assign).toHaveBeenCalled()); // y al terminar, sigue
+  });
+
+  it("si el registro va bien, envía los datos y vuelve a la página de origen", async () => {
+    const recibidas = registroResponde(() => HttpResponse.json({ token: null, user: { id: "u1" } }));
+    const usuario = userEvent.setup();
+    render(<FormRegistro volver="/notas" />);
+    await rellenar(usuario, { ...ANA, email: "  Ana@Example.com " });
+
+    await usuario.click(screen.getByRole("button", { name: "Crear cuenta" }));
+
+    await vi.waitFor(() => expect(assign).toHaveBeenCalledWith("/notas"));
+    expect(recibidas).toEqual([{ name: "Ana", email: "ana@example.com", password: "una-clave-larga" }]); // correo limpio
+  });
+
+  it.each([
+    { status: 422, mensaje: "No se pudo crear la cuenta. Si ya tienes una, inicia sesión." },
+    { status: 429, mensaje: "Demasiados registros. Vuelve a probar más tarde." },
+  ])("un $status muestra su mensaje y no sale de la página", async ({ status, mensaje }) => {
+    registroResponde(() => HttpResponse.json({ message: "error" }, { status }));
+    const usuario = userEvent.setup();
+    render(<FormRegistro volver="/" />);
+    await rellenar(usuario, ANA);
+
+    await usuario.click(screen.getByRole("button", { name: "Crear cuenta" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(mensaje);
+    expect(assign).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Crear cuenta" })).toBeEnabled();
+  });
+});
+```
+
+```bash
+npx vitest run tests/components --reporter=verbose
+```
+
+```text
+✓ CampoTexto.test.tsx > CampoTexto > la etiqueta da nombre al campo 12ms
+✓ CampoTexto.test.tsx > CampoTexto > sin error, el campo es válido y no tiene descripción 36ms
+✓ CampoTexto.test.tsx > CampoTexto > con error, el campo es inválido y el error es su descripción 3ms
+✓ Entrenos.test.tsx > Entrenos > muestra los entrenos de la API, con el ritmo de los de running 87ms
+✓ FormRegistro.test.tsx > FormRegistro > enviar vacío muestra los tres errores y no llama a la API 77ms
+✓ Entrenos.test.tsx > Entrenos > si la API no responde, lo dice 14ms
+✓ Entrenos.test.tsx > Entrenos > guardar un entreno lo envía a la API y lo pone el primero de la lista 81ms
+✓ FormRegistro.test.tsx > FormRegistro > valida cada campo al salir de él 27ms
+✓ Entrenos.test.tsx > Entrenos > un dato incorrecto se avisa sin llamar a la API 43ms
+✓ Entrenos.test.tsx > Entrenos > los errores que devuelve el servidor (422) también se muestran 23ms
+✓ FormRegistro.test.tsx > FormRegistro > mientras se envía, el botón está desactivado 309ms
+✓ FormRegistro.test.tsx > FormRegistro > si el registro va bien, envía los datos y vuelve a la página de origen 105ms
+✓ FormRegistro.test.tsx > FormRegistro > un 422 muestra su mensaje y no sale de la página 90ms
+✓ FormRegistro.test.tsx > FormRegistro > un 429 muestra su mensaje y no sale de la página 99ms
+Test Files  3 passed (3)
+Tests  14 passed (14)
+Duration  1.11s (tests 51%, environment 32%, setup 10%, import 4%, transform 3%)
+```
+
+- **Todas las consultas son por etiqueta o por papel:** "el campo Nombre", "el botón Crear cuenta", "la alerta". Ninguna menciona una clase ni la estructura del HTML.
+- **Los errores se comprueban como descripción del campo** (`toHaveAccessibleDescription`), que es como los anuncia un lector de pantalla.
+- **El botón desactivado se ve gracias a la espera de MSW** (`delay(200)`): mientras la respuesta no llega, el botón dice "Creando cuenta…" y está desactivado. Después, `vi.waitFor` espera a que termine.
+- **`window.location.assign` se sustituye con `vi.stubGlobal`:** jsdom no navega ("Not implemented: navigation to another Document") y no deja espiar `assign` con `vi.spyOn` (`Cannot redefine property: assign`). `vi.unstubAllGlobals()` devuelve el `location` original al terminar cada test: Vitest no lo hace solo, salvo que actives `unstubGlobals: true` en la configuración.
+- **El correo se envía limpio:** escrito como `"  Ana@Example.com "`, llega a la API como `"ana@example.com"`, por el `trim` y el `toLowerCase` del esquema (I5.5).
+
+<Callout type="risk">
+
+- **Un test de componente no prueba que el registro funcione:** prueba que el formulario valida, envía lo correcto y reacciona a cada respuesta. Que Better Auth cree la cuenta se comprueba con un E2E (I8.5).
+- **Los títulos de `it.each` se recortan:** Vitest acorta los textos largos de `$mensaje` en el título. Pon en el título algo corto (`$status`) y el texto completo en la comprobación.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tus tests no se rompen al cambiar clases de Tailwind: buscas los elementos como una persona (por papel, etiqueta y texto), interactúas con `userEvent`, compruebas lo que anuncia un lector de pantalla, esperas lo asíncrono con `findBy` y simulas la API con MSW, arrancado en el _setup_ antes de cualquier `import` y con `onUnhandledFrame: "error"` para que ninguna petición se escape a la red.
+
+</Callout>
+
+## Resumen
+
+- `// @vitest-environment jsdom` en cada archivo de componentes, y un _setup_ con `jest-dom` y `cleanup()`.
+- `getByRole` y `getByLabelText` antes que `getByText`; nunca por clase. `getBy` (tiene que estar), `queryBy` (no está) y `findBy` (llegará).
+- Buscar por clase falló con un cambio solo visual y no vio un fallo real de accesibilidad.
+- `userEvent.setup()` simula a una persona: teclas, clics, tabulador.
+- MSW responde por URL y método. `servidor.listen()` en el nivel superior del _setup_, con `onUnhandledFrame: "error"` (en MSW 2, `onUnhandledRequest`).

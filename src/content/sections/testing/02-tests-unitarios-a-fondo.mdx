@@ -1,0 +1,574 @@
+---
+sectionId: "I8.2"
+course: "I8"
+title: "Tests unitarios a fondo"
+order: 2
+minutes: 70
+summary: "Eliges el matcher justo (toEqual no ve las claves undefined), parametrizas con it.each, aíslas un endpoint con vi.mock, vi.fn y un reloj falso, descubres un bug que solo sale fuera de UTC y cubres el reducer de I2.3."
+---
+
+En I8.1 escribiste tests con `toBe` y `toBeNull`. Vitest trae muchas más formas de comprobar un resultado, y elegir la equivocada da tests que pasan cuando no deberían. Además, la mayoría del código real no es una función pura como `ritmo()`: llama a una base de datos, lee la fecha de hoy o escribe en la consola. Para probarlo de forma unitaria hay que **sustituir** esas dependencias por otras controladas. En esta sección vas a elegir el _matcher_ justo, a escribir tablas de casos con `it.each`, a aislar un _endpoint_ con _mocks_ y un reloj falso, y a probar a fondo el _reducer_ de I2.3.
+
+**Lo que tendrás al terminar:** tests del esquema de los entrenos con una fila por caso, un test unitario de `GET /api/resumen` con los servicios y el reloj simulados, una zona horaria fija en los tests y 22 tests para `cuestionarioReducer`.
+
+**Requisitos:** la app de entrenos de I8.1.
+
+## Paso 1: el _matcher_ justo
+
+| _Matcher_          | Comprueba                                                            | Úsalo para                                                          |
+| ------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `toBe(x)`          | Que es **el mismo** valor (`Object.is`)                              | Números, textos, booleanos; o que un objeto es exactamente el mismo |
+| `toEqual(x)`       | Que tiene **el mismo contenido**, recursivamente                     | Objetos y _arrays_                                                  |
+| `toStrictEqual(x)` | Lo mismo, y además las claves `undefined` y la clase                 | Cuando una clave de más importa                                     |
+| `toMatchObject(x)` | Que contiene **al menos** esas propiedades                           | Comprobar lo importante e ignorar el resto (ids, fechas)            |
+| `toThrow(x)`       | Que la función lanza; `x` puede ser la clase, el mensaje o un objeto | Errores de validación y de reglas                                   |
+| `expect.any(Date)` | Cualquier valor de esa clase                                         | Valores que cambian en cada ejecución                               |
+
+Prueba cada uno con algo real: el esquema de los entrenos, que comparten el formulario, la API y la base de datos (I3.2). Crea `tests/unit/entreno.schema.test.ts`:
+
+```ts
+// Archivo: tests/unit/entreno.schema.test.ts
+// El esquema de los entrenos: la regla que comparten el formulario, la API y la base de datos
+import { describe, expect, it } from "vitest";
+import { ValidacionError, validar } from "../../src/lib/errores";
+import { EntrenoSchema } from "../../src/schemas/entreno";
+
+// Lo que envía un formulario: todo texto, y los campos vacíos como ""
+const formulario = { tipo: "fuerza", minutos: "30", km: "", fecha: "2026-10-12", notas: "", sensacion: "3" };
+
+describe("matchers: cuánto se parecen dos valores", () => {
+  it("toBe compara la identidad; toEqual, el contenido", () => {
+    const entreno = validar(EntrenoSchema, formulario);
+    expect(entreno.minutos).toBe(30); // primitivos: toBe
+    expect(entreno.fecha).not.toBe(new Date("2026-10-12")); // dos Date distintas…
+    expect(entreno.fecha).toEqual(new Date("2026-10-12")); // …con el mismo contenido
+  });
+
+  it("toEqual ignora las claves undefined; toStrictEqual, no", () => {
+    const entreno = validar(EntrenoSchema, formulario);
+    const sinKm = { tipo: "fuerza", minutos: 30, fecha: new Date("2026-10-12"), sensacion: 3 };
+    expect(entreno).toEqual(sinKm); // pasa, aunque entreno tiene km: undefined y notas: undefined
+    expect(entreno).not.toStrictEqual(sinKm); // toStrictEqual sí ve las dos claves
+    expect(Object.keys(entreno)).toContain("km"); // la clave existe: sin ignoreUndefined, el driver la guardaría como null (I3.2)
+  });
+
+  it("toMatchObject comprueba solo las propiedades que le das", () => {
+    const entreno = validar(EntrenoSchema, { ...formulario, tipo: "running", km: "8.5" });
+    expect(entreno).toMatchObject({ tipo: "running", km: 8.5 });
+    expect(entreno).toMatchObject({ fecha: expect.any(Date) }); // cualquier Date vale
+  });
+
+  it("toThrow comprueba que lanza, y qué lanza", () => {
+    const mal = { ...formulario, minutos: "0" };
+    expect(() => validar(EntrenoSchema, mal)).toThrow(ValidacionError); // la clase
+    expect(() => validar(EntrenoSchema, mal)).toThrow("Revisa los datos del formulario"); // el mensaje
+    expect(() => validar(EntrenoSchema, mal)).toThrow(expect.objectContaining({ status: 422, campos: { minutos: ["Mínimo 1 minuto"] } }));
+  });
+});
+
+describe("EntrenoSchema: cada dato incorrecto, su mensaje", () => {
+  // Una fila por caso: añadir un caso es añadir una línea
+  it.each([
+    { caso: "minutos a 0", cambio: { minutos: "0" }, campo: "minutos", mensaje: "Mínimo 1 minuto" },
+    { caso: "más de 600 minutos", cambio: { minutos: "601" }, campo: "minutos", mensaje: "Máximo 600 minutos" },
+    { caso: "minutos con decimales", cambio: { minutos: "30.5" }, campo: "minutos", mensaje: "Minutos enteros" },
+    { caso: "km en un entreno de fuerza", cambio: { km: "5" }, campo: "km", mensaje: "Solo los entrenos de running llevan km" },
+    { caso: "km negativos en running", cambio: { tipo: "running", km: "-3" }, campo: "km", mensaje: "Los km deben ser mayores que 0" },
+    { caso: "una sensación de 6", cambio: { sensacion: "6" }, campo: "sensacion", mensaje: "De 1 a 5" },
+    { caso: "notas de 201 caracteres", cambio: { notas: "a".repeat(201) }, campo: "notas", mensaje: "Máximo 200 caracteres" },
+    { caso: "un tipo que no existe", cambio: { tipo: "natación" }, campo: "tipo", mensaje: "Elige un tipo de entreno" },
+  ])("rechaza $caso", ({ cambio, campo, mensaje }) => {
+    const error = (() => {
+      try {
+        validar(EntrenoSchema, { ...formulario, ...cambio });
+      } catch (e) {
+        return e;
+      }
+    })();
+    expect(error).toBeInstanceOf(ValidacionError);
+    expect((error as ValidacionError).campos[campo]).toEqual([mensaje]);
+  });
+
+  it.each([
+    ["sin km ni notas", {}],
+    ["running con km", { tipo: "running", km: "10" }],
+    ["600 minutos justos", { minutos: "600" }],
+    ["notas de 200 caracteres", { notas: "a".repeat(200) }],
+  ])("acepta %s", (_caso, cambio) => {
+    expect(() => validar(EntrenoSchema, { ...formulario, ...cambio })).not.toThrow();
+  });
+});
+```
+
+- **Dos `Date` con la misma fecha no son `toBe`:** son dos objetos distintos. `toEqual` compara lo que contienen.
+- **`toEqual` ignora las claves con `undefined`.** Zod devuelve `km: undefined` y `notas: undefined` cuando el campo llega vacío, y `toEqual` da por bueno un objeto sin esas claves. `toStrictEqual` no. En I3.2 eso importó: el _driver_ de MongoDB guarda una clave `undefined` como `null`, y por eso el repositorio abre la colección con `ignoreUndefined: true`.
+- **`toThrow` acepta la clase, el mensaje o un objeto parcial** (`expect.objectContaining`), que comprueba también el código HTTP y los errores por campo.
+
+<Callout type="risk">
+
+- **Para `toThrow`, pasa una función, no la llamada:** `expect(() => validar(…)).toThrow()` funciona; `expect(validar(…)).toThrow()` lanza el error **antes** de que `expect` pueda atraparlo, y el test falla con el error en lugar de comprobarlo.
+- **`toMatchObject` puede ser demasiado tolerante:** `expect(entreno).toMatchObject({ tipo: "running" })` pasa aunque los km sean incorrectos. Úsalo para ignorar lo que de verdad no importa, y `toEqual` cuando todo el objeto importa.
+
+</Callout>
+
+## Paso 2: tests parametrizados con `it.each`
+
+El segundo bloque del archivo es una **tabla**: una fila por caso, y un solo test que se ejecuta con cada fila. Para añadir un caso, se añade una línea.
+
+- **Con objetos (`{ caso, cambio, campo, mensaje }`)** cada columna tiene nombre, y `$caso` en el título del test pone el valor de esa columna: "rechaza km en un entreno de fuerza".
+- **Con _arrays_ (`["sin km ni notas", {}]`)** los valores llegan por posición, y `%s` en el título pone el primero. Más corto, menos legible si hay muchas columnas.
+- **Los límites, por los dos lados:** 600 minutos se acepta y 601 se rechaza; 200 caracteres se aceptan y 201, no. Un fallo en el límite (un `>` donde iba `>=`) solo lo encuentra un test justo en el límite.
+
+<Callout type="risk">
+
+- **Una tabla no sustituye a pensar los casos:** ocho filas del mismo tipo de error son un solo caso repetido. Cada fila tiene que probar algo distinto.
+- **Si las filas necesitan lógica distinta** (un `if` dentro del test según la fila), son tests distintos: sepáralos.
+
+</Callout>
+
+## Paso 3: _fakes_, _stubs_, _spies_ y _mocks_
+
+Cuando el código depende de algo que no quieres en un test unitario (la base de datos, la red, la consola, la fecha), lo sustituyes por un **doble de prueba**:
+
+| Doble      | Qué es                                                          | En tu app                                                 |
+| ---------- | --------------------------------------------------------------- | --------------------------------------------------------- |
+| **_Fake_** | Una implementación de verdad, pero simplificada                 | El repositorio en memoria con un `Map` (I3.5)             |
+| **_Stub_** | Devuelve respuestas fijas                                       | `vi.fn().mockResolvedValue([])`: siempre una semana vacía |
+| **_Spy_**  | Registra cómo lo llamaron (y puede dejar pasar la llamada real) | `vi.spyOn(console, "error")`                              |
+| **_Mock_** | Sustituye un módulo entero                                      | `vi.mock("../../src/services", …)`                        |
+
+En Vitest, todos se construyen con `vi.fn()`, que da una función que registra sus llamadas. Primero, un _stub_ que también se usa como _spy_, para comprobar **qué** pide el servicio de resumen al repositorio. `tests/unit/resumen.spy.test.ts`:
+
+```ts
+// Archivo: tests/unit/resumen.spy.test.ts
+// Un repositorio "espía": devuelve lo que le digas y registra con qué lo llamaron
+import { describe, expect, it, vi } from "vitest";
+import { crearServicioResumen } from "../../src/services/resumen.service";
+
+describe("servicio de resumen", () => {
+  it("pide al repositorio la semana del día y la anterior, sin solaparse", async () => {
+    const entre = vi.fn().mockResolvedValue([]); // un fake mínimo: siempre una semana vacía
+    const servicio = crearServicioResumen({ entrenos: { entre } }, 150);
+
+    await servicio.semanal("ana", new Date("2026-10-15T18:30:00Z")); // un jueves por la tarde
+
+    expect(entre).toHaveBeenCalledTimes(2);
+    expect(entre).toHaveBeenNthCalledWith(1, "ana", new Date("2026-10-12T00:00:00Z"), new Date("2026-10-19T00:00:00Z"));
+    expect(entre).toHaveBeenNthCalledWith(2, "ana", new Date("2026-10-05T00:00:00Z"), new Date("2026-10-12T00:00:00Z"));
+  });
+});
+```
+
+Para un jueves por la tarde, el servicio pide la semana del lunes 12 al lunes 19 (sin incluirlo) y la anterior, del 5 al 12. Sin un _spy_, solo verías el resultado; con él, compruebas que los rangos no se solapan.
+
+Ahora la capa HTTP. `GET /api/resumen` lee la URL, comprueba la sesión, valida `?semana`, llama al servicio y responde. Para probar **solo** eso, sin MongoDB, se sustituye el módulo de los servicios con `vi.mock`, se construye a mano el contexto de Astro (la URL y `locals`) y se fija la fecha de hoy. `tests/unit/api-resumen.test.ts`:
+
+```ts
+// Archivo: tests/unit/api-resumen.test.ts
+// La capa HTTP del resumen, aislada: los servicios son falsos (vi.mock) y el reloj también
+import type { APIContext } from "astro";
+import type { UsuarioSesion } from "../../src/lib/auth";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// vi.mock sustituye el módulo ENTERO antes de que nadie lo importe (Vitest lo sube al principio del archivo)
+vi.mock("../../src/services", () => ({
+  servicios: { resumen: { semanal: vi.fn(async () => ({ semana: "falsa" })) } },
+}));
+
+import { GET } from "../../src/pages/api/resumen";
+import { servicios } from "../../src/services";
+
+const ana: UsuarioSesion = { id: "ana", nombre: "Ana", email: "ana@example.com", rol: "user", zonaHoraria: "America/Mexico_City" };
+
+/** Lo mínimo del contexto de Astro que usa este endpoint: la URL y locals */
+function contexto(ruta: string, usuario: UsuarioSesion | null = ana) {
+  return { url: new URL(ruta, "http://localhost"), locals: { usuario, sesion: null } } as unknown as APIContext;
+}
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] }); // solo la fecha: los setTimeout siguen funcionando solos
+  vi.setSystemTime(new Date("2026-10-15T10:00:00Z")); // "hoy" es un jueves fijo
+});
+afterEach(() => {
+  vi.useRealTimers();
+  // No hace falta vi.clearAllMocks(): Vitest borra las llamadas registradas antes de cada test (clearMocks)
+});
+
+describe("GET /api/resumen", () => {
+  it("sin ?semana usa la fecha de hoy", async () => {
+    const res = await GET(contexto("/api/resumen"));
+    expect(res.status).toBe(200);
+    expect(servicios.resumen.semanal).toHaveBeenCalledTimes(1);
+    expect(servicios.resumen.semanal).toHaveBeenCalledWith("ana", new Date("2026-10-15T10:00:00Z"));
+  });
+
+  it("con ?semana usa ese día, a las 00:00 UTC", async () => {
+    await GET(contexto("/api/resumen?semana=2026-10-05"));
+    expect(servicios.resumen.semanal).toHaveBeenCalledWith("ana", new Date("2026-10-05T00:00:00Z"));
+  });
+
+  it("una fecha mal escrita es un 422 y no llega al servicio", async () => {
+    const res = await GET(contexto("/api/resumen?semana=15-10-2026"));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ campos: { semana: ["Fecha no válida"] } });
+    expect(servicios.resumen.semanal).not.toHaveBeenCalled();
+  });
+
+  it("sin sesión es un 401", async () => {
+    const res = await GET(contexto("/api/resumen", null));
+    expect(res.status).toBe(401);
+  });
+
+  it("un fallo inesperado del servicio es un 500 que no cuenta el detalle", async () => {
+    vi.mocked(servicios.resumen.semanal).mockRejectedValueOnce(new Error("conexión perdida con MongoDB"));
+    const consola = vi.spyOn(console, "error").mockImplementation(() => {}); // espiarlo y silenciarlo
+    const res = await GET(contexto("/api/resumen"));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Error interno" }); // el cliente no ve el mensaje
+    expect(consola).toHaveBeenCalledWith("[api] Error no controlado:", expect.any(Error)); // el registro, sí
+    consola.mockRestore();
+  });
+});
+```
+
+```bash
+npx vitest run tests/unit/entreno.schema.test.ts tests/unit/api-resumen.test.ts tests/unit/resumen.spy.test.ts --reporter=verbose
+```
+
+```text
+✓ resumen.spy.test.ts > servicio de resumen > pide al repositorio la semana del día y la anterior, sin solaparse 1ms
+✓ entreno.schema.test.ts > matchers: cuánto se parecen dos valores > toBe compara la identidad; toEqual, el contenido 2ms
+✓ entreno.schema.test.ts > matchers: cuánto se parecen dos valores > toEqual ignora las claves undefined; toStrictEqual, no 0ms
+✓ entreno.schema.test.ts > matchers: cuánto se parecen dos valores > toMatchObject comprueba solo las propiedades que le das 0ms
+✓ entreno.schema.test.ts > matchers: cuánto se parecen dos valores > toThrow comprueba que lanza, y qué lanza 1ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza minutos a 0 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza más de 600 minutos 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza minutos con decimales 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza km en un entreno de fuerza 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza km negativos en running 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza una sensación de 6 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza notas de 201 caracteres 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > rechaza un tipo que no existe 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > acepta sin km ni notas 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > acepta running con km 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > acepta 600 minutos justos 0ms
+✓ entreno.schema.test.ts > EntrenoSchema: cada dato incorrecto, su mensaje > acepta notas de 200 caracteres 0ms
+✓ api-resumen.test.ts > GET /api/resumen > sin ?semana usa la fecha de hoy 3ms
+✓ api-resumen.test.ts > GET /api/resumen > con ?semana usa ese día, a las 00:00 UTC 0ms
+✓ api-resumen.test.ts > GET /api/resumen > una fecha mal escrita es un 422 y no llega al servicio 1ms
+✓ api-resumen.test.ts > GET /api/resumen > sin sesión es un 401 0ms
+✓ api-resumen.test.ts > GET /api/resumen > un fallo inesperado del servicio es un 500 que no cuenta el detalle 0ms
+Test Files  3 passed (3)
+Tests  22 passed (22)
+Duration  325ms (setup 48%, import 34%, transform 14%, tests 3%, worker 1%)
+```
+
+- **`vi.mock` se ejecuta antes que los `import`**, aunque esté escrito después: Vitest lo sube al principio del archivo. Así, cuando el _endpoint_ importa `servicios`, recibe el falso.
+- **`vi.mocked(…)`** solo sirve para TypeScript: le dice que la función es un _mock_ y tiene `mockRejectedValueOnce`. `mockRejectedValueOnce` hace que **la siguiente** llamada falle, y solo esa.
+- **`vi.spyOn(console, "error").mockImplementation(() => {})`** registra las llamadas y, además, evita que el error ensucie la salida de los tests. `mockRestore()` devuelve a `console.error` su comportamiento normal.
+- **Las llamadas registradas no pasan de un test a otro:** Vitest 5 trae `clearMocks: true` por defecto, y las borra antes de cada test. Comprobado: sin ninguna limpieza en `afterEach`, el test del 422 (`not.toHaveBeenCalled()`) sigue pasando después de los dos que llaman al servicio.
+
+<Callout type="risk">
+
+- **Cada _mock_ es una suposición:** este test supone que `servicios.resumen.semanal` devuelve algo que se puede pasar a JSON. Si el servicio real cambia su firma, el test seguirá en verde. Por eso los _mocks_ no sustituyen a los tests de integración (I8.4), que usan las piezas reales.
+- **`clearMocks` borra las llamadas, no las implementaciones:** un `mockImplementation` o un `spyOn` siguen activos en el test siguiente. Por eso el _spy_ de la consola termina con `mockRestore()`. Si prefieres que se restaure siempre, activa `restoreMocks: true` en la configuración.
+- **No hagas _mock_ de lo que estás probando:** si sustituyes `validar` en el test del _endpoint_, ya no compruebas que el 422 funciona.
+
+</Callout>
+
+## Paso 4: el reloj falso y la zona horaria
+
+El test del _endpoint_ necesita que "hoy" sea siempre el mismo día; si no, su resultado cambiaría cada semana. `vi.useFakeTimers()` sustituye el reloj, y `vi.setSystemTime()` lo pone en la fecha que digas. Pero sustituye **todo**: la fecha y también los temporizadores (`setTimeout`, `setInterval`, `setImmediate`). Mira la diferencia, con una espera de 10 ms:
+
+```ts
+// Archivo: tests/unit/reloj.test.ts
+// Qué congela vi.useFakeTimers(): con todo falso, una espera de 10 ms no termina nunca
+import { afterEach, expect, it, vi } from "vitest";
+
+const esperar = (ms: number) => new Promise((resolver) => setTimeout(resolver, ms));
+afterEach(() => vi.useRealTimers());
+
+it("con el reloj falso completo, la espera no termina sola", { timeout: 1_000 }, async () => {
+  vi.useFakeTimers();
+  await esperar(10); // el setTimeout es falso: nadie lo dispara
+  expect(true).toBe(true);
+});
+
+it("avanzando el reloj a mano, sí", async () => {
+  vi.useFakeTimers();
+  const espera = esperar(10);
+  await vi.advanceTimersByTimeAsync(10); // "pasan" 10 ms al instante
+  await espera;
+});
+
+it("con toFake: ['Date'], solo cambia la fecha y la espera es real", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-15T10:00:00Z"));
+  await esperar(10);
+  expect(new Date().toISOString()).toBe("2026-10-15T10:00:00.000Z"); // la fecha no avanza
+});
+```
+
+```text
+× con el reloj falso completo, la espera no termina sola 1008ms
+✓ avanzando el reloj a mano, sí 2ms
+✓ con toFake: ['Date'], solo cambia la fecha y la espera es real 13ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+Error: Test timed out in 1000ms.
+Tests  1 failed | 2 passed (3)
+```
+
+Con el reloj falso completo, el `setTimeout` de 10 ms no se dispara nunca, y el test se queda esperando hasta su límite. Por eso el test del _endpoint_ usa **`toFake: ["Date"]`**: solo la fecha es falsa, y cualquier librería que use temporizadores sigue funcionando. (Este archivo solo es una demostración: no lo dejes en `tests/`, porque el primer test falla a propósito.)
+
+Ahora rompe el _endpoint_ a propósito, como si alguien hubiera olvidado la `Z` (UTC) de la fecha. En `src/pages/api/resumen.ts`, cambia `` `${semana}T00:00:00Z` `` por `` `${semana}T00:00:00` ``. Sin la `Z`, JavaScript interpreta la hora en la zona horaria **del ordenador**:
+
+```text
+ FAIL  tests/unit/api-resumen.test.ts > GET /api/resumen > con ?semana usa ese día, a las 00:00 UTC
+AssertionError: expected "vi.fn()" to be called with arguments: [ 'ana', 2026-10-05T00:00:00.000Z ]
+Received:
+  1st vi.fn() call:
+  [
+    "ana",
+-   2026-10-05T00:00:00.000Z,
++   2026-10-05T06:00:00.000Z,
+  ]
+Number of calls: 1
+ ❯ tests/unit/api-resumen.test.ts:41:39
+ Test Files  1 failed (1)
+      Tests  1 failed | 4 passed (5)
+```
+
+El test lo detecta: el lunes 5 empieza a las 06:00 UTC, la medianoche de Ciudad de México. Pero ejecuta el mismo test, con el mismo error, en tres zonas horarias:
+
+```text
+TZ=America/Mexico_City  1 failed | 4 passed (5)
+TZ=Europe/Madrid        1 failed | 4 passed (5)
+TZ=UTC                  5 passed (5)
+```
+
+**En UTC, el test pasa.** Y UTC es la zona horaria de casi todos los servidores de CI (GitHub Actions) y de despliegue (Vercel): el bug llegaría a producción con todos los tests en verde. La solución es fijar en los tests una zona horaria que **no** sea UTC. Sustituye `vitest.config.ts`:
+
+```ts
+// Archivo: vitest.config.ts
+// getViteConfig: Vitest usa la configuración de Astro (astro:env, astro:actions, alias…)
+/// <reference types="vitest/config" />
+import { getViteConfig } from "astro/config";
+
+export default getViteConfig({
+  test: {
+    include: ["tests/{unit,integration}/**/*.test.ts"],
+    hookTimeout: 120_000, // la primera vez, mongodb-memory-server descarga MongoDB
+    // Una zona horaria que NO es UTC: los bugs de fechas salen también en un servidor en UTC (I8.2)
+    env: { TZ: "America/Mexico_City" },
+  },
+});
+```
+
+```text
+Con env: { TZ: "America/Mexico_City" } en vitest.config.ts, y el endpoint sin la Z:
+  TZ=UTC             1 failed | 4 passed (5)
+  TZ=Europe/Madrid   1 failed | 4 passed (5)
+```
+
+Ahora el test falla en cualquier máquina. Deshaz el cambio del _endpoint_ y vuelve a ejecutar: todo en verde.
+
+<Callout type="risk">
+
+- **Restaura siempre el reloj real** (`vi.useRealTimers()` en `afterEach`): si un test falla antes de llegar al final, el reloj falso se quedaría para los siguientes.
+- **La zona horaria fija no sustituye a guardar las fechas en UTC:** solo hace que los errores de zona horaria se vean. Las fechas se guardan y se comparan en UTC (`Date.UTC`, `getUTCDay`, como `lunesDe`), y se convierten a la hora local solo para mostrarlas.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe tests completos para el _reducer_ del cuestionario de I2.3 (`cuestionarioReducer`), cubriendo todas las acciones en cada fase y sus casos límite.
+2. Comprueba con la cobertura que no queda ninguna rama sin probar.
+
+</Callout>
+
+Solución. Copia en tu app de entrenos `src/lib/preguntas.ts` y `src/lib/cuestionario.ts` tal como los dejaste en I2.3. `tests/unit/cuestionario.test.ts`:
+
+```ts
+// Archivo: tests/unit/cuestionario.test.ts
+// Todas las acciones del reducer de I2.3, en cada fase, y sus casos límite
+import { describe, expect, it } from "vitest";
+import { cuestionarioReducer as reducer, estadoInicial, type EstadoCuestionario } from "../../src/lib/cuestionario";
+import { PREGUNTAS_DEMO as PREGUNTAS } from "../../src/lib/preguntas";
+
+/** Responde en orden las preguntas de un cuestionario de `total` */
+const responder = (total: number, opciones: number[]) =>
+  opciones.reduce((s, opcion, paso) => reducer(reducer(s, { type: "ir", paso }), { type: "elegir", opcion }), estadoInicial(total));
+
+/** Un cuestionario de 3 preguntas ya enviado (las correctas son [1, 1, 1]) */
+const enviado = (opciones = [1, 1, 0]) => reducer(responder(3, opciones), { type: "enviar", preguntas: PREGUNTAS });
+
+describe("estadoInicial", () => {
+  it("empieza en la primera pregunta, sin respuestas", () => {
+    expect(estadoInicial(3)).toEqual({ fase: "respondiendo", paso: 0, respuestas: [null, null, null] });
+  });
+});
+
+describe("elegir", () => {
+  it("guarda la opción en la pregunta actual", () => {
+    const s = reducer(reducer(estadoInicial(3), { type: "ir", paso: 1 }), { type: "elegir", opcion: 2 });
+    expect(s).toMatchObject({ paso: 1, respuestas: [null, 2, null] });
+  });
+
+  it("elegir otra vez sustituye la respuesta", () => {
+    const s = reducer(responder(1, [0]), { type: "elegir", opcion: 2 });
+    expect(s).toMatchObject({ respuestas: [2] });
+  });
+
+  it("no modifica el estado anterior (devuelve uno nuevo)", () => {
+    const antes = estadoInicial(3);
+    const despues = reducer(antes, { type: "elegir", opcion: 1 });
+    expect(despues).not.toBe(antes);
+    expect(antes.respuestas).toEqual([null, null, null]); // React depende de esto para saber que cambió
+  });
+
+  it("en la pantalla de resultado no hace nada (el mismo objeto)", () => {
+    const s = enviado();
+    expect(reducer(s, { type: "elegir", opcion: 0 })).toBe(s);
+  });
+
+  it("acepta cualquier número: validar la opción es cosa del componente", () => {
+    expect(reducer(estadoInicial(1), { type: "elegir", opcion: 99 })).toMatchObject({ respuestas: [99] });
+  });
+});
+
+describe("ir", () => {
+  it.each([
+    { pedido: 1, queda: 1 },
+    { pedido: 2, queda: 2 },
+    { pedido: 99, queda: 2 }, // por arriba, la última
+    { pedido: -1, queda: 0 }, // por abajo, la primera
+  ])("pedir el paso $pedido deja el paso $queda", ({ pedido, queda }) => {
+    expect(reducer(estadoInicial(3), { type: "ir", paso: pedido })).toMatchObject({ paso: queda });
+  });
+
+  it("conserva las respuestas al moverse", () => {
+    const s = reducer(responder(3, [1, 0]), { type: "ir", paso: 0 });
+    expect(s).toMatchObject({ paso: 0, respuestas: [1, 0, null] });
+  });
+
+  it("en la pantalla de resultado no hace nada", () => {
+    const s = enviado();
+    expect(reducer(s, { type: "ir", paso: 0 })).toBe(s);
+  });
+});
+
+describe("enviar", () => {
+  it.each([
+    { respuestas: [1, 1, 1], aciertos: 3 },
+    { respuestas: [1, 1, 0], aciertos: 2 },
+    { respuestas: [0, 0, 0], aciertos: 0 },
+  ])("con $respuestas acierta $aciertos", ({ respuestas, aciertos }) => {
+    expect(enviado(respuestas)).toEqual({ fase: "resultado", respuestas, aciertos });
+  });
+
+  it("con alguna pregunta sin responder no cambia nada", () => {
+    const s = responder(3, [1, 1]);
+    expect(reducer(s, { type: "enviar", preguntas: PREGUNTAS })).toBe(s);
+  });
+
+  it("si hay menos preguntas que respuestas, las que sobran no cuentan como acierto", () => {
+    const s = reducer(responder(3, [1, 1, 1]), { type: "enviar", preguntas: PREGUNTAS.slice(0, 2) });
+    expect(s).toMatchObject({ fase: "resultado", aciertos: 2 });
+  });
+
+  it("enviar dos veces no vuelve a calcular", () => {
+    const s = enviado();
+    expect(reducer(s, { type: "enviar", preguntas: PREGUNTAS })).toBe(s);
+  });
+
+  it("un cuestionario sin preguntas se envía con 0 aciertos", () => {
+    expect(reducer(estadoInicial(0), { type: "enviar", preguntas: [] })).toEqual({ fase: "resultado", respuestas: [], aciertos: 0 });
+  });
+});
+
+describe("repetir", () => {
+  it.each<[string, EstadoCuestionario]>([
+    ["desde el resultado", enviado()],
+    ["a medio responder", responder(3, [2])],
+  ])("%s vuelve al estado inicial completo", (_caso, estado) => {
+    expect(reducer(estado, { type: "repetir", total: 3 })).toEqual(estadoInicial(3));
+  });
+
+  it("puede empezar un cuestionario con otro número de preguntas", () => {
+    expect(reducer(enviado(), { type: "repetir", total: 5 })).toMatchObject({ respuestas: [null, null, null, null, null] });
+  });
+});
+```
+
+```text
+✓ estadoInicial > empieza en la primera pregunta, sin respuestas 1ms
+✓ elegir > guarda la opción en la pregunta actual 0ms
+✓ elegir > elegir otra vez sustituye la respuesta 0ms
+✓ elegir > no modifica el estado anterior (devuelve uno nuevo) 0ms
+✓ elegir > en la pantalla de resultado no hace nada (el mismo objeto) 0ms
+✓ elegir > acepta cualquier número: validar la opción es cosa del componente 0ms
+✓ ir > pedir el paso 1 deja el paso 1 0ms
+✓ ir > pedir el paso 2 deja el paso 2 0ms
+✓ ir > pedir el paso 99 deja el paso 2 0ms
+✓ ir > pedir el paso -1 deja el paso 0 0ms
+✓ ir > conserva las respuestas al moverse 0ms
+✓ ir > en la pantalla de resultado no hace nada 0ms
+✓ enviar > con [ 1, 1, 1 ] acierta 3 0ms
+✓ enviar > con [ 1, 1, 0 ] acierta 2 0ms
+✓ enviar > con [ 0, 0, 0 ] acierta 0 0ms
+✓ enviar > con alguna pregunta sin responder no cambia nada 0ms
+✓ enviar > si hay menos preguntas que respuestas, las que sobran no cuentan como acierto 0ms
+✓ enviar > enviar dos veces no vuelve a calcular 0ms
+✓ enviar > un cuestionario sin preguntas se envía con 0 aciertos 0ms
+✓ repetir > desde el resultado vuelve al estado inicial completo 0ms
+✓ repetir > a medio responder vuelve al estado inicial completo 0ms
+✓ repetir > puede empezar un cuestionario con otro número de preguntas 0ms
+Test Files  1 passed (1)
+Tests  22 passed (22)
+Duration  70ms (transform 58%, import 22%, tests 12%, worker 6%, environment 2%)
+```
+
+- **Cada acción, en cada fase:** `elegir`, `ir` y `enviar` cambian el estado en `"respondiendo"` y no hacen nada en `"resultado"`; `repetir` funciona en las dos.
+- **"No hace nada" se comprueba con `toBe`:** el _reducer_ devuelve **el mismo** objeto, y así React sabe que no tiene que volver a pintar. Con `toEqual`, un _reducer_ que devolviera una copia idéntica también pasaría.
+- **"Devuelve uno nuevo" se comprueba también:** si `elegir` modificara el estado anterior en lugar de crear otro, React no vería el cambio.
+- **Los casos límite:** `ir` fuera de rango por los dos lados, enviar con huecos, enviar dos veces, menos preguntas que respuestas y un cuestionario sin preguntas.
+- **Un test documenta una decisión:** "acepta cualquier número" no es un bug que arreglar, sino lo que hace el _reducer_: la opción la valida el componente, que solo ofrece las que existen. Si algún día cambia, el test avisará.
+
+La cobertura, solo de ese archivo (la herramienta la instalas aquí y la verás a fondo en I8.6):
+
+```bash
+npm install --save-dev @vitest/coverage-v8
+npx vitest run tests/unit/cuestionario.test.ts --coverage --coverage.include=src/lib/cuestionario.ts --coverage.reporter=text
+```
+
+```text
+Statements   : 100% ( 21/21 )
+Branches     : 100% ( 14/14 )
+Functions    : 100% ( 5/5 )
+Lines        : 100% ( 14/14 )
+```
+
+Las 14 ramas del _reducer_ (cada `case` y cada `if`) se ejecutan al menos una vez.
+
+<Callout type="risk">
+
+- **El 100 % de cobertura dice que cada rama se ejecutó, no que se comprobó bien:** un test sin `expect` también "cubre" el código. Lo que importa son las comprobaciones de cada test.
+- **No uses el código para calcular lo esperado:** `expect(enviado()).toEqual(reducer(…))` compara el _reducer_ consigo mismo. Lo esperado se escribe a mano: `{ fase: "resultado", respuestas: [1, 1, 0], aciertos: 2 }`.
+
+</Callout>
+
+<Callout type="mastery">
+
+Cubres los casos límite antes de que aparezcan en producción: eliges el _matcher_ que comprueba lo que importa (`toStrictEqual` cuando una clave `undefined` cuenta, `toBe` para "es el mismo objeto"), escribes tablas de casos con `it.each` que prueban cada límite por los dos lados, aíslas el código con _stubs_, _spies_ y _mocks_ sabiendo qué suposición hace cada uno, fijas la fecha con `toFake: ["Date"]` y ejecutas los tests en una zona horaria que no es UTC.
+
+</Callout>
+
+## Resumen
+
+- `toBe` (identidad), `toEqual` (contenido, ignora `undefined`), `toStrictEqual` (todo), `toMatchObject` (lo que indiques) y `toThrow` (con una función).
+- `it.each` con objetos y `$columna`: una fila por caso, y los límites por los dos lados.
+- _Fake_, _stub_, _spy_ y _mock_: `vi.fn()`, `vi.spyOn()` y `vi.mock()`. Vitest borra las llamadas entre tests (`clearMocks`), pero no las implementaciones.
+- `vi.useFakeTimers({ toFake: ["Date"] })` y `vi.setSystemTime()` fijan "hoy" sin congelar los temporizadores.
+- `env: { TZ: "America/Mexico_City" }` en `vitest.config.ts`: los bugs de zona horaria salen también en un servidor en UTC.

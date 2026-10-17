@@ -1,0 +1,650 @@
+---
+sectionId: "I8.4"
+course: "I8"
+title: "Tests de integración con MongoDB"
+order: 4
+minutes: 75
+summary: "Pruebas repositorio y endpoints contra un MongoDB en memoria, vacías la base antes de cada test (el de I3.5 fallaba en 4 de 10 órdenes), aíslas la conexión del .env y encuentras un bug que el test unitario no veía."
+---
+
+En I8.2 aislaste el _endpoint_ del resumen con un servicio falso, y en I3.5 probaste el servicio de entrenos con un repositorio falso, un `Map`. Esos tests son rápidos, pero cada doble es una **suposición**: que el repositorio falso se comporta como MongoDB. Un test de **integración** quita la suposición: usa las piezas reales, juntas, contra una base de datos de verdad. En esta sección vas a preparar esa base para que cada test empiece limpio, a probar los _endpoints_ con todas sus capas sin tocar tu base real, y a comprobar que el repositorio hace lo que dice. Y vas a encontrar un bug que llevaba en la app desde I3.
+
+**Lo que tendrás al terminar:** un ayudante que da a cada archivo de tests su propio MongoDB en memoria, vacío antes de cada test; tests de los _endpoints_ de entrenos con el servicio, el repositorio y MongoDB reales; y un repositorio con un bug menos.
+
+**Requisitos:** la app de entrenos de I8.3, con `mongodb-memory-server` (I3.5).
+
+## Paso 1: un MongoDB en memoria, vacío antes de cada test
+
+**`mongodb-memory-server`** descarga un binario de MongoDB (la primera vez) y arranca un servidor de verdad, en un puerto libre, con los datos en una carpeta temporal. Las consultas, los índices y los operadores funcionan como en tu base real, y al terminar no queda nada.
+
+El test del repositorio de I3.5 arranca uno en `beforeAll` y lo comparte entre sus tres tests. Ejecútalo varias veces en **orden aleatorio**, con la opción `--sequence.shuffle` y una semilla distinta cada vez:
+
+```bash
+npx vitest run tests/integration/entrenos.repo.test.ts --sequence.shuffle --sequence.seed=2
+```
+
+```text
+semilla 1  3 passed (3)                 aísla los entrenos por|no guarda los campos u|un id mal formado es '|
+semilla 2  1 failed | 2 passed (3)      no guarda los campos u|aísla los entrenos por|un id mal formado es '|
+semilla 3  1 failed | 2 passed (3)      un id mal formado es '|no guarda los campos u|aísla los entrenos por|
+semilla 4  3 passed (3)                 aísla los entrenos por|no guarda los campos u|un id mal formado es '|
+semilla 5  3 passed (3)                 aísla los entrenos por|no guarda los campos u|un id mal formado es '|
+semilla 6  3 passed (3)                 aísla los entrenos por|no guarda los campos u|un id mal formado es '|
+semilla 7  3 passed (3)                 aísla los entrenos por|no guarda los campos u|un id mal formado es '|
+semilla 8  3 passed (3)                 un id mal formado es '|aísla los entrenos por|no guarda los campos u|
+semilla 9  1 failed | 2 passed (3)      un id mal formado es '|no guarda los campos u|aísla los entrenos por|
+semilla 10 1 failed | 2 passed (3)      no guarda los campos u|aísla los entrenos por|un id mal formado es '|
+```
+
+**Falla en 4 de cada 10 órdenes**, y siempre por lo mismo:
+
+```text
+ FAIL  tests/integration/entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales
+AssertionError: expected { total: 3, minutos: 100 } to deeply equal { total: 2, minutos: 70 }
+- Expected
++ Received
+  {
+-   "minutos": 70,
+-   "total": 2,
++   "minutos": 100,
++   "total": 3,
+  }
+ ❯ tests/integration/entrenos.repo.test.ts:29:39
+```
+
+Cuando "no guarda los campos undefined" se ejecuta antes que "aísla los entrenos por usuario", deja en la base un entreno de Ana de 30 minutos, y los totales de Ana pasan de 2 a 3. El test de los totales depende de lo que **otro** test dejó en la base. En el orden en que están escritos pasa siempre, así que el problema no se ve hasta que alguien añade un test, cambia el orden o los ejecuta en paralelo.
+
+La solución es que cada test empiece con la base vacía. Crea `tests/integration/mongo.ts`, un ayudante que cualquier archivo de integración puede usar:
+
+```ts
+// Archivo: tests/integration/mongo.ts
+// Un MongoDB en memoria para cada archivo de tests, con las colecciones vacías antes de cada test
+import { MongoClient, type Db } from "mongodb";
+import { MongoMemoryServer } from "mongodb-memory-server";
+import { afterAll, beforeAll, beforeEach } from "vitest";
+
+export function usarMongo() {
+  let servidor: MongoMemoryServer;
+  let cliente: MongoClient;
+  let db: Db;
+
+  beforeAll(async () => {
+    servidor = await MongoMemoryServer.create(); // arrancarlo cuesta: una vez por archivo
+    cliente = await MongoClient.connect(servidor.getUri());
+    db = cliente.db("test");
+  });
+
+  // Cada test empieza sin datos: ninguno depende de lo que dejó otro.
+  // deleteMany y no dropDatabase: así se conservan los índices, si el test los crea.
+  beforeEach(async () => {
+    for (const coleccion of await db.collections()) await coleccion.deleteMany({});
+  });
+
+  afterAll(async () => {
+    await cliente?.close();
+    await servidor?.stop();
+  });
+
+  // Funciones, no valores: cuando se llama a usarMongo(), el beforeAll todavía no se ha ejecutado
+  return { db: () => db, cliente: () => cliente, uri: () => servidor.getUri() };
+}
+```
+
+Y reescribe `tests/integration/entrenos.repo.test.ts` con él:
+
+```ts
+// Archivo: tests/integration/entrenos.repo.test.ts
+// El repositorio contra un MongoDB de verdad (en memoria): comprueba las consultas
+import { describe, expect, it } from "vitest";
+import { crearEntrenosRepo } from "../../src/repositories/entrenos.repo";
+import { usarMongo } from "./mongo";
+
+const mongo = usarMongo();
+const repo = () => crearEntrenosRepo(mongo.db());
+
+describe("repositorio de entrenos", () => {
+  it("aísla los entrenos por usuario y calcula los totales", async () => {
+    await repo().crear("ana", { tipo: "running", minutos: 40, km: 8, fecha: new Date("2026-10-12"), sensacion: 4 });
+    await repo().crear("ana", { tipo: "fuerza", minutos: 30, fecha: new Date("2026-10-13"), sensacion: 3 });
+    await repo().crear("dani", { tipo: "movilidad", minutos: 20, fecha: new Date("2026-10-13"), sensacion: 5 });
+
+    expect(await repo().totales("ana")).toEqual({ total: 2, minutos: 70 });
+    expect((await repo().listar("dani", { limite: 10 })).map((e) => e.tipo)).toEqual(["movilidad"]);
+  });
+
+  it("no guarda los campos undefined (ni como null)", async () => {
+    const { id } = await repo().crear("ana", { tipo: "fuerza", minutos: 30, km: undefined, fecha: new Date(), sensacion: 3 });
+    const doc = await mongo.db().collection("entrenos").findOne({});
+    expect(doc && "km" in doc).toBe(false);
+    expect(await repo().obtener("dani", id)).toBeNull(); // Dani no ve el entreno de Ana
+  });
+
+  it("un id mal formado es 'no existe', no una excepción", async () => {
+    expect(await repo().obtener("ana", "no-es-un-id")).toBeNull();
+    expect(await repo().borrar("ana", "no-es-un-id")).toBe(false);
+  });
+});
+```
+
+Las mismas diez semillas:
+
+```text
+semilla 1  3 passed (3)
+semilla 2  3 passed (3)
+semilla 3  3 passed (3)
+semilla 4  3 passed (3)
+semilla 5  3 passed (3)
+semilla 6  3 passed (3)
+semilla 7  3 passed (3)
+semilla 8  3 passed (3)
+semilla 9  3 passed (3)
+semilla 10 3 passed (3)
+```
+
+- **El servidor arranca una vez por archivo** (`beforeAll`), porque cuesta unas décimas de segundo; **los datos se vacían antes de cada test** (`beforeEach`), porque cuesta milisegundos.
+- **`mongo.db()` es una función y no un valor:** cuando el archivo llama a `usarMongo()`, el `beforeAll` todavía no se ha ejecutado y `db` no existe. La función lo lee en el momento de usarlo, ya dentro del test.
+- **`findOne({})` ya no necesita ordenar** por fecha de creación para encontrar "el último": la base solo tiene lo que creó este test.
+
+<Callout type="risk">
+
+- **Cada archivo de tests tiene su propio servidor:** Vitest ejecuta los archivos en paralelo, y si dos compartieran base, uno vaciaría los datos del otro a mitad de test. Con un servidor por archivo, no se ven.
+- **La primera ejecución descarga MongoDB** (unos 140 MB, en `node_modules/.cache/mongodb-memory-server`), y por eso `hookTimeout` es de 120 segundos. En CI, guarda esa carpeta en caché para no descargarlo en cada ejecución.
+- **Borrar los datos no borra los índices** (`deleteMany`, no `dropDatabase`). Si un test crea un índice único, sigue ahí en el test siguiente, igual que en producción.
+
+</Callout>
+
+## Paso 2: los _endpoints_ con todas sus capas
+
+Un test de integración de un _endpoint_ llama al _handler_ real (`POST` de `src/pages/api/entrenos/index.ts`), que llama al servicio real, que llama al repositorio real, que habla con MongoDB. Pero hay una trampa: el _endpoint_ importa `servicios`, que importa `src/lib/mongo.ts`, que crea la conexión con el `MONGODB_URI` de `astro:env`. ¿Y de dónde sale ese valor en un test? Se puede comprobar sin escribir nada: cambiando `process.env.MONGODB_URI` antes de importar `src/lib/mongo.ts`, el cliente sigue apuntando al host de tu `.env`. **`astro:env` lee el `.env` al arrancar Vitest**, no al importar el módulo.
+
+Si el test importara el _endpoint_ sin más, crearía entrenos en la base de tu `.env`, que puede ser la de Atlas. Por eso, el módulo de la conexión se sustituye con `vi.mock` por la base en memoria, y el test **comprueba** que la sustitución funcionó antes de hacer nada. `tests/integration/api-entrenos.test.ts`:
+
+```ts
+// Archivo: tests/integration/api-entrenos.test.ts
+// Los endpoints de entrenos con todas sus capas reales: endpoint → servicio → repositorio → MongoDB.
+// Lo único sustituido es la conexión: la base en memoria en lugar de la del .env
+import type { APIContext } from "astro";
+import type { UsuarioSesion } from "../../src/lib/auth";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { usarMongo } from "./mongo";
+
+const mongo = usarMongo();
+
+// astro:env lee el MONGODB_URI del .env al arrancar: sin esto, el test escribiría en tu base de verdad.
+// La fábrica se ejecuta la primera vez que alguien importa src/lib/mongo (en el beforeAll de abajo)
+vi.mock("../../src/lib/mongo", () => ({ db: mongo.db(), mongoClient: mongo.cliente() }));
+
+let api: typeof import("../../src/pages/api/entrenos/index");
+let porId: typeof import("../../src/pages/api/entrenos/[id]");
+
+beforeAll(async () => {
+  // Después del beforeAll de usarMongo: la base ya existe cuando se importan los endpoints
+  api = await import("../../src/pages/api/entrenos/index");
+  porId = await import("../../src/pages/api/entrenos/[id]");
+  const { db } = await import("../../src/lib/mongo");
+  expect(db.client.options.hosts.map(String)).toEqual([new URL(mongo.uri()).host]); // la de memoria, comprobado
+});
+
+const ana: UsuarioSesion = { id: "ana", nombre: "Ana", email: "ana@example.com", rol: "user", zonaHoraria: "America/Mexico_City" };
+
+/** El contexto de Astro que usan estos endpoints, con Ana ya autenticada (lo haría el middleware) */
+function contexto(metodo: string, ruta: string, opciones: { json?: unknown; formulario?: Record<string, string>; id?: string } = {}) {
+  const url = new URL(ruta, "http://localhost:4321");
+  const request = new Request(url, {
+    method: metodo,
+    ...(opciones.json !== undefined && { headers: { "content-type": "application/json" }, body: JSON.stringify(opciones.json) }),
+    ...(opciones.formulario && { body: new URLSearchParams(opciones.formulario) }), // content-type de formulario
+  });
+  const redirect = (destino: string, status = 302) => new Response(null, { status, headers: { Location: destino } });
+  return { request, url, params: { id: opciones.id }, locals: { usuario: ana, sesion: null }, redirect } as unknown as APIContext;
+}
+
+const CARRERA = { tipo: "running", minutos: 45, km: 9, fecha: "2026-10-12", sensacion: 4 };
+
+describe("/api/entrenos", () => {
+  it("POST crea el entreno, lo guarda con su dueño y responde 201 con su dirección", async () => {
+    const res = await api.POST(contexto("POST", "/api/entrenos", { json: CARRERA }));
+
+    expect(res.status).toBe(201);
+    const creado = await res.json();
+    expect(res.headers.get("Location")).toBe(`/api/entrenos/${creado.id}`);
+    const doc = await mongo.db().collection("entrenos").findOne({});
+    expect(doc).toMatchObject({ userId: "ana", tipo: "running", minutos: 45, km: 9, fecha: new Date("2026-10-12") });
+  });
+
+  it("GET devuelve lo que se creó, del más reciente al más antiguo", async () => {
+    await api.POST(contexto("POST", "/api/entrenos", { json: CARRERA }));
+    await api.POST(contexto("POST", "/api/entrenos", { json: { ...CARRERA, fecha: "2026-10-14", minutos: 30, km: 6 } }));
+
+    const res = await api.GET(contexto("GET", "/api/entrenos?limite=10"));
+
+    expect(res.status).toBe(200);
+    const { entrenos } = await res.json();
+    expect(entrenos.map((e: { fecha: string }) => e.fecha.slice(0, 10))).toEqual(["2026-10-14", "2026-10-12"]);
+  });
+
+  it("POST con datos incorrectos es un 422 y no guarda nada", async () => {
+    const res = await api.POST(contexto("POST", "/api/entrenos", { json: { ...CARRERA, tipo: "fuerza" } }));
+
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ campos: { km: ["Solo los entrenos de running llevan km"] } });
+    expect(await mongo.db().collection("entrenos").countDocuments()).toBe(0);
+  });
+
+  it("POST desde un formulario HTML guarda y redirige con 303", async () => {
+    const formulario = { tipo: "fuerza", minutos: "30", km: "", fecha: "2026-10-13", notas: "", sensacion: "3" };
+    const res = await api.POST(contexto("POST", "/api/entrenos", { formulario }));
+
+    expect(res.status).toBe(303);
+    expect(res.headers.get("Location")).toBe("/?creado=1");
+    const doc = await mongo.db().collection("entrenos").findOne({});
+    expect(doc && Object.keys(doc)).not.toContain("km"); // "" → ausente, ni undefined ni null
+  });
+});
+
+describe("/api/entrenos/[id]", () => {
+  it("PATCH comprueba la regla de los km sobre el resultado, no solo sobre el cambio", async () => {
+    const { id } = await (await api.POST(contexto("POST", "/api/entrenos", { json: CARRERA }))).json();
+
+    const res = await porId.PATCH(contexto("PATCH", `/api/entrenos/${id}`, { json: { tipo: "fuerza" }, id }));
+
+    expect(res.status).toBe(422); // pasar a fuerza un entreno con km lo dejaría inválido
+    expect(await mongo.db().collection("entrenos").findOne({})).toMatchObject({ tipo: "running" });
+  });
+
+  it("PATCH con km: null pasa un entreno a fuerza y le quita los km", async () => {
+    const { id } = await (await api.POST(contexto("POST", "/api/entrenos", { json: CARRERA }))).json();
+
+    const res = await porId.PATCH(contexto("PATCH", `/api/entrenos/${id}`, { json: { tipo: "fuerza", km: null }, id }));
+
+    expect(res.status).toBe(200);
+    const doc = await mongo.db().collection("entrenos").findOne({});
+    expect(doc).toMatchObject({ tipo: "fuerza" });
+    expect(doc && "km" in doc).toBe(false); // antes del arreglo: fuerza con km 9, contra la regla
+  });
+
+  it("DELETE responde 204, y después el entreno ya no existe", async () => {
+    const { id } = await (await api.POST(contexto("POST", "/api/entrenos", { json: CARRERA }))).json();
+
+    expect((await porId.DELETE(contexto("DELETE", `/api/entrenos/${id}`, { id }))).status).toBe(204);
+    expect((await porId.GET(contexto("GET", `/api/entrenos/${id}`, { id }))).status).toBe(404);
+  });
+});
+```
+
+- **El contexto de Astro se construye a mano:** la petición, la URL, los `params`, `locals` (con el usuario que pondría el _middleware_) y `redirect`. Es lo mínimo que usan estos _endpoints_.
+- **Los _endpoints_ se importan en el `beforeAll`, con `await import()`**, y no arriba del archivo. El repositorio llama a `db.collection()` al importarse, y en ese momento la base en memoria ya tiene que existir.
+- **Cada test comprueba la respuesta HTTP y lo que quedó en MongoDB:** el 422 responde bien **y** no guarda nada; el formulario redirige **y** no guarda el campo `km` vacío.
+- **`UsuarioSesion` tipa el usuario de prueba:** el contexto se convierte con `as unknown as APIContext`, y esa conversión apaga las comprobaciones de TypeScript. Sin el tipo, un rol mal escrito (`"usuario"` en lugar de `"user"`) pasaría desapercibido.
+
+La comprobación del `beforeAll` es la red de seguridad. Quitando la línea del `vi.mock`:
+
+```text
+❯ tests/integration/api-entrenos.test.ts (7 tests | 7 skipped) 436ms
+FAIL  tests/integration/api-entrenos.test.ts [ tests/integration/api-entrenos.test.ts ]
+AssertionError: expected [ '127.0.0.1:27200' ] to deeply equal [ '127.0.0.1:54482' ]
+- Expected
++ Received
+ [
+-   "127.0.0.1:54482",
++   "127.0.0.1:27200",
+ ]
+❯ tests/integration/api-entrenos.test.ts:23:47
+Test Files  1 failed (1)
+     Tests  7 skipped (7)
+```
+
+La comprobación falla en el `beforeAll`, y Vitest **salta los siete tests** sin ejecutar ninguno: nada llega a escribirse en la base del `.env`.
+
+Hay otra forma de llamar a un _endpoint_: la **Container API** de Astro, que construye el contexto por ti (URL, `params`, `redirect`…) igual que en una petición real. `tests/integration/api-container.test.ts`:
+
+```ts
+// Archivo: tests/integration/api-container.test.ts
+// El mismo endpoint con la Container API de Astro: Astro construye el contexto (url, params, redirect…)
+import { experimental_AstroContainer as AstroContainer } from "astro/container";
+import type { UsuarioSesion } from "../../src/lib/auth";
+import { expect, it, vi } from "vitest";
+import { usarMongo } from "./mongo";
+
+const mongo = usarMongo();
+vi.mock("../../src/lib/mongo", () => ({ db: mongo.db(), mongoClient: mongo.cliente() }));
+
+const ana: UsuarioSesion = { id: "ana", nombre: "Ana", email: "ana@example.com", rol: "user", zonaHoraria: "America/Mexico_City" };
+
+it("POST /api/entrenos con la Container API", async () => {
+  const endpoint = await import("../../src/pages/api/entrenos/index");
+  const container = await AstroContainer.create();
+  const request = new Request("http://localhost:4321/api/entrenos", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tipo: "running", minutos: 45, km: 9, fecha: "2026-10-12", sensacion: 4 }),
+  });
+
+  // `as never`: la API es experimental y sus tipos solo aceptan componentes .astro, aunque funciona con endpoints
+  const res = await container.renderToResponse(endpoint as never, {
+    routeType: "endpoint",
+    request,
+    locals: { usuario: ana, sesion: null },
+  });
+
+  expect(res.status).toBe(201);
+  expect(await mongo.db().collection("entrenos").countDocuments({ userId: "ana" })).toBe(1);
+});
+```
+
+```text
+✓ api-container.test.ts > POST /api/entrenos con la Container API 189ms
+Tests  1 passed (1)
+```
+
+Funciona igual, con menos código de preparación. A cambio, la API todavía es experimental (`experimental_AstroContainer`) y sus tipos solo aceptan componentes `.astro`, de ahí el `as never`. Para _endpoints_, el contexto a mano es más explícito; la Container API brilla al renderizar componentes `.astro` a HTML.
+
+<Callout type="risk">
+
+- **Nunca confíes en que el test "no debería" llegar a la base real:** compruébalo, como hace el `beforeAll`. Si mañana alguien mueve un `import` arriba del archivo, la comprobación lo parará.
+- **`vi.mock` con variables del archivo funciona porque la fábrica se ejecuta tarde:** Vitest sube `vi.mock` al principio, pero solo llama a la fábrica la primera vez que alguien importa el módulo, en el `beforeAll`. Con un `import` del _endpoint_ arriba del archivo, la fábrica se ejecuta antes de que exista `mongo`, y Vitest falla con `ReferenceError: Cannot access 'mongo' before initialization`.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe tests de integración para el repositorio de entrenos: crear y obtener, listar (orden, filtro y límite), el periodo de `entre` (qué entra justo en los límites), actualizar y borrar.
+2. Si algún test falla, decide si el error está en el test o en el repositorio, y arréglalo.
+
+</Callout>
+
+Solución. `tests/integration/entrenos.crud.test.ts`:
+
+```ts
+// Archivo: tests/integration/entrenos.crud.test.ts
+// Crear, editar, borrar y consultar por periodo, contra MongoDB
+import { describe, expect, it } from "vitest";
+import { crearEntrenosRepo } from "../../src/repositories/entrenos.repo";
+import type { EntrenoInput } from "../../src/schemas/entreno";
+import { usarMongo } from "./mongo";
+
+const mongo = usarMongo();
+const repo = () => crearEntrenosRepo(mongo.db());
+
+const carrera = (cambios: Partial<EntrenoInput> = {}): EntrenoInput => ({
+  tipo: "running",
+  minutos: 45,
+  km: 9,
+  fecha: new Date("2026-10-12T00:00:00Z"),
+  sensacion: 4,
+  ...cambios,
+});
+
+describe("crear y obtener", () => {
+  it("devuelve el DTO con id y fecha de creación, sin el userId", async () => {
+    const creado = await repo().crear("ana", carrera({ notas: "series" }));
+
+    expect(creado).toEqual({ ...carrera({ notas: "series" }), id: expect.any(String), creado: expect.any(Date) });
+    expect(creado).not.toHaveProperty("userId");
+    expect(await repo().obtener("ana", creado.id)).toEqual(creado); // lo mismo, leído de la base
+  });
+});
+
+describe("listar", () => {
+  it("ordena de la fecha más reciente a la más antigua, filtra por tipo y respeta el límite", async () => {
+    await repo().crear("ana", carrera({ fecha: new Date("2026-10-10") }));
+    await repo().crear("ana", carrera({ fecha: new Date("2026-10-14") }));
+    await repo().crear("ana", { tipo: "fuerza", minutos: 30, fecha: new Date("2026-10-12"), sensacion: 3 });
+
+    const fechas = (lista: { fecha: Date }[]) => lista.map((e) => e.fecha.toISOString().slice(0, 10));
+    expect(fechas(await repo().listar("ana", { limite: 10 }))).toEqual(["2026-10-14", "2026-10-12", "2026-10-10"]);
+    expect(fechas(await repo().listar("ana", { tipo: "running", limite: 10 }))).toEqual(["2026-10-14", "2026-10-10"]);
+    expect(await repo().listar("ana", { limite: 1 })).toHaveLength(1);
+  });
+});
+
+describe("entre (un periodo [desde, hasta))", () => {
+  it("incluye el primer instante y excluye el último", async () => {
+    const lunes = new Date("2026-10-12T00:00:00Z");
+    const siguienteLunes = new Date("2026-10-19T00:00:00Z");
+    await repo().crear("ana", carrera({ fecha: new Date("2026-10-11T23:59:59Z"), notas: "domingo anterior" }));
+    await repo().crear("ana", carrera({ fecha: lunes, notas: "lunes" }));
+    await repo().crear("ana", carrera({ fecha: new Date("2026-10-18T23:59:59Z"), notas: "domingo" }));
+    await repo().crear("ana", carrera({ fecha: siguienteLunes, notas: "lunes siguiente" }));
+
+    const semana = await repo().entre("ana", lunes, siguienteLunes);
+
+    expect(semana.map((e) => e.notas)).toEqual(["lunes", "domingo"]); // y en orden de fecha
+  });
+});
+
+describe("actualizar", () => {
+  it("cambia solo los campos que se le pasan", async () => {
+    const { id } = await repo().crear("ana", carrera({ notas: "series" }));
+
+    const editado = await repo().actualizar("ana", id, { minutos: 50 });
+
+    expect(editado).toMatchObject({ minutos: 50, km: 9, notas: "series" });
+  });
+
+  it("un campo a undefined se quita del documento", async () => {
+    const { id } = await repo().crear("ana", carrera());
+
+    const editado = await repo().actualizar("ana", id, { tipo: "fuerza", km: undefined }); // pasar a fuerza: sin km
+
+    expect(editado).toMatchObject({ tipo: "fuerza" });
+    expect(editado?.km).toBeUndefined();
+    const doc = await mongo.db().collection("entrenos").findOne({});
+    expect(doc && "km" in doc).toBe(false);
+  });
+
+  it("quitar solo un campo (sin nada más que cambiar) también funciona", async () => {
+    const { id } = await repo().crear("ana", carrera({ notas: "series" }));
+    expect(await repo().actualizar("ana", id, { notas: undefined })).not.toHaveProperty("notas", "series");
+  });
+
+  it("devuelve null si el entreno no es de ese usuario", async () => {
+    const { id } = await repo().crear("ana", carrera());
+    expect(await repo().actualizar("dani", id, { minutos: 1 })).toBeNull();
+    expect(await repo().obtener("ana", id)).toMatchObject({ minutos: 45 }); // y no lo ha tocado
+  });
+});
+
+describe("borrar", () => {
+  it("borra una vez; la segunda ya no existe", async () => {
+    const { id } = await repo().crear("ana", carrera());
+
+    expect(await repo().borrar("ana", id)).toBe(true);
+    expect(await repo().borrar("ana", id)).toBe(false);
+    expect(await repo().totales("ana")).toEqual({ total: 0, minutos: 0 });
+  });
+});
+```
+
+La primera ejecución:
+
+```text
+✓ crear y obtener > devuelve el DTO con id y fecha de creación, sin el userId 31ms
+✓ listar > ordena de la fecha más reciente a la más antigua, filtra por tipo y respeta el límite 4ms
+✓ entre (un periodo [desde, hasta)) > incluye el primer instante y excluye el último 3ms
+✓ actualizar > cambia solo los campos que se le pasan 2ms
+× actualizar > un campo a undefined se quita del documento 3ms
+✓ actualizar > devuelve null si el entreno no es de ese usuario 1ms
+✓ borrar > borra una vez; la segunda ya no existe 2ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+AssertionError: expected 9 to be undefined
+- Expected:
++ Received:
+❯ tests/integration/entrenos.crud.test.ts:73:25
+Tests  1 failed | 6 passed (7)
+```
+
+**El test está bien; el repositorio, no.** Pasar un entreno de running a fuerza exige quitarle los km, y el servicio lo permite: `{ tipo: "fuerza", km: undefined }` deja un entreno válido. Pero el repositorio guarda los cambios con `$set`, en una colección abierta con `ignoreUndefined: true` (I3.2), y el _driver_ **descarta** la clave `km: undefined` antes de enviarla. MongoDB nunca recibe la orden de quitar los km. Desde la API, un `PATCH` con `{"tipo":"fuerza","km":null}` respondía 200 y dejaba en la base un entreno de **fuerza con 9 km**, justo lo que la regla de los km tiene que impedir.
+
+¿Por qué no lo vio el test del servicio de I3.5? Añade este caso a `tests/unit/entrenos.service.test.ts`, dentro del `describe`:
+
+```ts
+  it("editar puede pasar un running a fuerza si se quitan los km", async () => {
+    const servicio = crearServicioEntrenos({ entrenos: repoEnMemoria([running]) });
+    const editado = await servicio.editar("u1", "e1", { tipo: "fuerza", km: undefined });
+    expect(editado).toMatchObject({ tipo: "fuerza", km: undefined });
+  });
+```
+
+Con el repositorio sin arreglar:
+
+```text
+Con el repositorio SIN arreglar:
+  unitario (repositorio falso, un Map):  1 passed | 3 skipped (4)
+  integración (MongoDB en memoria):      1 failed | 7 skipped (8)
+```
+
+El repositorio falso hace `{ ...e, ...cambios }`, que sí sustituye los km por `undefined`. Se comporta como **creías** que se comportaba MongoDB, y por eso el test unitario pasa. Solo la base real descubre la diferencia. Es el argumento del trofeo (I8.1): los fallos de verdad están donde las piezas se juntan.
+
+El arreglo: las claves que llegan con `undefined` se borran con `$unset`. Sustituye `src/repositories/entrenos.repo.ts`:
+
+```ts
+// Archivo: src/repositories/entrenos.repo.ts
+// Capa de datos: SOLO consultas a MongoDB. Ni reglas de negocio, ni HTTP.
+// Recibe la base de datos como parámetro: en producción, la real; en los tests, una en memoria.
+import { ObjectId, type Db, type WithId } from "mongodb";
+import type { CambiosEntreno, EntrenoDTO, EntrenoInput, FiltroEntrenos } from "../schemas/entreno";
+
+/** El documento tal como se guarda: lo validado más lo que pone el servidor */
+export interface EntrenoDoc extends EntrenoInput {
+  _id?: ObjectId;
+  userId: string;
+  creado: Date;
+}
+
+/** Documento de BD → DTO: _id pasa a id y userId no sale nunca */
+function aDTO(doc: WithId<EntrenoDoc>): EntrenoDTO {
+  return {
+    id: doc._id.toHexString(),
+    tipo: doc.tipo,
+    minutos: doc.minutos,
+    km: doc.km,
+    fecha: doc.fecha,
+    notas: doc.notas,
+    sensacion: doc.sensacion,
+    creado: doc.creado,
+  };
+}
+
+/** Un id que no es un ObjectId válido se trata como "no existe" */
+const aObjectId = (id: string) => (/^[0-9a-f]{24}$/i.test(id) ? new ObjectId(id) : null);
+
+export function crearEntrenosRepo(db: Db) {
+  // ignoreUndefined: un campo opcional sin valor no se guarda como null (I3.2)
+  const col = db.collection<EntrenoDoc>("entrenos", { ignoreUndefined: true });
+
+  return {
+    async listar(userId: string, filtro: FiltroEntrenos): Promise<EntrenoDTO[]> {
+      const docs = await col
+        .find({ userId, ...(filtro.tipo && { tipo: filtro.tipo }) })
+        .sort({ fecha: -1, creado: -1 })
+        .limit(filtro.limite)
+        .toArray();
+      return docs.map(aDTO);
+    },
+
+    /** Entrenos con fecha en [desde, hasta): para resúmenes por periodo */
+    async entre(userId: string, desde: Date, hasta: Date): Promise<EntrenoDTO[]> {
+      const docs = await col.find({ userId, fecha: { $gte: desde, $lt: hasta } }).sort({ fecha: 1 }).toArray();
+      return docs.map(aDTO);
+    },
+
+    async crear(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+      const doc: EntrenoDoc = { ...datos, userId, creado: new Date() };
+      const { insertedId } = await col.insertOne(doc);
+      return aDTO({ ...doc, _id: insertedId });
+    },
+
+    async obtener(userId: string, id: string): Promise<EntrenoDTO | null> {
+      const _id = aObjectId(id);
+      const doc = _id && (await col.findOne({ _id, userId }));
+      return doc ? aDTO(doc) : null;
+    },
+
+    async actualizar(userId: string, id: string, cambios: CambiosEntreno): Promise<EntrenoDTO | null> {
+      const _id = aObjectId(id);
+      if (!_id) return null;
+      // Una clave que llega con undefined ("quitar los km") se BORRA con $unset:
+      // con ignoreUndefined, $set la ignoraría y el valor antiguo se quedaría (I8.4)
+      const quitar = Object.entries(cambios).flatMap(([campo, valor]) => (valor === undefined ? [[campo, ""]] : []));
+      const doc = await col.findOneAndUpdate(
+        { _id, userId },
+        { $set: cambios, ...(quitar.length > 0 && { $unset: Object.fromEntries(quitar) }) },
+        { returnDocument: "after" },
+      );
+      return doc ? aDTO(doc) : null;
+    },
+
+    async totales(userId: string): Promise<{ total: number; minutos: number }> {
+      const [fila] = await col
+        .aggregate<{ total: number; minutos: number }>([
+          { $match: { userId } },
+          { $group: { _id: null, total: { $sum: 1 }, minutos: { $sum: "$minutos" } } },
+        ])
+        .toArray();
+      return { total: fila?.total ?? 0, minutos: fila?.minutos ?? 0 };
+    },
+
+    async borrar(userId: string, id: string): Promise<boolean> {
+      const _id = aObjectId(id);
+      return _id ? (await col.deleteOne({ _id, userId })).deletedCount === 1 : false;
+    },
+  };
+}
+
+export type EntrenosRepo = ReturnType<typeof crearEntrenosRepo>;
+```
+
+Y añade a `api-entrenos.test.ts` el caso que reproducía el bug desde la API (ya está en el archivo del Paso 2: "PATCH con km: null pasa un entreno a fuerza y le quita los km"). Todos los tests de integración:
+
+```text
+✓ entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales 84ms
+✓ entrenos.repo.test.ts > repositorio de entrenos > no guarda los campos undefined (ni como null) 3ms
+✓ entrenos.repo.test.ts > repositorio de entrenos > un id mal formado es 'no existe', no una excepción 1ms
+✓ entrenos.crud.test.ts > crear y obtener > devuelve el DTO con id y fecha de creación, sin el userId 111ms
+✓ entrenos.crud.test.ts > listar > ordena de la fecha más reciente a la más antigua, filtra por tipo y respeta el límite 5ms
+✓ entrenos.crud.test.ts > entre (un periodo [desde, hasta)) > incluye el primer instante y excluye el último 2ms
+✓ entrenos.crud.test.ts > actualizar > cambia solo los campos que se le pasan 2ms
+✓ entrenos.crud.test.ts > actualizar > un campo a undefined se quita del documento 1ms
+✓ entrenos.crud.test.ts > actualizar > quitar solo un campo (sin nada más que cambiar) también funciona 1ms
+✓ entrenos.crud.test.ts > actualizar > devuelve null si el entreno no es de ese usuario 1ms
+✓ entrenos.crud.test.ts > borrar > borra una vez; la segunda ya no existe 2ms
+✓ api-entrenos.test.ts > /api/entrenos > POST crea el entreno, lo guarda con su dueño y responde 201 con su dirección 47ms
+✓ api-entrenos.test.ts > /api/entrenos > GET devuelve lo que se creó, del más reciente al más antiguo 3ms
+✓ api-entrenos.test.ts > /api/entrenos > POST con datos incorrectos es un 422 y no guarda nada 2ms
+✓ api-entrenos.test.ts > /api/entrenos > POST desde un formulario HTML guarda y redirige con 303 2ms
+✓ api-entrenos.test.ts > /api/entrenos/[id] > PATCH comprueba la regla de los km sobre el resultado, no solo sobre el cambio 2ms
+✓ api-entrenos.test.ts > /api/entrenos/[id] > PATCH con km: null pasa un entreno a fuerza y le quita los km 2ms
+✓ api-entrenos.test.ts > /api/entrenos/[id] > DELETE responde 204, y después el entreno ya no existe 1ms
+✓ api-container.test.ts > POST /api/entrenos con la Container API 138ms
+Test Files  4 passed (4)
+Tests  19 passed (19)
+Duration  1.23s (tests 80%, import 8%, setup 7%, transform 4%)
+```
+
+- **"Quitar solo un campo" comprueba el caso límite del arreglo:** con `{ notas: undefined }`, el `$set` queda vacío después de descartar la clave, y solo actúa el `$unset`.
+- **El periodo de `entre` se prueba justo en sus bordes:** el domingo anterior a las 23:59:59 no entra, el lunes a las 00:00:00 sí; el domingo a las 23:59:59 sí, y el lunes siguiente a las 00:00:00, no.
+- **"Devuelve null si no es de ese usuario" comprueba también que no lo tocó:** el entreno de Ana sigue con sus 45 minutos.
+
+<Callout type="risk">
+
+- **Este bug está en el repositorio de I3.2 y I3.5**, que escribiste siguiendo esas lecciones: aplica el arreglo también en tu app si la sigues usando fuera de este curso.
+- **Un test de integración que falla puede tener la culpa:** antes de cambiar el código, comprueba que el test pide lo correcto. Aquí, la regla de negocio ("pasar a fuerza quitando los km") confirma que el test tenía razón.
+
+</Callout>
+
+<Callout type="mastery">
+
+Confías en tus consultas sin probarlas a mano en Compass: cada archivo de integración tiene su propio MongoDB en memoria, cada test empieza con la base vacía (y lo compruebas con `--sequence.shuffle`), pruebas los _endpoints_ con todas sus capas reales sustituyendo solo la conexión (y verificas que la sustitución funcionó), y sabes que un repositorio falso solo es tan bueno como tu idea de cómo se comporta la base real.
+
+</Callout>
+
+## Resumen
+
+- `mongodb-memory-server`: un MongoDB de verdad, en memoria, uno por archivo de tests.
+- `beforeEach` con `deleteMany` en cada colección: ningún test depende de otro. `--sequence.shuffle` lo comprueba.
+- `astro:env` lee el `.env` al arrancar: sustituye `src/lib/mongo.ts` con `vi.mock`, importa los _endpoints_ en el `beforeAll` y comprueba el host antes de escribir nada.
+- El contexto de Astro, a mano (o con la Container API, experimental).
+- Un repositorio falso se comporta como crees que se comporta la base; la base real descubrió que `$set` con `ignoreUndefined` no borra un campo. Se arregla con `$unset`.

@@ -1,0 +1,387 @@
+---
+sectionId: "I8.5"
+course: "I8"
+title: "Tests end-to-end con Playwright"
+order: 5
+minutes: 75
+summary: "Pruebas la app entera en Chromium contra un MongoDB en memoria, con locators y esperas automáticas, reutilizas la sesión con storageState, descubres que un newContext la hereda y depuras con la traza."
+---
+
+Los tests de las secciones anteriores prueban piezas: una función, un componente con la API simulada, un _endpoint_ con la base en memoria. Ninguno comprueba que, con la app arrancada de verdad, alguien puede entrar, guardar un entreno y verlo en la lista. Un test **_end-to-end_** (E2E) hace exactamente eso: abre un navegador real, carga tus páginas desde tu servidor y hace clic donde haría clic una persona. Es el más lento y el más caro de mantener, y por eso se reserva para los **flujos críticos**. En esta sección vas a montar Playwright para que pruebe tu app contra una base de datos desechable, a reutilizar la sesión entre tests y a depurar un fallo con su traza.
+
+**Lo que tendrás al terminar:** `scripts/e2e.mjs`, que levanta un MongoDB en memoria y ejecuta Playwright contra él; `playwright.config.ts` con el servidor de Astro; un _setup_ que crea la cuenta y guarda la sesión, y cuatro tests E2E de tus flujos principales.
+
+**Requisitos:** la app de entrenos de I8.4.
+
+```bash
+npm install --save-dev @playwright/test
+npx playwright install chromium
+```
+
+El segundo comando descarga el Chromium que usa Playwright, una sola vez por versión: en este Mac, unos 570 MB entre el navegador y su versión sin ventana (_headless shell_).
+
+## Paso 1: una base desechable y el servidor de Astro
+
+Un E2E crea cuentas y entrenos de verdad, en la base a la que esté conectado el servidor. **Nunca** debe ser tu base real. La solución es la misma de la plataforma en la que estás leyendo esto: un lanzador que arranca un MongoDB en memoria, ejecuta Playwright con las variables apuntando a él y lo apaga todo al terminar. Crea `scripts/e2e.mjs`:
+
+```js
+// Archivo: scripts/e2e.mjs
+// Uso: npm run test:e2e [-- argumentos de Playwright]
+// Levanta un MongoDB en memoria, ejecuta Playwright contra él y lo apaga todo al final.
+// Las variables de este proceso tienen prioridad sobre .env: el servidor de los tests nunca ve tu base real.
+import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { MongoClient } from "mongodb";
+import { MongoMemoryReplSet } from "mongodb-memory-server";
+
+// Un replica set de un nodo: Better Auth usa transacciones, y un servidor suelto no las admite
+const replSet = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
+const env = {
+  ...process.env,
+  MONGODB_URI: replSet.getUri(),
+  MONGODB_DB: "entrenos_e2e",
+  BETTER_AUTH_SECRET: randomBytes(32).toString("base64"), // uno nuevo en cada ejecución
+};
+
+const { status } = spawnSync("npx", ["playwright", "test", ...process.argv.slice(2)], { stdio: "inherit", env });
+
+// La prueba de que el servidor usó esta base y no la del .env: aquí están los usuarios de los tests
+const cliente = await MongoClient.connect(env.MONGODB_URI);
+const usuarios = await cliente.db(env.MONGODB_DB).collection("user").countDocuments();
+const entrenos = await cliente.db(env.MONGODB_DB).collection("entrenos").countDocuments();
+console.log(`\nEn la base en memoria: ${usuarios} usuarios y ${entrenos} entrenos`);
+await cliente.close();
+await replSet.stop();
+process.exit(status ?? 1);
+```
+
+Y en `package.json`, el _script_:
+
+```json
+"test:e2e": "node scripts/e2e.mjs"
+```
+
+Ahora la configuración, `playwright.config.ts`:
+
+```ts
+// Archivo: playwright.config.ts
+import { defineConfig, devices } from "@playwright/test";
+
+const PUERTO = 4330; // no choca con tu `npm run dev` (4321)
+const URL_BASE = `http://localhost:${PUERTO}`;
+
+// Los E2E crean usuarios y entrenos: nunca contra Atlas ni otra base remota
+if (!/^mongodb:\/\/(localhost|127\.0\.0\.1)[:/]/.test(process.env.MONGODB_URI ?? "")) {
+  throw new Error("Los E2E necesitan un MONGODB_URI local. Usa `npm run test:e2e`, que levanta uno en memoria.");
+}
+
+export default defineConfig({
+  testDir: "tests/e2e",
+  workers: 1, // un solo servidor de desarrollo: los tests, de uno en uno
+  retries: process.env.CI ? 1 : 0,
+  reporter: "list",
+  use: {
+    baseURL: URL_BASE,
+    trace: "retain-on-failure", // si un test falla, guarda su traza para el trace viewer
+  },
+  webServer: {
+    command: `npx astro dev --port ${PUERTO} --ignore-lock`,
+    url: `${URL_BASE}/acerca`, // una página que responde sin sesión
+    reuseExistingServer: false, // nunca uno ya abierto: podría estar conectado a la base real
+    timeout: 120_000,
+    env: { BETTER_AUTH_URL: URL_BASE },
+  },
+  projects: [
+    // 1. Se registra una vez y guarda la sesión
+    { name: "setup", testMatch: /auth\.setup\.ts/ },
+    // 2. Los demás tests empiezan ya con esa sesión iniciada
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"], storageState: "tests/e2e/.auth/usuario.json" },
+      dependencies: ["setup"],
+    },
+  ],
+});
+```
+
+- **`webServer`** arranca `astro dev` antes de los tests, espera a que `/acerca` responda y lo para al terminar. Las variables del lanzador (`MONGODB_URI`, `BETTER_AUTH_SECRET`) le llegan porque Playwright hereda el entorno, y tienen prioridad sobre tu `.env`.
+- **El puerto 4330 y `--ignore-lock`:** el servidor de los tests no choca con tu `npm run dev` del 4321.
+- **`reuseExistingServer: false`:** si hubiera un servidor ya abierto en ese puerto, conectado a tu base real, Playwright no lo usaría.
+- **La comprobación del principio** para cualquier ejecución que no venga del lanzador:
+
+```text
+Error: Los E2E necesitan un MONGODB_URI local. Usa `npm run test:e2e`, que levanta uno en memoria.
+    at file://playwright.config.ts:9:9
+```
+
+Ejecutado con `npx playwright test` a secas, sin el lanzador, `MONGODB_URI` no existe (Playwright no lee el `.env`) y la configuración se niega a seguir. Con una dirección de Atlas (`mongodb+srv://…`), también.
+
+<Callout type="risk">
+
+- **Un replica set, no un servidor suelto:** Better Auth usa transacciones al crear una cuenta, y MongoDB solo las admite en un replica set. Con `MongoMemoryServer` el registro falla, y el servidor lo dice: `Transaction numbers are only allowed on a replica set member or mongos`. `MongoMemoryReplSet` arranca un replica set de un nodo.
+- **Añade a `.gitignore`** `tests/e2e/.auth/`, `test-results/` y `playwright-report/`: el primero guarda cookies de sesión (aunque sean de una base desechable) y los otros dos, los resultados de cada ejecución.
+
+</Callout>
+
+## Paso 2: el primer test, con _locators_ y esperas automáticas
+
+Playwright encuentra los elementos con **_locators_**, que funcionan como las consultas de Testing Library: `page.getByRole("button", { name: "Guardar" })`, `page.getByLabel("Minutos")`, `page.getByText("…")`. Y sus comprobaciones **esperan solas**: `await expect(locator).toContainText("…")` vuelve a mirar durante 5 segundos, hasta que se cumple o se agota el tiempo. No hace falta escribir esperas.
+
+Pero antes de cada test hace falta una sesión. Registrarse en cada test sería lento y repetiría lo mismo cien veces. Playwright lo resuelve con un proyecto de **_setup_**: se ejecuta una vez, antes que los demás, y guarda las cookies de la sesión en un archivo (`storageState`), que los demás tests cargan al empezar. Es el proyecto `setup` de la configuración. Crea `tests/e2e/auth.setup.ts`:
+
+```ts
+// Archivo: tests/e2e/auth.setup.ts
+// Se ejecuta antes que los demás tests: crea una cuenta y guarda su sesión (las cookies) en un archivo
+import { expect, test as setup } from "@playwright/test";
+
+setup("crear la cuenta de los tests", async ({ page }) => {
+  await page.goto("/registro");
+  await page.getByLabel("Nombre").fill("Ana E2E");
+  await page.getByLabel("Correo").fill(`ana-${Date.now()}@example.test`);
+  await page.getByLabel("Contraseña").fill("una-clave-larga");
+  await page.getByRole("button", { name: "Crear cuenta" }).click();
+
+  // La portada con la sesión iniciada: el menú dice quién eres
+  await expect(page.getByRole("button", { name: "Salir" })).toBeVisible();
+  await page.context().storageState({ path: "tests/e2e/.auth/usuario.json" });
+});
+```
+
+Y el primer test, `tests/e2e/entrenos.spec.ts`:
+
+```ts
+// Archivo: tests/e2e/entrenos.spec.ts
+// Empieza con la sesión del setup (storageState): no pasa por el registro ni por el login
+import { expect, test } from "@playwright/test";
+
+test("guardar un entreno lo muestra en la lista, también después de recargar", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("Minutos").fill("45");
+  await page.getByLabel("Km").fill("9");
+  await page.getByLabel("Notas").fill("rodaje suave");
+  await page.getByRole("button", { name: "Guardar" }).click();
+
+  const entreno = page.getByRole("listitem").filter({ hasText: "rodaje suave" });
+  await expect(entreno).toContainText("running · 45 min · 9 km · 5:00 min/km"); // espera sola a que aparezca
+
+  await page.reload(); // ya no viene del estado de React, sino de MongoDB
+  await expect(entreno).toBeVisible();
+});
+
+test.describe("sin sesión", () => {
+  // Vacía el storageState del proyecto: estos tests empiezan sin cookies
+  test.use({ storageState: { cookies: [], origins: [] } });
+
+  test("las páginas privadas llevan a /entrar, recordando adónde ibas", async ({ page }) => {
+    await page.goto("/nuevo");
+    await expect(page).toHaveURL(/\/entrar\?volver=%2Fnuevo$/);
+    await expect(page.getByRole("heading", { name: "Entrar" })).toBeVisible();
+  });
+});
+```
+
+- **`getByRole("listitem").filter({ hasText: "rodaje suave" })`** busca el elemento de la lista que contiene ese texto: así el test no depende de la posición ni de lo que hayan creado otros tests.
+- **`page.reload()`** comprueba que el entreno no solo estaba en el estado de React, sino que se guardó en MongoDB.
+- **"Sin sesión" vacía el `storageState`** con `test.use`: esos tests empiezan con un navegador sin cookies.
+
+`npm run test:e2e`:
+
+```text
+Running 4 tests using 1 worker
+  ✓  1 [setup] › tests/e2e/auth.setup.ts:5:1 › crear la cuenta de los tests (647ms)
+  ✓  2 [chromium] › tests/e2e/entrenos.spec.ts:5:1 › guardar un entreno lo muestra en la lista, también después de recargar (598ms)
+  ✓  3 [chromium] › tests/e2e/entrenos.spec.ts:23:3 › sin sesión › las páginas privadas llevan a /entrar, recordando adónde ibas (195ms)
+  ✓  4 [chromium] › tests/e2e/flujo.spec.ts:16:1 › entrar, registrar un entreno y verlo en la lista (724ms)
+  4 passed (3.9s)
+En la base en memoria: 2 usuarios y 2 entrenos
+```
+
+(El cuarto test es el del ejercicio). Los cuatro tests tardan unos 4 segundos, y la ejecución completa, con el arranque de MongoDB y de Astro, unos 5. Repetida cinco veces:
+
+```text
+ejecución 1:  4 passed (4.2s) · total 5 s
+ejecución 2:  4 passed (3.7s) · total 5 s
+ejecución 3:  4 passed (3.8s) · total 5 s
+ejecución 4:  4 passed (3.8s) · total 5 s
+ejecución 5:  4 passed (4.0s) · total 6 s
+```
+
+Cinco de cinco: sin esperas fijas y sin depender del orden, un E2E es estable.
+
+<Callout type="risk">
+
+- **Nunca uses `page.waitForTimeout(2000)`:** con una máquina lenta (la de CI) no es suficiente, y con una rápida sobra tiempo. Espera siempre a algo concreto: un texto, una URL, un elemento.
+- **Los tests comparten la cuenta del _setup_,** y lo que uno crea lo ve el siguiente. Por eso cada test busca **su** entreno por un texto único, en lugar de contar los elementos de la lista.
+- **La primera ejecución tarda más** (unos 9 segundos en este laboratorio): Vite prepara las dependencias la primera vez que se arranca el servidor.
+
+</Callout>
+
+## Paso 3: depurar un fallo con la traza
+
+La primera versión del test "sin sesión" de este laboratorio no usaba `test.use`, sino un contexto de navegador creado a mano:
+
+```ts
+test("las páginas privadas piden sesión: sin ella, a /entrar", async ({ browser }) => {
+  const anonimo = await browser.newContext(); // un navegador sin cookies
+  const page = await anonimo.newPage();
+  await page.goto("/nuevo");
+  await expect(page).toHaveURL(/\/entrar\?volver=%2Fnuevo$/);
+  await anonimo.close();
+});
+```
+
+Y fallaba:
+
+```text
+Running 2 tests using 1 worker
+  ✓  1 [setup] › tests/e2e/auth.setup.ts:5:1 › crear la cuenta de los tests (655ms)
+  ✘  2 [chromium] › tests/e2e/entrenos.spec.ts:19:1 › las páginas privadas piden sesión: sin ella, a /entrar (5.1s)
+  1) [chromium] › tests/e2e/entrenos.spec.ts:19:1 › las páginas privadas piden sesión: sin ella, a /entrar
+    Error: expect(page).toHaveURL(expected) failed
+    Expected pattern: /\/entrar\?volver=%2Fnuevo$/
+    Received string:  "http://localhost:4330/nuevo"
+    Timeout: 5000ms
+    Call log:
+      - Expect "toHaveURL" with timeout 5000ms
+        14 × locator resolved to <html lang="es">…</html>
+           - unexpected value "http://localhost:4330/nuevo"
+      21 |   const page = await anonimo.newPage();
+      22 |   await page.goto("/nuevo");
+    > 23 |   await expect(page).toHaveURL(/\/entrar\?volver=%2Fnuevo$/);
+         |                      ^
+      24 |   await anonimo.close();
+      25 | });
+      26 |
+        at tests/e2e/entrenos.spec.ts:23:22
+    Error Context: test-results/entrenos-las-páginas-privadas-piden-sesión-sin-ella-a-entrar-chromium/error-context.md
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/entrenos-las-páginas-privadas-piden-sesión-sin-ella-a-entrar-chromium/trace.zip
+    Usage:
+        npx playwright show-trace test-results/entrenos-las-páginas-privadas-piden-sesión-sin-ella-a-entrar-chromium/trace.zip
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+  1 failed
+    [chromium] › tests/e2e/entrenos.spec.ts:19:1 › las páginas privadas piden sesión: sin ella, a /entrar
+  1 passed (7.4s)
+En la base en memoria: 1 usuarios y 0 entrenos
+```
+
+Playwright da tres pistas. El **registro de llamadas** (_Call log_): durante 5 segundos, 14 comprobaciones, siempre en `/nuevo`; no es que llegara tarde, es que la redirección no ocurrió. El **contexto del error** (`error-context.md`), con lo que había en la página al fallar, como lo vería un lector de pantalla:
+
+```text
+- navigation:
+  - link "Entrenos":
+    - /url: /
+  - link "Estadísticas":
+    - /url: /estadisticas
+  - link "Acerca de":
+    - /url: /acerca
+  - text: Ana E2E · America/Mexico_City
+  - button "Salir"
+- heading "Nuevo entreno (sin JavaScript)" [level=1]
+```
+
+El navegador "sin cookies" muestra **"Ana E2E · Salir"**: tenía la sesión del _setup_. Un `browser.newContext()` dentro de un test **hereda las opciones de `use`** del proyecto, incluido el `storageState` (por eso `page.goto("/nuevo")` funcionaba con una ruta relativa: también heredó la `baseURL`). Con `test.use({ storageState: { cookies: [], origins: [] } })`, como en el Paso 2, el contexto empieza vacío de verdad.
+
+Y la tercera pista: la **traza** (`trace.zip`), que se guarda porque la configuración tiene `trace: "retain-on-failure"`. Se abre con:
+
+```bash
+npx playwright show-trace test-results/<carpeta-del-test>/trace.zip
+```
+
+El _trace viewer_ muestra cada acción del test en una línea de tiempo y, para cada una, cómo estaba la página antes y después, las peticiones de red, los mensajes de la consola y la línea del test. Para un fallo en CI, donde no puedes ver el navegador, es la mejor herramienta.
+
+Y para escribir y depurar tests en tu máquina, el **modo UI**:
+
+```bash
+npm run test:e2e -- --ui
+```
+
+Abre una ventana con todos los tests, los ejecuta al guardar y deja ver cada paso como en la traza. El `--` pasa la opción a Playwright a través del lanzador, que es quien prepara la base en memoria.
+
+<Callout type="risk">
+
+- **Lee el contexto del error antes de cambiar el test:** "no redirige" parecía un fallo del _middleware_, y el problema estaba en el test. El contexto de la página lo deja claro en segundos.
+- **`retain-on-failure` solo guarda las trazas de los tests que fallan:** grabar todas ralentiza la ejecución y llena el disco. En CI, sube `test-results/` como artefacto para poder descargar la traza.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe el test E2E del flujo principal de tu app de entrenos: entrar → registrar un entreno → verlo en la lista.
+2. Que el test pase por el formulario de entrada (sin la sesión del _setup_), y que la cuenta que usa ya exista antes de empezar.
+
+</Callout>
+
+Solución. `tests/e2e/flujo.spec.ts`:
+
+```ts
+// Archivo: tests/e2e/flujo.spec.ts
+// El flujo principal, de principio a fin: entrar → registrar un entreno → verlo en la lista
+import { expect, test } from "@playwright/test";
+
+const cuenta = { name: "Dani E2E", email: `dani-${Date.now()}@example.test`, password: "otra-clave-larga" };
+
+// Este test SÍ pasa por el login: empieza sin la sesión del setup
+test.use({ storageState: { cookies: [], origins: [] } });
+
+test.beforeAll(async ({ request }) => {
+  // La cuenta se crea por la API, sin navegador: el registro ya lo prueba auth.setup.ts, aquí solo es preparación
+  const res = await request.post("/api/auth/sign-up/email", { data: cuenta });
+  expect(res.ok()).toBe(true);
+});
+
+test("entrar, registrar un entreno y verlo en la lista", async ({ page }) => {
+  // 1. Entrar
+  await page.goto("/entrar");
+  await page.getByLabel("Correo").fill(cuenta.email);
+  await page.getByLabel("Contraseña").fill(cuenta.password);
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page.getByText(`${cuenta.name} ·`)).toBeVisible(); // el menú ya dice quién eres
+
+  // 2. Registrar un entreno de fuerza (sin km)
+  await page.getByLabel("Tipo").selectOption("fuerza");
+  await page.getByLabel("Minutos").fill("40");
+  await page.getByLabel("Fecha").fill("2026-10-14");
+  await page.getByLabel("Notas").fill("pierna y core");
+  await page.getByLabel("Sensación (1–5)").selectOption("4");
+  await page.getByRole("button", { name: "Guardar" }).click();
+
+  // 3. Verlo en la lista, con los datos que se enviaron
+  await expect(page.getByRole("listitem").filter({ hasText: "pierna y core" })).toHaveText(
+    "2026-10-14 · fuerza · 40 min · pierna y core · sensación 4/5",
+  );
+  // Y solo ese: la lista es de este usuario, no la del usuario del setup
+  await expect(page.getByRole("listitem")).toHaveCount(1);
+});
+```
+
+- **La cuenta se crea por la API** (`request.post`), sin navegador: el registro ya lo prueba `auth.setup.ts`, y aquí solo es preparación. Es más rápido y no depende de la pantalla de registro.
+- **El login sí pasa por la interfaz:** es parte del flujo que se prueba.
+- **`toHaveText` compara la línea completa** del entreno: fecha, tipo, minutos, notas y sensación, tal como se enviaron. Y `toHaveCount(1)` comprueba que la lista es solo de este usuario.
+- **`selectOption`** elige en un `<select>`, y `fill` en un `<input type="date">` acepta la fecha en formato `AAAA-MM-DD`.
+
+Los cuatro tests se ven en la salida del Paso 2, y el lanzador confirma al final: 2 usuarios y 2 entrenos en la base en memoria, ninguno en tu base real.
+
+<Callout type="risk">
+
+- **Un E2E por flujo crítico, no por caso:** los errores de validación, los 422 y los casos límite ya están en los tests de componentes y de integración, que son cien veces más rápidos. El E2E comprueba que las piezas funcionan juntas.
+- **Los correos de prueba usan el dominio `example.test`**, reservado para pruebas: nunca existirá, y ningún correo saldrá hacia una persona real.
+
+</Callout>
+
+<Callout type="mastery">
+
+Un test E2E te avisa cuando rompes un flujo crítico: Playwright arranca tu app contra un MongoDB en memoria (y se niega a usar otra base), recorre las páginas con _locators_ accesibles y esperas automáticas, reutiliza la sesión con un proyecto de _setup_ y `storageState`, y cuando algo falla, el registro de llamadas, el contexto del error y la traza te dicen qué pasó.
+
+</Callout>
+
+## Resumen
+
+- Un E2E abre un navegador real contra tu app: pocos, y solo para los flujos críticos.
+- `scripts/e2e.mjs`: un replica set en memoria, sus variables para el servidor y la comprobación de que se usó.
+- `webServer` arranca `astro dev` en otro puerto, sin reutilizar servidores abiertos.
+- _Locators_ (`getByRole`, `getByLabel`) y `expect` que espera solo: nunca `waitForTimeout`.
+- Un proyecto `setup` guarda la sesión en `storageState`; `test.use({ storageState: { cookies: [], origins: [] } })` empieza sin ella. `browser.newContext()` la hereda.
+- `trace: "retain-on-failure"`, `npx playwright show-trace` y el modo `--ui` para depurar.
