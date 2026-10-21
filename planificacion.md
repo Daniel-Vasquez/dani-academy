@@ -5342,6 +5342,7 @@ Todo el código de las Tandas 11–13 se ejecutó en una copia del proyecto **fu
 | `useEditor` compara sus opciones en cada render; un `extensions` o `editorProps` nuevo provoca `setOptions()`, que reescribe la selección del DOM: la negrita se aplicaba a medio texto o a nada | Las opciones del editor son constantes de módulo |
 | El sitio usa `<ClientRouter />`: al ir a otra sección **no** se disparan `pagehide` ni `visibilitychange` | El autoguardado envía lo pendiente también con `astro:before-preparation` |
 | `checkOrigin` de Astro solo revisa los envíos con tipo de formulario (`origin-check.js`): un `PUT` con `application/json` no se comprueba | El endpoint compara `Origin` con `url.origin` |
+| Al cargar en móvil, `sync()` cierra el panel que el servidor pintó abierto; ese `close` devolvía el foco al botón flotante sin que nadie lo hubiera pulsado (visto en una captura al ejecutar la Tanda 11) | El foco vuelve al botón solo al cerrar la hoja que se abrió con él |
 | `@tiptap/html` en el servidor depende de `happy-dom` (18 MB) | La vista previa del servidor la pinta `renderNoteHtml` (25 líneas). Comprobado: cada carácter lleva las mismas marcas que en el HTML de TipTap |
 | `--warning` (3,05:1) e `--info` (3,92:1) no llegan a AA como color de texto en modo claro | Variables propias para el ámbar (`#b45309`, 4,81:1) y el azul (`#0369a1`, 5,68:1) |
 
@@ -5472,14 +5473,22 @@ const { sectionTitle, hasNote } = Astro.props;
       }
     };
 
+    // El foco vuelve al botón solo al cerrar la hoja que abrió la persona. Al cargar en móvil,
+    // sync() cierra el panel que el servidor pintó abierto, y ese "close" no debe mover el foco
+    let openedAsModal = false;
+
     const open = () => {
       if (panel.open) panel.close(); // showModal() lanza InvalidStateError si ya está abierto
       panel.showModal();
+      openedAsModal = true;
       document.dispatchEvent(new CustomEvent("da:notes-open"));
     };
     const close = () => panel.close();
     const closeButton = panel.querySelector<HTMLButtonElement>("[data-notes-close]");
     const backToOpener = () => {
+      // El evento "close" llega en otra tarea: si el panel ya está abierto otra vez, es uno viejo
+      if (!openedAsModal || panel.open) return;
+      openedAsModal = false;
       if (!DESKTOP.matches) opener.focus();
     };
 
@@ -5632,12 +5641,24 @@ Con el usuario de prueba de `fixtures.ts`, en una sección publicada:
 
 ### Criterios de aceptación — Tanda 11
 
-- [ ] A 1280, 1440 y 1536 px: tres columnas, lección ≥ 600 px a 1280 y 686 px desde 1440, y el panel fijo al hacer *scroll*.
-- [ ] Entre 1024 y 1279 px, panel lateral; por debajo de 1024 px, hoja inferior. Las dos se abren con el botón flotante, se cierran con Escape y con "Cerrar", y devuelven el foco al botón.
-- [ ] CLS 0 al cargar una sección en escritorio (el panel viene abierto del servidor).
-- [ ] El panel no añade *scroll* horizontal a ningún ancho entre 320 y 1920 px.
-- [ ] La portada del curso y la evaluación conservan sus dos columnas.
-- [ ] `npm run check`, `npm run lint`, `npm run test:run` y los E2E de `notes-layout.spec.ts` pasan; axe sin violaciones en 390 y 1440 px.
+- [x] A 1280, 1440 y 1536 px: tres columnas, lección ≥ 600 px a 1280 y 686 px desde 1440, y el panel fijo al hacer *scroll*.
+- [x] Entre 1024 y 1279 px, panel lateral; por debajo de 1024 px, hoja inferior. Las dos se abren con el botón flotante, se cierran con Escape y con "Cerrar", y devuelven el foco al botón.
+- [x] CLS 0 al cargar una sección en escritorio (el panel viene abierto del servidor).
+- [x] El panel no añade *scroll* horizontal a ningún ancho entre 320 y 1920 px.
+- [x] La portada del curso y la evaluación conservan sus dos columnas.
+- [x] `npm run check`, `npm run lint`, `npm run test:run` y los E2E de `notes-layout.spec.ts` pasan; axe sin violaciones en 390 y 1440 px.
+
+### Notas de implementación (Tanda 11 ya ejecutada)
+
+Cerrada el 2026-10-20. **El código real del repositorio manda.**
+
+- **Sin *push* todavía:** el panel muestra el texto provisional «El editor llega en la Tanda 13.», así que no debe llegar a producción antes de la Tanda 13.
+- **Fallo encontrado al revisar las capturas:** en móvil, al cargar la página, el botón «Notas» recibía el foco sin que nadie lo hubiera pulsado (ver §11.0). Corregido en `NotesPanel.astro`, y `notes-layout.spec.ts` lo comprueba: el test falla con la versión anterior y pasa con la corregida.
+- **Medido en el servidor de desarrollo, en B1.1:** ningún *scroll* horizontal a 320, 360, 390, 768, 1023, 1024, 1100, 1279, 1280, 1440 y 1920 px.
+  - Por debajo de 1024 px, la hoja ocupa todo el ancho, pegada abajo.
+  - Entre 1024 y 1279 px, el panel lateral mide 384 × 900 px.
+  - Desde 1280 px, la columna se ve y el botón se oculta.
+- **Tests:** E2E `notes-layout.spec.ts`, con 7 tests repartidos entre los proyectos `desktop` y `mobile`; axe sin infracciones con la hoja abierta. Batería completa: 98 tests de Vitest y 32 E2E.
 
 ---
 

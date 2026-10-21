@@ -1,0 +1,138 @@
+---
+/**
+ * Panel de notas: UNA sola instancia que cambia de forma según el ancho.
+ * - ≥ xl (1280 px): columna derecha fija (dialog abierto sin modal).
+ * - lg–xl: panel lateral; < lg: hoja inferior. Las dos, como dialog modal con el botón flotante.
+ */
+interface Props {
+  sectionTitle: string;
+  hasNote: boolean;
+}
+
+const { sectionTitle, hasNote } = Astro.props;
+---
+
+<button
+  type="button"
+  data-notes-open
+  data-has-note={hasNote ? "" : undefined}
+  aria-controls="notas"
+  aria-haspopup="dialog"
+  class="group fixed right-4 bottom-4 z-30 inline-flex items-center gap-2 rounded-full bg-accent-strong px-5 py-3 font-sans text-sm font-semibold text-accent-contrast shadow-lg transition hover:opacity-90 xl:hidden"
+>
+  <svg class="size-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h8.586a2 2 0 0 0 1.414-.586l2.414-2.414A2 2 0 0 0 17 12.586V5a2 2 0 0 0-2-2H4Zm2 4h8v1.5H6V7Zm0 3h5v1.5H6V10Z"></path>
+  </svg>
+  Notas
+  <span
+    class="hidden size-2 rounded-full bg-accent-contrast group-data-has-note:inline-block"
+    aria-hidden="true"
+  ></span>
+</button>
+
+<dialog
+  id="notas"
+  open
+  data-notes-panel
+  aria-labelledby="notas-titulo"
+  class:list={[
+    "m-0 max-h-none max-w-none border-0 bg-bg p-0 text-fg backdrop:bg-black/40",
+    // < xl: oculto salvo cuando se abre como modal
+    "max-xl:[&:not(:modal)]:hidden",
+    // < lg: hoja inferior (sube por encima del teclado del móvil con --notes-kb)
+    "max-lg:fixed max-lg:inset-x-0 max-lg:top-auto max-lg:bottom-(--notes-kb,0px) max-lg:max-h-[80dvh] max-lg:w-full max-lg:rounded-t-2xl",
+    // lg–xl: panel lateral derecho
+    "lg:max-xl:fixed lg:max-xl:inset-y-0 lg:max-xl:right-0 lg:max-xl:left-auto lg:max-xl:h-dvh lg:max-xl:w-96 lg:max-xl:rounded-l-2xl",
+    // ≥ xl: tercera columna, fija al hacer scroll
+    "xl:sticky xl:top-14 xl:h-[calc(100dvh-3.5rem)] xl:w-auto xl:self-start xl:bg-transparent",
+  ]}
+>
+  <div class="flex h-full max-h-[inherit] flex-col overflow-y-auto px-4 py-5 xl:px-0 xl:py-8">
+    <header class="mb-4 flex items-start justify-between gap-3">
+      <div>
+        <h2
+          id="notas-titulo"
+          class="font-sans text-sm font-semibold tracking-wider text-muted uppercase"
+        >
+          Mis notas
+        </h2>
+        <p class="mt-1 line-clamp-2 font-sans text-xs text-muted">{sectionTitle}</p>
+      </div>
+      <button
+        type="button"
+        data-notes-close
+        class="rounded-lg px-2 py-1 font-sans text-sm text-muted hover:bg-surface-2 xl:hidden"
+      >
+        Cerrar
+      </button>
+    </header>
+    <slot />
+  </div>
+</dialog>
+
+<script>
+  const DESKTOP = window.matchMedia("(min-width: 80rem)");
+  let cleanup: (() => void) | undefined;
+
+  function setup() {
+    cleanup?.();
+    const panel = document.querySelector<HTMLDialogElement>("[data-notes-panel]");
+    const opener = document.querySelector<HTMLButtonElement>("[data-notes-open]");
+    if (!panel || !opener) return;
+
+    // ≥ xl: abierto sin modal (columna). < xl: cerrado hasta que se pulse el botón
+    const sync = () => {
+      if (DESKTOP.matches) {
+        if (panel.matches(":modal")) panel.close();
+        if (!panel.open) panel.show();
+      } else if (panel.open && !panel.matches(":modal")) {
+        panel.close();
+      }
+    };
+
+    // El foco vuelve al botón solo al cerrar la hoja que abrió la persona. Al cargar en móvil,
+    // sync() cierra el panel que el servidor pintó abierto, y ese "close" no debe mover el foco
+    let openedAsModal = false;
+
+    const open = () => {
+      if (panel.open) panel.close(); // showModal() lanza InvalidStateError si ya está abierto
+      panel.showModal();
+      openedAsModal = true;
+      document.dispatchEvent(new CustomEvent("da:notes-open"));
+    };
+    const close = () => panel.close();
+    const closeButton = panel.querySelector<HTMLButtonElement>("[data-notes-close]");
+    const backToOpener = () => {
+      // El evento "close" llega en otra tarea: si el panel ya está abierto otra vez, es uno viejo
+      if (!openedAsModal || panel.open) return;
+      openedAsModal = false;
+      if (!DESKTOP.matches) opener.focus();
+    };
+
+    // Teclado virtual (iOS no encoge el viewport de diseño): la hoja sube por encima
+    const viewport = window.visualViewport;
+    const onViewport = () => {
+      if (!viewport) return;
+      const covered = window.innerHeight - viewport.height - viewport.offsetTop;
+      panel.style.setProperty("--notes-kb", `${Math.max(0, covered)}px`);
+    };
+
+    sync();
+    DESKTOP.addEventListener("change", sync);
+    opener.addEventListener("click", open);
+    closeButton?.addEventListener("click", close);
+    panel.addEventListener("close", backToOpener);
+    viewport?.addEventListener("resize", onViewport);
+
+    cleanup = () => {
+      DESKTOP.removeEventListener("change", sync);
+      opener.removeEventListener("click", open);
+      closeButton?.removeEventListener("click", close);
+      panel.removeEventListener("close", backToOpener);
+      viewport?.removeEventListener("resize", onViewport);
+    };
+  }
+
+  // Con View Transitions el script se ejecuta una vez: se vuelve a enlazar en cada página
+  document.addEventListener("astro:page-load", setup);
+</script>
