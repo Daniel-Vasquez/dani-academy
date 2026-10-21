@@ -27,6 +27,9 @@
 - [Tanda 8 · Producción de contenido](#tanda-8--producción-de-contenido)
 - [Tanda 9 · Calidad: tests, seguridad, accesibilidad y CI](#tanda-9--calidad-tests-seguridad-accesibilidad-y-ci)
 - [Tanda 10 · Despliegue a producción](#tanda-10--despliegue-a-producción)
+- [Tanda 11 · Notas personales: layout de tres columnas](#tanda-11--notas-personales-layout-de-tres-columnas)
+- [Tanda 12 · Notas personales: datos y API](#tanda-12--notas-personales-datos-y-api)
+- [Tanda 13 · Notas personales: editor y autoguardado](#tanda-13--notas-personales-editor-y-autoguardado)
 - [Anexo A · Variables de entorno](#anexo-a--variables-de-entorno)
 - [Anexo B · Prompt para ejecutar una Tanda con una IA](#anexo-b--prompt-para-ejecutar-una-tanda-con-una-ia)
 
@@ -412,6 +415,9 @@ debajo de la cabecera; el contenido ocupa todo el ancho con 16 px de margen.
 | 8 | Producción de contenido | Secciones y evaluaciones de los 23 cursos restantes | — |
 | 9 | Calidad | Tests, seguridad, *rate limiting*, accesibilidad, CI | Docker en local; el CI no necesita secretos |
 | 10 | Despliegue | Producción en Vercel + Atlas + dominio propio | Variables en Vercel, acceso a Atlas y Namecheap |
+| 11 | Notas: layout | Página de sección a 3 columnas; panel de notas fijo en escritorio, lateral en tableta y hoja inferior en móvil | Ninguna |
+| 12 | Notas: datos y API | Colección `notes` con versiones, servicio y `GET`/`PUT /api/notes/[sectionId]` | Ninguna (en producción, `db-setup` antes del despliegue) |
+| 13 | Notas: editor | Editor TipTap (negrita, cursiva y 4 tonos) con vista previa del servidor, carga diferida y autoguardado | Ninguna |
 
 ---
 
@@ -5305,6 +5311,1583 @@ Cerrada el 2026-10-16. **El código real del repositorio manda:**
 
 - **Un solo usuario de Mongo para desarrollo y producción (decisión del usuario, 2026-10-16):** `danielvasquezgit_db_user`, con "Read and write to any database". Los entornos se separan por **base de datos**: desarrollo usa `dani_academy_dev` (creada con `npm run db:setup`) y producción `dani_academy`, en el mismo `Cluster0` (M0 permite un solo clúster). Riesgo aceptado: un `.env` con el `MONGODB_DB` equivocado, o un *script* mal dirigido, puede escribir en producción. La red de seguridad es el *backup*, y el criterio de "usuarios de Mongo distintos" se cumple solo en parte. Además existe `academy_backup` (`read` sobre `dani_academy`) para `npm run db:backup`.
 - **Cuenta de la app en desarrollo:** al cambiar a `dani_academy_dev`, la cuenta hay que registrarla otra vez en local (mismo correo y contraseña, nombre "Dani Desarrollo"). El progreso de cada entorno es independiente.
+---
+
+## Tanda 11 · Notas personales: layout de tres columnas
+
+| Dato | Valor |
+|---|---|
+| Objetivo | Reestructurar la página de sección a tres columnas en escritorio (índice, lección, notas) y crear el panel de notas: columna fija desde `xl`, panel lateral entre `lg` y `xl`, y hoja inferior en móvil con un botón flotante |
+| Prerrequisitos | Tanda 10 (la plataforma está en producción) |
+| Variables de entorno | **Ninguna** |
+| Rama | `main` (se trabaja sin ramas). **No hagas *push* hasta cerrar la Tanda 13**: cada *push* despliega en producción y, hasta entonces, el panel no tiene editor |
+
+### 11.0 Decisiones (cerradas con el usuario el 2026-10-20) y hallazgos del laboratorio
+
+El sistema de notas se reparte en tres Tandas: el **layout** (11), los **datos y la API** (12) y el **editor con autoguardado** (13). Decisiones:
+
+- **Una nota por sección** (`A3.2`), no por curso. El índice `{ userId, courseId }` permite listar después todas las de un curso.
+- **Paleta cerrada de cuatro tonos** (rojo, ámbar, verde y azul) que cambian con el tema. Se guarda el **nombre** del tono, nunca un hexadecimal.
+- **TipTap 3** (3.32.0) como editor, sin interfaz propia. Se descartan Lexical, que obliga a programar el color a mano con estilos en línea, y Quill, que no está pensado para React y guarda colores fijos.
+- **En móvil, una hoja inferior (*drawer*)** que se abre con un botón flotante, no las notas al final de la lección: se toman notas mientras se lee.
+
+Todo el código de las Tandas 11–13 se ejecutó en una copia del proyecto **fuera del repositorio**, con MongoDB en memoria y Chrome automatizado. Hallazgos que el código ya incorpora:
+
+| Hallazgo (medido) | Consecuencia en el código |
+|---|---|
+| A 1280 px, con `18rem` de índice y `20rem` de notas, la lección bajaría de sus 686 px (`68ch`) a unos 528 px | Desde `xl`: índice de `15rem`, notas de `18rem` y contenedor de `96rem`. Medido: 624 px de lección a 1280 y 686 px desde 1440 |
+| TipTap y ProseMirror pesan **102 KB gzip** en el *build* (la isla, 1,4 KB) | El editor va en un trozo aparte (`React.lazy`): en escritorio se pide al hidratar; en móvil, solo al abrir la hoja |
+| Si la barra importa `@tiptap/react`, TipTap entra en el paquete inicial aunque el editor sea diferido | La barra (`NotesToolbar`) no importa nada de TipTap; su estado se calcula dentro del editor |
+| Con `immediatelyRender: false`, el primer render llega con `editor === null`: la caja se encogía un fotograma (CLS 0,0012) | `NotesEditor` muestra el mismo esqueleto que la vista previa hasta tener el editor: CLS 0 |
+| `useEditor` compara sus opciones en cada render; un `extensions` o `editorProps` nuevo provoca `setOptions()`, que reescribe la selección del DOM: la negrita se aplicaba a medio texto o a nada | Las opciones del editor son constantes de módulo |
+| El sitio usa `<ClientRouter />`: al ir a otra sección **no** se disparan `pagehide` ni `visibilitychange` | El autoguardado envía lo pendiente también con `astro:before-preparation` |
+| `checkOrigin` de Astro solo revisa los envíos con tipo de formulario (`origin-check.js`): un `PUT` con `application/json` no se comprueba | El endpoint compara `Origin` con `url.origin` |
+| `@tiptap/html` en el servidor depende de `happy-dom` (18 MB) | La vista previa del servidor la pinta `renderNoteHtml` (25 líneas). Comprobado: cada carácter lleva las mismas marcas que en el HTML de TipTap |
+| `--warning` (3,05:1) e `--info` (3,92:1) no llegan a AA como color de texto en modo claro | Variables propias para el ámbar (`#b45309`, 4,81:1) y el azul (`#0369a1`, 5,68:1) |
+
+> **Fallo previo, ajeno a las notas:** a 390 px, **59 de las 95 lecciones publicadas** tienen *scroll* horizontal, medido en el repositorio sin cambios. Se debe a tablas y a código en línea largo sin contenedor con *scroll*. El criterio de esta Tanda es que **el panel no añada** *scroll* horizontal; el de las lecciones se corrige aparte.
+
+### 11.1 Archivos de esta Tanda
+
+```
+src/
+├── layouts/CourseLayout.astro                (modificar: slot "notes" y rejilla de 3 columnas)
+├── components/notes/NotesPanel.astro         (nuevo: panel, botón flotante y su script)
+├── pages/cursos/[course]/[section].astro     (modificar: monta el panel)
+└── styles/global.css                         (modificar: bloquear el scroll con la hoja abierta)
+tests/e2e/notes-layout.spec.ts                (nuevo)
+```
+
+### 11.2 Puntos de ruptura
+
+| Ancho | Índice | Lección | Notas |
+|---|---|---|---|
+| < `lg` (< 1024 px) | `<details>` actual | 100 % | Botón flotante → **hoja inferior** (`dialog` modal, 80 % del alto como máximo) |
+| `lg`–`xl` (1024–1279 px) | Columna de `18rem` | Resto | Botón flotante → **panel lateral derecho** de `24rem` (`dialog` modal) |
+| ≥ `xl` (≥ 1280 px) | Columna de `15rem` | `minmax(0,1fr)`, con su tope de `68ch` | **Columna de `18rem`**, fija al hacer *scroll* (`dialog` abierto sin modal) |
+
+Solo la página de sección pasa el panel de notas. La portada del curso y la evaluación siguen con dos columnas, porque la rejilla de tres solo se activa si existe el *slot* `notes`.
+
+### 11.3 Una sola instancia del panel
+
+El panel es **un único `<dialog>`** que cambia de forma con CSS. No hay una columna y un *drawer* por separado: con dos islas habría dos editores, cada uno con su versión, y se sobrescribirían al guardar.
+
+- **El servidor lo pinta con `open`.** En escritorio está visible desde el primer fotograma (sin salto), y por debajo de `xl` lo oculta la regla `max-xl:[&:not(:modal)]:hidden`.
+- **Por debajo de `xl`**, el botón flotante llama a `close()` y después a `showModal()`. `showModal()` lanza `InvalidStateError` si el diálogo ya está abierto. El modal trae de serie el foco atrapado, el cierre con Escape y la capa superior.
+- **Al cruzar `xl`**, un `matchMedia` cierra el modal y lo vuelve a abrir sin modal con `show()`, o al revés.
+- **Con View Transitions**, el *script* se ejecuta una sola vez: se vuelve a enlazar en `astro:page-load`, como `StudyTracker`.
+
+`src/components/notes/NotesPanel.astro`:
+
+```astro
+---
+/**
+ * Panel de notas: UNA sola instancia que cambia de forma según el ancho.
+ * - ≥ xl (1280 px): columna derecha fija (dialog abierto sin modal).
+ * - lg–xl: panel lateral; < lg: hoja inferior. Las dos, como dialog modal con el botón flotante.
+ */
+interface Props {
+  sectionTitle: string;
+  hasNote: boolean;
+}
+
+const { sectionTitle, hasNote } = Astro.props;
+---
+
+<button
+  type="button"
+  data-notes-open
+  data-has-note={hasNote ? "" : undefined}
+  aria-controls="notas"
+  aria-haspopup="dialog"
+  class="group fixed right-4 bottom-4 z-30 inline-flex items-center gap-2 rounded-full bg-accent-strong px-5 py-3 font-sans text-sm font-semibold text-accent-contrast shadow-lg transition hover:opacity-90 xl:hidden"
+>
+  <svg class="size-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path d="M4 3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h8.586a2 2 0 0 0 1.414-.586l2.414-2.414A2 2 0 0 0 17 12.586V5a2 2 0 0 0-2-2H4Zm2 4h8v1.5H6V7Zm0 3h5v1.5H6V10Z"></path>
+  </svg>
+  Notas
+  <span
+    class="hidden size-2 rounded-full bg-accent-contrast group-data-has-note:inline-block"
+    aria-hidden="true"
+  ></span>
+</button>
+
+<dialog
+  id="notas"
+  open
+  data-notes-panel
+  aria-labelledby="notas-titulo"
+  class:list={[
+    "m-0 max-h-none max-w-none border-0 bg-bg p-0 text-fg backdrop:bg-black/40",
+    // < xl: oculto salvo cuando se abre como modal
+    "max-xl:[&:not(:modal)]:hidden",
+    // < lg: hoja inferior (sube por encima del teclado del móvil con --notes-kb)
+    "max-lg:fixed max-lg:inset-x-0 max-lg:top-auto max-lg:bottom-(--notes-kb,0px) max-lg:max-h-[80dvh] max-lg:w-full max-lg:rounded-t-2xl",
+    // lg–xl: panel lateral derecho
+    "lg:max-xl:fixed lg:max-xl:inset-y-0 lg:max-xl:right-0 lg:max-xl:left-auto lg:max-xl:h-dvh lg:max-xl:w-96 lg:max-xl:rounded-l-2xl",
+    // ≥ xl: tercera columna, fija al hacer scroll
+    "xl:sticky xl:top-14 xl:h-[calc(100dvh-3.5rem)] xl:w-auto xl:self-start xl:bg-transparent",
+  ]}
+>
+  <div class="flex h-full max-h-[inherit] flex-col overflow-y-auto px-4 py-5 xl:px-0 xl:py-8">
+    <header class="mb-4 flex items-start justify-between gap-3">
+      <div>
+        <h2
+          id="notas-titulo"
+          class="font-sans text-sm font-semibold tracking-wider text-muted uppercase"
+        >
+          Mis notas
+        </h2>
+        <p class="mt-1 line-clamp-2 font-sans text-xs text-muted">{sectionTitle}</p>
+      </div>
+      <button
+        type="button"
+        data-notes-close
+        class="rounded-lg px-2 py-1 font-sans text-sm text-muted hover:bg-surface-2 xl:hidden"
+      >
+        Cerrar
+      </button>
+    </header>
+    <slot />
+  </div>
+</dialog>
+
+<script>
+  const DESKTOP = window.matchMedia("(min-width: 80rem)");
+  let cleanup: (() => void) | undefined;
+
+  function setup() {
+    cleanup?.();
+    const panel = document.querySelector<HTMLDialogElement>("[data-notes-panel]");
+    const opener = document.querySelector<HTMLButtonElement>("[data-notes-open]");
+    if (!panel || !opener) return;
+
+    // ≥ xl: abierto sin modal (columna). < xl: cerrado hasta que se pulse el botón
+    const sync = () => {
+      if (DESKTOP.matches) {
+        if (panel.matches(":modal")) panel.close();
+        if (!panel.open) panel.show();
+      } else if (panel.open && !panel.matches(":modal")) {
+        panel.close();
+      }
+    };
+
+    const open = () => {
+      if (panel.open) panel.close(); // showModal() lanza InvalidStateError si ya está abierto
+      panel.showModal();
+      document.dispatchEvent(new CustomEvent("da:notes-open"));
+    };
+    const close = () => panel.close();
+    const closeButton = panel.querySelector<HTMLButtonElement>("[data-notes-close]");
+    const backToOpener = () => {
+      if (!DESKTOP.matches) opener.focus();
+    };
+
+    // Teclado virtual (iOS no encoge el viewport de diseño): la hoja sube por encima
+    const viewport = window.visualViewport;
+    const onViewport = () => {
+      if (!viewport) return;
+      const covered = window.innerHeight - viewport.height - viewport.offsetTop;
+      panel.style.setProperty("--notes-kb", `${Math.max(0, covered)}px`);
+    };
+
+    sync();
+    DESKTOP.addEventListener("change", sync);
+    opener.addEventListener("click", open);
+    closeButton?.addEventListener("click", close);
+    panel.addEventListener("close", backToOpener);
+    viewport?.addEventListener("resize", onViewport);
+
+    cleanup = () => {
+      DESKTOP.removeEventListener("change", sync);
+      opener.removeEventListener("click", open);
+      closeButton?.removeEventListener("click", close);
+      panel.removeEventListener("close", backToOpener);
+      viewport?.removeEventListener("resize", onViewport);
+    };
+  }
+
+  // Con View Transitions el script se ejecuta una vez: se vuelve a enlazar en cada página
+  document.addEventListener("astro:page-load", setup);
+</script>
+```
+
+En esta Tanda, el *slot* del panel lleva un texto provisional (`<p class="text-sm text-muted">El editor llega en la Tanda 13.</p>`), y `hasNote` vale `false`. La Tanda 13 lo sustituye por la isla.
+
+### 11.4 `src/layouts/CourseLayout.astro`
+
+```astro
+---
+import BaseLayout from "./BaseLayout.astro";
+import SiteHeader from "@/components/layout/SiteHeader.astro";
+import CourseSidebar from "@/components/course/CourseSidebar.astro";
+import type { Course, Section } from "@/lib/content";
+
+interface Props {
+  title: string;
+  description?: string;
+  course: Course;
+  sections: Section[];
+  readIds: string[];
+  currentSectionId?: string;
+  current?: "overview" | "quiz";
+  quizAvailable?: boolean;
+}
+
+const { title, description, ...sidebar } = Astro.props;
+const { course, sections, readIds } = sidebar;
+const readCount = sections.filter((s) => readIds.includes(s.data.sectionId)).length;
+// Solo las páginas de sección pasan el panel de notas: la portada y la evaluación siguen a 2 columnas
+const hasNotes = Astro.slots.has("notes");
+---
+
+<BaseLayout title={title} description={description}>
+  <SiteHeader
+    crumbs={[
+      { label: "Temario", href: "/temario" },
+      { label: `${course.id} · ${course.data.title}` },
+    ]}
+  >
+    <slot name="header-actions" slot="actions" />
+  </SiteHeader>
+
+  <div
+    class:list={[
+      "mx-auto max-w-7xl lg:grid lg:grid-cols-[18rem_minmax(0,1fr)] lg:gap-12 lg:px-6",
+      hasNotes && "xl:max-w-[96rem] xl:grid-cols-[15rem_minmax(0,1fr)_18rem] xl:gap-10",
+    ]}
+  >
+    <!-- Índice en móvil: desplegable nativo, sin JavaScript -->
+    <details class="border-b border-surface-2 px-4 py-3 lg:hidden">
+      <summary class="flex cursor-pointer items-center justify-between text-sm font-medium">
+        Índice del curso
+        <span data-read-count class="text-muted tabular-nums">
+          {readCount}/{sections.length}
+        </span>
+      </summary>
+      <div class="pt-4 pb-2">
+        <CourseSidebar {...sidebar} />
+      </div>
+    </details>
+
+    <!-- Índice en escritorio: fijo al hacer scroll -->
+    <aside class="hidden lg:block">
+      <div class="sticky top-14 max-h-[calc(100dvh-3.5rem)] overflow-y-auto py-8 pr-2">
+        <CourseSidebar {...sidebar} />
+      </div>
+    </aside>
+
+    <main
+      id="contenido"
+      class:list={[
+        "min-w-0 px-4 py-10 sm:px-6 lg:px-0 lg:py-14",
+        hasNotes && "max-xl:pb-28", // que el botón flotante no tape el final de la lección
+      ]}
+    >
+      <slot />
+    </main>
+
+    {hasNotes && <slot name="notes" />}
+  </div>
+</BaseLayout>
+```
+
+`max-xl:pb-28` deja hueco al final de la lección para que el botón flotante no tape "Marcar como leído" ni la navegación.
+
+### 11.5 Página de sección y CSS
+
+En `src/pages/cursos/[course]/[section].astro`, importa `NotesPanel` y añade el panel justo antes de `</CourseLayout>`:
+
+```astro
+<NotesPanel slot="notes" sectionTitle={section.data.title} hasNote={false}>
+  <p class="text-sm text-muted">El editor llega en la Tanda 13.</p>
+</NotesPanel>
+```
+
+Al final de `src/styles/global.css`:
+
+```css
+/* Con la hoja de notas abierta en móvil, la lección de detrás no hace scroll */
+html:has(dialog[data-notes-panel]:modal) {
+  overflow: hidden;
+}
+```
+
+### 11.6 Tests E2E (`tests/e2e/notes-layout.spec.ts`)
+
+Con el usuario de prueba de `fixtures.ts`, en una sección publicada:
+
+- **1280, 1440 y 1536 px:** el panel es visible y no es modal, el botón flotante está oculto, la lección mide ≥ 600 px a 1280 y 686 px desde 1440, y no hay *scroll* horizontal añadido.
+- **1440 px:** tras `scrollTo(0, 4000)`, el panel sigue con `top` = 56 px.
+- **390 px:** el panel tiene `display: none` y el botón es visible. Al pulsarlo, el panel `:modal` queda pegado abajo y `html` tiene `overflow: hidden`. Escape lo cierra y el foco vuelve al botón.
+- **1100 px:** al abrirlo, es un panel lateral derecho de 384 px.
+- Abierto en 390 px y ensanchado a 1440, vuelve a ser la columna sin modal.
+- La portada del curso y la evaluación **no** tienen panel ni botón flotante.
+
+### Fuera de alcance — Tanda 11
+
+- El editor, el guardado y los datos (Tandas 12 y 13).
+- Ocultar o plegar la columna de notas en escritorio.
+- El *scroll* horizontal previo de las lecciones (ver §11.0).
+
+### Criterios de aceptación — Tanda 11
+
+- [ ] A 1280, 1440 y 1536 px: tres columnas, lección ≥ 600 px a 1280 y 686 px desde 1440, y el panel fijo al hacer *scroll*.
+- [ ] Entre 1024 y 1279 px, panel lateral; por debajo de 1024 px, hoja inferior. Las dos se abren con el botón flotante, se cierran con Escape y con "Cerrar", y devuelven el foco al botón.
+- [ ] CLS 0 al cargar una sección en escritorio (el panel viene abierto del servidor).
+- [ ] El panel no añade *scroll* horizontal a ningún ancho entre 320 y 1920 px.
+- [ ] La portada del curso y la evaluación conservan sus dos columnas.
+- [ ] `npm run check`, `npm run lint`, `npm run test:run` y los E2E de `notes-layout.spec.ts` pasan; axe sin violaciones en 390 y 1440 px.
+
+---
+
+## Tanda 12 · Notas personales: datos y API
+
+| Dato | Valor |
+|---|---|
+| Objetivo | Colección `notes` con validación e índices, repositorio con control de versiones, servicio y endpoint `GET`/`PUT /api/notes/[sectionId]` |
+| Prerrequisitos | Tanda 11 |
+| Variables de entorno | **Ninguna nueva** |
+| Rama | `main`. Sin *push* hasta cerrar la Tanda 13 |
+
+### 12.1 Archivos de esta Tanda
+
+```
+src/
+├── lib/
+│   ├── constants.ts                          (modificar: NOTE_LIMITS y RATE_LIMITS.notes)
+│   ├── errors.ts                             (modificar: ConflictError y PayloadTooLargeError)
+│   └── notes/
+│       ├── palette.ts                        (nuevo: los cuatro tonos)
+│       └── schema.ts                         (nuevo: validación del JSON de TipTap)
+├── server/
+│   ├── db-types.ts                           (modificar: COLLECTIONS.notes y NoteDoc)
+│   ├── repositories/notes.repo.ts            (nuevo)
+│   ├── repositories/index.ts                 (modificar)
+│   └── services/notes.service.ts             (nuevo)
+└── pages/api/notes/[sectionId].ts            (nuevo)
+scripts/db-setup.ts                           (modificar: validador e índices de notes)
+tests/
+├── unit/note-schema.test.ts                  (nuevo)
+├── integration/notes.repo.test.ts            (nuevo)
+├── integration/setup.ts                      (modificar: índice único de notes)
+└── e2e/notes-api.spec.ts                     (nuevo)
+```
+
+### 12.2 Modelo de datos: JSON, no HTML
+
+Se guarda el **JSON de TipTap** (el documento de ProseMirror), validado en el servidor con zod, y no HTML.
+
+- **El HTML habría que sanearlo en cada lectura.** Se pinta dentro de la lección, detrás de la sesión, así que sería un riesgo de XSS. Además, no se puede validar su estructura.
+- **El JSON se valida campo a campo** con `.strict()`. Solo admite párrafos, `bold`, `italic` y `tono` con un valor de la paleta. Medido: rechaza un color libre, un enlace `javascript:`, una imagen y un estilo en línea.
+- **El editor tampoco produce nada más.** Al pegar HTML con un color libre, un enlace, una imagen, listas o títulos, TipTap los convierte en párrafos de texto, porque su esquema tiene las mismas piezas que el validador.
+
+Colección `notes`:
+
+| Campo | Tipo | Notas |
+|---|---|---|
+| `userId` | `string` | De la sesión, **nunca** de la petición |
+| `courseId` | `string` | Sale del contenido (`getSectionById`), no de la petición |
+| `sectionId` | `string` | `"A3.2"` |
+| `doc` | objeto | JSON de TipTap ya validado |
+| `text` | `string` | Texto plano derivado, para la vista previa y búsquedas futuras |
+| `rev` | entero ≥ 1 | Versión: empieza en 1 y sube en cada guardado |
+| `createdAt`, `updatedAt` | `Date` | |
+
+Índices: `{ userId: 1, sectionId: 1 }` **único** (una nota por persona y sección) y `{ userId: 1, courseId: 1, updatedAt: -1 }` (las notas de un curso, de la más reciente a la más antigua).
+
+**Control de concurrencia optimista (`rev`):** cada guardado envía la `rev` que tiene el editor.
+
+- **Crear** (`rev: 0`) es un `insertOne`. Si otra pestaña la creó antes, el índice único lo detecta con un error 11000.
+- **Actualizar** es un `findOneAndUpdate` filtrado por `rev`. Si no encuentra el documento, alguien guardó antes: se responde **409** con la nota actual.
+- **Una nota vacía no se guarda: se borra**, también filtrando por `rev`.
+
+### 12.3 Constantes, errores y tipos
+
+En `src/lib/constants.ts`, dentro de `RATE_LIMITS`, y debajo:
+
+```ts
+  // El autoguardado envía como mucho uno por cada segundo de pausa al escribir
+  notes: { max: 60, windowSeconds: 60 },
+} as const;
+
+/** Notas personales (Tanda 12) */
+export const NOTE_LIMITS = {
+  maxChars: 10_000, // los que cuenta CharacterCount en el editor
+  // JSON de la petición: por debajo de los 64 KiB que admite un fetch con keepalive
+  maxBytes: 60_000,
+} as const;
+```
+
+En `src/lib/errors.ts`, antes de `toErrorResponse`:
+
+```ts
+export class ConflictError<T = unknown> extends HttpError {
+  constructor(
+    public readonly current: T,
+    message = "La nota ha cambiado en otra pestaña",
+  ) {
+    super(409, message);
+  }
+}
+
+export class PayloadTooLargeError extends HttpError {
+  constructor(message = "La nota es demasiado larga") {
+    super(413, message);
+  }
+}
+```
+
+En `src/server/db-types.ts`, añade `notes: "notes"` a `COLLECTIONS`, `import type { NoteContent } from "@/lib/notes/schema";` arriba y, al final:
+
+```ts
+export interface NoteDoc {
+  _id?: ObjectId;
+  userId: string;
+  courseId: string;
+  sectionId: string;
+  doc: NoteContent; // JSON de TipTap ya validado con noteContentSchema
+  text: string; // texto plano derivado de doc (vista previa y búsquedas futuras)
+  rev: number; // versión: empieza en 1 y sube en cada guardado
+  createdAt: Date;
+  updatedAt: Date;
+}
+```
+
+### 12.4 Paleta y esquema
+
+`src/lib/notes/palette.ts`:
+
+```ts
+/** Paleta cerrada de colores de texto de las notas. El color real lo pone global.css por tema */
+export const NOTE_TONES = ["rojo", "ambar", "verde", "azul"] as const;
+export type NoteTone = (typeof NOTE_TONES)[number];
+
+export const NOTE_TONE_LABELS: Record<NoteTone, string> = {
+  rojo: "Rojo",
+  ambar: "Ámbar",
+  verde: "Verde",
+  azul: "Azul",
+};
+
+export const isNoteTone = (value: unknown): value is NoteTone =>
+  typeof value === "string" && (NOTE_TONES as readonly string[]).includes(value);
+```
+
+`src/lib/notes/schema.ts`:
+
+```ts
+import { z } from "zod";
+import { NOTE_TONES } from "./palette";
+
+/**
+ * Lo único que puede contener una nota: párrafos de texto con negrita, cursiva y un tono.
+ * `.strict()` rechaza cualquier otra clave, así que un enlace, una imagen o un estilo en línea
+ * enviados a mano no llegan nunca a la base de datos.
+ */
+const markSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("bold") }).strict(),
+  z.object({ type: z.literal("italic") }).strict(),
+  z
+    .object({ type: z.literal("tono"), attrs: z.object({ tono: z.enum(NOTE_TONES) }).strict() })
+    .strict(),
+]);
+
+const textSchema = z
+  .object({
+    type: z.literal("text"),
+    text: z.string().min(1),
+    marks: z.array(markSchema).max(3).optional(),
+  })
+  .strict();
+
+const paragraphSchema = z
+  .object({ type: z.literal("paragraph"), content: z.array(textSchema).optional() })
+  .strict();
+
+export const noteContentSchema = z
+  .object({ type: z.literal("doc"), content: z.array(paragraphSchema).min(1).max(2_000) })
+  .strict();
+
+export type NoteContent = z.infer<typeof noteContentSchema>;
+
+export const saveNoteInputSchema = z.object({
+  doc: noteContentSchema,
+  rev: z.number().int().min(0), // 0 = la nota todavía no existe
+});
+
+/** Texto plano: un párrafo por línea */
+export function noteToText(doc: NoteContent): string {
+  return doc.content
+    .map((p) => (p.content ?? []).map((t) => t.text).join(""))
+    .join("\n")
+    .trim();
+}
+```
+
+### 12.5 Validación e índices en `scripts/db-setup.ts`
+
+En `validators`:
+
+```ts
+  [COLLECTIONS.notes]: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["userId", "courseId", "sectionId", "doc", "text", "rev", "createdAt", "updatedAt"],
+      properties: {
+        userId: { bsonType: "string", minLength: 1 },
+        courseId: { bsonType: "string", pattern: COURSE_ID },
+        sectionId: { bsonType: "string", pattern: SECTION_ID },
+        doc: { bsonType: "object", required: ["type", "content"] },
+        text: { bsonType: "string", maxLength: 20_000 },
+        rev: { bsonType: ["int", "long"], minimum: 1 },
+        createdAt: { bsonType: "date" },
+        updatedAt: { bsonType: "date" },
+      },
+    },
+  },
+```
+
+En `indexes`:
+
+```ts
+  // Tanda 12: una nota por usuario y sección; "mis notas de este curso", de la más reciente
+  [COLLECTIONS.notes, { userId: 1, sectionId: 1 }, { unique: true, name: "user_section_unique" }],
+  [COLLECTIONS.notes, { userId: 1, courseId: 1, updatedAt: -1 }, { name: "user_course_updatedAt" }],
+```
+
+Medido contra un MongoDB en memoria con el `db-setup.ts` real: la colección se crea con su validación y sus dos índices. Acepta un documento válido y rechaza `rev: 0`, un `sectionId` mal formado y un documento sin `doc` (código 121), además de un duplicado de persona y sección (11000). `$inc` sobre `rev` conserva el tipo entero.
+
+> **Antes de desplegar (al cerrar la Tanda 13):** ejecuta el `db-setup` contra producción, como en §10.1: `node --env-file=.env.production.local --import tsx scripts/db-setup.ts`. Si la colección se creara sola con el primer guardado, no tendría ni el validador ni el índice único, y dos pestañas podrían crear dos notas de la misma sección. Crear la colección y sus índices funciona con el rol `readWrite` (`collMod`, no).
+
+### 12.6 Repositorio
+
+`src/server/repositories/notes.repo.ts`:
+
+```ts
+import type { Db } from "mongodb";
+import { COLLECTIONS, type NoteDoc } from "@/server/db-types";
+import type { NoteContent } from "@/lib/notes/schema";
+
+const DUPLICATE_KEY = 11000;
+
+export interface StoredNote {
+  doc: NoteContent;
+  rev: number;
+  updatedAt: Date;
+}
+
+export type SaveNoteResult =
+  { ok: true; rev: number; updatedAt: Date } | { ok: false; current: StoredNote | null };
+
+export interface SaveNoteData {
+  userId: string;
+  courseId: string;
+  sectionId: string;
+  doc: NoteContent;
+  text: string;
+  expectedRev: number; // la versión que tenía el editor; 0 = nota nueva
+}
+
+/**
+ * Control de concurrencia optimista: solo se escribe si la versión guardada es la que
+ * el editor dice tener. Si otra pestaña guardó antes, se devuelve la nota actual (409).
+ */
+export function createNotesRepo(db: Db) {
+  const col = db.collection<NoteDoc>(COLLECTIONS.notes);
+  const projection = { _id: 0, doc: 1, rev: 1, updatedAt: 1 } as const;
+
+  async function get(userId: string, sectionId: string): Promise<StoredNote | null> {
+    return col.findOne<StoredNote>({ userId, sectionId }, { projection });
+  }
+
+  return {
+    get,
+
+    async save(data: SaveNoteData, now = new Date()): Promise<SaveNoteResult> {
+      const { userId, courseId, sectionId, doc, text, expectedRev } = data;
+
+      if (expectedRev === 0) {
+        try {
+          await col.insertOne({
+            userId,
+            courseId,
+            sectionId,
+            doc,
+            text,
+            rev: 1,
+            createdAt: now,
+            updatedAt: now,
+          });
+          return { ok: true, rev: 1, updatedAt: now };
+        } catch (error) {
+          // Ya existe (otra pestaña la creó): el índice único lo detecta
+          if ((error as { code?: number }).code !== DUPLICATE_KEY) throw error;
+        }
+      } else {
+        const updated = await col.findOneAndUpdate(
+          { userId, sectionId, rev: expectedRev },
+          { $set: { doc, text, updatedAt: now }, $inc: { rev: 1 } },
+          { returnDocument: "after", projection: { _id: 0, rev: 1, updatedAt: 1 } },
+        );
+        if (updated) return { ok: true, rev: updated.rev, updatedAt: updated.updatedAt };
+      }
+
+      return { ok: false, current: await get(userId, sectionId) };
+    },
+
+    /** Borra la nota (al vaciarla) si nadie la cambió entre medias */
+    async remove(userId: string, sectionId: string, expectedRev: number): Promise<SaveNoteResult> {
+      const { deletedCount } = await col.deleteOne({ userId, sectionId, rev: expectedRev });
+      if (deletedCount === 1) return { ok: true, rev: 0, updatedAt: new Date() };
+      return { ok: false, current: await get(userId, sectionId) };
+    },
+  };
+}
+```
+
+En `src/server/repositories/index.ts`, `import { createNotesRepo } from "./notes.repo";` y `notes: createNotesRepo(db),` en `repos`.
+
+### 12.7 Servicio
+
+`src/server/services/notes.service.ts`:
+
+```ts
+import { getSectionById } from "@/lib/content";
+import { NOTE_LIMITS, RATE_LIMITS } from "@/lib/constants";
+import { BadRequestError, ConflictError, NotFoundError, PayloadTooLargeError } from "@/lib/errors";
+import { noteToText, saveNoteInputSchema } from "@/lib/notes/schema";
+import { enforceRateLimit } from "@/server/services/rate-limit.service";
+import { repos } from "@/server/repositories";
+import type { StoredNote } from "@/server/repositories/notes.repo";
+
+export type NoteView = { doc: StoredNote["doc"] | null; rev: number; updatedAt: Date | null };
+
+const EMPTY: NoteView = { doc: null, rev: 0, updatedAt: null };
+
+export async function getNote(userId: string, sectionId: string): Promise<NoteView> {
+  return (await repos.notes.get(userId, sectionId)) ?? EMPTY;
+}
+
+export async function saveNote(
+  userId: string,
+  sectionId: string,
+  input: unknown,
+): Promise<{ rev: number; updatedAt: Date | null }> {
+  await enforceRateLimit(`notes:${userId}`, RATE_LIMITS.notes);
+
+  // El curso sale del contenido, nunca de la petición
+  const section = await getSectionById(sectionId);
+  if (!section) throw new NotFoundError("La sección no existe");
+
+  const parsed = saveNoteInputSchema.safeParse(input);
+  if (!parsed.success) throw new BadRequestError("La nota no tiene un formato válido");
+  const { doc, rev } = parsed.data;
+
+  const text = noteToText(doc);
+  if (text.length > NOTE_LIMITS.maxChars) throw new PayloadTooLargeError();
+
+  // Una nota vacía no se guarda: se borra (y si no existía, no hay nada que hacer)
+  if (text === "") {
+    if (rev === 0) return { rev: 0, updatedAt: null };
+    const removed = await repos.notes.remove(userId, sectionId, rev);
+    if (!removed.ok) throw new ConflictError(removed.current);
+    return { rev: 0, updatedAt: null };
+  }
+
+  const result = await repos.notes.save({
+    userId,
+    courseId: section.data.course.id,
+    sectionId,
+    doc,
+    text,
+    expectedRev: rev,
+  });
+  if (!result.ok) throw new ConflictError(result.current);
+  return { rev: result.rev, updatedAt: result.updatedAt };
+}
+```
+
+### 12.8 Endpoint
+
+`src/pages/api/notes/[sectionId].ts`:
+
+```ts
+import type { APIRoute } from "astro";
+import { NOTE_LIMITS, SECTION_ID_REGEX } from "@/lib/constants";
+import {
+  BadRequestError,
+  ConflictError,
+  ForbiddenError,
+  PayloadTooLargeError,
+  UnauthorizedError,
+  toErrorResponse,
+} from "@/lib/errors";
+import { getNote, saveNote } from "@/server/services/notes.service";
+
+function sectionIdFrom(params: Record<string, string | undefined>): string {
+  const sectionId = params.sectionId ?? "";
+  if (!SECTION_ID_REGEX.test(sectionId)) {
+    throw new BadRequestError("Identificador de sección no válido");
+  }
+  return sectionId;
+}
+
+export const GET: APIRoute = async ({ params, locals }) => {
+  try {
+    if (!locals.user) throw new UnauthorizedError();
+    // El userId SIEMPRE sale de la sesión: no hay forma de pedir la nota de otra persona
+    return Response.json(await getNote(locals.user.id, sectionIdFrom(params)));
+  } catch (error) {
+    return toErrorResponse(error);
+  }
+};
+
+export const PUT: APIRoute = async ({ params, locals, request, url }) => {
+  try {
+    if (!locals.user) throw new UnauthorizedError();
+    const sectionId = sectionIdFrom(params);
+    // checkOrigin de Astro solo revisa los envíos de formularios: un JSON se comprueba aquí
+    if (request.headers.get("origin") !== url.origin)
+      throw new ForbiddenError("Origen no permitido");
+    if (!request.headers.get("content-type")?.startsWith("application/json")) {
+      throw new BadRequestError("Se esperaba JSON");
+    }
+
+    const raw = await request.text();
+    if (new TextEncoder().encode(raw).length > NOTE_LIMITS.maxBytes)
+      throw new PayloadTooLargeError();
+    let body: unknown;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      throw new BadRequestError("JSON no válido");
+    }
+
+    return Response.json(await saveNote(locals.user.id, sectionId, body));
+  } catch (error) {
+    if (error instanceof ConflictError) {
+      return Response.json({ error: error.message, current: error.current }, { status: 409 });
+    }
+    return toErrorResponse(error);
+  }
+};
+```
+
+| Petición | Respuesta |
+|---|---|
+| `GET` | `200 { doc, rev, updatedAt }` (`doc: null` y `rev: 0` si no hay nota) |
+| `PUT { doc, rev }` | `200 { rev, updatedAt }` (`rev: 0` si se vació y se borró) |
+| `PUT` con una `rev` antigua | `409 { error, current: { doc, rev, updatedAt } \| null }` |
+| Sin sesión / otro origen | `401` / `403` |
+| JSON roto, esquema no válido, ID mal formado | `400` |
+| Más de 60 000 bytes o de 10 000 caracteres | `413` |
+| Sección inexistente | `404` |
+| Más de 60 guardados por minuto | `429` con `Retry-After` |
+
+### 12.9 Tests
+
+- **`tests/integration/setup.ts`:** en `beforeEach`, crea también el índice único de `notes` (`{ userId: 1, sectionId: 1 }`), igual que el de `section_progress`.
+- **`tests/unit/note-schema.test.ts`:**
+  - acepta lo que produce el editor;
+  - rechaza un color fuera de la paleta, un enlace, una imagen, un estilo en línea y un documento sin párrafos;
+  - `noteToText` pone un párrafo por línea, y un documento de párrafos vacíos da `""`.
+- **`tests/integration/notes.repo.test.ts`:**
+  - crea con `rev` 1 y actualiza a 2;
+  - una `rev` antigua no sobrescribe y devuelve la actual;
+  - tres creaciones simultáneas dejan **un** documento;
+  - aísla las notas entre personas y entre secciones;
+  - borrar con una `rev` antigua no borra.
+- **`tests/e2e/notes-api.spec.ts`:** los códigos de la tabla de §12.8, y que otra persona pide la misma sección y recibe **su** nota vacía, no la tuya.
+
+Con las Tandas 11–13 aplicadas en la copia del laboratorio, pasan los 121 tests de Vitest: los del proyecto y los 23 nuevos (8 del esquema, 5 del repositorio y 10 del autoguardado). Los recorridos de §12.8 y §13.9 se hicieron con Chrome automatizado; en esta Tanda se convierten en E2E de Playwright.
+
+### Fuera de alcance — Tanda 12
+
+- El editor y el autoguardado (Tanda 13).
+- Listar las notas de un curso en `/progreso` o en la portada (el índice ya existe), buscarlas o exportarlas.
+- Compartir notas o guardar un historial de versiones.
+
+### Criterios de aceptación — Tanda 12
+
+- [ ] `npm run db:setup` crea `notes` con su validación y sus dos índices (en desarrollo; en producción, antes del *push* de la Tanda 13).
+- [ ] Los tests unitarios y de integración de §12.9 pasan.
+- [ ] Cada fila de la tabla de §12.8 se comprueba en `notes-api.spec.ts`.
+- [ ] El `userId` sale siempre de la sesión y el `courseId`, del contenido.
+
+---
+
+## Tanda 13 · Notas personales: editor y autoguardado
+
+| Dato | Valor |
+|---|---|
+| Objetivo | Editor TipTap con negrita, cursiva y cuatro tonos dentro del panel, vista previa pintada en el servidor, carga diferida y autoguardado con control de versiones |
+| Prerrequisitos | Tandas 11 y 12 |
+| Variables de entorno | **Ninguna nueva** |
+| Rama | `main`. Al cerrar la Tanda: `db-setup` en producción (§12.5) y después *push* |
+
+### 13.1 Dependencias
+
+```bash
+npm i @tiptap/core @tiptap/react @tiptap/pm @tiptap/extension-document @tiptap/extension-paragraph \
+  @tiptap/extension-text @tiptap/extension-bold @tiptap/extension-italic @tiptap/extensions
+```
+
+Versión probada: 3.32.0 en todos. **No** se instalan `@tiptap/starter-kit`, que trae listas, títulos y enlaces que el esquema no admite, ni `@tiptap/html` (ver §11.0).
+
+### 13.2 Archivos de esta Tanda
+
+```
+src/
+├── lib/notes/
+│   ├── tone-mark.ts                          (nuevo: la marca de color)
+│   ├── extensions.ts                         (nuevo: el esquema del editor)
+│   └── render.ts                             (nuevo: HTML de la vista previa en el servidor)
+├── components/notes/
+│   ├── NotesPanel.astro                      (de la Tanda 11, sin cambios)
+│   ├── NotesIsland.tsx                       (nuevo: vista previa y carga diferida)
+│   ├── NotesEditor.tsx                       (nuevo: TipTap, estado y conflicto)
+│   ├── NotesToolbar.tsx                      (nuevo: barra sin TipTap)
+│   ├── note-classes.ts                       (nuevo: clases compartidas)
+│   └── useAutosave.ts                        (nuevo)
+├── pages/cursos/[course]/[section].astro     (modificar: lee la nota y monta la isla)
+└── styles/global.css                         (modificar: tonos, ProseMirror y placeholder)
+tests/
+├── components/useAutosave.test.ts            (nuevo)
+└── e2e/notes.spec.ts                         (nuevo)
+```
+
+### 13.3 La marca de color y el esquema del editor
+
+`src/lib/notes/tone-mark.ts`:
+
+```ts
+import { Mark, mergeAttributes } from "@tiptap/core";
+import { isNoteTone, type NoteTone } from "./palette";
+
+declare module "@tiptap/core" {
+  interface Commands<ReturnType> {
+    tono: {
+      setTono: (tono: NoteTone) => ReturnType;
+      unsetTono: () => ReturnType;
+    };
+  }
+}
+
+/**
+ * Color de texto de la paleta cerrada. Guarda el NOMBRE del tono (data-tono="rojo"), no un
+ * hexadecimal: global.css le da el color de cada tema, y no hay estilos en línea.
+ */
+export const ToneMark = Mark.create({
+  name: "tono",
+
+  addAttributes() {
+    return {
+      tono: {
+        default: null,
+        parseHTML: (el) => {
+          const value = el.getAttribute("data-tono");
+          return isNoteTone(value) ? value : null;
+        },
+        renderHTML: (attrs) => (isNoteTone(attrs.tono) ? { "data-tono": attrs.tono } : {}),
+      },
+    };
+  },
+
+  parseHTML() {
+    // Al pegar, solo se reconoce un tono de la paleta; cualquier otro color se descarta
+    return [
+      {
+        tag: "span[data-tono]",
+        getAttrs: (el) =>
+          isNoteTone((el as HTMLElement).getAttribute("data-tono")) ? null : false,
+      },
+    ];
+  },
+
+  renderHTML({ HTMLAttributes }) {
+    return ["span", mergeAttributes(HTMLAttributes, { class: "nota-tono" }), 0];
+  },
+
+  addCommands() {
+    return {
+      setTono:
+        (tono) =>
+        ({ commands }) =>
+          commands.setMark(this.name, { tono }),
+      unsetTono:
+        () =>
+        ({ commands }) =>
+          commands.unsetMark(this.name),
+    };
+  },
+});
+```
+
+`src/lib/notes/extensions.ts`:
+
+```ts
+import Bold from "@tiptap/extension-bold";
+import Document from "@tiptap/extension-document";
+import Italic from "@tiptap/extension-italic";
+import Paragraph from "@tiptap/extension-paragraph";
+import Text from "@tiptap/extension-text";
+import { ToneMark } from "./tone-mark";
+
+/** El esquema del editor: exactamente lo que admite noteContentSchema (y nada más) */
+export const noteExtensions = [Document, Paragraph, Text, Bold, Italic, ToneMark];
+```
+
+### 13.4 Colores de los tonos
+
+En `src/styles/global.css`, dentro de `:root`:
+
+```css
+  /* Tonos de las notas (Tanda 13): contraste ≥ 4,5:1 sobre --bg */
+  --tono-rojo: var(--danger-strong);
+  --tono-ambar: #b45309;
+  --tono-verde: var(--accent-strong);
+  --tono-azul: #0369a1;
+```
+
+dentro de `[data-theme="dark"]`:
+
+```css
+  --tono-ambar: #fbbf24;
+  --tono-azul: #38bdf8;
+```
+
+y al final, junto a la regla de la Tanda 11:
+
+```css
+.nota-tono[data-tono="rojo"] {
+  color: var(--tono-rojo);
+}
+.nota-tono[data-tono="ambar"] {
+  color: var(--tono-ambar);
+}
+.nota-tono[data-tono="verde"] {
+  color: var(--tono-verde);
+}
+.nota-tono[data-tono="azul"] {
+  color: var(--tono-azul);
+}
+
+/* Lo imprescindible del CSS que TipTap inyecta con injectCSS (desactivado) */
+.ProseMirror {
+  position: relative;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  white-space: break-spaces;
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0;
+}
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--muted);
+}
+```
+
+`--tono-rojo` y `--tono-verde` apuntan a variables del tema. Como `data-theme` está en `<html>`, el mismo elemento que `:root`, toman el valor oscuro sin redefinirlas.
+
+Contraste medido sobre `--bg`:
+
+| Tono | Claro (sobre `#fafafa`) | Oscuro (sobre `#0d1117`) |
+|---|---|---|
+| Rojo | `#be123c`: 6,02:1 | `#fda4af`: 10,01:1 |
+| Ámbar | `#b45309`: 4,81:1 | `#fbbf24`: 11,34:1 |
+| Verde | `#0f766e`: 5,24:1 | `#5eead4`: 12,79:1 |
+| Azul | `#0369a1`: 5,68:1 | `#38bdf8`: 8,83:1 |
+
+La caja del editor usa `bg-bg` y no `bg-surface`, porque sobre `--surface` el ámbar claro baja a 4,28:1.
+
+### 13.5 Vista previa en el servidor
+
+`src/lib/notes/render.ts`:
+
+```ts
+import type { NoteContent } from "./schema";
+
+/**
+ * HTML de una nota YA VALIDADA, para la vista previa que pinta el servidor antes de que cargue
+ * el editor. Sin @tiptap/html: su versión de servidor arrastra happy-dom (18 MB) a la función.
+ * No es idéntico byte a byte al del editor (TipTap agrupa marcas contiguas), pero cada carácter
+ * lleva las mismas marcas.
+ */
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+type TextNode = NonNullable<NoteContent["content"][number]["content"]>[number];
+
+function renderText(node: TextNode): string {
+  let html = escapeHtml(node.text);
+  const marks = node.marks ?? [];
+  // Mismo anidamiento que el editor: el tono dentro, luego la cursiva y fuera la negrita
+  const tone = marks.find((m) => m.type === "tono");
+  if (tone) html = `<span data-tono="${tone.attrs.tono}" class="nota-tono">${html}</span>`;
+  if (marks.some((m) => m.type === "italic")) html = `<em>${html}</em>`;
+  if (marks.some((m) => m.type === "bold")) html = `<strong>${html}</strong>`;
+  return html;
+}
+
+export function renderNoteHtml(doc: NoteContent): string {
+  return doc.content.map((p) => `<p>${(p.content ?? []).map(renderText).join("")}</p>`).join("");
+}
+```
+
+`src/components/notes/note-classes.ts`:
+
+```ts
+/** Mismas clases en la vista previa del servidor y en el editor: así no hay salto al cargar */
+export const NOTE_CONTENT_CLASS =
+  "nota-contenido min-h-48 rounded-xl border border-surface-2 bg-bg px-4 py-3 font-serif text-base leading-relaxed outline-none focus-visible:ring-2 focus-visible:ring-accent [&_p]:my-2 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0";
+```
+
+### 13.6 La barra, sin TipTap
+
+`src/components/notes/NotesToolbar.tsx`:
+
+```tsx
+import { cn } from "@/lib/cn";
+import { NOTE_TONES, NOTE_TONE_LABELS, type NoteTone } from "@/lib/notes/palette";
+
+// Sin imports de TipTap: el esqueleto de la isla la usa antes de descargar el editor
+
+export interface ToolbarState {
+  bold: boolean;
+  italic: boolean;
+  tone: NoteTone | null;
+}
+
+export type ToolbarCommand =
+  { type: "bold" } | { type: "italic" } | { type: "tone"; tone: NoteTone } | { type: "unsetTone" };
+
+interface Props {
+  /** null mientras el editor carga: se pinta igual, desactivada, para que nada salte */
+  state: ToolbarState | null;
+  onCommand?: (command: ToolbarCommand) => void;
+}
+
+const BUTTON =
+  "inline-flex size-9 items-center justify-center rounded-lg font-sans text-sm transition hover:bg-surface-2 disabled:pointer-events-none disabled:opacity-50 aria-pressed:bg-surface-2 aria-pressed:ring-1 aria-pressed:ring-accent/50";
+
+export default function NotesToolbar({ state, onCommand }: Props) {
+  const disabled = !state;
+  const send = (command: ToolbarCommand) => () => onCommand?.(command);
+
+  return (
+    <div
+      role="toolbar"
+      aria-label="Formato de la nota"
+      className="flex flex-wrap items-center gap-1"
+    >
+      <button
+        type="button"
+        className={cn(BUTTON, "font-bold")}
+        aria-pressed={state?.bold ?? false}
+        aria-label="Negrita"
+        title="Negrita (Ctrl/⌘ + B)"
+        disabled={disabled}
+        onClick={send({ type: "bold" })}
+      >
+        B
+      </button>
+      <button
+        type="button"
+        className={cn(BUTTON, "font-serif italic")}
+        aria-pressed={state?.italic ?? false}
+        aria-label="Cursiva"
+        title="Cursiva (Ctrl/⌘ + I)"
+        disabled={disabled}
+        onClick={send({ type: "italic" })}
+      >
+        I
+      </button>
+      <span className="mx-1 h-5 w-px bg-surface-2" aria-hidden="true" />
+      {NOTE_TONES.map((tone) => (
+        <button
+          key={tone}
+          type="button"
+          className={BUTTON}
+          aria-pressed={state?.tone === tone}
+          aria-label={`Color ${NOTE_TONE_LABELS[tone].toLowerCase()}`}
+          title={NOTE_TONE_LABELS[tone]}
+          disabled={disabled}
+          onClick={send({ type: "tone", tone })}
+        >
+          <span data-tono={tone} className="nota-tono font-semibold" aria-hidden="true">
+            A
+          </span>
+        </button>
+      ))}
+      <button
+        type="button"
+        className={cn(BUTTON, "w-auto px-2 text-xs text-muted")}
+        aria-label="Quitar el color"
+        disabled={disabled || !state.tone}
+        onClick={send({ type: "unsetTone" })}
+      >
+        Sin color
+      </button>
+    </div>
+  );
+}
+```
+
+### 13.7 El autoguardado
+
+`src/components/notes/useAutosave.ts`:
+
+```ts
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { JSONContent } from "@tiptap/core";
+
+export type SaveStatus =
+  "idle" | "pending" | "saving" | "saved" | "offline" | "error" | "conflict" | "signed-out";
+
+export interface ServerNote {
+  doc: JSONContent | null;
+  rev: number;
+}
+
+const DEBOUNCE_MS = 1000;
+const KEEPALIVE_MAX_BYTES = 63 * 1024; // el navegador rechaza un keepalive de más de 64 KiB
+
+/**
+ * Guarda la nota 1 s después de dejar de escribir, una petición cada vez, con control de
+ * versiones (rev). Al ocultar o cerrar la pestaña, o al navegar a otra página con View
+ * Transitions (que no dispara pagehide), envía lo pendiente con keepalive.
+ */
+export function useAutosave(sectionId: string, initialRev: number) {
+  const [status, setStatus] = useState<SaveStatus>("idle");
+  const [savedAt, setSavedAt] = useState<Date | null>(null);
+  const [conflict, setConflict] = useState<ServerNote | null>(null);
+  const rev = useRef(initialRev);
+  const pending = useRef<JSONContent | null>(null);
+  const inFlight = useRef(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const inConflict = useRef(false); // espejo de `conflict` para los callbacks
+  const url = `/api/notes/${encodeURIComponent(sectionId)}`;
+
+  const flush = useCallback(
+    async (keepalive = false): Promise<void> => {
+      clearTimeout(timer.current);
+      const doc = pending.current;
+      if (!doc || inFlight.current) return;
+      pending.current = null;
+      inFlight.current = true;
+      setStatus("saving");
+
+      const body = JSON.stringify({ doc, rev: rev.current });
+      let next: number | null = null; // ms hasta el siguiente intento; null = no reintentar
+      try {
+        const res = await fetch(url, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body,
+          keepalive: keepalive && body.length < KEEPALIVE_MAX_BYTES,
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { rev: number; updatedAt: string | null };
+          rev.current = data.rev;
+          setSavedAt(data.updatedAt ? new Date(data.updatedAt) : new Date());
+          setStatus(pending.current ? "pending" : "saved");
+          if (pending.current) next = DEBOUNCE_MS; // se escribió mientras se guardaba
+        } else if (res.status === 409) {
+          pending.current ??= doc; // lo de esta pestaña no se pierde
+          const data = (await res.json()) as { current: ServerNote | null };
+          inConflict.current = true;
+          setConflict(data.current ?? { doc: null, rev: 0 });
+          setStatus("conflict");
+        } else if (res.status === 401) {
+          pending.current ??= doc;
+          setStatus("signed-out");
+        } else {
+          pending.current ??= doc;
+          setStatus("error");
+          const retryAfter = Number(res.headers.get("Retry-After"));
+          next = res.status === 429 && retryAfter > 0 ? retryAfter * 1000 : 5000;
+        }
+      } catch {
+        pending.current ??= doc;
+        setStatus("offline"); // se reintenta con el evento "online"
+      } finally {
+        inFlight.current = false;
+      }
+      // Sin red se espera al evento "online"; con 401 o 409, a que la persona actúe
+      if (next !== null) timer.current = setTimeout(() => void flush(), next);
+    },
+    [url],
+  );
+
+  const schedule = useCallback(
+    (doc: JSONContent) => {
+      pending.current = doc;
+      if (inConflict.current) return; // no se guarda nada hasta que se resuelva
+      setStatus("pending");
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => void flush(), DEBOUNCE_MS);
+    },
+    [flush],
+  );
+
+  /** "Conservar la mía": se guarda encima de la versión del servidor */
+  const keepMine = useCallback(
+    (doc: JSONContent) => {
+      rev.current = conflict?.rev ?? 0;
+      inConflict.current = false;
+      setConflict(null);
+      pending.current = doc;
+      void flush();
+    },
+    [conflict, flush],
+  );
+
+  /** "Usar la guardada": se descarta lo de esta pestaña y se devuelve la del servidor */
+  const takeServer = useCallback(() => {
+    rev.current = conflict?.rev ?? 0;
+    pending.current = null;
+    inConflict.current = false;
+    setConflict(null);
+    setStatus("saved");
+    return conflict?.doc ?? null;
+  }, [conflict]);
+
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === "hidden") void flush(true);
+    };
+    const onPageHide = () => void flush(true);
+    const onOnline = () => void flush();
+    const onNavigate = () => void flush(true); // ClientRouter: antes de pedir la página nueva
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (pending.current || inFlight.current) e.preventDefault();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("online", onOnline);
+    document.addEventListener("astro:before-preparation", onNavigate);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("online", onOnline);
+      document.removeEventListener("astro:before-preparation", onNavigate);
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      clearTimeout(timer.current);
+    };
+  }, [flush]);
+
+  return { status, savedAt, conflict, schedule, flush, keepMine, takeServer };
+}
+```
+
+| Situación | Qué hace |
+|---|---|
+| Se escribe | Un `PUT` 1 s después de la última tecla, nunca dos a la vez. Lo escrito durante un guardado se envía después |
+| 409 (otra pestaña guardó antes) | Deja de guardar y muestra "Usar la guardada" / "Conservar la mía" |
+| 429 / 5xx | Reintenta según `Retry-After`, o a los 5 s |
+| Sin red | Espera al evento `online` |
+| 401 | No reintenta: pide copiar el texto e iniciar sesión |
+| Ocultar o cerrar la pestaña, o navegar con View Transitions | Envía lo pendiente al momento con `keepalive` (si cabe en 63 KiB) |
+| Cerrar con cambios sin guardar | Aviso de `beforeunload` |
+
+### 13.8 El editor y la isla
+
+`src/components/notes/NotesEditor.tsx`:
+
+```tsx
+import { useEffect, type ReactNode } from "react";
+import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
+import { CharacterCount, Placeholder, UndoRedo } from "@tiptap/extensions";
+import type { JSONContent } from "@tiptap/core";
+import { NOTE_LIMITS } from "@/lib/constants";
+import { noteExtensions } from "@/lib/notes/extensions";
+import NotesToolbar, { type ToolbarCommand, type ToolbarState } from "./NotesToolbar";
+import { NOTE_CONTENT_CLASS } from "./note-classes";
+import { useAutosave, type SaveStatus } from "./useAutosave";
+
+export interface NotesEditorProps {
+  sectionId: string;
+  initialDoc: JSONContent | null;
+  initialRev: number;
+  /** Lo que se ve mientras TipTap crea el editor (el primer render llega con editor === null) */
+  fallback: ReactNode;
+}
+
+/**
+ * Fuera del componente a propósito: useEditor compara las opciones en cada render y, si un
+ * array u objeto es nuevo, llama a setOptions(), que reescribe la selección del DOM con la que
+ * tenía ProseMirror. Como useEditorState repinta en cada cambio de selección, unas opciones
+ * creadas dentro del componente deshacían la selección recién hecha (medido: la negrita se
+ * aplicaba a medio texto o a nada).
+ */
+const EXTENSIONS = [
+  ...noteExtensions,
+  UndoRedo,
+  Placeholder.configure({ placeholder: "Escribe aquí tus notas de esta sección…" }),
+  CharacterCount.configure({ limit: NOTE_LIMITS.maxChars }),
+];
+const EDITOR_PROPS = {
+  attributes: {
+    class: NOTE_CONTENT_CLASS,
+    "aria-label": "Notas de esta sección",
+    "aria-multiline": "true",
+    role: "textbox",
+  },
+};
+
+function runCommand(editor: Editor, command: ToolbarCommand) {
+  const chain = editor.chain().focus();
+  if (command.type === "bold") chain.toggleBold().run();
+  else if (command.type === "italic") chain.toggleItalic().run();
+  else if (command.type === "tone") chain.setTono(command.tone).run();
+  else chain.unsetTono().run();
+}
+
+const time = new Intl.DateTimeFormat("es", { hour: "2-digit", minute: "2-digit" });
+
+function statusText(status: SaveStatus, savedAt: Date | null): string {
+  switch (status) {
+    case "pending":
+      return "Cambios sin guardar";
+    case "saving":
+      return "Guardando…";
+    case "saved":
+      return savedAt ? `Guardado a las ${time.format(savedAt)}` : "Guardado";
+    case "offline":
+      return "Sin conexión: se guardará al volver";
+    case "error":
+      return "No se pudo guardar. Reintentando…";
+    case "signed-out":
+      return "Tu sesión ha caducado. Copia el texto y vuelve a iniciar sesión.";
+    default:
+      return "";
+  }
+}
+
+export default function NotesEditor({
+  sectionId,
+  initialDoc,
+  initialRev,
+  fallback,
+}: NotesEditorProps) {
+  const { status, savedAt, conflict, schedule, keepMine, takeServer } = useAutosave(
+    sectionId,
+    initialRev,
+  );
+
+  const editor = useEditor({
+    immediatelyRender: false, // el servidor ya pintó la vista previa
+    injectCSS: false, // sus reglas están en global.css (sin <style> en línea)
+    extensions: EXTENSIONS,
+    content: initialDoc ?? undefined,
+    editorProps: EDITOR_PROPS,
+    onUpdate: ({ editor: e }) => schedule(e.getJSON()),
+  });
+
+  // Solo la barra se repinta al mover el cursor: el selector devuelve 3 valores
+  const toolbar = useEditorState({
+    editor,
+    selector: ({ editor: e }): ToolbarState | null =>
+      e && {
+        bold: e.isActive("bold"),
+        italic: e.isActive("italic"),
+        tone: (e.getAttributes("tono").tono as ToolbarState["tone"] | undefined) ?? null,
+      },
+  });
+
+  // El punto del botón flotante indica si la sección tiene nota
+  useEffect(() => {
+    if (status !== "saved" || !editor) return;
+    document.querySelector("[data-notes-open]")?.toggleAttribute("data-has-note", !editor.isEmpty);
+  }, [status, editor]);
+
+  if (!editor) return fallback;
+  const chars = editor.storage.characterCount.characters();
+
+  return (
+    <div className="flex flex-col gap-3">
+      <NotesToolbar state={toolbar} onCommand={(c) => runCommand(editor, c)} />
+      {conflict && (
+        <div
+          role="alert"
+          className="rounded-xl border-l-4 border-warning bg-surface px-4 py-3 font-sans text-sm"
+        >
+          <p>Esta nota se cambió en otra pestaña. ¿Con cuál te quedas?</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="rounded-lg bg-surface-2 px-3 py-1.5 font-semibold"
+              onClick={() => editor.commands.setContent(takeServer() ?? "", { emitUpdate: false })}
+            >
+              Usar la guardada
+            </button>
+            <button
+              type="button"
+              className="rounded-lg bg-accent-strong px-3 py-1.5 font-semibold text-accent-contrast"
+              onClick={() => keepMine(editor.getJSON())}
+            >
+              Conservar la mía
+            </button>
+          </div>
+        </div>
+      )}
+      <EditorContent editor={editor} />
+      <p className="flex min-h-5 justify-between gap-2 font-sans text-xs text-muted">
+        <span aria-live="polite" data-notes-status>
+          {statusText(status, savedAt)}
+        </span>
+        {chars > NOTE_LIMITS.maxChars * 0.9 && (
+          <span className="tabular-nums">
+            {chars.toLocaleString("es")} / {NOTE_LIMITS.maxChars.toLocaleString("es")}
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+```
+
+`src/components/notes/NotesIsland.tsx`:
+
+```tsx
+import { lazy, Suspense, useEffect, useState } from "react";
+import NotesToolbar from "./NotesToolbar";
+import { NOTE_CONTENT_CLASS } from "./note-classes";
+import type { NotesEditorProps } from "./NotesEditor";
+
+// TipTap y ProseMirror (unos 100 KB gzip) van en un trozo aparte que solo se pide si hace falta
+const NotesEditor = lazy(() => import("./NotesEditor"));
+
+interface Props extends Omit<NotesEditorProps, "fallback"> {
+  /** HTML de la nota generado en el servidor (renderNoteHtml), ya escapado */
+  previewHtml: string;
+}
+
+const DESKTOP = "(min-width: 80rem)"; // xl: el panel es una columna visible
+
+export default function NotesIsland({ previewHtml, ...editorProps }: Props) {
+  const [active, setActive] = useState(false);
+
+  useEffect(() => {
+    const desktop = window.matchMedia(DESKTOP);
+    const panel = document.querySelector<HTMLDialogElement>("[data-notes-panel]");
+    const activate = () => setActive(true);
+    // En escritorio el panel se ve desde el principio; en móvil, al abrirlo por primera vez
+    if (desktop.matches || panel?.matches(":modal")) return activate();
+    document.addEventListener("da:notes-open", activate);
+    desktop.addEventListener("change", activate);
+    return () => {
+      document.removeEventListener("da:notes-open", activate);
+      desktop.removeEventListener("change", activate);
+    };
+  }, []);
+
+  // Mismo esqueleto que NotesEditor: barra desactivada, contenido y línea de estado
+  const preview = (
+    <div className="flex flex-col gap-3">
+      <NotesToolbar state={null} />
+      <div>
+        <div
+          className={NOTE_CONTENT_CLASS}
+          aria-label="Notas de esta sección (cargando el editor)"
+          dangerouslySetInnerHTML={{ __html: previewHtml }}
+        />
+      </div>
+      <p className="min-h-5" />
+    </div>
+  );
+
+  if (!active) return preview;
+  return (
+    <Suspense fallback={preview}>
+      <NotesEditor {...editorProps} fallback={preview} />
+    </Suspense>
+  );
+}
+```
+
+En `src/pages/cursos/[course]/[section].astro`, la nota se lee junto al progreso y la evaluación:
+
+```astro
+---
+import NotesPanel from "@/components/notes/NotesPanel.astro";
+import NotesIsland from "@/components/notes/NotesIsland";
+import { renderNoteHtml } from "@/lib/notes/render";
+import { getNote } from "@/server/services/notes.service";
+// …
+const [readIds, quiz, note] = await Promise.all([
+  getCourseReadIds(user.id, course.id),
+  getQuizByCourseId(course.id),
+  getNote(user.id, section.data.sectionId),
+]);
+---
+```
+
+y el panel provisional de la Tanda 11 se sustituye por:
+
+```astro
+<NotesPanel slot="notes" sectionTitle={section.data.title} hasNote={note.rev > 0}>
+  <NotesIsland
+    client:idle
+    sectionId={section.data.sectionId}
+    initialDoc={note.doc}
+    initialRev={note.rev}
+    previewHtml={note.doc ? renderNoteHtml(note.doc) : ""}
+  />
+</NotesPanel>
+```
+
+### 13.9 Tests
+
+- **`tests/components/useAutosave.test.ts`** (jsdom, temporizadores falsos y `fetch` simulado). Son 10 casos:
+  - agrupa las teclas en una sola petición;
+  - envía la `rev` devuelta;
+  - lo escrito durante un guardado sale después;
+  - el 409 detiene el guardado y "Conservar la mía" guarda con la `rev` del servidor;
+  - "Usar la guardada" adopta su `rev`;
+  - el 429 respeta `Retry-After`;
+  - sin red, espera al evento `online`;
+  - `visibilitychange` y `astro:before-preparation` envían con `keepalive` sin esperar;
+  - el 401 no reintenta.
+
+  Al escribirlos encontraron un fallo del primer borrador: sin red o con 401, reintentaba cada segundo (11 peticiones en 10 s).
+- **`tests/e2e/notes.spec.ts`:**
+  - **1440 px:** escribir, seleccionar una palabra, ponerla en negrita y en rojo, esperar a "Guardado" (`[data-notes-status]`) y recargar.
+    - Sin JavaScript, la vista previa ya muestra la palabra en `<strong><span data-tono="rojo">`.
+    - Con JavaScript, el editor la carga con CLS 0.
+    - Su color cambia con el tema.
+  - **390 px:** antes de abrir la hoja no se ha pedido ningún archivo de TipTap. Al abrirla, el editor se carga con la nota.
+  - **Dos pestañas:**
+    - B, con una `rev` antigua, muestra el aviso de conflicto;
+    - "Conservar la mía" guarda la versión de B.
+  - **Navegar:** lo escrito justo antes de ir a la sección siguiente se guarda, y el panel de la sección nueva está vacío.
+  - **Sin errores de consola** en ninguno de los anteriores.
+- **Teclado en los E2E:** pulsa las teclas con un retardo humano (`{ delay: 30 }`) y deja unos 200 ms tras escribir. A la velocidad de la automatización, ProseMirror a veces no ha leído aún la selección del DOM. Medido: sin retardo falló 2 de 4 veces; con retardo, 8 de 8 bien.
+
+### Fuera de alcance — Tanda 13
+
+- Listas, títulos, enlaces, imágenes o subrayado. El esquema y el validador los rechazan; ampliarlos exige cambiar los dos.
+- Sincronización sin conexión entre dispositivos y borradores en `localStorage`.
+- Atajos de teclado para los tonos (negrita y cursiva tienen los de TipTap: Ctrl/⌘ + B e I).
+
+### Criterios de aceptación — Tanda 13
+
+- [ ] Negrita, cursiva y los cuatro tonos se aplican a la selección y la barra refleja el formato del cursor.
+- [ ] La nota se guarda sola 1 s después de dejar de escribir, persiste tras recargar y la vista previa del servidor la muestra antes de que cargue el editor.
+- [ ] CLS 0 al cargar una sección con y sin nota (medido en el laboratorio: 0 a 1280, 1440 y 1536 px).
+- [ ] En móvil, el trozo del editor (unos 100 KB gzip) no se descarga hasta abrir la hoja; la isla inicial pesa unos 1,4 KB gzip.
+- [ ] Dos pestañas no se sobrescriben en silencio: la que va por detrás ve el aviso de conflicto.
+- [ ] Lo escrito antes de navegar con View Transitions, de ocultar la pestaña o de cerrarla se guarda.
+- [ ] Los tonos se leen en claro y en oscuro (contraste ≥ 4,5:1, §13.4).
+- [ ] Lighthouse en una sección, con sesión: rendimiento, accesibilidad y buenas prácticas sin bajar respecto a la Tanda 10. CSP sin violaciones (no hay estilos en línea nuevos).
+- [ ] `npm run check`, `lint`, `test:run` y los E2E de las Tandas 11–13 pasan.
+- [ ] Producción: `db-setup` ejecutado (§12.5) **antes** del *push*; tras desplegar, crear una nota con un usuario propio, recargar y borrarla.
+
 ---
 
 ## Anexo A · Variables de entorno
