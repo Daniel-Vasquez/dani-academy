@@ -39,6 +39,21 @@ export class TooManyRequestsError extends HttpError {
   }
 }
 
+export class ConflictError<T = unknown> extends HttpError {
+  constructor(
+    public readonly current: T,
+    message = "La nota ha cambiado en otra pestaña",
+  ) {
+    super(409, message);
+  }
+}
+
+export class PayloadTooLargeError extends HttpError {
+  constructor(message = "La nota es demasiado larga") {
+    super(413, message);
+  }
+}
+
 /** Convierte cualquier error en una respuesta JSON con el código correcto. */
 export function toErrorResponse(error: unknown): Response {
   if (error instanceof TooManyRequestsError) {

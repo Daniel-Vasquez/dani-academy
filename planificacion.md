@@ -5688,6 +5688,7 @@ src/
 │   └── services/notes.service.ts             (nuevo)
 └── pages/api/notes/[sectionId].ts            (nuevo)
 scripts/db-setup.ts                           (modificar: validador e índices de notes)
+scripts/e2e-local.mjs                         (modificar al ejecutarla: spawn asíncrono, ver las notas)
 tests/
 ├── unit/note-schema.test.ts                  (nuevo)
 ├── integration/notes.repo.test.ts            (nuevo)
@@ -6131,10 +6132,26 @@ Con las Tandas 11–13 aplicadas en la copia del laboratorio, pasan los 121 test
 
 ### Criterios de aceptación — Tanda 12
 
-- [ ] `npm run db:setup` crea `notes` con su validación y sus dos índices (en desarrollo; en producción, antes del *push* de la Tanda 13).
-- [ ] Los tests unitarios y de integración de §12.9 pasan.
-- [ ] Cada fila de la tabla de §12.8 se comprueba en `notes-api.spec.ts`.
-- [ ] El `userId` sale siempre de la sesión y el `courseId`, del contenido.
+- [x] `npm run db:setup` crea `notes` con su validación y sus dos índices en desarrollo. En producción queda pendiente, antes del *push* de la Tanda 13.
+- [x] Los tests unitarios y de integración de §12.9 pasan.
+- [x] Cada fila de la tabla de §12.8 se comprueba en `notes-api.spec.ts`.
+- [x] El `userId` sale siempre de la sesión y el `courseId`, del contenido.
+
+### Notas de implementación (Tanda 12 ya ejecutada)
+
+Cerrada el 2026-10-20. **El código real del repositorio manda.**
+
+- **Sin *push* todavía**, igual que la Tanda 11.
+- **`db:setup` nunca había funcionado en Atlas con colecciones existentes.** Atlas no responde a `collMod` con el código 13 (`Unauthorized`) que esperaba el *script*, sino con el 8000 (`AtlasError`: *user is not allowed to do action [collMod]*). El *script* abortaba en la primera colección, antes de crear `notes`.
+  - Corregido: `isCollModDenied` reconoce los dos errores, y en el 8000 comprueba además el mensaje.
+  - Medido en `dani_academy_dev`: avisa en las tres colecciones existentes y crea `notes` con su validación (`strict`, 8 campos obligatorios) y sus dos índices. Un documento inválido se rechaza con el código 121.
+  - Así funcionará también el paso a producción de §12.5.
+- **`test:e2e:local` se colgaba a mitad de la batería (fallo latente desde la Tanda 9).** `scripts/e2e-local.mjs` lanzaba Playwright con `spawnSync`, que bloquea el bucle de eventos del proceso que también lee la salida del `mongod` en memoria.
+  - Cuando la tubería se llenaba, `mongod` se quedaba parado escribiendo su log y toda consulta esperaba sin fin.
+  - La Tanda 12 genera más log de `mongod` y lo hizo aflorar: los 12 tests con sesión del proyecto `mobile` fallaban siempre, 4 de 4 ejecuciones.
+  - Corregido con `spawn` asíncrono: la batería completa pasa 2 de 2 ejecuciones (37 tests, unos 40 s).
+- **Prueba de humo en desarrollo (Atlas):** crear (`rev` 1), actualizar (`rev` 2), 409 con una versión antigua y lectura con el tono. El usuario de prueba y su nota se borraron después.
+- **Tests:** 111 de Vitest, con 13 nuevos (8 del esquema y 5 del repositorio). `notes-api.spec.ts` tiene 5 E2E, que cubren todas las filas de §12.8 y el aislamiento entre personas.
 
 ---
 

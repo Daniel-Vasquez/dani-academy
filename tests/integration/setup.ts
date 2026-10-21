@@ -18,6 +18,7 @@ beforeEach(async () => {
   await db
     .collection("section_progress")
     .createIndex({ userId: 1, sectionId: 1 }, { unique: true });
+  await db.collection("notes").createIndex({ userId: 1, sectionId: 1 }, { unique: true });
 });
 
 afterAll(async () => {

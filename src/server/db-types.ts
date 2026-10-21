@@ -1,10 +1,12 @@
 import type { ObjectId } from "mongodb";
+import type { NoteContent } from "@/lib/notes/schema";
 
 export const COLLECTIONS = {
   sectionProgress: "section_progress",
   quizAttempts: "quiz_attempts",
   studySessions: "study_sessions",
   rateLimits: "rate_limits",
+  notes: "notes",
 } as const;
 
 export interface SectionProgressDoc {
@@ -40,4 +42,16 @@ export interface RateLimitDoc {
   _id: string; // "<clave>:<ventana>"
   n: number;
   expiresAt: Date;
+}
+
+export interface NoteDoc {
+  _id?: ObjectId;
+  userId: string;
+  courseId: string;
+  sectionId: string;
+  doc: NoteContent; // JSON de TipTap ya validado con noteContentSchema
+  text: string; // texto plano derivado de doc (vista previa y búsquedas futuras)
+  rev: number; // versión: empieza en 1 y sube en cada guardado
+  createdAt: Date;
+  updatedAt: Date;
 }

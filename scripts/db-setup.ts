@@ -78,6 +78,22 @@ const validators: Record<string, Document> = {
       },
     },
   },
+  [COLLECTIONS.notes]: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["userId", "courseId", "sectionId", "doc", "text", "rev", "createdAt", "updatedAt"],
+      properties: {
+        userId: { bsonType: "string", minLength: 1 },
+        courseId: { bsonType: "string", pattern: COURSE_ID },
+        sectionId: { bsonType: "string", pattern: SECTION_ID },
+        doc: { bsonType: "object", required: ["type", "content"] },
+        text: { bsonType: "string", maxLength: 20_000 },
+        rev: { bsonType: ["int", "long"], minimum: 1 },
+        createdAt: { bsonType: "date" },
+        updatedAt: { bsonType: "date" },
+      },
+    },
+  },
 };
 
 type IndexDef = [collection: string, spec: IndexSpecification, options?: CreateIndexesOptions];
@@ -98,6 +114,9 @@ const indexes: IndexDef[] = [
   ],
   [COLLECTIONS.quizAttempts, { userId: 1, submittedAt: -1 }, { name: "user_submittedAt" }],
   [COLLECTIONS.studySessions, { userId: 1, lastSeenAt: -1 }, { name: "user_lastSeenAt" }],
+  // Tanda 12: una nota por usuario y sección; "mis notas de este curso", de la más reciente
+  [COLLECTIONS.notes, { userId: 1, sectionId: 1 }, { unique: true, name: "user_section_unique" }],
+  [COLLECTIONS.notes, { userId: 1, courseId: 1, updatedAt: -1 }, { name: "user_course_updatedAt" }],
   // Tanda 9: Mongo borra cada ventana de rate limiting cuando llega su expiresAt
   [COLLECTIONS.rateLimits, { expiresAt: 1 }, { expireAfterSeconds: 0, name: "ttl" }],
   // Better Auth (Tanda 3): consultas por email, token y userId
@@ -110,6 +129,13 @@ const indexes: IndexDef[] = [
 ];
 
 const UNAUTHORIZED = 13;
+// Atlas no responde con 13 sino con su propio error: "user is not allowed to do action [collMod]"
+const ATLAS_ERROR = 8000;
+
+const isCollModDenied = (error: unknown) =>
+  error instanceof MongoServerError &&
+  (error.code === UNAUTHORIZED ||
+    (error.code === ATLAS_ERROR && /not allowed to do action \[collMod\]/.test(error.message)));
 
 async function ensureCollection(db: Db, name: string, validator: Document) {
   const exists = (await db.listCollections({ name }, { nameOnly: true }).toArray()).length > 0;
@@ -126,7 +152,7 @@ async function ensureCollection(db: Db, name: string, validator: Document) {
     console.log(`↻ ${name}: validación actualizada`);
   } catch (error) {
     // `collMod` requiere el rol dbAdmin; con readWrite la colección conserva su validador anterior
-    if (error instanceof MongoServerError && error.code === UNAUTHORIZED) {
+    if (isCollModDenied(error)) {
       console.warn(
         `⚠ ${name}: ya existe; no se actualizó la validación (el usuario necesita el rol dbAdmin para collMod)`,
       );

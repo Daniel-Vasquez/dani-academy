@@ -26,4 +26,13 @@ export const RATE_LIMITS = {
   progress: { max: 60, windowSeconds: 60 }, // 60 marcados/desmarcados por minuto
   // Se envía 1 por minuto y otro al abrir cada sección: 20 deja navegar rápido entre secciones
   heartbeat: { max: 20, windowSeconds: 60 },
+  // El autoguardado envía como mucho uno por cada segundo de pausa al escribir
+  notes: { max: 60, windowSeconds: 60 },
+} as const;
+
+/** Notas personales (Tanda 12) */
+export const NOTE_LIMITS = {
+  maxChars: 10_000, // los que cuenta CharacterCount en el editor
+  // JSON de la petición: por debajo de los 64 KiB que admite un fetch con keepalive
+  maxBytes: 60_000,
 } as const;

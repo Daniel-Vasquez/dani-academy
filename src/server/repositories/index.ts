@@ -1,4 +1,5 @@
 import { db } from "@/lib/mongo";
+import { createNotesRepo } from "./notes.repo";
 import { createProgressRepo } from "./progress.repo";
 import { createQuizAttemptsRepo } from "./quiz-attempts.repo";
 import { createRateLimitRepo } from "./rate-limit.repo";
@@ -10,4 +11,5 @@ export const repos = {
   studySessions: createStudySessionsRepo(db),
   quizAttempts: createQuizAttemptsRepo(db),
   rateLimit: createRateLimitRepo(db),
+  notes: createNotesRepo(db),
 };
