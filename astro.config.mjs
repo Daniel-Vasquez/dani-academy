@@ -12,6 +12,26 @@ export default defineConfig({
   integrations: [react(), mdx()],
   vite: {
     plugins: [tailwindcss()],
+    // Con la caché vacía (siempre en CI), Vite descubría en desarrollo estas dependencias al
+    // usarlas por primera vez, las reoptimizaba y respondía 504 "Outdated Optimize Dep" mientras:
+    // a veces una isla no llegaba a hidratarse. Las de TipTap se cargan con import() diferido
+    optimizeDeps: {
+      include: [
+        "astro/actions/runtime/entrypoints/client.js",
+        "astro/virtual-modules/transitions-events.js",
+        "astro/virtual-modules/transitions-router.js",
+        "astro/virtual-modules/transitions-swap-functions.js",
+        "astro/virtual-modules/transitions-types.js",
+        "@tiptap/core",
+        "@tiptap/react",
+        "@tiptap/extensions",
+        "@tiptap/extension-bold",
+        "@tiptap/extension-document",
+        "@tiptap/extension-italic",
+        "@tiptap/extension-paragraph",
+        "@tiptap/extension-text",
+      ],
+    },
   },
   markdown: {
     shikiConfig: {

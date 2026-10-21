@@ -6,6 +6,9 @@ import SectionNav from "@/components/course/SectionNav.astro";
 import MarkAsReadButton from "@/components/course/MarkAsReadButton";
 import StudyTracker from "@/components/course/StudyTracker.astro";
 import NotesPanel from "@/components/notes/NotesPanel.astro";
+import NotesIsland from "@/components/notes/NotesIsland";
+import { renderNoteHtml } from "@/lib/notes/render";
+import { getNote } from "@/server/services/notes.service";
 import { getCourseReadIds } from "@/server/services/progress.service";
 import { getQuizByCourseId } from "@/server/services/quiz.service";
 import {
@@ -29,9 +32,10 @@ if (!section) return Astro.rewrite("/404");
 const { Content } = await render(section);
 
 const user = Astro.locals.user!; // el middleware garantiza la sesión
-const [readIds, quiz] = await Promise.all([
+const [readIds, quiz, note] = await Promise.all([
   getCourseReadIds(user.id, course.id),
   getQuizByCourseId(course.id),
+  getNote(user.id, section.data.sectionId),
 ]);
 const isRead = readIds.includes(section.data.sectionId);
 
@@ -89,7 +93,13 @@ const next = nextSection
     <StudyTracker sectionId={section.data.sectionId} />
   </article>
 
-  <NotesPanel slot="notes" sectionTitle={section.data.title} hasNote={false}>
-    <p class="text-sm text-muted">El editor llega en la Tanda 13.</p>
+  <NotesPanel slot="notes" sectionTitle={section.data.title} hasNote={note.rev > 0}>
+    <NotesIsland
+      client:idle
+      sectionId={section.data.sectionId}
+      initialDoc={note.doc}
+      initialRev={note.rev}
+      previewHtml={note.doc ? renderNoteHtml(note.doc) : ""}
+    />
   </NotesPanel>
 </CourseLayout>

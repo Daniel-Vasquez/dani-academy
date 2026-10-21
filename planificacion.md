@@ -6190,6 +6190,7 @@ src/
 │   └── useAutosave.ts                        (nuevo)
 ├── pages/cursos/[course]/[section].astro     (modificar: lee la nota y monta la isla)
 └── styles/global.css                         (modificar: tonos, ProseMirror y placeholder)
+astro.config.mjs                              (modificar al ejecutarla: optimizeDeps, ver las notas)
 tests/
 ├── components/useAutosave.test.ts            (nuevo)
 └── e2e/notes.spec.ts                         (nuevo)
@@ -6830,11 +6831,8 @@ export default function NotesIsland({ previewHtml, ...editorProps }: Props) {
     <div className="flex flex-col gap-3">
       <NotesToolbar state={null} />
       <div>
-        <div
-          className={NOTE_CONTENT_CLASS}
-          aria-label="Notas de esta sección (cargando el editor)"
-          dangerouslySetInnerHTML={{ __html: previewHtml }}
-        />
+        {/* Sin aria-label: ARIA no permite nombrar un div sin rol (axe: aria-prohibited-attr) */}
+        <div className={NOTE_CONTENT_CLASS} dangerouslySetInnerHTML={{ __html: previewHtml }} />
       </div>
       <p className="min-h-5" />
     </div>
@@ -6915,16 +6913,44 @@ y el panel provisional de la Tanda 11 se sustituye por:
 
 ### Criterios de aceptación — Tanda 13
 
-- [ ] Negrita, cursiva y los cuatro tonos se aplican a la selección y la barra refleja el formato del cursor.
-- [ ] La nota se guarda sola 1 s después de dejar de escribir, persiste tras recargar y la vista previa del servidor la muestra antes de que cargue el editor.
-- [ ] CLS 0 al cargar una sección con y sin nota (medido en el laboratorio: 0 a 1280, 1440 y 1536 px).
-- [ ] En móvil, el trozo del editor (unos 100 KB gzip) no se descarga hasta abrir la hoja; la isla inicial pesa unos 1,4 KB gzip.
-- [ ] Dos pestañas no se sobrescriben en silencio: la que va por detrás ve el aviso de conflicto.
-- [ ] Lo escrito antes de navegar con View Transitions, de ocultar la pestaña o de cerrarla se guarda.
-- [ ] Los tonos se leen en claro y en oscuro (contraste ≥ 4,5:1, §13.4).
-- [ ] Lighthouse en una sección, con sesión: rendimiento, accesibilidad y buenas prácticas sin bajar respecto a la Tanda 10. CSP sin violaciones (no hay estilos en línea nuevos).
-- [ ] `npm run check`, `lint`, `test:run` y los E2E de las Tandas 11–13 pasan.
+- [x] Negrita, cursiva y los cuatro tonos se aplican a la selección y la barra refleja el formato del cursor.
+- [x] La nota se guarda sola 1 s después de dejar de escribir, persiste tras recargar y la vista previa del servidor la muestra antes de que cargue el editor.
+- [x] CLS 0 al cargar una sección con y sin nota (medido en el laboratorio: 0 a 1280, 1440 y 1536 px).
+- [x] En móvil, el trozo del editor (unos 100 KB gzip) no se descarga hasta abrir la hoja; la isla inicial pesa unos 1,4 KB gzip.
+- [x] Dos pestañas no se sobrescriben en silencio: la que va por detrás ve el aviso de conflicto.
+- [x] Lo escrito antes de navegar con View Transitions, de ocultar la pestaña o de cerrarla se guarda.
+- [x] Los tonos se leen en claro y en oscuro (contraste ≥ 4,5:1, §13.4).
+- [x] Lighthouse en una sección, con sesión: rendimiento, accesibilidad y buenas prácticas sin bajar respecto a la Tanda 10. CSP sin violaciones (no hay estilos en línea nuevos).
+- [x] `npm run check`, `lint`, `test:run` y los E2E de las Tandas 11–13 pasan.
 - [ ] Producción: `db-setup` ejecutado (§12.5) **antes** del *push*; tras desplegar, crear una nota con un usuario propio, recargar y borrarla.
+
+### Notas de implementación (Tanda 13 ya ejecutada)
+
+Cerrada el 2026-10-20, salvo el paso a producción (último criterio). **El código real del repositorio manda.**
+
+- **Dependencias:** TipTap 3.32.0 (`@tiptap/core`, `react`, `pm`, `extensions` y las cinco extensiones del esquema). React sigue siendo una sola copia, la 19.3.0.
+- **Dos fallos de accesibilidad y de desarrollo que no salieron en el laboratorio:**
+  - **axe marcaba `aria-prohibited-attr` en la vista previa.** Tenía un `aria-label` en un `div` sin rol, y ARIA no permite nombrar un elemento genérico. Se quitó: el panel ya tiene su título «Mis notas», y el editor conserva `role="textbox"` con su nombre. Ahora axe no da ninguna infracción, ni en los E2E ni en Lighthouse.
+  - **Con la caché de Vite vacía (siempre en CI), el servidor de desarrollo descubría dependencias a mitad de la ejecución.** Eran TipTap, por el `import()` diferido, los módulos de `<ClientRouter />` y el cliente de Astro Actions. Vite las reoptimizaba, recargaba la página y respondía 504 «Outdated Optimize Dep» mientras tanto: la isla de la evaluación a veces no se hidrataba. Se declaran en `vite.optimizeDeps.include`. Medido con `DEBUG=vite:deps`: el escáner ya encuentra todas las dependencias y no hay ninguna recarga.
+- **Medido en el *build* de producción**, servido como en Vercel (estáticos y la función `_render`) contra un MongoDB en memoria:
+  - El editor pesa 102 184 B gzip y la isla, 1 431 B. Ninguno de los dos incluye Zod.
+  - La CSP llega como cabecera HTTP: no hay violaciones ni errores de consola.
+  - Una nota con cursiva y azul se recupera tras recargar.
+- **Lighthouse con sesión en B1.1** (mediana de 3 pasadas, mismo servidor):
+
+  | | Sin editor (Tanda 12) | Con editor (Tanda 13) |
+  | --- | --- | --- |
+  | Móvil | 90 · LCP 3,2 s | 89 · LCP 3,3 s (pasadas: 82/90/89) |
+  | Escritorio | 100 · LCP 0,7 s | 100 · LCP 0,7 s |
+  | Accesibilidad / buenas prácticas | 100 / 100 | 100 / 100 |
+  | CLS | 0 | 0 |
+
+  La diferencia de un punto en móvil está dentro de la variación entre pasadas. En móvil el editor no se descarga; en escritorio se pide en `client:idle`, sin coste en TBT (0 ms). El servidor local no comprime, así que las cifras absolutas son más bajas que en Vercel.
+- **Tests:**
+  - 121 de Vitest: 10 nuevos del autoguardado.
+  - `notes.spec.ts`, 4 E2E: formato, guardado y recarga, con y sin JavaScript, CLS y tema; conflicto entre dos pestañas; guardar al navegar con View Transitions; y en móvil, que el editor no se descargue hasta abrir la hoja.
+  - La batería completa (41 E2E) pasa dos veces con la caché fría y una con la caliente.
+- **Pendiente: el paso a producción**, por confirmar con el usuario: `db-setup` contra producción (§12.5), *push* y comprobación con un usuario propio.
 
 ---
 
