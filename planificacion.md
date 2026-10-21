@@ -6950,7 +6950,9 @@ Cerrada el 2026-10-20, salvo el paso a producción (último criterio). **El cód
   - 121 de Vitest: 10 nuevos del autoguardado.
   - `notes.spec.ts`, 4 E2E: formato, guardado y recarga, con y sin JavaScript, CLS y tema; conflicto entre dos pestañas; guardar al navegar con View Transitions; y en móvil, que el editor no se descargue hasta abrir la hoja.
   - La batería completa (41 E2E) pasa dos veces con la caché fría y una con la caliente.
-- **Pendiente: el paso a producción**, por confirmar con el usuario: `db-setup` contra producción (§12.5), *push* y comprobación con un usuario propio.
+- **Paso a producción:**
+  - **Hecho el 2026-10-20:** `db-setup` contra `dani_academy`, con la URI de `.env` y `MONGODB_DB=dani_academy`, porque no hay `.env.production.local` y el usuario de Mongo es compartido (Tanda 10). Creó `notes` con validación `strict`, sus 8 campos obligatorios y sus dos índices (el de persona y sección, único), y 0 documentos.
+  - **Pendiente, a cargo del usuario:** el *push*. Después, crear una nota con un usuario propio, recargar y borrarla.
 
 ---
 
