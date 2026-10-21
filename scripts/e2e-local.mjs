@@ -4,7 +4,8 @@
  * transacciones), crea colecciones e índices, ejecuta Playwright y lo apaga todo al final.
  * Las variables de este proceso tienen prioridad sobre .env, así que nunca toca Atlas.
  */
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { randomBytes } from "node:crypto";
 import { MongoClient } from "mongodb";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
@@ -17,10 +18,20 @@ const env = {
   BETTER_AUTH_SECRET: randomBytes(32).toString("base64"),
 };
 
-const run = (command, args) => spawnSync(command, args, { stdio: "inherit", env }).status ?? 1;
+/**
+ * Asíncrono a propósito: este proceso lee la salida de mongod por una tubería. Con spawnSync
+ * el bucle de eventos se bloquea, nadie vacía la tubería y, cuando se llena, mongod se queda
+ * parado escribiendo su log y todas las consultas esperan sin fin (pasó al añadir la colección
+ * notes en la Tanda 12: los tests del proyecto mobile se colgaban a mitad de la batería).
+ */
+async function run(command, args) {
+  const child = spawn(command, args, { stdio: "inherit", env });
+  const [code] = await once(child, "exit");
+  return code ?? 1;
+}
 
-let status = run("npm", ["run", "db:setup"]);
-if (status === 0) status = run("npx", ["playwright", "test", ...process.argv.slice(2)]);
+let status = await run("npm", ["run", "db:setup"]);
+if (status === 0) status = await run("npx", ["playwright", "test", ...process.argv.slice(2)]);
 
 // Prueba de que el servidor usó esta base y no la de .env: aquí deben estar los usuarios de los tests
 const client = await MongoClient.connect(env.MONGODB_URI);
