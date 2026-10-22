@@ -14,6 +14,8 @@ if (!/^mongodb:\/\/(localhost|127\.0\.0\.1)[:/]/.test(uri)) {
 
 export default defineConfig({
   testDir: "tests/e2e",
+  // Espera a que Vite termine de optimizar antes del primer test (ver el archivo)
+  globalSetup: "./tests/e2e/global-setup.ts",
   fullyParallel: false,
   workers: 1,
   retries: process.env.CI ? 1 : 0,

@@ -32,16 +32,35 @@ test.describe("escritorio", () => {
 
   test("tres columnas desde xl, con la lección a su ancho de lectura", async ({ page }) => {
     await registerUser(page);
-    // CLS acumulado desde el primer fotograma de cada carga
+    // CLS que provoca el panel, desde el primer fotograma de cada carga. Cuenta los saltos de
+    // elementos del panel y los que cambian la x o el ancho de algo (una columna mal reservada
+    // desplaza la lección en horizontal). No cuenta el cambio de fuente (font-display: swap):
+    // en CI las fuentes llegan tarde y el texto de la lección baja en vertical (CLS 0,0027 en
+    // la primera carga), algo del sitio entero que no tiene que ver con el panel
     await page.addInitScript(() => {
+      type Rect = { x: number; width: number };
+      type Shift = {
+        value: number;
+        hadRecentInput: boolean;
+        sources: { node: Node | null; previousRect: Rect; currentRect: Rect }[];
+      };
       const w = window as unknown as { __cls: number };
       w.__cls = 0;
+      const fromPanel = (node: Node | null) => {
+        const el = node instanceof Element ? node : node?.parentElement;
+        return Boolean(el?.closest("[data-notes-panel]"));
+      };
       new PerformanceObserver((list) => {
-        for (const e of list.getEntries() as unknown as {
-          value: number;
-          hadRecentInput: boolean;
-        }[])
-          if (!e.hadRecentInput) w.__cls += e.value;
+        for (const e of list.getEntries() as unknown as Shift[]) {
+          if (e.hadRecentInput) continue;
+          const caused = e.sources.some(
+            (s) =>
+              fromPanel(s.node) ||
+              Math.round(s.previousRect.x) !== Math.round(s.currentRect.x) ||
+              Math.round(s.previousRect.width) !== Math.round(s.currentRect.width),
+          );
+          if (caused) w.__cls += e.value;
+        }
       }).observe({ type: "layout-shift", buffered: true });
     });
 
