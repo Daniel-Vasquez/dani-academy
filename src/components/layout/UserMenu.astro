@@ -8,10 +8,52 @@ const user = Astro.locals.user;
     <button
       type="button"
       data-sign-out
-      class="rounded-lg px-2 py-1.5 text-sm sm:px-3 text-muted transition-colors hover:bg-surface hover:text-fg disabled:opacity-60"
+      aria-haspopup="dialog"
+      aria-controls="confirmar-salida"
+      class="rounded-lg px-2 py-1.5 text-sm text-muted transition-colors hover:bg-surface hover:text-fg sm:px-3"
     >
       Salir
     </button>
+
+    <!--
+        Confirmación antes de cerrar la sesión. <dialog> modal: el navegador pone el fondo
+        (::backdrop), atrapa el foco, cierra con Escape y bloquea la página de detrás
+      -->
+    <dialog
+      id="confirmar-salida"
+      data-sign-out-dialog
+      aria-labelledby="confirmar-salida-titulo"
+      aria-describedby="confirmar-salida-texto"
+      class="m-auto w-[calc(100%-2rem)] max-w-sm rounded-xl border border-surface-2 bg-bg p-0 text-fg shadow-xl backdrop:bg-black/40 backdrop:backdrop-blur-sm"
+    >
+      <div class="p-6">
+        <h2 id="confirmar-salida-titulo" class="text-lg font-semibold">
+          Cerrar sesión
+        </h2>
+        <p id="confirmar-salida-texto" class="mt-2 text-sm text-muted">
+          ¿Estás seguro de que deseas salir de tu cuenta?
+        </p>
+        <div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+          <!-- autofocus: con una acción destructiva, el foco empieza en la opción segura -->
+          <button
+            type="button"
+            data-sign-out-cancel
+            autofocus
+            class="rounded-lg bg-surface px-4 py-2 text-sm font-medium transition-colors hover:bg-surface-2"
+          >
+            Cancelar
+          </button>
+          <!-- Fondo --danger (#f25c76); texto oscuro: el blanco sobre ese rojo da 3,2:1 (< AA) -->
+          <button
+            type="button"
+            data-sign-out-confirm
+            class="rounded-lg bg-danger px-4 py-2 text-sm font-semibold text-fg transition-colors hover:bg-danger/90 disabled:cursor-wait disabled:opacity-60 dark:text-bg"
+          >
+            Cerrar sesión
+          </button>
+        </div>
+      </div>
+    </dialog>
   </div>
 )}
 
@@ -19,12 +61,27 @@ const user = Astro.locals.user;
   import { authClient } from "@/lib/auth-client";
 
   document.addEventListener("astro:page-load", () => {
-    document.querySelectorAll<HTMLButtonElement>("[data-sign-out]").forEach((btn) => {
-      btn.onclick = async () => {
-        btn.disabled = true;
-        await authClient.signOut();
-        window.location.assign("/login");
-      };
-    });
+    const dialog = document.querySelector<HTMLDialogElement>("[data-sign-out-dialog]");
+    const opener = document.querySelector<HTMLButtonElement>("[data-sign-out]");
+    if (!dialog || !opener) return;
+    const confirm = dialog.querySelector<HTMLButtonElement>("[data-sign-out-confirm]")!;
+
+    // onclick (no addEventListener): con View Transitions esto se ejecuta en cada página
+    opener.onclick = () => dialog.showModal();
+    dialog.querySelector<HTMLButtonElement>("[data-sign-out-cancel]")!.onclick = () =>
+      dialog.close();
+
+    // Clic en el fondo: el dialog no tiene relleno, así que el clic solo llega a él fuera de la caja
+    dialog.onclick = (event) => {
+      if (event.target === dialog) dialog.close();
+    };
+    dialog.onclose = () => opener.focus();
+
+    confirm.onclick = async () => {
+      confirm.disabled = true;
+      confirm.textContent = "Cerrando sesión…";
+      await authClient.signOut();
+      window.location.assign("/login");
+    };
   });
 </script>

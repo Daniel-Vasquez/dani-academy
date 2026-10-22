@@ -34,9 +34,13 @@ export function api(page: Page) {
   };
 }
 
-/** Cierra la sesión desde la cabecera y espera a que termine (vuelve al login) */
+/** Cierra la sesión desde la cabecera, confirma en el diálogo y espera a volver al login */
 export async function signOut(page: Page) {
   await page.getByRole("button", { name: "Salir" }).click();
+  await page
+    .getByRole("dialog", { name: "Cerrar sesión" })
+    .getByRole("button", { name: "Cerrar sesión" })
+    .click();
   await expect(page).toHaveURL(/\/login/);
 }
 
