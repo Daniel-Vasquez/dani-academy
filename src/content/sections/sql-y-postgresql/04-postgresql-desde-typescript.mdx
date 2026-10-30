@@ -1,0 +1,1238 @@
+---
+sectionId: "A3.4"
+course: "A3"
+title: "PostgreSQL desde TypeScript"
+order: 4
+minutes: 90
+summary: "Conectas con node-postgres y ves una inyección SQL borrar una tabla, corriges los tipos que llegan mal, defines el esquema con Drizzle y sus migraciones, y llevas el repositorio de evaluaciones a PostgreSQL."
+---
+
+Hasta ahora has hablado con PostgreSQL desde `psql`. Una aplicación lo hace desde su código, y ahí aparecen problemas que `psql` no tiene: cómo pasar los datos de la petición sin abrir la puerta a una inyección SQL, qué tipo de JavaScript llega por cada tipo de PostgreSQL, cómo mantener el esquema de la base de datos al día con el código y cuántas conexiones abre cada instancia de tu app. En esta sección vas a conectar con el _driver_ `pg`, después vas a usar **Drizzle ORM**, que describe las tablas en TypeScript y genera las migraciones, y terminarás con el repositorio de evaluaciones de esta plataforma funcionando sobre PostgreSQL con la misma interfaz que el de MongoDB (I3.5).
+
+**Lo que tendrás al terminar:** un proyecto `pg-ts` con un _pool_ de conexiones, el esquema de las evaluaciones en Drizzle con dos migraciones aplicadas, y el repositorio de evaluaciones en MongoDB y en PostgreSQL pasando los mismos 5 tests.
+
+**Requisitos:** las secciones A3.1–A3.3 (PostgreSQL 18), I3.5 (repositorios inyectados) y Node 24 o superior, que ejecuta TypeScript sin compilar.
+
+## Paso 1: conectar con `pg` y no concatenar SQL nunca
+
+La aplicación no debe conectarse como `postgres`, que puede hacerlo todo. Crea un rol propio, con contraseña, y una base para esta sección (cambia la clave):
+
+```bash
+sudo -u postgres psql -c "CREATE ROLE academy_app LOGIN PASSWORD 'cambia-esta-clave'"
+sudo -u postgres psql -c "CREATE DATABASE academia_ts OWNER academy_app"
+```
+
+La conexión llega por TCP (`localhost:5432`), con contraseña, y PostgreSQL 18 la comprueba con `scram-sha-256` sin tocar nada. Si PostgreSQL está en Docker, publica el puerto con `-p 5432:5432` (A3.1). Si está en una VM, reenvía el 5432 a tu equipo: Lima, por ejemplo, lo hace solo.
+
+Crea el proyecto, en tu equipo:
+
+```bash
+mkdir pg-ts && cd pg-ts
+```
+
+```json
+{
+  "name": "pg-ts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
+```
+
+Guárdalo como `package.json`, instala las dependencias y crea `tsconfig.json`:
+
+```bash
+npm install pg drizzle-orm
+npm install -D drizzle-kit typescript @types/pg @types/node
+```
+
+```json
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "src",
+    "tests",
+    "drizzle.config.ts",
+    "vitest.config.ts"
+  ]
+}
+```
+
+Y `.env`, que nunca se sube al repositorio, con la URL de conexión:
+
+```bash
+DATABASE_URL=postgres://academy_app:cambia-esta-clave@localhost:5432/academia_ts
+```
+
+Node ejecuta los `.ts` quitando los tipos, sin compilar. Por eso los `import` llevan la extensión `.ts` y `tsconfig.json` tiene `allowImportingTsExtensions`. El _pool_ de conexiones vive en un archivo propio, `src/db.ts`:
+
+```ts
+// Archivo: src/db.ts
+// Un único pool de conexiones para todo el proceso
+import pg from "pg";
+
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error("Falta DATABASE_URL (¿has creado el .env?)");
+
+export const pool = new pg.Pool({ connectionString: url, max: 10 });
+```
+
+`src/01-conectar.ts` conecta y busca un usuario por correo de dos formas: pegando el texto en el SQL y pasándolo como parámetro:
+
+```ts
+// Archivo: src/01-conectar.ts
+// Conectar con node-postgres y consultar con parámetros, y por qué nunca se concatena SQL
+import { pool } from "./db.ts";
+
+const { rows: [info] } = await pool.query("SELECT current_user AS usuario, current_database() AS base, version()");
+console.log(info);
+
+await pool.query(`
+  DROP TABLE IF EXISTS usuarios;
+  CREATE TABLE usuarios (email text PRIMARY KEY, nombre text NOT NULL);
+  INSERT INTO usuarios VALUES ('ana@ejemplo.com', 'Ana'), ('luis@ejemplo.com', 'Luis'), ('marta@ejemplo.com', 'Marta');
+`);
+
+// MAL: el texto de la petición se pega dentro del SQL
+async function buscarConcatenando(email: string) {
+  const { rows } = await pool.query(`SELECT nombre FROM usuarios WHERE email = '${email}'`);
+  return rows.map((r) => r.nombre);
+}
+
+// BIEN: el SQL va por un lado y los valores por otro ($1)
+async function buscarConParametro(email: string) {
+  const { rows } = await pool.query("SELECT nombre FROM usuarios WHERE email = $1", [email]);
+  return rows.map((r) => r.nombre);
+}
+
+for (const entrada of ["ana@ejemplo.com", "x' OR '1'='1", "x'; DROP TABLE usuarios; --"]) {
+  console.log(`\nentrada: ${entrada}`);
+  console.log("  con parámetro: ", await buscarConParametro(entrada));
+  try {
+    console.log("  concatenando:  ", await buscarConcatenando(entrada));
+  } catch (error) {
+    console.log("  concatenando:   error:", (error as Error).message);
+  }
+}
+
+const { rows: tablas } = await pool.query("SELECT to_regclass('usuarios') AS existe");
+console.log("\n¿Sigue existiendo la tabla usuarios?", tablas[0]?.existe ?? null);
+
+await pool.end();
+```
+
+```text
+$ node --env-file=.env src/01-conectar.ts
+{
+  usuario: 'academy_app',
+  base: 'academia_ts',
+  version: 'PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1) on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, 64-bit'
+}
+
+entrada: ana@ejemplo.com
+  con parámetro:  [ 'Ana' ]
+  concatenando:   [ 'Ana' ]
+
+entrada: x' OR '1'='1
+  con parámetro:  []
+  concatenando:   [ 'Ana', 'Luis', 'Marta' ]
+
+entrada: x'; DROP TABLE usuarios; --
+  con parámetro:  []
+  concatenando:   error: Cannot read properties of undefined (reading 'map')
+
+¿Sigue existiendo la tabla usuarios? null
+```
+
+- **Con `$1`, el SQL y los datos viajan por separado:** PostgreSQL recibe la consulta ya analizada y el valor aparte, así que `x' OR '1'='1` es solo un correo que no existe. No hay forma de que un dato se convierta en SQL.
+- **Concatenando, el dato se convierte en SQL:** `x' OR '1'='1` cierra la comilla y añade una condición que siempre se cumple, y devuelve los tres usuarios.
+- **Y puede ejecutar más de una sentencia:** sin parámetros, `pg` usa el protocolo simple de PostgreSQL, que acepta varias sentencias separadas por `;`. La tercera entrada borró la tabla `usuarios` (`to_regclass` devuelve `null`). El error que se ve llega **después** del daño: con dos sentencias, `pg` devuelve un _array_ de resultados sin `rows`.
+
+<Callout type="risk">
+
+- **Ningún dato de la petición va dentro del texto del SQL:** ni del formulario, ni de la URL, ni de la cabecera, ni de la base de datos. Ni siquiera "ya validado": el día que cambie la validación, el agujero aparece. Si necesitas variar algo que no es un valor (el nombre de una columna para ordenar), elige entre una lista cerrada en tu código, nunca el texto tal cual.
+- **El rol de la aplicación, con lo justo:** `academy_app` es dueño solo de su base. Si una inyección se cuela, el daño se limita a lo que ese rol puede hacer. Con el usuario `postgres`, podría borrar cualquier base del servidor.
+
+</Callout>
+
+## Paso 2: los tipos que llegan mal a JavaScript
+
+`pg` convierte cada valor según su tipo de PostgreSQL. `src/02-tipos.ts` consulta un valor de cada tipo y lo ejecuta en dos zonas horarias:
+
+```ts
+// Archivo: src/02-tipos.ts
+// Qué tipo de JavaScript llega por cada tipo de PostgreSQL
+import { pool } from "./db.ts";
+
+const { rows: [fila] } = await pool.query(`
+  SELECT count(*)                          AS count_bigint,
+         9007199254740993::bigint          AS bigint_grande,
+         4.5::numeric(3,1)                 AS numeric,
+         42::integer                       AS integer,
+         0.1::float8 + 0.2::float8         AS float8,
+         true                              AS boolean,
+         timestamptz '2026-10-01 10:00:00+00' AS timestamptz,
+         date '2026-10-01'                 AS date,
+         '{"tema": "dark", "avisos": [1, 2]}'::jsonb AS jsonb,
+         ARRAY['B1', 'I3']                 AS text_array
+  FROM generate_series(1, 3)
+`);
+
+for (const [columna, valor] of Object.entries(fila ?? {})) {
+  const tipo = valor instanceof Date ? "Date" : Array.isArray(valor) ? "array" : typeof valor;
+  console.log(columna.padEnd(13), tipo.padEnd(7), valor instanceof Date ? valor.toISOString() : JSON.stringify(valor));
+}
+
+// La trampa del tipo date: por defecto llega como medianoche en la zona horaria de Node
+const dia: unknown = fila?.date;
+const enIso = dia instanceof Date ? dia.toISOString().slice(0, 10) : dia;
+console.log(`\nTZ=${process.env.TZ}: date '2026-10-01' llega como el día ${enIso}`);
+
+await pool.end();
+```
+
+```text
+$ TZ=America/Mexico_City node --env-file=.env src/02-tipos.ts
+count_bigint  string  "3"
+bigint_grande string  "9007199254740993"
+numeric       string  "4.5"
+integer       number  42
+float8        number  0.30000000000000004
+boolean       boolean true
+timestamptz   Date    2026-10-01T10:00:00.000Z
+date          Date    2026-10-01T06:00:00.000Z
+jsonb         object  {"tema":"dark","avisos":[1,2]}
+text_array    array   ["B1","I3"]
+
+TZ=America/Mexico_City: date '2026-10-01' llega como el día 2026-10-01
+
+$ TZ=Europe/Madrid node --env-file=.env src/02-tipos.ts
+count_bigint  string  "3"
+bigint_grande string  "9007199254740993"
+numeric       string  "4.5"
+integer       number  42
+float8        number  0.30000000000000004
+boolean       boolean true
+timestamptz   Date    2026-10-01T10:00:00.000Z
+date          Date    2026-09-30T22:00:00.000Z
+jsonb         object  {"tema":"dark","avisos":[1,2]}
+text_array    array   ["B1","I3"]
+
+TZ=Europe/Madrid: date '2026-10-01' llega como el día 2026-09-30
+```
+
+- **`count(*)` llega como _string_ (`"3"`):** `count` devuelve `bigint`, que puede superar el entero exacto más grande de JavaScript (2^53), y `pg` no se arriesga. `"3" + 1` da `"31"`.
+- **`numeric` también llega como _string_ (`"4.5"`):** a propósito, para no perder decimales. Es el tipo del dinero (A3.1).
+- **`date` llega como un `Date` a medianoche de la zona horaria de Node:** en Ciudad de México, medianoche son las 06:00 UTC y el día no cambia; en Madrid, medianoche son las 22:00 UTC **del día anterior**, y `toISOString()` dice 30 de septiembre. El mismo código da días distintos según dónde corra el servidor.
+- **`timestamptz` sí es fiable:** es un instante, y llega como el `Date` de ese instante en cualquier zona.
+
+Los dos primeros se arreglan una vez, al crear el _pool_. Sustituye `src/db.ts`:
+
+```ts
+// Archivo: src/db.ts
+// Un único pool de conexiones para todo el proceso, y los tipos que node-postgres convierte mal
+import pg from "pg";
+
+// date (OID 1082): se queda como "2026-10-01". Por defecto sería un Date a medianoche LOCAL,
+// que en una zona por delante de UTC cambia de día al pasarlo a ISO
+pg.types.setTypeParser(pg.types.builtins.DATE, (valor) => valor);
+// bigint (OID 20), el tipo de count(*): a number. Seguro para contadores; no para valores
+// por encima de 2^53 (los id de una tabla enorme), que perderían precisión
+pg.types.setTypeParser(pg.types.builtins.INT8, (valor) => Number(valor));
+// numeric se queda como string a propósito: convertirlo a number perdería decimales
+
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error("Falta DATABASE_URL (¿has creado el .env?)");
+
+export const pool = new pg.Pool({ connectionString: url, max: 10 });
+```
+
+```text
+$ TZ=America/Mexico_City node --env-file=.env src/02-tipos.ts
+count_bigint  number  3
+bigint_grande number  9007199254740992
+numeric       string  "4.5"
+integer       number  42
+float8        number  0.30000000000000004
+boolean       boolean true
+timestamptz   Date    2026-10-01T10:00:00.000Z
+date          string  "2026-10-01"
+jsonb         object  {"tema":"dark","avisos":[1,2]}
+text_array    array   ["B1","I3"]
+
+TZ=America/Mexico_City: date '2026-10-01' llega como el día 2026-10-01
+
+$ TZ=Europe/Madrid node --env-file=.env src/02-tipos.ts
+count_bigint  number  3
+bigint_grande number  9007199254740992
+numeric       string  "4.5"
+integer       number  42
+float8        number  0.30000000000000004
+boolean       boolean true
+timestamptz   Date    2026-10-01T10:00:00.000Z
+date          string  "2026-10-01"
+jsonb         object  {"tema":"dark","avisos":[1,2]}
+text_array    array   ["B1","I3"]
+
+TZ=Europe/Madrid: date '2026-10-01' llega como el día 2026-10-01
+```
+
+El día ya es el mismo en las dos zonas, y `count(*)` es un número. Fíjate en `bigint_grande`: `9007199254740993` se ha convertido en `9007199254740992`, porque supera 2^53. Por eso el _parser_ de `bigint` sirve para contadores, pero no para cualquier columna `bigint`.
+
+<Callout type="risk">
+
+- **Los _parsers_ son globales:** `pg.types.setTypeParser` cambia la conversión para todo el proceso, también para otras librerías que usen `pg`. Regístralos en un solo sitio (`db.ts`) y antes de la primera consulta.
+- **Con un `bigint` de verdad, usa `BigInt` o déjalo como texto:** un `id` de una tabla con miles de millones de filas no cabe en un `number`. Drizzle (Paso 3) declara cada columna `bigint` con `mode: "number"` o `mode: "bigint"`, y tienes que elegir.
+- **`float8` tiene los errores de siempre:** `0.1 + 0.2` da `0.30000000000000004`, igual que en JavaScript. Para cantidades exactas, `numeric`.
+
+</Callout>
+
+## Paso 3: el esquema en TypeScript con Drizzle
+
+Escribir SQL a mano en cada consulta tiene dos problemas: nada comprueba que `user_id` exista o sea un texto, y los tipos de las filas hay que escribirlos aparte. **Drizzle ORM** describe las tablas en TypeScript, y de ese esquema salen los tipos de las filas, las consultas tipadas y las migraciones. A diferencia de otros ORM, sus consultas se parecen mucho al SQL que generan.
+
+El esquema de las evaluaciones, con la misma forma que la colección `quiz_attempts` de la plataforma y las restricciones que en MongoDB vivían en el validador (`db-setup.ts`). `src/schema.ts`:
+
+```ts
+// Archivo: src/schema.ts
+// El esquema de las evaluaciones, en TypeScript: de aquí salen los tipos y las migraciones
+import { sql } from "drizzle-orm";
+import {
+  bigint,
+  boolean,
+  check,
+  index,
+  pgTable,
+  smallint,
+  text,
+  timestamp,
+} from "drizzle-orm/pg-core";
+
+export const quizAttempts = pgTable(
+  "quiz_attempts",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: text("user_id").notNull(),
+    courseId: text("course_id").notNull(),
+    answers: smallint("answers").array().notNull(),
+    results: boolean("results").array().notNull(),
+    score: smallint("score").notNull(),
+    total: smallint("total").notNull(),
+    passed: boolean("passed").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("course_id_valido", sql`${t.courseId} ~ '^([BIA][1-8]|P1)$'`),
+    check("score_en_rango", sql`${t.score} BETWEEN 0 AND ${t.total}`),
+    check("cinco_respuestas", sql`cardinality(${t.answers}) = 5 AND cardinality(${t.results}) = 5`),
+    // Las consultas del repositorio: por usuario y curso, y por usuario, de la más reciente
+    index("quiz_attempts_user_course_submitted").on(t.userId, t.courseId, t.submittedAt.desc()),
+    index("quiz_attempts_user_submitted").on(t.userId, t.submittedAt.desc()),
+  ],
+);
+
+// Los tipos salen del esquema: nunca se desincronizan de la tabla
+export type QuizAttemptRow = typeof quizAttempts.$inferSelect;
+export type NewQuizAttempt = typeof quizAttempts.$inferInsert;
+```
+
+`drizzle-kit` es la herramienta de línea de comandos que compara el esquema con las migraciones anteriores y escribe el SQL que falta. `drizzle.config.ts`:
+
+```ts
+// Archivo: drizzle.config.ts
+import { defineConfig } from "drizzle-kit";
+
+process.loadEnvFile(); // carga .env (Node 20.12+), sin instalar dotenv
+
+export default defineConfig({
+  dialect: "postgresql",
+  schema: "./src/schema.ts",
+  out: "./drizzle",
+  dbCredentials: { url: process.env.DATABASE_URL! },
+});
+```
+
+```text
+$ npx drizzle-kit generate --name evaluaciones
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '…/pg-ts/drizzle.config.ts'
+1 tables
+quiz_attempts 9 columns 2 indexes 0 fks
+
+[✓] Your SQL migration file ➜ drizzle/0000_evaluaciones.sql 🚀
+```
+
+`drizzle/0000_evaluaciones.sql`, el SQL que acaba de escribir:
+
+```sql
+CREATE TABLE "quiz_attempts" (
+	"id" bigint PRIMARY KEY GENERATED ALWAYS AS IDENTITY (sequence name "quiz_attempts_id_seq" INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1),
+	"user_id" text NOT NULL,
+	"course_id" text NOT NULL,
+	"answers" smallint[] NOT NULL,
+	"results" boolean[] NOT NULL,
+	"score" smallint NOT NULL,
+	"total" smallint NOT NULL,
+	"passed" boolean NOT NULL,
+	"submitted_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "course_id_valido" CHECK ("quiz_attempts"."course_id" ~ '^([BIA][1-8]|P1)$'),
+	CONSTRAINT "score_en_rango" CHECK ("quiz_attempts"."score" BETWEEN 0 AND "quiz_attempts"."total"),
+	CONSTRAINT "cinco_respuestas" CHECK (cardinality("quiz_attempts"."answers") = 5 AND cardinality("quiz_attempts"."results") = 5)
+);
+--> statement-breakpoint
+CREATE INDEX "quiz_attempts_user_course_submitted" ON "quiz_attempts" USING btree ("user_id","course_id","submitted_at" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "quiz_attempts_user_submitted" ON "quiz_attempts" USING btree ("user_id","submitted_at" DESC NULLS LAST);
+```
+
+Revisa siempre el SQL antes de aplicarlo: es lo que va a ejecutarse en tu base de datos. Después, `migrate` aplica las migraciones pendientes, y `src/04-ver-migraciones.ts` comprueba qué ha quedado:
+
+```text
+$ npx drizzle-kit migrate
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '…/pg-ts/drizzle.config.ts'
+Using 'pg' driver for database querying
+[✓] migrations applied successfully!
+```
+
+```ts
+// Archivo: src/04-ver-migraciones.ts
+// Qué migraciones están aplicadas y qué índices tiene la tabla
+import { pool } from "./db.ts";
+
+const { rows: aplicadas } = await pool.query(
+  "SELECT id, hash, to_timestamp(created_at / 1000) AS generada FROM drizzle.__drizzle_migrations ORDER BY id",
+);
+console.table(aplicadas.map((m) => ({ ...m, hash: m.hash.slice(0, 12) + "…" })));
+
+const { rows: indices } = await pool.query(
+  "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'quiz_attempts' ORDER BY indexname",
+);
+for (const i of indices) console.log(i.indexname.padEnd(38), i.indexdef.replace(/.* USING /, "USING "));
+
+await pool.end();
+```
+
+```text
+$ node --env-file=.env src/04-ver-migraciones.ts
+┌─────────┬────┬─────────────────┬──────────────────────────┐
+│ (index) │ id │ hash            │ generada                 │
+├─────────┼────┼─────────────────┼──────────────────────────┤
+│ 0       │ 1  │ 'b36fe9eaca5b…' │ 2026-10-30T01:06:20.000Z │
+└─────────┴────┴─────────────────┴──────────────────────────┘
+quiz_attempts_pkey                     USING btree (id)
+quiz_attempts_user_course_submitted    USING btree (user_id, course_id, submitted_at DESC NULLS LAST)
+quiz_attempts_user_submitted           USING btree (user_id, submitted_at DESC NULLS LAST)
+```
+
+Drizzle guarda las migraciones aplicadas en la tabla `drizzle.__drizzle_migrations`, con el _hash_ de cada archivo. Y en los índices hay un detalle que vas a necesitar en el Paso 5: `t.submittedAt.desc()` se ha convertido en `DESC NULLS LAST`.
+
+<Callout type="risk">
+
+- **El esquema de TypeScript no es la base de datos:** lo que manda es lo que hay en PostgreSQL. Si alguien cambia una tabla a mano, el esquema miente y Drizzle no se entera. Todos los cambios, por migraciones.
+- **`drizzle-kit push` aplica el esquema sin migración:** es cómodo en un prototipo, pero no deja rastro ni se puede revisar, y en una base con datos puede proponer borrar una columna para crear otra. En cualquier base que importe, `generate` y `migrate`.
+- **Un `CHECK` escrito con `` sql`…` `` no lo comprueba TypeScript:** la expresión regular de `course_id_valido` es texto. Si tiene un error, lo verás al aplicar la migración, no al compilar.
+
+</Callout>
+
+## Paso 4: consultas con Drizzle, y el SQL que generan
+
+`src/orm.ts` crea Drizzle sobre el mismo _pool_ de `pg`:
+
+```ts
+// Archivo: src/orm.ts
+// Drizzle sobre el mismo pool de node-postgres
+import { drizzle } from "drizzle-orm/node-postgres";
+import { pool } from "./db.ts";
+import * as schema from "./schema.ts";
+
+export const db = drizzle(pool, { schema });
+export type Database = typeof db;
+```
+
+`src/04-consultas.ts` inserta, consulta, agrega y prueba los límites:
+
+```ts
+// Archivo: src/04-consultas.ts
+// Insertar y consultar con Drizzle, y ver el SQL que genera
+import { and, count, desc, eq, sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { db } from "./orm.ts";
+import { pool } from "./db.ts";
+import { quizAttempts, type NewQuizAttempt } from "./schema.ts";
+
+await db.delete(quizAttempts);
+
+// 1. Insertar: el tipo NewQuizAttempt sale del esquema (id y submittedAt son opcionales)
+const intento: NewQuizAttempt = {
+  userId: "u_00042",
+  courseId: "A3",
+  answers: [1, 2, 0, 3, 1],
+  results: [true, true, true, false, true],
+  score: 4,
+  total: 5,
+  passed: true,
+};
+const [creado] = await db.insert(quizAttempts).values(intento).returning();
+console.log("insertado:", creado);
+
+// 2. Consultar: los nombres son los de TypeScript (userId), el SQL usa los de la tabla (user_id)
+const consulta = db
+  .select({ courseId: quizAttempts.courseId, score: quizAttempts.score, submittedAt: quizAttempts.submittedAt })
+  .from(quizAttempts)
+  .where(and(eq(quizAttempts.userId, "u_00042"), eq(quizAttempts.courseId, "A3")))
+  .orderBy(desc(quizAttempts.submittedAt))
+  .limit(5);
+console.log("\nSQL generado:", consulta.toSQL());
+console.log("filas:", await consulta);
+
+// 3. sql`…` para lo que Drizzle no expresa: los valores ${…} también van como parámetros
+const entrada = "x' OR '1'='1";
+const peligrosa = sql`SELECT count(*) FROM quiz_attempts WHERE user_id = ${entrada}`;
+console.log("\nsql`…` con una inyección:", new PgDialect().sqlToQuery(peligrosa), (await db.execute(peligrosa)).rows);
+
+// 4. Agregaciones con las funciones de Drizzle
+const porCurso = await db
+  .select({ courseId: quizAttempts.courseId, intentos: count() })
+  .from(quizAttempts)
+  .groupBy(quizAttempts.courseId);
+console.log("\nintentos por curso:", porCurso);
+
+// 5. Las restricciones de la tabla siguen mandando: la base de datos rechaza lo que TypeScript no ve
+try {
+  await db.insert(quizAttempts).values({ ...intento, score: 9 });
+} catch (error) {
+  const causa = (error as { cause?: { message: string; constraint?: string } }).cause;
+  console.log("\nscore = 9:", causa?.message);
+}
+
+await pool.end();
+```
+
+```text
+$ node --env-file=.env src/04-consultas.ts
+insertado: {
+  id: 1,
+  userId: 'u_00042',
+  courseId: 'A3',
+  answers: [ 1, 2, 0, 3, 1 ],
+  results: [ true, true, true, false, true ],
+  score: 4,
+  total: 5,
+  passed: true,
+  submittedAt: 2026-10-30T01:06:21.919Z
+}
+
+SQL generado: {
+  sql: 'select "course_id", "score", "submitted_at" from "quiz_attempts" where ("quiz_attempts"."user_id" = $1 and "quiz_attempts"."course_id" = $2) order by "quiz_attempts"."submitted_at" desc limit $3',
+  params: [ 'u_00042', 'A3', 5 ]
+}
+filas: [ { courseId: 'A3', score: 4, submittedAt: 2026-10-30T01:06:21.919Z } ]
+
+sql`…` con una inyección: {
+  sql: 'SELECT count(*) FROM quiz_attempts WHERE user_id = $1',
+  params: [ "x' OR '1'='1" ],
+  typings: [ 'none' ]
+} [ { count: 0 } ]
+
+intentos por curso: [ { courseId: 'A3', intentos: 1 } ]
+
+score = 9: new row for relation "quiz_attempts" violates check constraint "score_en_rango"
+```
+
+- **Los nombres de TypeScript y los de la tabla, cada uno en su sitio:** escribes `userId` y Drizzle genera `"user_id"`, y la fila vuelve con `userId`. El tipo de cada campo sale del esquema: `answers` es `number[]`, y `submittedAt`, `Date`.
+- **`toSQL()` enseña el SQL y sus parámetros:** todos los valores van como `$1`, `$2`, `$3`, también el `limit`. Drizzle nunca concatena valores.
+- **`` sql`…` `` para lo que Drizzle no expresa:** cada `${…}` también se convierte en un parámetro, así que la inyección vuelve a ser solo un texto (`count: 0`). Lo que sí es peligroso es `sql.raw()`, que pega el texto tal cual: úsalo solo con texto que escribes tú.
+- **Las restricciones siguen en la base de datos:** TypeScript acepta `score: 9` (es un número), pero el `CHECK` lo rechaza. Los tipos ayudan a escribir bien el código, y las restricciones protegen los datos.
+
+Que el SQL sea correcto no significa que sea rápido. `src/04-plan.ts` llena la tabla con 70 000 intentos, uno de ellos de un usuario que repite 20 000 veces la evaluación de A3, y pide sus 5 últimos con `EXPLAIN ANALYZE`, como en A3.3:
+
+```ts
+// Archivo: src/04-plan.ts
+// ¿Usa PostgreSQL el índice con la consulta que genera Drizzle? Datos de prueba y EXPLAIN ANALYZE
+import { and, desc, eq, sql } from "drizzle-orm";
+import { db } from "./orm.ts";
+import { pool } from "./db.ts";
+import { quizAttempts } from "./schema.ts";
+
+// 50 000 intentos de 2000 usuarios, y 20 000 de un usuario que repite mucho la evaluación de A3
+await db.delete(quizAttempts);
+await db.execute(sql`
+  INSERT INTO quiz_attempts (user_id, course_id, answers, results, score, total, passed, submitted_at)
+  SELECT 'u_' || lpad((g % 2000)::text, 5, '0'), (ARRAY['B1', 'I3', 'A3'])[g % 3 + 1],
+         '{0,0,0,0,0}'::smallint[], '{t,t,t,f,f}'::boolean[], 3, 5, false, now() - g * interval '1 minute'
+  FROM generate_series(1, 50000) AS g
+  UNION ALL
+  SELECT 'u_repite', 'A3', '{0,0,0,0,0}'::smallint[], '{t,t,t,f,f}'::boolean[], 3, 5, false, now() - g * interval '1 second'
+  FROM generate_series(1, 20000) AS g
+`);
+await db.execute(sql`ANALYZE quiz_attempts`);
+
+// Los 5 últimos intentos de A3 del usuario que más repite
+const consulta = db
+  .select()
+  .from(quizAttempts)
+  .where(and(eq(quizAttempts.userId, "u_repite"), eq(quizAttempts.courseId, "A3")))
+  .orderBy(desc(quizAttempts.submittedAt))
+  .limit(5);
+
+const { sql: texto, params } = consulta.toSQL();
+console.log(texto, "\n");
+const { rows } = await pool.query(`EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF) ${texto}`, params);
+console.log(rows.map((r) => r["QUERY PLAN"]).join("\n"));
+
+await pool.end();
+```
+
+```text
+$ node --env-file=.env src/04-plan.ts
+select "id", "user_id", "course_id", "answers", "results", "score", "total", "passed", "submitted_at" from "quiz_attempts" where ("quiz_attempts"."user_id" = $1 and "quiz_attempts"."course_id" = $2) order by "quiz_attempts"."submitted_at" desc limit $3
+
+Limit (actual time=2.540..2.541 rows=5.00 loops=1)
+  ->  Sort (actual time=2.538..2.539 rows=5.00 loops=1)
+        Sort Key: submitted_at DESC
+        Sort Method: top-N heapsort  Memory: 25kB
+        ->  Bitmap Heap Scan on quiz_attempts (actual time=0.369..1.458 rows=20000.00 loops=1)
+              Recheck Cond: ((user_id = 'u_repite'::text) AND (course_id = 'A3'::text))
+              Heap Blocks: exact=308
+              ->  Bitmap Index Scan on quiz_attempts_user_course_submitted (actual time=0.350..0.350 rows=20000.00 loops=1)
+                    Index Cond: ((user_id = 'u_repite'::text) AND (course_id = 'A3'::text))
+                    Index Searches: 1
+Planning Time: 0.166 ms
+Execution Time: 2.555 ms
+```
+
+Hay un índice `(user_id, course_id, submitted_at DESC NULLS LAST)` hecho justo para esta consulta, y aun así PostgreSQL lee las 20 000 filas del usuario y las **ordena** (`Sort`) para quedarse con 5. El motivo está en las dos líneas de SQL:
+
+- **La consulta pide `order by "submitted_at" desc`:** en PostgreSQL, `DESC` significa `DESC NULLS FIRST` (los nulos primero).
+- **El índice está en `DESC NULLS LAST`:** Drizzle añade `NULLS LAST` a todas las columnas de un índice si no le dices otra cosa.
+
+Los dos órdenes no coinciden, así que el índice sirve para encontrar las filas del usuario, pero no para entregarlas ordenadas. Da igual que la columna sea `NOT NULL`: el planificador compara el orden del índice con el de la consulta, no los datos.
+
+<Callout type="risk">
+
+- **Comprueba con `EXPLAIN` las consultas que genera el ORM:** el SQL de Drizzle es correcto y legible, pero los detalles (como el orden de los nulos) se ven en el plan, no en el código TypeScript. Haz con `toSQL()` y `EXPLAIN ANALYZE` lo que hiciste en A3.3.
+- **Con pocas filas, el fallo no se nota:** con 8 intentos por usuario y curso, ordenar no cuesta nada, y este problema habría pasado todas las pruebas. Mide con el volumen que tendrá la tabla en producción, o con el peor usuario.
+- **`select()` sin columnas trae todas:** como `SELECT *`. Para listados, pide solo lo que vas a mostrar, como la consulta del punto 2.
+
+</Callout>
+
+## Paso 5: una migración para arreglarlo
+
+El arreglo es declarar el índice con el mismo orden que la consulta. En `src/schema.ts`, cambia los dos índices (el resto del archivo no cambia):
+
+```ts
+// Archivo: src/schema.ts
+// El esquema de las evaluaciones, en TypeScript: de aquí salen los tipos y las migraciones
+import { sql } from "drizzle-orm";
+import {
+  bigint,
+  boolean,
+  check,
+  index,
+  pgTable,
+  smallint,
+  text,
+  timestamp,
+} from "drizzle-orm/pg-core";
+
+export const quizAttempts = pgTable(
+  "quiz_attempts",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: text("user_id").notNull(),
+    courseId: text("course_id").notNull(),
+    answers: smallint("answers").array().notNull(),
+    results: boolean("results").array().notNull(),
+    score: smallint("score").notNull(),
+    total: smallint("total").notNull(),
+    passed: boolean("passed").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("course_id_valido", sql`${t.courseId} ~ '^([BIA][1-8]|P1)$'`),
+    check("score_en_rango", sql`${t.score} BETWEEN 0 AND ${t.total}`),
+    check("cinco_respuestas", sql`cardinality(${t.answers}) = 5 AND cardinality(${t.results}) = 5`),
+    // Las consultas del repositorio: por usuario y curso, y por usuario, de la más reciente.
+    // nullsFirst: Drizzle pone NULLS LAST por defecto en los índices, pero orderBy(desc(…))
+    // genera "DESC", que en PostgreSQL es NULLS FIRST. Sin esto el índice no sirve para ordenar
+    index("quiz_attempts_user_course_submitted").on(t.userId, t.courseId, t.submittedAt.desc().nullsFirst()),
+    index("quiz_attempts_user_submitted").on(t.userId, t.submittedAt.desc().nullsFirst()),
+  ],
+);
+
+// Los tipos salen del esquema: nunca se desincronizan de la tabla
+export type QuizAttemptRow = typeof quizAttempts.$inferSelect;
+export type NewQuizAttempt = typeof quizAttempts.$inferInsert;
+```
+
+`drizzle-kit generate` detecta el cambio y escribe la segunda migración:
+
+```text
+$ npx drizzle-kit generate --name indices-nulls-first
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '…/pg-ts/drizzle.config.ts'
+1 tables
+quiz_attempts 9 columns 2 indexes 0 fks
+
+[✓] Your SQL migration file ➜ drizzle/0001_indices-nulls-first.sql 🚀
+```
+
+`drizzle/0001_indices-nulls-first.sql`:
+
+```sql
+DROP INDEX "quiz_attempts_user_course_submitted";--> statement-breakpoint
+DROP INDEX "quiz_attempts_user_submitted";--> statement-breakpoint
+CREATE INDEX "quiz_attempts_user_course_submitted" ON "quiz_attempts" USING btree ("user_id","course_id","submitted_at" DESC NULLS FIRST);--> statement-breakpoint
+CREATE INDEX "quiz_attempts_user_submitted" ON "quiz_attempts" USING btree ("user_id","submitted_at" DESC NULLS FIRST);
+```
+
+```text
+$ npx drizzle-kit migrate
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '…/pg-ts/drizzle.config.ts'
+Using 'pg' driver for database querying
+[✓] migrations applied successfully!
+$ node --env-file=.env src/04-ver-migraciones.ts
+┌─────────┬────┬─────────────────┬──────────────────────────┐
+│ (index) │ id │ hash            │ generada                 │
+├─────────┼────┼─────────────────┼──────────────────────────┤
+│ 0       │ 1  │ 'b36fe9eaca5b…' │ 2026-10-30T01:06:20.000Z │
+│ 1       │ 2  │ 'bfa9084201c9…' │ 2026-10-30T01:06:22.000Z │
+└─────────┴────┴─────────────────┴──────────────────────────┘
+quiz_attempts_pkey                     USING btree (id)
+quiz_attempts_user_course_submitted    USING btree (user_id, course_id, submitted_at DESC)
+quiz_attempts_user_submitted           USING btree (user_id, submitted_at DESC)
+```
+
+`NULLS FIRST` es lo que significa `DESC` en PostgreSQL, así que el índice queda como `submitted_at DESC`. La misma consulta, sin tocar una línea de ella:
+
+```text
+$ node --env-file=.env src/04-plan.ts
+select "id", "user_id", "course_id", "answers", "results", "score", "total", "passed", "submitted_at" from "quiz_attempts" where ("quiz_attempts"."user_id" = $1 and "quiz_attempts"."course_id" = $2) order by "quiz_attempts"."submitted_at" desc limit $3
+
+Limit (actual time=0.009..0.014 rows=5.00 loops=1)
+  ->  Index Scan using quiz_attempts_user_course_submitted on quiz_attempts (actual time=0.008..0.012 rows=5.00 loops=1)
+        Index Cond: ((user_id = 'u_repite'::text) AND (course_id = 'A3'::text))
+        Index Searches: 1
+Planning Time: 0.210 ms
+Execution Time: 0.025 ms
+```
+
+De 2,6 ms a 0,025 ms: _Index Scan_, sin `Sort`, y se detiene a las 5 filas. Si vuelves a ejecutar `generate` sin cambiar el esquema, no crea nada:
+
+```text
+$ npx drizzle-kit generate
+No config path provided, using default 'drizzle.config.ts'
+Reading config file '…/pg-ts/drizzle.config.ts'
+1 tables
+quiz_attempts 9 columns 2 indexes 0 fks
+
+No schema changes, nothing to migrate 😴
+```
+
+<Callout type="risk">
+
+- **Drizzle aplica las migraciones por fecha, no por nombre:** guarda en `created_at` el momento en que se **generó** cada migración y, al migrar, solo aplica las que son más recientes que la última aplicada (está en `node_modules/drizzle-orm/pg-core/dialect.js`). Si dos personas generan migraciones en ramas distintas y la más antigua se fusiona después, **se salta sin avisar**. Genera las migraciones de una en una, en la rama principal, o vuelve a generarlas tras fusionar.
+- **`migrate` aplica todas las pendientes en una sola transacción:** también está en `dialect.js`. Si una falla, no se aplica ninguna, y eso es bueno. Pero esta migración borra y crea los índices con la tabla bloqueada para escribir, y con millones de filas eso son segundos o minutos. `CREATE INDEX CONCURRENTLY`, que no bloquea, no sirve dentro de una migración de Drizzle: PostgreSQL responde `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. En una tabla grande en producción, haz ese cambio a mano con `psql`, fuera de `migrate`.
+- **No edites una migración ya aplicada:** Drizzle compara el _hash_ y la tabla ya tiene el cambio. Para corregir algo, una migración nueva.
+
+</Callout>
+
+## Paso 6: el _pool_ de conexiones en _serverless_
+
+Cada conexión a PostgreSQL es un proceso del servidor, y el servidor admite un número limitado (`max_connections`, 100 por defecto, con 3 reservadas para superusuarios). Un _pool_ abre unas pocas conexiones y las reutiliza entre peticiones. El error típico en _serverless_ es crear el _pool_ dentro del _handler_: cada invocación abre los suyos y no los cierra. `src/06-pool.ts` lanza 120 peticiones a la vez de las dos formas:
+
+```ts
+// Archivo: src/06-pool.ts
+// 120 peticiones a la vez: un Pool nuevo por petición frente a un Pool compartido
+import pg from "pg";
+
+const url = process.env.DATABASE_URL!;
+// La conexión que mide: se abre al principio y no se cierra, para tener sitio cuando el servidor se llene
+const admin = new pg.Pool({ connectionString: url, max: 1, idleTimeoutMillis: 0 });
+
+/** Conexiones de la aplicación abiertas ahora mismo en el servidor */
+async function conexiones() {
+  const { rows } = await admin.query(
+    "SELECT count(*)::int AS n FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid()",
+  );
+  return rows[0].n as number;
+}
+
+/** Espera a que el servidor registre las desconexiones (pool.end() no espera a que termine) */
+async function hastaQueSeCierren() {
+  for (let i = 0; i < 100 && (await conexiones()) > 0; i++) await new Promise((r) => setTimeout(r, 50));
+}
+
+console.log(`Conexiones de la app al empezar: ${await conexiones()}\n`);
+
+// MAL: cada "invocación" crea su propio Pool (como si estuviera dentro del handler) y no lo cierra
+const abandonados: pg.Pool[] = [];
+async function invocacionConPoolPropio() {
+  const pool = new pg.Pool({ connectionString: url });
+  abandonados.push(pool);
+  await pool.query("SELECT pg_sleep(0.2)");
+}
+
+/** Las peticiones que fallaron, de un lote de Promise.allSettled */
+const fallos = (r: PromiseSettledResult<unknown>[]) => r.filter((x): x is PromiseRejectedResult => x.status === "rejected");
+
+let fallidas = fallos(await Promise.allSettled(Array.from({ length: 120 }, invocacionConPoolPropio)));
+console.log("Pool por petición:");
+console.log(`  ${120 - fallidas.length} bien, ${fallidas.length} con error`);
+console.log(`  primer error: ${fallidas[0]?.reason.message}`);
+console.log(`  conexiones que siguen abiertas al terminar: ${await conexiones()}`);
+await Promise.all(abandonados.map((p) => p.end()));
+await hastaQueSeCierren();
+console.log(`  tras cerrar los pools a mano: ${await conexiones()}`);
+
+// BIEN: un único Pool compartido por todas las peticiones del proceso
+const pool = new pg.Pool({ connectionString: url, max: 10 });
+let pico = 0;
+const vigia = setInterval(async () => (pico = Math.max(pico, await conexiones())), 20);
+const inicio = performance.now();
+fallidas = fallos(await Promise.allSettled(Array.from({ length: 120 }, () => pool.query("SELECT pg_sleep(0.2)"))));
+clearInterval(vigia);
+console.log("\nPool compartido (max: 10):");
+console.log(`  ${120 - fallidas.length} bien, ${fallidas.length} con error, en ${Math.round(performance.now() - inicio)} ms`);
+console.log(`  pico de conexiones: ${pico}`);
+
+await pool.end();
+await admin.end();
+```
+
+```text
+$ node --env-file=.env src/06-pool.ts
+Conexiones de la app al empezar: 0
+
+Pool por petición:
+  96 bien, 24 con error
+  primer error: remaining connection slots are reserved for roles with the SUPERUSER attribute
+  conexiones que siguen abiertas al terminar: 96
+  tras cerrar los pools a mano: 0
+
+Pool compartido (max: 10):
+  120 bien, 0 con error, en 2457 ms
+  pico de conexiones: 10
+```
+
+- **Un _pool_ por petición:** las primeras 96 consiguen conexión y las 24 siguientes reciben `remaining connection slots are reserved for roles with the SUPERUSER attribute`: el servidor está lleno. Y las 96 conexiones **siguen abiertas** al terminar, hasta que cada _pool_ se cierre. En _serverless_ eso no pasa nunca de forma explícita: se quedan hasta que la plataforma congela o destruye la instancia.
+- **Un _pool_ compartido de 10:** las 120 terminan bien, con un pico de exactamente 10 conexiones. Las peticiones que no tienen conexión libre esperan su turno: 12 tandas de 0,2 s, unos 2,4 s.
+
+En una app de Astro en Vercel, como esta plataforma, el _pool_ se crea **fuera** del _handler_, en un módulo (como `src/db.ts`), y cada instancia de la función lo reutiliza entre invocaciones. Es lo mismo que hace `src/lib/mongo.ts` con MongoDB. Dos ajustes más:
+
+- **`attachDatabasePool(pool)` de `@vercel/functions`:** admite el _pool_ de `pg` (sus tipos lo listan, junto con MongoDB y otros) y mantiene viva la instancia hasta que el _pool_ cierra las conexiones inactivas, según su `idleTimeoutMillis`. Es lo que la plataforma hace con MongoDB desde la Tanda 10.
+- **Un _pooler_ delante de PostgreSQL:** con muchas instancias a la vez, ni un _pool_ por instancia basta (100 instancias × 10 conexiones). Los servicios gestionados (Neon, Supabase) ofrecen una URL "pooled" con PgBouncer delante, que reparte pocas conexiones reales entre muchas instancias.
+
+<Callout type="risk">
+
+- **Nunca `new Pool()` dentro de una función que se ejecuta por petición:** ni en un _endpoint_, ni en una Action, ni en un servicio. Un único módulo lo crea, y todo lo demás lo importa.
+- **Ajusta `max` a lo que tu servidor aguanta:** con `max: 10` y 10 instancias, son 100 conexiones, todo el servidor. Calcula `max` × instancias posibles y deja margen para las migraciones y para ti.
+- **Con un _pooler_ en modo transacción, cuidado con el estado de la sesión:** cada transacción puede ir por una conexión distinta, así que `SET` de sesión, las tablas temporales o las sentencias preparadas con nombre (`.prepare()` de Drizzle) pueden fallar o mezclarse entre clientes, salvo que el _pooler_ las admita. Las consultas normales de Drizzle con `pg` usan sentencias sin nombre y funcionan.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Implementa con Drizzle el repositorio de evaluaciones de la plataforma (`src/server/repositories/quiz-attempts.repo.ts`), con sus cuatro métodos: `insert`, `listByCourse`, `recent` y `summaryByCourse`.
+2. Mantén la misma interfaz que el de MongoDB: un servicio tiene que poder usar cualquiera de los dos sin cambiar.
+3. Demuéstralo: los mismos tests, contra los dos repositorios.
+
+</Callout>
+
+Solución. La clave es que el contrato no hable de ninguna base de datos. `src/repositories/tipos.ts`:
+
+```ts
+// Archivo: src/repositories/tipos.ts
+// El contrato del repositorio de evaluaciones: lo que usan los servicios, sin nada de MongoDB ni de SQL
+
+export interface QuizAttempt {
+  userId: string;
+  courseId: string;
+  answers: number[];
+  results: boolean[];
+  score: number;
+  total: number;
+  passed: boolean;
+  submittedAt: Date;
+}
+
+export interface CourseQuizSummary {
+  courseId: string;
+  attempts: number;
+  best: number;
+  passed: boolean;
+  lastScore: number;
+  lastAt: Date;
+}
+
+export interface QuizAttemptsRepo {
+  insert(attempt: QuizAttempt): Promise<void>;
+  listByCourse(userId: string, courseId: string, limit?: number): Promise<QuizAttempt[]>;
+  recent(userId: string, limit?: number): Promise<QuizAttempt[]>;
+  /** Por curso: nº de intentos, mejor nota, si alguna vez aprobó y último intento */
+  summaryByCourse(userId: string): Promise<Record<string, CourseQuizSummary>>;
+}
+```
+
+El repositorio de MongoDB de la plataforma, contra ese contrato. Cambian dos cosas: la proyección sin `_id` (el dominio no lo conoce) y la copia en `insert` (`insertOne` añade `_id` al objeto que recibe). `src/repositories/quiz-attempts.mongo.ts`:
+
+```ts
+// Archivo: src/repositories/quiz-attempts.mongo.ts
+// El repositorio de la plataforma (src/server/repositories/quiz-attempts.repo.ts), contra el contrato común
+import type { Db } from "mongodb";
+import type { CourseQuizSummary, QuizAttempt, QuizAttemptsRepo } from "./tipos.ts";
+
+export function createQuizAttemptsRepo(db: Db): QuizAttemptsRepo {
+  const col = db.collection<QuizAttempt>("quiz_attempts");
+  const sinId = { projection: { _id: 0 } } as const; // el dominio no conoce el _id de MongoDB
+
+  return {
+    async insert(attempt) {
+      await col.insertOne({ ...attempt }); // copia: insertOne añade _id al objeto que recibe
+    },
+
+    async listByCourse(userId, courseId, limit = 5) {
+      return col.find({ userId, courseId }, sinId).sort({ submittedAt: -1 }).limit(limit).toArray();
+    },
+
+    async recent(userId, limit = 20) {
+      return col.find({ userId }, sinId).sort({ submittedAt: -1 }).limit(limit).toArray();
+    },
+
+    async summaryByCourse(userId) {
+      const rows = await col
+        .aggregate<Omit<CourseQuizSummary, "courseId"> & { _id: string }>([
+          { $match: { userId } },
+          { $sort: { submittedAt: -1 } },
+          {
+            $group: {
+              _id: "$courseId",
+              attempts: { $sum: 1 },
+              best: { $max: "$score" },
+              passed: { $max: "$passed" }, // true > false en el orden BSON
+              lastScore: { $first: "$score" },
+              lastAt: { $first: "$submittedAt" },
+            },
+          },
+        ])
+        .toArray();
+      return Object.fromEntries(rows.map(({ _id, ...r }) => [_id, { ...r, courseId: _id }]));
+    },
+  };
+}
+```
+
+Y el de Drizzle. Cada etapa de la agregación de MongoDB tiene su equivalente en SQL: `$sum: 1` es `count()`, `$max` es `max()` o `bool_or()` para el booleano, y "el primero tras ordenar por fecha" (`$first`) es el primer elemento de `array_agg(… ORDER BY submitted_at DESC)`. `src/repositories/quiz-attempts.drizzle.ts`:
+
+```ts
+// Archivo: src/repositories/quiz-attempts.drizzle.ts
+// El mismo contrato, con PostgreSQL y Drizzle
+import { and, count, desc, eq, max, sql } from "drizzle-orm";
+import type { Database } from "../orm.ts";
+import { quizAttempts } from "../schema.ts";
+import type { QuizAttemptsRepo } from "./tipos.ts";
+
+// Las columnas del dominio (sin el id de la tabla), con los nombres de TypeScript
+const columnas = {
+  userId: quizAttempts.userId,
+  courseId: quizAttempts.courseId,
+  answers: quizAttempts.answers,
+  results: quizAttempts.results,
+  score: quizAttempts.score,
+  total: quizAttempts.total,
+  passed: quizAttempts.passed,
+  submittedAt: quizAttempts.submittedAt,
+};
+
+export function createQuizAttemptsRepo(db: Database): QuizAttemptsRepo {
+  return {
+    async insert(attempt) {
+      await db.insert(quizAttempts).values(attempt);
+    },
+
+    async listByCourse(userId, courseId, limit = 5) {
+      return db
+        .select(columnas)
+        .from(quizAttempts)
+        .where(and(eq(quizAttempts.userId, userId), eq(quizAttempts.courseId, courseId)))
+        .orderBy(desc(quizAttempts.submittedAt))
+        .limit(limit);
+    },
+
+    async recent(userId, limit = 20) {
+      return db
+        .select(columnas)
+        .from(quizAttempts)
+        .where(eq(quizAttempts.userId, userId))
+        .orderBy(desc(quizAttempts.submittedAt))
+        .limit(limit);
+    },
+
+    async summaryByCourse(userId) {
+      const rows = await db
+        .select({
+          courseId: quizAttempts.courseId,
+          attempts: count(),
+          best: max(quizAttempts.score),
+          passed: sql<boolean>`bool_or(${quizAttempts.passed})`,
+          // La nota del intento más reciente: el primero del array ordenado por fecha
+          lastScore: sql<number>`(array_agg(${quizAttempts.score} ORDER BY ${quizAttempts.submittedAt} DESC))[1]`,
+          lastAt: max(quizAttempts.submittedAt),
+        })
+        .from(quizAttempts)
+        .where(eq(quizAttempts.userId, userId))
+        .groupBy(quizAttempts.courseId);
+
+      // max() puede devolver null en un grupo vacío; aquí cada grupo tiene al menos un intento
+      return Object.fromEntries(rows.map((r) => [r.courseId, { ...r, best: r.best!, lastAt: r.lastAt! }]));
+    },
+  };
+}
+```
+
+Los tests no saben qué base de datos tienen detrás: reciben una función que prepara un repositorio vacío. Son los dos de `tests/integration/quiz-attempts.repo.test.ts` de la plataforma y tres más. `tests/contrato.ts`:
+
+```ts
+// Archivo: tests/contrato.ts
+// Los tests del repositorio de evaluaciones, independientes de la base de datos.
+// Son los de tests/integration/quiz-attempts.repo.test.ts de la plataforma, y tres más
+import { beforeEach, describe, expect, it } from "vitest";
+import type { QuizAttempt, QuizAttemptsRepo } from "../src/repositories/tipos.ts";
+
+const attempt = (courseId: string, score: number, submittedAt: string, userId = "u1"): QuizAttempt => ({
+  userId,
+  courseId,
+  answers: [0, 0, 0, 0, 0],
+  results: Array.from({ length: 5 }, (_, i) => i < score),
+  score,
+  total: 5,
+  passed: score >= 4,
+  submittedAt: new Date(submittedAt),
+});
+
+export function contratoQuizAttempts(nombre: string, preparar: () => Promise<QuizAttemptsRepo>) {
+  describe(`quiz-attempts (${nombre})`, () => {
+    let repo: QuizAttemptsRepo;
+    beforeEach(async () => {
+      repo = await preparar(); // cada test empieza con la tabla o la colección vacía
+    });
+
+    it("summaryByCourse: intentos, mejor nota, aprobado alguna vez y último intento", async () => {
+      await repo.insert(attempt("B1", 3, "2026-10-01T10:00:00Z"));
+      await repo.insert(attempt("B1", 5, "2026-10-02T10:00:00Z"));
+      await repo.insert(attempt("B1", 2, "2026-10-03T10:00:00Z"));
+      await repo.insert(attempt("B2", 1, "2026-10-04T10:00:00Z"));
+
+      const summary = await repo.summaryByCourse("u1");
+      expect(summary.B1).toEqual({
+        courseId: "B1",
+        attempts: 3,
+        best: 5,
+        passed: true, // aprobó una vez, aunque el último intento suspendiera
+        lastScore: 2,
+        lastAt: new Date("2026-10-03T10:00:00Z"),
+      });
+      expect(summary.B2).toMatchObject({ attempts: 1, best: 1, passed: false });
+      expect(await repo.summaryByCourse("u2")).toEqual({});
+    });
+
+    it("listByCourse ordena del más reciente al más antiguo y respeta el límite", async () => {
+      for (let day = 1; day <= 7; day++) {
+        await repo.insert(attempt("B1", day % 6, `2026-10-0${day}T10:00:00Z`));
+      }
+      const list = await repo.listByCourse("u1", "B1");
+      expect(list).toHaveLength(5);
+      expect(list[0]!.submittedAt).toEqual(new Date("2026-10-07T10:00:00Z"));
+      expect((await repo.recent("u1", 2)).map((a) => a.submittedAt.getUTCDate())).toEqual([7, 6]);
+    });
+
+    it("devuelve solo los campos del dominio, sin _id ni id de la base de datos", async () => {
+      const original = attempt("A3", 4, "2026-10-05T10:00:00Z");
+      await repo.insert(original);
+      expect(await repo.recent("u1")).toEqual([original]);
+    });
+
+    it("recent devuelve como mucho 20 por defecto, de todos los cursos", async () => {
+      for (let i = 0; i < 25; i++) {
+        await repo.insert(attempt(i % 2 ? "B1" : "I3", 3, new Date(Date.UTC(2026, 9, 1, i)).toISOString()));
+      }
+      const list = await repo.recent("u1");
+      expect(list).toHaveLength(20);
+      expect(new Set(list.map((a) => a.courseId))).toEqual(new Set(["B1", "I3"]));
+    });
+
+    it("aísla los intentos entre usuarios", async () => {
+      await repo.insert(attempt("B1", 5, "2026-10-01T10:00:00Z", "u1"));
+      await repo.insert(attempt("B1", 1, "2026-10-02T10:00:00Z", "u2"));
+      expect(await repo.listByCourse("u2", "B1")).toHaveLength(1);
+      expect((await repo.summaryByCourse("u2")).B1).toMatchObject({ best: 1, passed: false });
+    });
+  });
+}
+```
+
+`tests/quiz-attempts.test.ts` ejecuta el contrato contra MongoDB (en memoria, como en I8.4) y contra PostgreSQL:
+
+```ts
+// Archivo: tests/quiz-attempts.test.ts
+// El mismo contrato, contra MongoDB (en memoria) y contra PostgreSQL (la base academia_ts)
+import { afterAll, beforeAll } from "vitest";
+import { MongoClient } from "mongodb";
+import { MongoMemoryServer } from "mongodb-memory-server";
+import { sql } from "drizzle-orm";
+import { contratoQuizAttempts } from "./contrato.ts";
+import { createQuizAttemptsRepo as conMongo } from "../src/repositories/quiz-attempts.mongo.ts";
+import { createQuizAttemptsRepo as conDrizzle } from "../src/repositories/quiz-attempts.drizzle.ts";
+import { db } from "../src/orm.ts";
+import { pool } from "../src/db.ts";
+
+let mongod: MongoMemoryServer;
+let cliente: MongoClient;
+
+beforeAll(async () => {
+  mongod = await MongoMemoryServer.create();
+  cliente = await MongoClient.connect(mongod.getUri());
+});
+
+afterAll(async () => {
+  await cliente.close();
+  await mongod.stop();
+  await pool.end();
+});
+
+contratoQuizAttempts("MongoDB", async () => {
+  const mongo = cliente.db("contrato");
+  await mongo.dropDatabase();
+  return conMongo(mongo);
+});
+
+contratoQuizAttempts("PostgreSQL + Drizzle", async () => {
+  await db.execute(sql`TRUNCATE quiz_attempts`);
+  return conDrizzle(db);
+});
+```
+
+```ts
+// Archivo: vitest.config.ts
+import { defineConfig } from "vitest/config";
+
+process.loadEnvFile(); // DATABASE_URL de .env
+
+export default defineConfig({
+  test: { fileParallelism: false, testTimeout: 30_000, hookTimeout: 120_000 },
+});
+```
+
+```bash
+npm install mongodb
+npm install -D vitest mongodb-memory-server
+npm pkg set scripts.test="vitest run"
+```
+
+```text
+$ npm test -- --reporter=verbose
+
+ RUN  v5.0.5 …/pg-ts
+
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (MongoDB) > summaryByCourse: intentos, mejor nota, aprobado alguna vez y último intento 46ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (MongoDB) > listByCourse ordena del más reciente al más antiguo y respeta el límite 18ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (MongoDB) > devuelve solo los campos del dominio, sin _id ni id de la base de datos 16ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (MongoDB) > recent devuelve como mucho 20 por defecto, de todos los cursos 18ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (MongoDB) > aísla los intentos entre usuarios 17ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (PostgreSQL + Drizzle) > summaryByCourse: intentos, mejor nota, aprobado alguna vez y último intento 27ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (PostgreSQL + Drizzle) > listByCourse ordena del más reciente al más antiguo y respeta el límite 9ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (PostgreSQL + Drizzle) > devuelve solo los campos del dominio, sin _id ni id de la base de datos 7ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (PostgreSQL + Drizzle) > recent devuelve como mucho 20 por defecto, de todos los cursos 11ms
+ ✓ tests/quiz-attempts.test.ts > quiz-attempts (PostgreSQL + Drizzle) > aísla los intentos entre usuarios 3ms
+
+ Test Files  1 passed (1)
+      Tests  10 passed (10)
+   Start at  19:09:04
+   Duration  1.01s (tests 76%, import 23%, transform 1%)
+```
+
+Los 5 casos pasan con las dos bases de datos: para la plataforma, cambiar de MongoDB a PostgreSQL sería cambiar `createQuizAttemptsRepo(db)` en `src/server/repositories/index.ts`, y nada más. Para comprobar que el contrato de verdad vigila, rompe a propósito la nota del último intento con `max(score)` en lugar de `array_agg`:
+
+```text
+$ npm test
+
+ RUN  v5.0.5 …/pg-ts
+
+ ❯ tests/quiz-attempts.test.ts (10 tests | 1 failed) 513ms
+   ❯ quiz-attempts (PostgreSQL + Drizzle) (5)
+     × summaryByCourse: intentos, mejor nota, aprobado alguna vez y último intento 29ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/quiz-attempts.test.ts > quiz-attempts (PostgreSQL + Drizzle) > summaryByCourse: intentos, mejor nota, aprobado alguna vez y último intento
+AssertionError: expected { courseId: 'B1', attempts: 3, …(4) } to deeply equal { courseId: 'B1', attempts: 3, …(4) }
+
+- Expected
++ Received
+
+  {
+    "attempts": 3,
+    "best": 5,
+    "courseId": "B1",
+    "lastAt": 2026-10-03T10:00:00.000Z,
+-   "lastScore": 2,
++   "lastScore": 5,
+    "passed": true,
+  }
+
+ ❯ tests/contrato.ts:32:26
+     30|
+     31|       const summary = await repo.summaryByCourse("u1");
+     32|       expect(summary.B1).toEqual({
+       |                          ^
+     33|         courseId: "B1",
+     34|         attempts: 3,
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 9 passed (10)
+   Start at  19:09:18
+   Duration  781ms (tests 70%, import 29%, transform 1%)
+```
+
+Solo falla el test que tiene que fallar, y dice qué valor esperaba: la nota más alta (5) no es la del último intento (2).
+
+<Callout type="risk">
+
+- **El contrato es tan bueno como sus tests:** con solo los dos tests originales, un repositorio de PostgreSQL que devolviera también el `id` de la fila habría pasado. Por eso hay un test que exige exactamente los campos del dominio.
+- **Las dos bases ordenan distinto en los empates:** si dos intentos tienen la misma fecha, MongoDB y PostgreSQL pueden devolverlos en un orden diferente, y ningún test de este contrato lo vería. Si importa, añade un segundo criterio de orden (`id`) en los dos.
+- **`TRUNCATE` en `beforeEach` necesita una base propia para los tests:** nunca apuntes los tests a la base de desarrollo, ni mucho menos a la de producción. Aquí es `academia_ts`, que solo existe para esto.
+
+</Callout>
+
+<Callout type="mastery">
+
+Conectas con PostgreSQL desde TypeScript con un único _pool_ y consultas parametrizadas, corriges los tipos que llegan mal (`bigint`, `date`), describes las tablas con Drizzle, generas y revisas sus migraciones, y compruebas con `EXPLAIN` el SQL que genera. Y cambias de base de datos sustituyendo solo el repositorio, con los mismos tests como prueba.
+
+</Callout>
+
+## Resumen
+
+- Los datos de la petición van siempre como parámetros (`$1`). Concatenados, una entrada puede leer todo o borrar una tabla.
+- `pg` entrega `bigint` y `numeric` como texto, y `date` como medianoche local: corrígelo una vez en `db.ts`.
+- Drizzle describe las tablas en TypeScript: de ahí salen los tipos, las consultas y las migraciones, que se generan, se revisan y se aplican.
+- Comprueba con `EXPLAIN` el SQL del ORM: el orden de los nulos de un índice de Drizzle no coincidía con su propio `orderBy`.
+- En _serverless_, un único _pool_ por instancia, creado fuera del _handler_, y un _pooler_ cuando hay muchas instancias.
+- Un repositorio con un contrato sin base de datos se puede cambiar de MongoDB a PostgreSQL con los mismos tests.
