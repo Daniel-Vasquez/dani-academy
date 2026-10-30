@@ -1,0 +1,1231 @@
+---
+sectionId: "A3.5"
+course: "A3"
+title: "Diseño relacional avanzado"
+order: 5
+minutes: 90
+summary: "Con el temario real, comparas un array con una tabla N:M, mides qué cuesta desnormalizar con un trigger y con vistas materializadas, eliges entre cascada y borrado lógico, y proteges las lecturas con RLS."
+---
+
+En A3.1 llevaste a PostgreSQL el esquema de Dani Academy, normalizado: cada dato en un solo sitio, con claves ajenas que lo unen. Es el punto de partida correcto, pero no la última palabra. Una app real necesita relaciones de muchos a muchos con datos propios, consultas de panel que agregan miles de filas en cada visita, una forma de borrar que no destruya lo que no debe y, si varias personas comparten la base de datos, que cada una vea solo lo suyo. Cada una de esas decisiones tiene un coste, y en esta sección vas a medirlo sobre el temario real de esta plataforma: cuándo **normalizar**, cuándo **desnormalizar**, y cómo hacerlo sin que los datos se contradigan.
+
+**Lo que tendrás al terminar:** el temario de Dani Academy con sus prerrequisitos como relación N:M y consultas recursivas, un contador mantenido por un _trigger_ (y la razón para quitarlo), vistas materializadas para el panel de administración, borrado lógico con índices parciales, y RLS en las lecturas.
+
+**Requisitos:** las secciones A3.1 (el esquema de la base `academia`, de su ejercicio) y A3.3 (índices). Todos los archivos se ejecutan desde `pg-lab` con `sudo -u postgres psql -X -d academia -f archivo.sql`.
+
+## Paso 1: el temario real, en el esquema de A3.1
+
+`exportar-temario.mjs` saca de esta plataforma los cursos (con sus prerrequisitos, de `courses.json`) y las secciones (de los `.mdx`). Ejecútalo donde tengas el repositorio y deja los dos CSV en `pg-lab/datos/`:
+
+```js
+// Archivo: exportar-temario.mjs
+// Exporta el temario de Dani Academy: datos/cursos.csv (con sus prerrequisitos) y datos/secciones.csv
+// Uso: node exportar-temario.mjs ../dani-academy/src/content
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const raiz = process.argv[2];
+if (!raiz) throw new Error("Falta la ruta de src/content");
+
+const csv = (valor) => `"${String(valor).replaceAll('"', '""')}"`;
+const pgArray = (lista) => `{${lista.map((x) => `"${x.replaceAll('"', '\\"')}"`).join(",")}}`;
+const nivel = { basic: "basico", intermediate: "intermedio", advanced: "avanzado", final: "proyecto" };
+
+const cursos = JSON.parse(readFileSync(join(raiz, "courses.json"), "utf8"));
+const filasCursos = [["id", "titulo", "nivel", "orden", "prerrequisitos"]];
+for (const c of cursos) filasCursos.push([c.id, c.title, nivel[c.level], c.order, pgArray(c.prerequisites)]);
+
+const campo = (fm, nombre) => fm.match(new RegExp(`^${nombre}: "?(.*?)"?$`, "m"))?.[1] ?? "";
+const filasSecciones = [["id", "curso_id", "titulo", "orden", "minutos"]];
+for (const carpeta of readdirSync(join(raiz, "sections")).sort()) {
+  for (const archivo of readdirSync(join(raiz, "sections", carpeta)).sort()) {
+    if (!archivo.endsWith(".mdx") || archivo.startsWith("_")) continue;
+    const fm = readFileSync(join(raiz, "sections", carpeta, archivo), "utf8").split(/^---$/m)[1];
+    filasSecciones.push([campo(fm, "sectionId"), campo(fm, "course"), campo(fm, "title"), campo(fm, "order"), campo(fm, "minutes")]);
+  }
+}
+
+mkdirSync("datos", { recursive: true });
+writeFileSync("datos/cursos.csv", filasCursos.map((f) => f.map(csv).join(",")).join("\n") + "\n");
+writeFileSync("datos/secciones.csv", filasSecciones.map((f) => f.map(csv).join(",")).join("\n") + "\n");
+console.log(`${filasCursos.length - 1} cursos y ${filasSecciones.length - 1} secciones exportados a datos/`);
+```
+
+```bash
+node exportar-temario.mjs ../dani-academy/src/content
+```
+
+```text
+24 cursos y 99 secciones exportados a datos/
+```
+
+`50-datos.sql` los carga en el esquema de A3.1 y genera 2000 usuarios, sus lecturas y sus intentos. Empieza borrando lo que crean los pasos de esta sección, así que sirve también para volver a empezar:
+
+```sql
+-- Archivo: 50-datos.sql
+-- El temario real de Dani Academy en el esquema de A3.1, con 2000 usuarios, sus lecturas y sus intentos
+-- Vuelve al esquema de A3.1, para poder repetir la sección desde aquí: borra lo que crean los pasos siguientes
+DROP MATERIALIZED VIEW IF EXISTS estadisticas_cursos_mv, panel_progreso, progreso_por_etiqueta;
+DROP TABLE IF EXISTS curso_etiquetas, etiquetas;
+DROP VIEW IF EXISTS estadisticas_cursos;
+DROP TABLE IF EXISTS curso_prerrequisitos, progreso_cursos;
+DROP TRIGGER IF EXISTS lecturas_contador ON lecturas;
+DROP FUNCTION IF EXISTS contar_lectura();
+DROP INDEX IF EXISTS lecturas_seccion;
+ALTER TABLE cursos DROP COLUMN IF EXISTS prerrequisitos, DROP COLUMN IF EXISTS conocimientos_previos;
+DROP VIEW IF EXISTS usuarios_activos, mis_lecturas;
+DROP POLICY IF EXISTS lecturas_propias ON lecturas;
+ALTER TABLE lecturas DISABLE ROW LEVEL SECURITY;
+ALTER TABLE usuarios DROP COLUMN IF EXISTS borrado_en; -- se lleva también el índice parcial del Paso 5
+TRUNCATE intentos, lecturas, secciones, cursos, usuarios;
+CREATE UNIQUE INDEX IF NOT EXISTS usuarios_email_unico ON usuarios (lower(email)); -- el de A3.1
+
+-- Los cursos vienen con sus prerrequisitos; de momento solo se cargan sus columnas (el Paso 2 los usa)
+CREATE TEMP TABLE temario (id text, titulo text, nivel text, orden integer, prerrequisitos text[]);
+\copy temario FROM 'datos/cursos.csv' WITH (FORMAT csv, HEADER true)
+INSERT INTO cursos (id, titulo, nivel, orden) SELECT id, titulo, nivel, orden FROM temario;
+\copy secciones (id, curso_id, titulo, orden, minutos) FROM 'datos/secciones.csv' WITH (FORMAT csv, HEADER true)
+
+SELECT setseed(0.5);
+INSERT INTO usuarios (nombre, email)
+SELECT 'Usuario ' || g, 'u' || g || '@example.com' FROM generate_series(1, 2000) AS g;
+
+-- Cada usuario lee, de media, un 30 % de las secciones, en los últimos 300 días
+INSERT INTO lecturas (usuario_id, seccion_id, leida_en)
+SELECT u.id, s.id, timestamptz '2026-10-01 00:00:00+00' - random() * interval '300 days'
+FROM usuarios u CROSS JOIN secciones s
+WHERE random() < 0.3;
+
+-- Y hace 6000 evaluaciones de los cursos que tienen secciones (los otros no tienen evaluación aún).
+-- Los ARRAY(...) se calculan una vez; cada fila elige una posición al azar
+CREATE TEMP TABLE con_secciones AS SELECT DISTINCT curso_id AS id FROM secciones;
+INSERT INTO intentos (usuario_id, curso_id, respuestas, nota, enviado_en)
+SELECT (ARRAY(SELECT id FROM usuarios ORDER BY email))[1 + floor(random() * 2000)::int],
+       (ARRAY(SELECT id FROM con_secciones ORDER BY id))[1 + floor(random() * (SELECT count(*) FROM con_secciones))::int],
+       '{0,1,2,3,0}', floor(random() * 6)::smallint,
+       timestamptz '2026-10-01 00:00:00+00' - random() * interval '300 days'
+FROM generate_series(1, 6000);
+
+ANALYZE;
+SELECT (SELECT count(*) FROM cursos) AS cursos, (SELECT count(*) FROM secciones) AS secciones,
+       (SELECT count(*) FROM usuarios) AS usuarios, (SELECT count(*) FROM lecturas) AS lecturas,
+       (SELECT count(*) FROM intentos) AS intentos;
+```
+
+```text
+DROP MATERIALIZED VIEW
+DROP TABLE
+DROP VIEW
+psql:50-datos.sql:7: NOTICE:  table "progreso_cursos" does not exist, skipping
+DROP TABLE
+DROP TRIGGER
+psql:50-datos.sql:8: NOTICE:  trigger "lecturas_contador" for relation "lecturas" does not exist, skipping
+DROP FUNCTION
+psql:50-datos.sql:9: NOTICE:  function contar_lectura() does not exist, skipping
+DROP INDEX
+psql:50-datos.sql:11: NOTICE:  column "prerrequisitos" of relation "cursos" does not exist, skipping
+ALTER TABLE
+DROP VIEW
+DROP POLICY
+ALTER TABLE
+ALTER TABLE
+TRUNCATE TABLE
+CREATE INDEX
+CREATE TABLE
+COPY 24
+INSERT 0 24
+COPY 99
+ setseed
+---------
+
+(1 row)
+
+INSERT 0 2000
+INSERT 0 59304
+SELECT 18
+INSERT 0 6000
+ANALYZE
+ cursos | secciones | usuarios | lecturas | intentos
+--------+-----------+----------+----------+----------
+     24 |        99 |     2000 |    59304 |     6000
+(1 row)
+```
+
+Las 99 secciones reales entran sin un error: cumplen todas las reglas que pusiste en A3.1 (el formato del id, que la sección sea de su curso, el orden único y los minutos entre 10 y 240).
+
+## Paso 2: relaciones N:M, con una tabla intermedia
+
+Cada curso tiene prerrequisitos, y cada curso puede ser prerrequisito de varios: es una relación de muchos a muchos, y además de una tabla **consigo misma**. Hay dos formas de guardarla: un _array_ en la propia fila de cada curso, o una tabla intermedia con una fila por cada "curso requiere curso". `51-prerrequisitos.sql` prueba las dos:
+
+```sql
+-- Archivo: 51-prerrequisitos.sql
+-- Prerrequisitos de cada curso: primero como array, después como tabla intermedia N:M
+CREATE TEMP TABLE temario (id text, titulo text, nivel text, orden integer, prerrequisitos text[]);
+\copy temario FROM 'datos/cursos.csv' WITH (FORMAT csv, HEADER true)
+
+-- (para poder repetirlo: deshace lo que crea este archivo)
+DROP TABLE IF EXISTS curso_prerrequisitos;
+ALTER TABLE cursos DROP COLUMN IF EXISTS prerrequisitos, DROP COLUMN IF EXISTS conocimientos_previos;
+
+-- 1. Un array en la propia tabla: cómodo, y acepta cualquier cosa
+ALTER TABLE cursos ADD COLUMN prerrequisitos text[] NOT NULL DEFAULT '{}';
+UPDATE cursos c SET prerrequisitos = t.prerrequisitos FROM temario t WHERE t.id = c.id;
+
+SELECT id, prerrequisitos FROM cursos WHERE id IN ('B1', 'B7', 'I3', 'P1') ORDER BY orden;
+SELECT string_agg(id, ', ' ORDER BY orden) AS cursos_que_piden_I1 FROM cursos WHERE 'I1' = ANY (prerrequisitos);
+UPDATE cursos SET prerrequisitos = array_append(prerrequisitos, 'I9') WHERE id = 'A1'; -- I9 no existe
+SELECT id, prerrequisitos FROM cursos WHERE id = 'A1';
+UPDATE cursos SET prerrequisitos = array_remove(prerrequisitos, 'I9') WHERE id = 'A1';
+
+-- 2. Una tabla intermedia: cada fila es un "curso requiere curso", con claves ajenas a los dos lados
+CREATE TABLE curso_prerrequisitos (
+  curso_id    text NOT NULL REFERENCES cursos(id) ON DELETE CASCADE,
+  requiere_id text NOT NULL REFERENCES cursos(id),
+  PRIMARY KEY (curso_id, requiere_id),
+  CHECK (curso_id <> requiere_id)
+);
+CREATE INDEX ON curso_prerrequisitos (requiere_id); -- para la dirección contraria: "¿quién depende de I1?"
+
+-- Solo entran los prerrequisitos que son cursos; el resto es texto libre y se queda en otra columna
+INSERT INTO curso_prerrequisitos (curso_id, requiere_id)
+SELECT c.id, p.requiere FROM cursos c CROSS JOIN unnest(c.prerrequisitos) AS p(requiere)
+WHERE p.requiere IN (SELECT id FROM cursos);
+ALTER TABLE cursos RENAME COLUMN prerrequisitos TO conocimientos_previos;
+UPDATE cursos SET conocimientos_previos = ARRAY(
+  SELECT x FROM unnest(conocimientos_previos) AS x WHERE x NOT IN (SELECT id FROM cursos));
+
+SELECT (SELECT count(*) FROM curso_prerrequisitos) AS relaciones,
+       (SELECT string_agg(id || ': ' || array_to_string(conocimientos_previos, ', '), ' · ' ORDER BY orden)
+          FROM cursos WHERE conocimientos_previos <> '{}') AS texto_libre;
+
+-- Ahora la base de datos sí protege la relación
+INSERT INTO curso_prerrequisitos VALUES ('A1', 'I9');
+INSERT INTO curso_prerrequisitos VALUES ('A1', 'A1');
+INSERT INTO curso_prerrequisitos VALUES ('A1', 'I1');
+DELETE FROM cursos WHERE id = 'A4'; -- A6 lo necesita: RESTRICT por defecto
+BEGIN;
+DELETE FROM cursos WHERE id = 'A6'; -- nadie lo necesita: se borra, y sus prerrequisitos con él (CASCADE)
+SELECT count(*) AS relaciones_tras_borrar_A6 FROM curso_prerrequisitos;
+ROLLBACK;
+
+-- 3. Todos los prerrequisitos de A8, también los indirectos: una consulta recursiva
+WITH RECURSIVE cadena AS (
+  SELECT requiere_id AS id, 1 AS nivel, ARRAY['A8', requiere_id] AS camino
+  FROM curso_prerrequisitos WHERE curso_id = 'A8'
+  UNION ALL
+  SELECT p.requiere_id, c.nivel + 1, c.camino || p.requiere_id
+  FROM cadena c JOIN curso_prerrequisitos p ON p.curso_id = c.id
+)
+SELECT id, max(nivel) AS distancia, count(*) AS caminos, (array_agg(array_to_string(camino, ' → ') ORDER BY nivel DESC))[1] AS camino_mas_largo
+FROM cadena GROUP BY id ORDER BY distancia DESC, id;
+```
+
+```text
+CREATE TABLE
+COPY 24
+DROP TABLE
+psql:51-prerrequisitos.sql:7: NOTICE:  table "curso_prerrequisitos" does not exist, skipping
+psql:51-prerrequisitos.sql:8: NOTICE:  column "prerrequisitos" of relation "cursos" does not exist, skipping
+psql:51-prerrequisitos.sql:8: NOTICE:  column "conocimientos_previos" of relation "cursos" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+UPDATE 24
+ id |   prerrequisitos
+----+---------------------
+ B1 | {JavaScript}
+ B7 | {"CSS básico"}
+ I3 | {B3,B5,I1}
+ P1 | {"Todo el temario"}
+(4 rows)
+
+  cursos_que_piden_i1
+------------------------
+ I2, I3, I4, I8, A1, A3
+(1 row)
+
+UPDATE 1
+ id | prerrequisitos
+----+----------------
+ A1 | {I1,I9}
+(1 row)
+
+UPDATE 1
+CREATE TABLE
+CREATE INDEX
+INSERT 0 35
+ALTER TABLE
+UPDATE 24
+ relaciones |                                     texto_libre
+------------+-------------------------------------------------------------------------------------
+         35 | B1: JavaScript · B2: Comandos básicos de Git · B7: CSS básico · P1: Todo el temario
+(1 row)
+
+psql:51-prerrequisitos.sql:42: ERROR:  insert or update on table "curso_prerrequisitos" violates foreign key constraint "curso_prerrequisitos_requiere_id_fkey"
+DETAIL:  Key (requiere_id)=(I9) is not present in table "cursos".
+psql:51-prerrequisitos.sql:43: ERROR:  new row for relation "curso_prerrequisitos" violates check constraint "curso_prerrequisitos_check"
+DETAIL:  Failing row contains (A1, A1).
+psql:51-prerrequisitos.sql:44: ERROR:  duplicate key value violates unique constraint "curso_prerrequisitos_pkey"
+DETAIL:  Key (curso_id, requiere_id)=(A1, I1) already exists.
+psql:51-prerrequisitos.sql:45: ERROR:  update or delete on table "cursos" violates foreign key constraint "curso_prerrequisitos_requiere_id_fkey" on table "curso_prerrequisitos"
+DETAIL:  Key (id)=(A4) is still referenced from table "curso_prerrequisitos".
+BEGIN
+DELETE 1
+ relaciones_tras_borrar_a6
+---------------------------
+                        33
+(1 row)
+
+ROLLBACK
+ id | distancia | caminos |    camino_mas_largo
+----+-----------+---------+------------------------
+ B1 |         4 |       6 | A8 → I3 → B5 → B4 → B1
+ B4 |         3 |       1 | A8 → I3 → B5 → B4
+ B3 |         2 |       1 | A8 → I3 → B3
+ B5 |         2 |       1 | A8 → I3 → B5
+ B6 |         2 |       1 | A8 → I2 → B6
+ I1 |         2 |       3 | A8 → A1 → I1
+ A1 |         1 |       1 | A8 → A1
+ I2 |         1 |       1 | A8 → I2
+ I3 |         1 |       1 | A8 → I3
+(9 rows)
+```
+
+- **El _array_ acepta cualquier cosa:** `I9` no existe y entra sin protestar, como `"JavaScript"` o `"Todo el temario"`. Para una lista que solo se lee con su fila (las etiquetas de un artículo, los tipos de entreno de un usuario), un _array_ con un índice GIN basta.
+- **La tabla intermedia protege la relación:** la clave ajena rechaza `I9`, el `CHECK` rechaza que un curso se requiera a sí mismo, y la clave primaria rechaza repetir un prerrequisito. Ninguna de las tres es posible con un _array_: PostgreSQL no tiene claves ajenas sobre los elementos de un _array_.
+- **Y decide qué pasa al borrar:** `A4` no se puede borrar porque `A6` lo necesita (`requiere_id` no tiene `ON DELETE`, así que es `NO ACTION`, que actúa como una restricción). Borrar `A6`, que nadie necesita, se lleva sus dos prerrequisitos (`ON DELETE CASCADE` en `curso_id`): de 35 relaciones a 33.
+- **El texto libre no es una relación:** "JavaScript" no es un curso de la plataforma, así que no puede ir en una tabla con clave ajena. Se queda en otra columna, `conocimientos_previos`. Mezclar los dos en el mismo _array_ era el problema de fondo.
+- **`WITH RECURSIVE` recorre la relación entera:** la primera parte (los prerrequisitos directos de `A8`) se une con la segunda, que sigue cada prerrequisito hacia atrás hasta que no quedan más. A8 depende de 9 cursos, y B1 está a 4 saltos por el camino más largo, al que se llega por 6 caminos distintos.
+
+Una tabla N:M se consulta en las dos direcciones, y cada una necesita su índice. `52-direccion.sql` lo mide con `lecturas`, la tabla intermedia entre usuarios y secciones de A3.1:
+
+```sql
+-- Archivo: 52-direccion.sql
+-- Una tabla N:M se consulta en las dos direcciones, y cada una necesita su índice
+DROP INDEX IF EXISTS lecturas_seccion;
+
+-- Las secciones de un usuario: la clave primaria (usuario_id, seccion_id) empieza por usuario_id.
+-- (lower(email): el índice único de A3.1 es sobre lower(email), y solo se usa con esa misma expresión)
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT seccion_id FROM lecturas WHERE usuario_id = (SELECT id FROM usuarios WHERE lower(email) = 'u42@example.com');
+
+-- Los usuarios que leyeron una sección: la clave primaria no sirve, y lee la tabla entera
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT count(*) FROM lecturas WHERE seccion_id = 'A3.1';
+
+CREATE INDEX lecturas_seccion ON lecturas (seccion_id);
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT count(*) FROM lecturas WHERE seccion_id = 'A3.1';
+```
+
+```text
+DROP INDEX
+psql:52-direccion.sql:3: NOTICE:  index "lecturas_seccion" does not exist, skipping
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ Index Only Scan using lecturas_pkey on lecturas (actual time=0.036..0.041 rows=38.00 loops=1)
+   Index Cond: (usuario_id = (InitPlan 1).col1)
+   Heap Fetches: 38
+   Index Searches: 1
+   InitPlan 1
+     ->  Index Scan using usuarios_email_unico on usuarios (actual time=0.018..0.018 rows=1.00 loops=1)
+           Index Cond: (lower(email) = 'u42@example.com'::text)
+           Index Searches: 1
+ Planning Time: 0.257 ms
+ Execution Time: 0.066 ms
+(10 rows)
+
+                                QUERY PLAN
+---------------------------------------------------------------------------
+ Aggregate (actual time=1.624..1.624 rows=1.00 loops=1)
+   ->  Seq Scan on lecturas (actual time=0.007..1.609 rows=596.00 loops=1)
+         Filter: (seccion_id = 'A3.1'::text)
+         Rows Removed by Filter: 58708
+ Planning Time: 0.029 ms
+ Execution Time: 1.633 ms
+(6 rows)
+
+CREATE INDEX
+                                            QUERY PLAN
+--------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.218..0.219 rows=1.00 loops=1)
+   ->  Bitmap Heap Scan on lecturas (actual time=0.053..0.205 rows=596.00 loops=1)
+         Recheck Cond: (seccion_id = 'A3.1'::text)
+         Heap Blocks: exact=354
+         ->  Bitmap Index Scan on lecturas_seccion (actual time=0.026..0.026 rows=596.00 loops=1)
+               Index Cond: (seccion_id = 'A3.1'::text)
+               Index Searches: 1
+ Planning Time: 0.108 ms
+ Execution Time: 0.228 ms
+(9 rows)
+```
+
+La clave primaria `(usuario_id, seccion_id)` responde "qué ha leído este usuario" (_Index Only Scan_, 0,07 ms), pero no "quién ha leído esta sección", que lee las 59 304 lecturas (1,6 ms). Con un índice sobre `seccion_id`, 0,23 ms. Por eso `curso_prerrequisitos` tiene un índice en `requiere_id`.
+
+<Callout type="risk">
+
+- **Un índice de expresión solo se usa con la misma expresión:** el índice único de A3.1 es sobre `lower(email)`. Con `WHERE email = …`, PostgreSQL lee los 2000 usuarios; con `WHERE lower(email) = …`, usa el índice. Es la regla de las funciones de A3.3.
+- **Una consulta recursiva sin final no termina nunca:** si alguien crea un ciclo (A requiere B y B requiere A), `WITH RECURSIVE` da vueltas hasta agotar la memoria. Añade `CYCLE id SET hay_ciclo USING camino` (PostgreSQL 14+) o limita la profundidad (`WHERE c.nivel < 20`) en cualquier recursión sobre datos que escriben usuarios.
+- **`array || 'texto'` no añade un elemento:** PostgreSQL interpreta `'I9'` como un _array_ literal y responde `malformed array literal`. Para añadir un elemento, `array_append`.
+
+</Callout>
+
+## Paso 3: desnormalizar un contador con un _trigger_
+
+El panel enseña, de cada curso, cuántas secciones lleva leídas el usuario. Normalizado, eso es contar sus lecturas en cada visita. **Desnormalizar** es guardar el número ya contado y mantenerlo al día cada vez que cambian las lecturas. La forma de que no se desincronice es un _trigger_: una función que PostgreSQL ejecuta en cada `INSERT` o `DELETE`, dentro de la misma transacción. `53-contador.sql` lo construye y mide lo que gana y lo que cuesta:
+
+```sql
+-- Archivo: 53-contador.sql
+-- Desnormalizar: guardar "secciones leídas por curso" en vez de contarlas en cada consulta, con un trigger
+DROP TABLE IF EXISTS progreso_cursos;
+CREATE TABLE progreso_cursos (
+  usuario_id uuid NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  leidas     integer NOT NULL CHECK (leidas >= 0),
+  PRIMARY KEY (usuario_id, curso_id)
+);
+INSERT INTO progreso_cursos
+SELECT usuario_id, split_part(seccion_id, '.', 1), count(*) FROM lecturas GROUP BY 1, 2;
+
+-- El trigger: cada lectura que entra o sale suma o resta en el contador, en la misma transacción
+CREATE OR REPLACE FUNCTION contar_lectura() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    INSERT INTO progreso_cursos VALUES (NEW.usuario_id, split_part(NEW.seccion_id, '.', 1), 1)
+    ON CONFLICT (usuario_id, curso_id) DO UPDATE SET leidas = progreso_cursos.leidas + 1;
+    RETURN NEW;
+  ELSE
+    UPDATE progreso_cursos SET leidas = leidas - 1
+    WHERE usuario_id = OLD.usuario_id AND curso_id = split_part(OLD.seccion_id, '.', 1);
+    RETURN OLD;
+  END IF;
+END $$;
+CREATE TRIGGER lecturas_contador AFTER INSERT OR DELETE ON lecturas
+FOR EACH ROW EXECUTE FUNCTION contar_lectura();
+
+-- ¿Coincide con contar de verdad? Debe dar 0 diferencias
+\set comprobar 'SELECT count(*) AS diferencias FROM (SELECT usuario_id, split_part(seccion_id, ''.'', 1) AS curso_id, count(*) AS leidas FROM lecturas GROUP BY 1, 2) AS real FULL JOIN (SELECT * FROM progreso_cursos WHERE leidas > 0) AS guardado USING (usuario_id, curso_id) WHERE real.leidas IS DISTINCT FROM guardado.leidas'
+:comprobar;
+
+-- Lo que gana: el panel de un usuario, contando frente a leyendo el contador
+\set usuario '(SELECT id FROM usuarios WHERE lower(email) = ''u42@example.com'')'
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT split_part(seccion_id, '.', 1) AS curso_id, count(*) FROM lecturas WHERE usuario_id = :usuario GROUP BY 1;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT curso_id, leidas FROM progreso_cursos WHERE usuario_id = :usuario;
+
+-- Lo que cuesta: 400 usuarios × 50 secciones, con el trigger y sin él (las que ya existían se saltan; se deshacen)
+\timing on
+BEGIN;
+INSERT INTO lecturas (usuario_id, seccion_id) SELECT u.id, s.id FROM (SELECT id FROM usuarios ORDER BY email LIMIT 400 OFFSET 1000) u, (SELECT id FROM secciones ORDER BY id LIMIT 50) s ON CONFLICT DO NOTHING;
+ROLLBACK;
+ALTER TABLE lecturas DISABLE TRIGGER lecturas_contador;
+BEGIN;
+INSERT INTO lecturas (usuario_id, seccion_id) SELECT u.id, s.id FROM (SELECT id FROM usuarios ORDER BY email LIMIT 400 OFFSET 1000) u, (SELECT id FROM secciones ORDER BY id LIMIT 50) s ON CONFLICT DO NOTHING;
+ROLLBACK;
+ALTER TABLE lecturas ENABLE TRIGGER lecturas_contador;
+\timing off
+
+-- Se mantiene solo con INSERT, DELETE y los borrados en cascada...
+DELETE FROM lecturas WHERE seccion_id = 'A3.1';
+DELETE FROM usuarios WHERE lower(email) = 'u7@example.com';
+:comprobar;
+-- ...pero TRUNCATE no dispara los triggers de fila: el contador se queda con datos que ya no existen
+BEGIN;
+TRUNCATE lecturas;
+SELECT sum(leidas) AS leidas_segun_el_contador, (SELECT count(*) FROM lecturas) AS leidas_de_verdad FROM progreso_cursos;
+ROLLBACK;
+
+-- Para este panel no compensa (ver la lección): se quita, y el panel vuelve a contar
+DROP TRIGGER lecturas_contador ON lecturas;
+DROP FUNCTION contar_lectura();
+DROP TABLE progreso_cursos;
+```
+
+```text
+DROP TABLE
+psql:53-contador.sql:3: NOTICE:  table "progreso_cursos" does not exist, skipping
+CREATE TABLE
+INSERT 0 30624
+CREATE FUNCTION
+CREATE TRIGGER
+ diferencias
+-------------
+           0
+(1 row)
+
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ HashAggregate (actual time=0.032..0.033 rows=16.00 loops=1)
+   Group Key: split_part(lecturas.seccion_id, '.'::text, 1)
+   Batches: 1  Memory Usage: 32kB
+   InitPlan 1
+     ->  Index Scan using usuarios_email_unico on usuarios (actual time=0.007..0.008 rows=1.00 loops=1)
+           Index Cond: (lower(email) = 'u42@example.com'::text)
+           Index Searches: 1
+   ->  Index Only Scan using lecturas_pkey on lecturas (actual time=0.023..0.027 rows=38.00 loops=1)
+         Index Cond: (usuario_id = (InitPlan 1).col1)
+         Heap Fetches: 38
+         Index Searches: 1
+ Planning Time: 0.060 ms
+ Execution Time: 0.045 ms
+(13 rows)
+
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on progreso_cursos (actual time=0.012..0.018 rows=16.00 loops=1)
+   Recheck Cond: (usuario_id = (InitPlan 1).col1)
+   Heap Blocks: exact=16
+   InitPlan 1
+     ->  Index Scan using usuarios_email_unico on usuarios (actual time=0.002..0.003 rows=1.00 loops=1)
+           Index Cond: (lower(email) = 'u42@example.com'::text)
+           Index Searches: 1
+   ->  Bitmap Index Scan on progreso_cursos_pkey (actual time=0.007..0.007 rows=16.00 loops=1)
+         Index Cond: (usuario_id = (InitPlan 1).col1)
+         Index Searches: 1
+ Planning Time: 0.017 ms
+ Execution Time: 0.023 ms
+(12 rows)
+
+Timing is on.
+BEGIN
+Time: 0.032 ms
+INSERT 0 14144
+Time: 266.890 ms
+ROLLBACK
+Time: 0.088 ms
+ALTER TABLE
+Time: 3.871 ms
+BEGIN
+Time: 0.056 ms
+INSERT 0 14144
+Time: 124.912 ms
+ROLLBACK
+Time: 0.089 ms
+ALTER TABLE
+Time: 3.958 ms
+Timing is off.
+DELETE 596
+DELETE 1
+ diferencias
+-------------
+           0
+(1 row)
+
+BEGIN
+TRUNCATE TABLE
+ leidas_segun_el_contador | leidas_de_verdad
+--------------------------+------------------
+                    58675 |                0
+(1 row)
+
+ROLLBACK
+DROP TRIGGER
+DROP FUNCTION
+DROP TABLE
+```
+
+- **Coherente, de verdad:** el contador coincide con contar (0 diferencias) al crearlo, después de borrar las 596 lecturas de A3.1 y después del borrado en cascada de un usuario. Como el _trigger_ va en la misma transacción, o se guardan la lectura y el contador, o ninguno.
+- **Lo que gana:** el panel de un usuario pasa de 0,045 ms (contando sus 38 lecturas con la clave primaria) a 0,023 ms. Nadie notará la diferencia.
+- **Lo que cuesta:** las mismas 14 144 lecturas nuevas tardan 267 ms con el _trigger_ y 125 ms sin él. Cada escritura cuesta el doble, y las lecturas son lo que más se escribe en la plataforma.
+- **Y tiene un agujero:** `TRUNCATE` no ejecuta los _triggers_ de fila. Tras vaciar `lecturas`, el contador sigue diciendo 58 675.
+
+**Decisión: no compensa**, y el archivo termina quitándolo. Desnormalizar tiene sentido cuando la cuenta es cara (muchas filas, muchas tablas) y se lee mucho más de lo que se escribe. Aquí la cuenta ya es barata gracias al índice, y se escribe en cada lectura.
+
+<Callout type="risk">
+
+- **Un _trigger_ hace más lenta cada escritura, también las que no ves:** cada `INSERT` en `lecturas` hace ahora otro `INSERT … ON CONFLICT` en `progreso_cursos`. Con cargas masivas o muchas escrituras a la vez, se nota, y dos lecturas del mismo usuario y curso se bloquean entre sí por la misma fila del contador (A3.3, Paso 5).
+- **Cada camino que cambia los datos tiene que pasar por el _trigger_:** `TRUNCATE`, un `ALTER TABLE … DISABLE TRIGGER` para una carga rápida o una restauración que lo desactiva lo dejan desfasado sin ningún error. Si desnormalizas, ten una consulta que compruebe la coherencia (como `:comprobar`) y ejecútala de vez en cuando.
+- **El _trigger_ no se ve en el código de la aplicación:** quien lea `INSERT INTO lecturas` en TypeScript no sabe que también se escribe otra tabla. Documéntalo junto al esquema, y en las migraciones (A3.4).
+
+</Callout>
+
+## Paso 4: vistas y vistas materializadas
+
+Hay consultas que sí son caras: las del panel de administración, que agregan las lecturas e intentos de **todos** los usuarios. `54-vistas.sql` define las estadísticas de cada curso como vista y como vista materializada:
+
+```sql
+-- Archivo: 54-vistas.sql
+-- Las estadísticas de cada curso para un panel de administración: vista frente a vista materializada
+DROP MATERIALIZED VIEW IF EXISTS estadisticas_cursos_mv;
+DROP VIEW IF EXISTS estadisticas_cursos;
+
+-- 1. Una vista: un nombre para una consulta. No guarda nada: se calcula cada vez que se lee
+CREATE VIEW estadisticas_cursos AS
+SELECT c.id AS curso_id,
+       count(DISTINCT l.usuario_id)                                   AS lectores,
+       count(l.*)                                                     AS lecturas,
+       (SELECT count(*) FROM intentos i WHERE i.curso_id = c.id)      AS intentos,
+       (SELECT round(avg(nota), 2) FROM intentos i WHERE i.curso_id = c.id) AS nota_media,
+       (SELECT round(100.0 * count(*) FILTER (WHERE nota >= 4) / nullif(count(*), 0), 1)
+          FROM intentos i WHERE i.curso_id = c.id)                   AS pct_aprobados
+FROM cursos c
+LEFT JOIN secciones s ON s.curso_id = c.id
+LEFT JOIN lecturas l ON l.seccion_id = s.id
+GROUP BY c.id;
+
+-- 2. Una vista materializada: la misma consulta, con el resultado GUARDADO en disco
+CREATE MATERIALIZED VIEW estadisticas_cursos_mv AS SELECT * FROM estadisticas_cursos;
+
+\timing on
+SELECT * FROM estadisticas_cursos WHERE curso_id IN ('B1', 'I3', 'A3') ORDER BY curso_id;
+SELECT * FROM estadisticas_cursos_mv WHERE curso_id IN ('B1', 'I3', 'A3') ORDER BY curso_id;
+\timing off
+
+-- 3. La materializada no se entera de los cambios hasta que se refresca
+INSERT INTO lecturas (usuario_id, seccion_id)
+SELECT id, 'B1.1' FROM usuarios WHERE id NOT IN (SELECT usuario_id FROM lecturas WHERE seccion_id = 'B1.1');
+SELECT 'vista' AS origen, lecturas FROM estadisticas_cursos WHERE curso_id = 'B1'
+UNION ALL
+SELECT 'materializada', lecturas FROM estadisticas_cursos_mv WHERE curso_id = 'B1';
+
+\timing on
+REFRESH MATERIALIZED VIEW estadisticas_cursos_mv;
+\timing off
+SELECT lecturas AS materializada_tras_refresh FROM estadisticas_cursos_mv WHERE curso_id = 'B1';
+
+-- 4. REFRESH normal bloquea las lecturas de la vista mientras dura; CONCURRENTLY no, pero pide un índice único
+REFRESH MATERIALIZED VIEW CONCURRENTLY estadisticas_cursos_mv;
+CREATE UNIQUE INDEX ON estadisticas_cursos_mv (curso_id);
+\timing on
+REFRESH MATERIALIZED VIEW CONCURRENTLY estadisticas_cursos_mv;
+\timing off
+```
+
+```text
+DROP MATERIALIZED VIEW
+DROP VIEW
+psql:54-vistas.sql:3: NOTICE:  materialized view "estadisticas_cursos_mv" does not exist, skipping
+psql:54-vistas.sql:4: NOTICE:  view "estadisticas_cursos" does not exist, skipping
+CREATE VIEW
+SELECT 24
+Timing is on.
+ curso_id | lectores | lecturas | intentos | nota_media | pct_aprobados
+----------+----------+----------+----------+------------+---------------
+ A3       |     1321 |     1800 |      335 |       2.49 |          35.2
+ B1       |     1892 |     4729 |      338 |       2.34 |          28.1
+ I3       |     1758 |     3644 |      352 |       2.38 |          31.0
+(3 rows)
+
+Time: 4.613 ms
+ curso_id | lectores | lecturas | intentos | nota_media | pct_aprobados
+----------+----------+----------+----------+------------+---------------
+ A3       |     1321 |     1800 |      335 |       2.49 |          35.2
+ B1       |     1892 |     4729 |      338 |       2.34 |          28.1
+ I3       |     1758 |     3644 |      352 |       2.38 |          31.0
+(3 rows)
+
+Time: 0.131 ms
+Timing is off.
+INSERT 0 1439
+    origen     | lecturas
+---------------+----------
+ vista         |     6168
+ materializada |     4729
+(2 rows)
+
+Timing is on.
+REFRESH MATERIALIZED VIEW
+Time: 31.650 ms
+Timing is off.
+ materializada_tras_refresh
+----------------------------
+                       6168
+(1 row)
+
+psql:54-vistas.sql:41: ERROR:  cannot refresh materialized view "public.estadisticas_cursos_mv" concurrently
+HINT:  Create a unique index with no WHERE clause on one or more columns of the materialized view.
+CREATE INDEX
+Timing is on.
+REFRESH MATERIALIZED VIEW
+Time: 32.533 ms
+Timing is off.
+```
+
+- **Una vista no guarda nada:** es un nombre para una consulta, y cada `SELECT` la vuelve a calcular entera (4,6 ms). Sirve para no repetir la consulta en cada sitio, no para ir más rápido.
+- **Una vista materializada guarda el resultado:** leerla cuesta lo que leer 24 filas (0,13 ms), unas 35 veces menos.
+- **A cambio, se queda desfasada:** tras 1439 lecturas nuevas de B1.1, la vista dice 6168 y la materializada sigue diciendo 4729 hasta que se ejecuta `REFRESH` (32 ms), que la vuelve a calcular entera.
+- **`REFRESH … CONCURRENTLY`:** el `REFRESH` normal bloquea las lecturas de la vista mientras dura; `CONCURRENTLY` no, porque calcula el resultado nuevo aparte y cambia solo las filas distintas. Para saber qué fila es qué, necesita un índice único sin `WHERE`, y sin él da error.
+
+Cuándo refrescar depende de cuánto desfase admite quien la lee: un panel de administración puede ir con datos de hace una hora (un `REFRESH` programado, por ejemplo con la extensión `pg_cron` o con una tarea de la app); el progreso que ve cada usuario después de marcar una sección, no.
+
+<Callout type="risk">
+
+- **Una vista materializada desfasada no avisa:** responde con los datos del último `REFRESH`, sin indicar de cuándo son. Si el desfase importa, guarda en otra tabla la hora del último refresco y muéstrala junto al dato.
+- **`REFRESH` recalcula entera la consulta:** con millones de filas puede tardar minutos y cargar la base de datos. No lo ejecutes en cada petición ni en cada escritura: entonces tendrías el coste de la consulta en cada escritura, que es peor que no materializar.
+- **`CONCURRENTLY` hace más trabajo:** además de calcular el resultado, lo compara fila a fila con el anterior. Con 24 filas tardó lo mismo (32 ms), pero con vistas grandes se nota. Úsalo cuando la vista se lee mientras se refresca; si no, el normal basta.
+
+</Callout>
+
+## Paso 5: borrar en cascada, prohibirlo o marcarlo como borrado
+
+Qué pasa con los datos de alguien cuando se borra es una decisión de diseño, no un detalle. `55-borrado.sql` prueba las tres opciones:
+
+```sql
+-- Archivo: 55-borrado.sql
+-- Tres formas de "borrar": en cascada, prohibirlo, o marcarlo como borrado
+\set ana '(SELECT id FROM usuarios WHERE lower(email) = ''u42@example.com'')'
+\set luis '(SELECT id FROM usuarios WHERE lower(email) = ''u43@example.com'')'
+
+-- 1. En cascada (ON DELETE CASCADE, de A3.1): borrar al usuario se lleva sus lecturas e intentos
+SELECT (SELECT count(*) FROM lecturas WHERE usuario_id = :ana) AS lecturas_de_u42,
+       (SELECT count(*) FROM intentos WHERE usuario_id = :ana) AS intentos_de_u42;
+BEGIN;
+DELETE FROM usuarios WHERE id = :ana;
+SELECT count(*) AS lecturas_tras_borrar FROM lecturas WHERE usuario_id NOT IN (SELECT id FROM usuarios);
+ROLLBACK;
+
+-- 2. Prohibido (sin CASCADE, como secciones → cursos): un DELETE mal escrito no se lleva un curso entero
+DELETE FROM cursos WHERE id = 'B1';
+
+-- 3. Borrado lógico: una fecha de borrado en lugar de borrar la fila
+ALTER TABLE usuarios ADD COLUMN borrado_en timestamptz;
+UPDATE usuarios SET borrado_en = now() WHERE id = :luis;
+
+-- La trampa del correo único: la persona no puede volver a registrarse con su correo
+INSERT INTO usuarios (nombre, email) VALUES ('Usuario 43 de nuevo', 'u43@example.com');
+-- Un índice único PARCIAL: el correo solo tiene que ser único entre los usuarios no borrados
+DROP INDEX usuarios_email_unico;
+CREATE UNIQUE INDEX usuarios_email_unico ON usuarios (lower(email)) WHERE borrado_en IS NULL;
+INSERT INTO usuarios (nombre, email) VALUES ('Usuario 43 de nuevo', 'u43@example.com');
+SELECT nombre, borrado_en IS NOT NULL AS borrado FROM usuarios WHERE lower(email) = 'u43@example.com' ORDER BY borrado;
+
+-- La otra trampa: cada consulta tiene que acordarse de filtrar. Una vista con el filtro ayuda
+CREATE VIEW usuarios_activos AS SELECT id, nombre, email, creado FROM usuarios WHERE borrado_en IS NULL;
+SELECT (SELECT count(*) FROM usuarios) AS en_la_tabla, (SELECT count(*) FROM usuarios_activos) AS activos;
+-- ...pero las lecturas del usuario borrado siguen contando en las estadísticas que no pasan por la vista
+SELECT count(*) AS lecturas_de_usuarios_borrados FROM lecturas WHERE usuario_id IN (SELECT id FROM usuarios WHERE borrado_en IS NOT NULL);
+```
+
+```text
+ lecturas_de_u42 | intentos_de_u42
+-----------------+-----------------
+              38 |               4
+(1 row)
+
+BEGIN
+DELETE 1
+ lecturas_tras_borrar
+----------------------
+                    0
+(1 row)
+
+ROLLBACK
+psql:55-borrado.sql:15: ERROR:  update or delete on table "cursos" violates foreign key constraint "secciones_curso_id_fkey" on table "secciones"
+DETAIL:  Key (id)=(B1) is still referenced from table "secciones".
+ALTER TABLE
+UPDATE 1
+psql:55-borrado.sql:22: ERROR:  duplicate key value violates unique constraint "usuarios_email_unico"
+DETAIL:  Key (lower(email))=(u43@example.com) already exists.
+DROP INDEX
+CREATE INDEX
+INSERT 0 1
+       nombre        | borrado
+---------------------+---------
+ Usuario 43 de nuevo | f
+ Usuario 43          | t
+(2 rows)
+
+CREATE VIEW
+ en_la_tabla | activos
+-------------+---------
+        2000 |    1999
+(1 row)
+
+ lecturas_de_usuarios_borrados
+-------------------------------
+                            34
+(1 row)
+```
+
+- **En cascada:** borrar a `u42` se lleva sus 38 lecturas y sus 4 intentos, sin dejar ninguna huérfana. Es lo correcto cuando los datos solo tienen sentido con su dueño, y cuando alguien pide que borres los suyos.
+- **Prohibido:** un curso con secciones no se puede borrar (A3.1). Un `DELETE` mal escrito no se lleva las 8 secciones de B1 ni las lecturas que cuelgan de ellas.
+- **Borrado lógico:** `borrado_en` marca la fila en lugar de borrarla, y se puede deshacer. Pero rompe dos cosas que antes funcionaban solas:
+  - **El correo único:** la persona no puede volver a registrarse con su correo, porque la fila borrada sigue ahí. El arreglo es un índice único **parcial**, solo para las filas no borradas.
+  - **Cada consulta tiene que acordarse de filtrar:** la tabla tiene 2000 filas y una está borrada. La vista `usuarios_activos` ayuda, pero las 34 lecturas del usuario borrado siguen contando en cualquier estadística que no pase por ella.
+
+| `ON DELETE`                            | Al borrar la fila referenciada        | Para qué                                                                   |
+| -------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------- |
+| `CASCADE`                              | Borra las filas que la referencian    | Datos que no tienen sentido sin su dueño (lecturas, intentos)              |
+| `RESTRICT` / `NO ACTION` (por defecto) | Da error si alguna fila la referencia | Datos que no deben desaparecer en cadena (las secciones de un curso)       |
+| `SET NULL`                             | Deja la columna a `NULL`              | Conservar la fila sin su referencia (un intento anónimo para estadísticas) |
+
+<Callout type="risk">
+
+- **El índice parcial solo se usa si la consulta repite su condición:** desde este paso, el índice del correo es `WHERE borrado_en IS NULL`, y buscar con `WHERE lower(email) = …` a secas ya no lo usa. Lo verás en el ejercicio: un _Seq Scan_ sobre los 2000 usuarios. Las consultas por correo tienen que añadir `AND borrado_en IS NULL`, o ir por la vista.
+- **Un borrado lógico no es un borrado:** el nombre y el correo siguen en la base de datos, en las copias de seguridad y en cualquier exportación. Si la persona pide que borres sus datos, márcala y además anonimiza lo personal (`nombre`, `email`), o bórrala de verdad.
+- **`CASCADE` también borra en cadena lo que no esperabas:** si `lecturas` tuviera a su vez tablas con `CASCADE`, un solo `DELETE` de un usuario podría vaciar media base de datos. Antes de añadir un `CASCADE`, mira qué tablas cuelgan de la que borras.
+
+</Callout>
+
+## Paso 6: Row Level Security, la autorización en la base de datos
+
+En esta plataforma, cada servicio filtra por el `userId` de la sesión: `setSectionRead` y `submitQuiz` lo reciben de `locals.user`, nunca de la petición. Si un día alguien escribe una consulta sin ese filtro, se ven los datos de todos. **Row Level Security** (RLS) pone la regla en la propia tabla: una política decide qué filas puede ver y escribir cada conexión, y se aplica a todas las consultas, se acuerde el código o no. `56-rls.sql` la prueba con un rol de aplicación que no es superusuario ni dueño de las tablas:
+
+```sql
+-- Archivo: 56-rls.sql
+-- Row Level Security: que la base de datos solo deje a cada usuario ver y escribir SUS lecturas
+-- El rol con el que se conecta la aplicación: sin superusuario y sin ser dueño de las tablas
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'app_web') THEN CREATE ROLE app_web; END IF;
+END $$;
+GRANT SELECT, INSERT, DELETE ON lecturas TO app_web;
+GRANT SELECT ON usuarios TO app_web;
+
+\set ana 'SELECT id FROM usuarios WHERE lower(email) = ''u42@example.com'''
+\set luis 'SELECT id FROM usuarios WHERE lower(email) = ''u44@example.com'''
+
+-- 1. Sin RLS, la aplicación ve todas las lecturas de todos
+SET ROLE app_web;
+SELECT count(*) AS sin_rls FROM lecturas;
+RESET ROLE;
+
+-- 2. La política: cada fila es visible (USING) y escribible (WITH CHECK) solo para su usuario.
+--    El usuario lo dice la aplicación en cada transacción, con la variable app.usuario_id
+ALTER TABLE lecturas ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS lecturas_propias ON lecturas;
+CREATE POLICY lecturas_propias ON lecturas
+  USING (usuario_id = current_setting('app.usuario_id', true)::uuid)
+  WITH CHECK (usuario_id = current_setting('app.usuario_id', true)::uuid);
+
+SET ROLE app_web;
+-- Sin decir quién es: current_setting(…, true) devuelve NULL y no se ve nada (falla cerrado)
+SELECT count(*) AS sin_identificar FROM lecturas;
+
+-- Una petición de u42: SET LOCAL dura solo hasta el final de la transacción
+BEGIN;
+SELECT set_config('app.usuario_id', (:ana)::text, true) IS NOT NULL AS peticion_de_u42; -- true = LOCAL
+SELECT count(*) AS visibles_para_u42, count(*) FILTER (WHERE usuario_id = (:ana)) AS suyas FROM lecturas;
+INSERT INTO lecturas (usuario_id, seccion_id) VALUES ((:luis), 'B1.2'); -- una lectura a nombre de otro
+ROLLBACK;
+
+-- La siguiente petición sin usuario, en la misma conexión: la variable ya no es NULL, sino ''
+SELECT quote_literal(current_setting('app.usuario_id', true)) AS app_usuario_id;
+SELECT count(*) AS sin_identificar_otra_vez FROM lecturas;
+RESET ROLE;
+-- La política corregida: '' cuenta como "sin usuario"
+DROP POLICY lecturas_propias ON lecturas;
+CREATE POLICY lecturas_propias ON lecturas
+  USING (usuario_id = nullif(current_setting('app.usuario_id', true), '')::uuid)
+  WITH CHECK (usuario_id = nullif(current_setting('app.usuario_id', true), '')::uuid);
+SET ROLE app_web;
+SELECT count(*) AS sin_identificar_corregida FROM lecturas;
+
+-- 3. El fallo con un pool: SET (sin LOCAL) se queda en la conexión, y la siguiente petición lo hereda
+BEGIN;
+SELECT set_config('app.usuario_id', (:ana)::text, false) IS NOT NULL AS peticion_de_u42; -- false = toda la sesión
+COMMIT;
+-- ...la conexión vuelve al pool, y otra petición, sin usuario, la reutiliza:
+SELECT count(*) AS la_siguiente_peticion_ve FROM lecturas;
+RESET app.usuario_id;
+RESET ROLE;
+
+-- 4. Los superusuarios (y el dueño de la tabla, salvo FORCE ROW LEVEL SECURITY) se saltan la política
+SELECT count(*) AS como_postgres FROM lecturas;
+
+-- 5. Con el índice de la clave primaria, la política no hace la consulta más lenta
+SET ROLE app_web;
+BEGIN;
+SELECT set_config('app.usuario_id', (:ana)::text, true) IS NOT NULL AS listo;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF) SELECT seccion_id FROM lecturas;
+ROLLBACK;
+RESET ROLE;
+
+-- 6. Una vista se ejecuta con los permisos de su DUEÑO (aquí postgres, que se salta RLS)...
+DROP VIEW IF EXISTS mis_lecturas;
+CREATE VIEW mis_lecturas AS SELECT usuario_id, seccion_id, leida_en FROM lecturas;
+GRANT SELECT ON mis_lecturas TO app_web;
+SET ROLE app_web;
+BEGIN;
+SELECT set_config('app.usuario_id', (:ana)::text, true) IS NOT NULL AS peticion_de_u42;
+SELECT count(*) AS u42_por_la_vista FROM mis_lecturas;
+ROLLBACK;
+RESET ROLE;
+-- ...salvo con security_invoker (PostgreSQL 15+): entonces usa los permisos de quien la consulta
+ALTER VIEW mis_lecturas SET (security_invoker = true);
+SET ROLE app_web;
+BEGIN;
+SELECT set_config('app.usuario_id', (:ana)::text, true) IS NOT NULL AS peticion_de_u42;
+SELECT count(*) AS u42_por_la_vista_invoker FROM mis_lecturas;
+ROLLBACK;
+RESET ROLE;
+```
+
+```text
+DO
+GRANT
+GRANT
+SET
+ sin_rls
+---------
+   60114
+(1 row)
+
+RESET
+ALTER TABLE
+psql:56-rls.sql:21: DROP POLICY
+NOTICE:  policy "lecturas_propias" for relation "lecturas" does not exist, skipping
+CREATE POLICY
+SET
+ sin_identificar
+-----------------
+               0
+(1 row)
+
+BEGIN
+ peticion_de_u42
+-----------------
+ t
+(1 row)
+
+ visibles_para_u42 | suyas
+-------------------+-------
+                38 |    38
+(1 row)
+
+psql:56-rls.sql:34: ERROR:  new row violates row-level security policy for table "lecturas"
+ROLLBACK
+ app_usuario_id
+----------------
+ ''
+(1 row)
+
+psql:56-rls.sql:39: ERROR:  invalid input syntax for type uuid: ""
+RESET
+DROP POLICY
+CREATE POLICY
+SET
+ sin_identificar_corregida
+---------------------------
+                         0
+(1 row)
+
+BEGIN
+ peticion_de_u42
+-----------------
+ t
+(1 row)
+
+COMMIT
+ la_siguiente_peticion_ve
+--------------------------
+                       38
+(1 row)
+
+RESET
+RESET
+ como_postgres
+---------------
+         60114
+(1 row)
+
+SET
+BEGIN
+ listo
+-------
+ t
+(1 row)
+
+                                              QUERY PLAN
+------------------------------------------------------------------------------------------------------
+ Index Only Scan using lecturas_pkey on lecturas (actual time=0.007..0.010 rows=38.00 loops=1)
+   Index Cond: (usuario_id = (NULLIF(current_setting('app.usuario_id'::text, true), ''::text))::uuid)
+   Heap Fetches: 38
+   Index Searches: 1
+ Planning Time: 0.015 ms
+ Execution Time: 0.014 ms
+(6 rows)
+
+ROLLBACK
+RESET
+DROP VIEW
+psql:56-rls.sql:70: NOTICE:  view "mis_lecturas" does not exist, skipping
+CREATE VIEW
+GRANT
+SET
+BEGIN
+ peticion_de_u42
+-----------------
+ t
+(1 row)
+
+ u42_por_la_vista
+------------------
+            60114
+(1 row)
+
+ROLLBACK
+RESET
+ALTER VIEW
+SET
+BEGIN
+ peticion_de_u42
+-----------------
+ t
+(1 row)
+
+ u42_por_la_vista_invoker
+--------------------------
+                       38
+(1 row)
+
+ROLLBACK
+RESET
+```
+
+- **La aplicación dice quién es el usuario:** RLS no conoce las sesiones de Better Auth. En cada transacción, la app guarda el id en una variable propia (`app.usuario_id`) con `set_config(…, true)`, que es `SET LOCAL`: dura hasta el `COMMIT` o el `ROLLBACK`.
+- **`USING` filtra lo que se ve y `WITH CHECK` lo que se escribe:** `u42` ve sus 38 lecturas de las 60 114, y una lectura a nombre de otro usuario da `new row violates row-level security policy`.
+- **Falla cerrado:** sin identificar a nadie, la política compara con `NULL` y no se ve ninguna fila.
+- **Pero hay que tratar la cadena vacía:** cuando la variable ya se usó en la conexión, al terminar la transacción no vuelve a `NULL`, sino a `''`, y `''::uuid` da `invalid input syntax for type uuid`. Cada petición sin usuario fallaría. `nullif(…, '')` lo convierte en `NULL`.
+- **Sin coste:** la política se convierte en una condición más, y la clave primaria la resuelve (_Index Only Scan_, 0,014 ms).
+
+<Callout type="risk">
+
+- **`SET` sin `LOCAL` se queda en la conexión:** tras la petición de `u42`, la siguiente que reutiliza la misma conexión del _pool_ (A3.4) ve sus 38 lecturas sin haber dicho quién es. Con un _pool_ o un _pooler_, usa siempre `set_config(…, true)` dentro de una transacción, nunca `SET` de sesión.
+- **Las vistas se saltan RLS por defecto:** una vista se ejecuta con los permisos de su dueño. Aquí el dueño es `postgres`, que se salta las políticas, y a través de la vista `u42` vio las 60 114 lecturas. Crea las vistas sobre tablas con RLS con `security_invoker = true` (PostgreSQL 15+), que usa los permisos de quien consulta. Las vistas materializadas no tienen esa opción (lo verás en el ejercicio).
+- **El dueño de la tabla y los superusuarios no pasan por la política:** si la aplicación se conecta como `postgres` o como dueña de la tabla, RLS no hace nada. Para que también se aplique al dueño, `ALTER TABLE … FORCE ROW LEVEL SECURITY`. Y la aplicación, siempre con su propio rol (A3.4).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade etiquetas a los cursos (Astro, React, Bases de datos…) como una relación N:M, y consulta los cursos que tienen **todas** las etiquetas de una lista.
+2. Crea una vista materializada para el panel de progreso.
+3. Decide con medidas para qué consulta del panel compensa la vista materializada y para cuál no.
+
+</Callout>
+
+Solución. `57-ejercicio.sql`:
+
+```sql
+-- Archivo: 57-ejercicio.sql
+-- Ejercicio: etiquetas para los cursos (N:M) y una vista materializada para el panel
+DROP MATERIALIZED VIEW IF EXISTS panel_progreso, progreso_por_etiqueta;
+DROP TABLE IF EXISTS curso_etiquetas, etiquetas;
+
+CREATE TABLE etiquetas (
+  id     text PRIMARY KEY CHECK (id ~ '^[a-z0-9-]+$'), -- el "slug" de la URL: /temario?etiqueta=bases-de-datos
+  nombre text NOT NULL UNIQUE
+);
+CREATE TABLE curso_etiquetas (
+  curso_id    text NOT NULL REFERENCES cursos(id) ON DELETE CASCADE,
+  etiqueta_id text NOT NULL REFERENCES etiquetas(id) ON DELETE CASCADE,
+  PRIMARY KEY (curso_id, etiqueta_id)
+);
+CREATE INDEX ON curso_etiquetas (etiqueta_id); -- "los cursos de una etiqueta"
+
+INSERT INTO etiquetas VALUES
+  ('typescript', 'TypeScript'), ('react', 'React'), ('astro', 'Astro'), ('bases-de-datos', 'Bases de datos'),
+  ('seguridad', 'Seguridad'), ('despliegue', 'Despliegue'), ('css', 'CSS'), ('calidad', 'Calidad');
+INSERT INTO curso_etiquetas VALUES
+  ('B1', 'typescript'), ('I1', 'typescript'), ('A1', 'typescript'),
+  ('B6', 'react'), ('I2', 'react'), ('A8', 'react'), ('I3', 'astro'), ('A8', 'astro'),
+  ('B4', 'bases-de-datos'), ('B5', 'bases-de-datos'), ('I4', 'bases-de-datos'), ('A2', 'bases-de-datos'), ('A3', 'bases-de-datos'),
+  ('B3', 'seguridad'), ('I5', 'seguridad'), ('A5', 'seguridad'), ('I3', 'seguridad'),
+  ('I6', 'despliegue'), ('A4', 'despliegue'), ('A7', 'despliegue'),
+  ('B7', 'css'), ('I7', 'css'), ('I8', 'calidad'), ('A6', 'calidad'), ('A7', 'calidad'), ('B2', 'calidad');
+
+-- 1. Las etiquetas de cada curso, y los cursos de una etiqueta
+SELECT c.id, c.titulo, string_agg(e.nombre, ', ' ORDER BY e.nombre) AS etiquetas
+FROM cursos c JOIN curso_etiquetas ce ON ce.curso_id = c.id JOIN etiquetas e ON e.id = ce.etiqueta_id
+WHERE c.id IN ('I3', 'A7', 'A8') GROUP BY c.id, c.titulo, c.orden ORDER BY c.orden;
+
+-- 2. Los cursos que tienen TODAS las etiquetas pedidas ("división relacional"): agrupar y contar
+SELECT curso_id FROM curso_etiquetas
+WHERE etiqueta_id IN ('react', 'astro')
+GROUP BY curso_id HAVING count(*) = 2;
+
+-- 3. La vista materializada del panel: el progreso de cada usuario en cada curso
+CREATE MATERIALIZED VIEW panel_progreso AS
+SELECT l.usuario_id, s.curso_id,
+       count(*) AS leidas,
+       (SELECT count(*) FROM secciones s2 WHERE s2.curso_id = s.curso_id) AS secciones,
+       max(l.leida_en) AS ultima_lectura
+FROM lecturas l JOIN secciones s ON s.id = l.seccion_id
+GROUP BY l.usuario_id, s.curso_id;
+CREATE UNIQUE INDEX ON panel_progreso (usuario_id, curso_id); -- para REFRESH ... CONCURRENTLY
+
+-- ¿Para quién? El panel de UN usuario, en vivo y desde la vista materializada
+\set ana '(SELECT id FROM usuarios WHERE lower(email) = ''u42@example.com'')'
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT s.curso_id, count(*) AS leidas FROM lecturas l JOIN secciones s ON s.id = l.seccion_id
+WHERE l.usuario_id = :ana GROUP BY s.curso_id;
+EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF)
+SELECT curso_id, leidas FROM panel_progreso WHERE usuario_id = :ana;
+
+-- ...y para el panel de administración: el progreso medio por etiqueta, sobre todos los usuarios
+CREATE MATERIALIZED VIEW progreso_por_etiqueta AS
+SELECT e.id AS etiqueta, count(DISTINCT p.usuario_id) AS usuarios,
+       round(avg(100.0 * p.leidas / p.secciones), 1) AS pct_medio_leido
+FROM panel_progreso p
+JOIN curso_etiquetas ce ON ce.curso_id = p.curso_id JOIN etiquetas e ON e.id = ce.etiqueta_id
+GROUP BY e.id;
+CREATE UNIQUE INDEX ON progreso_por_etiqueta (etiqueta);
+
+\timing on
+SELECT * FROM progreso_por_etiqueta ORDER BY pct_medio_leido DESC;
+-- La misma cuenta en vivo, desde las lecturas
+WITH p AS (
+  SELECT l.usuario_id, s.curso_id, count(*) AS leidas,
+         (SELECT count(*) FROM secciones s2 WHERE s2.curso_id = s.curso_id) AS secciones
+  FROM lecturas l JOIN secciones s ON s.id = l.seccion_id
+  GROUP BY l.usuario_id, s.curso_id
+)
+SELECT ce.etiqueta_id AS etiqueta, count(DISTINCT p.usuario_id) AS usuarios,
+       round(avg(100.0 * p.leidas / p.secciones), 1) AS pct_medio_leido
+FROM p JOIN curso_etiquetas ce ON ce.curso_id = p.curso_id
+GROUP BY ce.etiqueta_id ORDER BY pct_medio_leido DESC LIMIT 3;
+REFRESH MATERIALIZED VIEW CONCURRENTLY panel_progreso;
+REFRESH MATERIALIZED VIEW CONCURRENTLY progreso_por_etiqueta;
+\timing off
+
+-- 4. Una vista materializada no aplica RLS: si la aplicación pudiera leerla, vería a todos
+GRANT SELECT ON panel_progreso TO app_web;
+SET ROLE app_web;
+BEGIN;
+SELECT set_config('app.usuario_id', (SELECT id FROM usuarios WHERE lower(email) = 'u42@example.com')::text, true) IS NOT NULL AS peticion_de_u42;
+SELECT count(DISTINCT usuario_id) AS usuarios_visibles_en_panel_progreso FROM panel_progreso;
+ROLLBACK;
+RESET ROLE;
+REVOKE SELECT ON panel_progreso FROM app_web;
+```
+
+```text
+DROP MATERIALIZED VIEW
+DROP TABLE
+psql:57-ejercicio.sql:3: NOTICE:  materialized view "panel_progreso" does not exist, skipping
+psql:57-ejercicio.sql:3: NOTICE:  materialized view "progreso_por_etiqueta" does not exist, skipping
+psql:57-ejercicio.sql:4: NOTICE:  table "curso_etiquetas" does not exist, skipping
+psql:57-ejercicio.sql:4: NOTICE:  table "etiquetas" does not exist, skipping
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+INSERT 0 8
+INSERT 0 26
+ id |             titulo             |      etiquetas
+----+--------------------------------+---------------------
+ I3 | Backend con Astro              | Astro, Seguridad
+ A7 | CI/CD con GitHub Actions       | Calidad, Despliegue
+ A8 | Arquitectura con Astro y React | Astro, React
+(3 rows)
+
+ curso_id
+----------
+ A8
+(1 row)
+
+SELECT 30507
+CREATE INDEX
+                                                 QUERY PLAN
+-------------------------------------------------------------------------------------------------------------
+ HashAggregate (actual time=0.380..0.382 rows=16.00 loops=1)
+   Group Key: s.curso_id
+   Batches: 1  Memory Usage: 32kB
+   InitPlan 1
+     ->  Seq Scan on usuarios (actual time=0.021..0.337 rows=1.00 loops=1)
+           Filter: (lower(email) = 'u42@example.com'::text)
+           Rows Removed by Filter: 1999
+   ->  Hash Join (actual time=0.364..0.374 rows=38.00 loops=1)
+         Hash Cond: (l.seccion_id = s.id)
+         ->  Index Only Scan using lecturas_pkey on lecturas l (actual time=0.348..0.352 rows=38.00 loops=1)
+               Index Cond: (usuario_id = (InitPlan 1).col1)
+               Heap Fetches: 38
+               Index Searches: 1
+         ->  Hash (actual time=0.015..0.015 rows=99.00 loops=1)
+               Buckets: 1024  Batches: 1  Memory Usage: 12kB
+               ->  Seq Scan on secciones s (actual time=0.002..0.007 rows=99.00 loops=1)
+ Planning Time: 0.143 ms
+ Execution Time: 0.398 ms
+(18 rows)
+
+                                                   QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on panel_progreso (actual time=0.329..0.336 rows=16.00 loops=1)
+   Recheck Cond: (usuario_id = (InitPlan 1).col1)
+   Heap Blocks: exact=15
+   InitPlan 1
+     ->  Seq Scan on usuarios (actual time=0.010..0.314 rows=1.00 loops=1)
+           Filter: (lower(email) = 'u42@example.com'::text)
+           Rows Removed by Filter: 1999
+   ->  Bitmap Index Scan on panel_progreso_usuario_id_curso_id_idx (actual time=0.325..0.325 rows=16.00 loops=1)
+         Index Cond: (usuario_id = (InitPlan 1).col1)
+         Index Searches: 1
+ Planning Time: 0.038 ms
+ Execution Time: 0.340 ms
+(12 rows)
+
+SELECT 8
+CREATE INDEX
+Timing is on.
+    etiqueta    | usuarios | pct_medio_leido
+----------------+----------+-----------------
+ seguridad      |     1987 |            36.7
+ calidad        |     1942 |            36.3
+ typescript     |     1999 |            36.3
+ css            |     1945 |            35.7
+ bases-de-datos |     1998 |            35.0
+ astro          |     1758 |            34.5
+ despliegue     |     1787 |            33.6
+ react          |     1977 |            33.4
+(8 rows)
+
+Time: 0.192 ms
+  etiqueta  | usuarios | pct_medio_leido
+------------+----------+-----------------
+ seguridad  |     1987 |            36.7
+ calidad    |     1942 |            36.3
+ typescript |     1999 |            36.3
+(3 rows)
+
+Time: 160.631 ms
+REFRESH MATERIALIZED VIEW
+Time: 251.406 ms
+REFRESH MATERIALIZED VIEW
+Time: 20.878 ms
+Timing is off.
+GRANT
+SET
+BEGIN
+ peticion_de_u42
+-----------------
+ t
+(1 row)
+
+ usuarios_visibles_en_panel_progreso
+-------------------------------------
+                                1999
+(1 row)
+
+ROLLBACK
+RESET
+REVOKE
+```
+
+- **Etiquetas como tabla N:M, no como _array_:** el nombre de una etiqueta cambia una vez en `etiquetas` y lo ven todos los cursos, una etiqueta mal escrita no entra (clave ajena) y borrar una etiqueta se lleva sus asignaciones (`CASCADE` en los dos lados: sin curso o sin etiqueta, la asignación no tiene sentido).
+- **"Todas las etiquetas" es una división relacional:** se filtran las asignaciones de las etiquetas pedidas, se agrupan por curso y se quedan los cursos que tienen tantas como etiquetas había en la lista (`HAVING count(*) = 2`). Solo A8 tiene React y Astro a la vez.
+- **El panel de un usuario no compensa materializarlo:** 0,38 ms en vivo frente a 0,33 ms desde la vista, casi todo en buscar al usuario por correo (el _Seq Scan_ del índice parcial del Paso 5). A cambio, la vista estaría desfasada: quien marca una sección como leída no lo vería hasta el siguiente `REFRESH`, que cuesta 251 ms.
+- **El panel de administración, sí:** el progreso medio por etiqueta, sobre todos los usuarios, cuesta 167 ms en vivo y 0,18 ms desde la vista materializada, unas 900 veces menos, y nadie necesita ese dato al segundo. Refrescarla después de `panel_progreso` cuesta 21 ms.
+
+<Callout type="risk">
+
+- **Una vista materializada no aplica RLS:** guarda el resultado calculado por su dueño, con los datos de todos. Si la aplicación pudiera leer `panel_progreso`, `u42` vería a 1999 usuarios. Nunca des `SELECT` sobre una vista materializada con datos de usuarios al rol de la aplicación. Si la app la necesita, consúltala desde una función que filtre, o materializa solo datos agregados sin usuarios, como `progreso_por_etiqueta`.
+- **Una vista materializada que lee de otra hereda su desfase:** `progreso_por_etiqueta` lee de `panel_progreso`, así que hay que refrescarlas en orden. Al revés, la segunda calcularía sobre los datos viejos de la primera.
+- **La división relacional depende de que no haya duplicados:** `HAVING count(*) = 2` funciona porque la clave primaria impide asignar dos veces la misma etiqueta a un curso. Sin esa clave, una etiqueta repetida contaría dos veces.
+
+</Callout>
+
+<Callout type="mastery">
+
+Decides cómo guardar cada relación (un _array_ si solo se lee con su fila, una tabla intermedia si necesita integridad o se consulta al revés) y si desnormalizar, según cómo se lee y se escribe cada dato: mides lo que gana y lo que cuesta un _trigger_ o una vista materializada antes de quedártelo. Eliges entre cascada, restricción y borrado lógico, y proteges los datos de cada usuario con RLS sin dejar que se escapen por una vista.
+
+</Callout>
+
+## Resumen
+
+- Una relación N:M con integridad va en una tabla intermedia, con una clave primaria compuesta y un índice para cada dirección. Un _array_ basta para listas que no necesitan claves ajenas.
+- `WITH RECURSIVE` recorre relaciones de una tabla consigo misma, como los prerrequisitos.
+- Desnormalizar con un _trigger_ mantiene un dato coherente, pero encarece cada escritura y `TRUNCATE` lo desincroniza: solo compensa si la cuenta es cara y se lee mucho.
+- Una vista no guarda nada; una vista materializada guarda el resultado, se lee muy rápido y se queda desfasada hasta el `REFRESH`.
+- El borrado lógico necesita índices únicos parciales y que cada consulta filtre; `CASCADE` borra lo que depende de la fila.
+- RLS filtra cada consulta por usuario con una variable de transacción (`SET LOCAL`), pero las vistas y las vistas materializadas pueden saltársela.
