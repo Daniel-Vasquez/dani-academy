@@ -1,0 +1,682 @@
+---
+sectionId: "A4.1"
+course: "A4"
+title: "Vercel vs VPS vs PaaS"
+order: 1
+minutes: 75
+summary: "Mides lo que Vercel hace por ti, ejecutas la app de entrenos compilada con el adaptador de Node como en producción, la llevas a Ubuntu y comparas VPS, PaaS y Coolify por coste, control y límites."
+---
+
+Desde I3, tu app de entrenos se ejecuta en un servidor Node, pero solo en tu equipo, con `npm run dev`. Esta plataforma, en cambio, vive en Vercel: haces `git push` y, un minuto después, está en internet con HTTPS. Vercel hace mucho trabajo que no ves. Este curso trata de hacer ese trabajo tú, en un servidor propio, y esta primera sección responde a dos preguntas. **¿Qué hace exactamente Vercel por ti?** Lo vas a medir en una web real. **¿Qué te tocaría montar si lo dejaras?** Lo vas a descubrir al ejecutar tu app compilada como en producción, primero en tu Mac y después en un Ubuntu.
+
+Una analogía para todo el curso: Vercel es un **restaurante**. Pides y te traen el plato; no ves la cocina, pero tampoco puedes cambiar el menú. Un **VPS** es una **cocina vacía de alquiler**: puedes cocinar lo que quieras, pero compras los fogones, limpias y, si se quema algo a las tres de la mañana, te toca a ti. Un **PaaS** (Railway, Render, Fly.io) está en medio: una cocina equipada donde pones tus ingredientes, y te cobran por el tiempo que la usas.
+
+**Lo que tendrás al terminar:** la lista de lo que Vercel hace por ti, medida; tu app compilada con `@astrojs/node` y ejecutándose como en producción; un _script_ que la compila, la arranca y comprueba que responde bien; y criterios con precios reales para elegir entre Vercel, un VPS, un PaaS y Coolify.
+
+**Requisitos:** la app `entrenos-app` tal como la dejaste en I8, con su `.env` relleno, y el servidor Ubuntu de I6 (la máquina virtual o un VPS) con acceso por SSH.
+
+## Paso 1: lo que Vercel hace por ti, medido
+
+Antes de dejar Vercel, mira qué te da. `curl` enseña las cabeceras de la respuesta (`-D -`) sin guardar el cuerpo (`-o /dev/null`). Esta plataforma está en Vercel, así que sirve como ejemplo. Primero, la dirección con `http://`:
+
+```bash
+curl -s -o /dev/null -w "%{http_code} %{redirect_url}\n" http://academy.danielvasquez.lat/
+```
+
+```text
+308 https://academy.danielvasquez.lat/
+```
+
+Después, un archivo JavaScript de la página de entrada. `-H "Accept-Encoding: br"` le dice al servidor que tu cliente entiende Brotli, el formato de compresión que usan los navegadores:
+
+```bash
+curl -s -D - -o /dev/null -H "Accept-Encoding: gzip, br" https://academy.danielvasquez.lat/_astro/client.Dda4loRL.js
+```
+
+```text
+HTTP/2 200
+age: 7
+cache-control: public, max-age=31536000, immutable
+content-encoding: br
+strict-transport-security: max-age=63072000; includeSubDomains
+x-vercel-cache: HIT
+```
+
+Y el mismo archivo con y sin compresión:
+
+```text
+con Accept-Encoding: br → 66 730 bytes descargados
+sin comprimir           → 209 191 bytes
+```
+
+Cada línea es un servicio que no has configurado:
+
+- **`308` hacia `https://`:** quien escribe la dirección sin `https` acaba en la versión cifrada. Vercel emite y renueva el certificado TLS de tu dominio por ti.
+- **`strict-transport-security` (HSTS):** le dice al navegador que, durante dos años (63 072 000 segundos), no vuelva a intentar `http://` con este dominio, ni siquiera la primera petición.
+- **`content-encoding: br`:** el archivo viaja comprimido con Brotli, un 32 % de su tamaño. En un móvil con mala cobertura, es la diferencia entre esperar y no esperar.
+- **`x-vercel-cache: HIT` y `age: 7`:** el archivo salió de la caché de la **CDN** (_Content Delivery Network_), un servidor de Vercel cercano a ti, que lo guardó hace 7 segundos. La petición ni llegó a tu app.
+- **`HTTP/2`:** varias peticiones viajan a la vez por la misma conexión.
+- **`cache-control: … immutable`:** el navegador puede guardar el archivo un año sin preguntar. Esta la pone Astro, no Vercel; en el Paso 4 verás que tu servidor Node también la envía.
+
+Hay más que no se ve en una cabecera:
+
+- **El _build_ en cada `push`**, en las máquinas de Vercel, con las variables de cada entorno (I3.6).
+- **Los _previews_:** cada rama y cada PR tienen su propia URL para probar antes de mezclar.
+- **Funciones _serverless_:** cada página SSR se ejecuta en una función que Vercel arranca cuando llega tráfico y para cuando no lo hay. Si se cae, la siguiente petición arranca otra; nadie tiene que reiniciar nada.
+- **_Rollback_ instantáneo:** volver al despliegue anterior es un clic.
+
+<Callout type="risk">
+
+- **El 32 % depende del archivo:** el JavaScript y el HTML se comprimen muy bien; las imágenes JPEG o WebP ya vienen comprimidas, y Brotli apenas las reduce. No esperes ese ahorro en todo.
+- **HSTS es difícil de deshacer:** el navegador lo recuerda durante todo el `max-age`. Si un día tu dominio no puede servir HTTPS, quien ya lo visitó no podrá entrar por `http://`. En A4.4 lo activarás con un `max-age` corto antes de subirlo.
+- **`x-vercel-cache: MISS` en la primera petición es normal:** la primera vez que alguien pide un archivo en esa zona, la CDN lo busca y lo guarda; desde la segunda, `HIT`. Repite la petición antes de sacar conclusiones.
+
+</Callout>
+
+## Paso 2: el adaptador de Node en modo `standalone`
+
+Vercel ejecuta tu app con su adaptador, `@astrojs/vercel`, que convierte cada ruta SSR en una función _serverless_. Fuera de Vercel, el adaptador es **`@astrojs/node`**, que convierte la app en un servidor Node normal: un proceso que se queda escuchando en un puerto. Lo instalaste en I3.1 y tu `astro.config.mjs` ya lo usa:
+
+```js
+// Archivo: astro.config.mjs (el de I5.2, sin cambios)
+// @ts-check
+import { defineConfig, envField } from "astro/config";
+import react from "@astrojs/react";
+
+import node from "@astrojs/node";
+
+export default defineConfig({
+  integrations: [react()],
+
+  env: {
+    schema: {
+      // Secretas del servidor: nunca llegan al navegador ni al HTML
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "entrenos_lab" }),
+      // Better Auth: el secreto firma las cookies de sesión (mínimo 32 caracteres) y la URL base de la app
+      BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
+      // Públicas del servidor: configuración que no es secreta (se puede incrustar en el build)
+      OBJETIVO_SEMANAL_MINUTOS: envField.number({ context: "server", access: "public", int: true, gt: 0, default: 150 }),
+      // Públicas del cliente: las pueden leer los componentes de React. NUNCA un secreto.
+      PUBLIC_NOMBRE_APP: envField.string({ context: "client", access: "public", default: "Mi entreno" }),
+    },
+    // Comprueba también las secretas al arrancar `astro dev` y `astro build`
+    validateSecrets: true,
+  },
+
+  adapter: node({
+    mode: "standalone",
+  }),
+});
+```
+
+`mode` tiene dos valores:
+
+- **`standalone`:** el _build_ incluye un servidor HTTP completo. `node dist/server/entry.mjs` y ya está escuchando. Es lo que usarás en todo el curso.
+- **`middleware`:** el _build_ exporta un manejador que montas dentro de tu propio servidor Express o Fastify, junto a otras rutas que no son de Astro. Solo lo necesitas si ya tienes ese servidor.
+
+No hace falta `output: "server"`. Con `output: "static"`, el valor por defecto, Astro prerenderiza todo lo que puede y ejecuta en el servidor las páginas con `export const prerender = false` (I3.1). Compila:
+
+```bash
+npm run build
+```
+
+```text
+23:38:52 [build] output: "static"
+23:38:52 [build] mode: "server"
+23:38:52 [build] adapter: @astrojs/node
+…
+23:38:52 [build] Complete!
+```
+
+Y mira qué ha generado:
+
+```bash
+du -sh dist/client dist/server
+ls dist/client dist/server
+```
+
+```text
+460K	dist/client
+696K	dist/server
+dist/client:
+_astro		acerca		favicon.ico	favicon.svg	index.html
+
+dist/server:
+chunks		entry.mjs	virtual_astro_middleware.mjs
+```
+
+- **`dist/client`:** lo que el navegador descarga tal cual. Las páginas prerenderizadas (`index.html`, `acerca/index.html`) y los recursos de `_astro/`, con un _hash_ en el nombre (`client.XI9U0KhD.js`): si el contenido cambia, cambia el nombre.
+- **`dist/server`:** el código que se ejecuta en el servidor. `entry.mjs` arranca el servidor HTTP; `chunks/` tiene tus páginas SSR, _endpoints_, _middleware_ y Actions ya compilados.
+
+**Lo que no está en `dist`:** tus dependencias. El servidor compilado las importa de `node_modules`, igual que tu código fuente:
+
+```bash
+grep -rhoE "from \"[^./][^\"]*\"" dist/server | sort | uniq -c | sort -rn | head -n 8
+```
+
+```text
+   7 from "react"
+   6 from "react/jsx-runtime"
+   5 from "zod"
+   3 from "piccolore"
+   3 from "mongodb"
+   3 from "astro:middleware"
+   2 from "zod/v4"
+   2 from "unstorage/drivers/fs-lite"
+```
+
+`mongodb`, `react`, `zod`… se cargan de `node_modules` al arrancar. Lo comprobarás en el Paso 5, en el servidor.
+
+<Callout type="risk">
+
+- **Sin adaptador, el _build_ falla** en cuanto una ruta se ejecuta en el servidor (`NoAdapterInstalled`, I3.1). Y solo puede haber uno: para desplegar en Vercel y en un VPS desde el mismo código, elige el adaptador según una variable de entorno en `astro.config.mjs`, o mantén una rama por destino. Lo primero es más sencillo.
+- **`dist/` se genera, no se edita:** cada `npm run build` lo borra y lo vuelve a crear. Un arreglo hecho a mano en `dist/server/chunks/` desaparece en el siguiente _build_. Y no lo subas a Git (`.gitignore` ya lo excluye).
+
+</Callout>
+
+## Paso 3: ejecutarla como en producción
+
+En producción no hay `npm run dev`: no hay Vite, ni recarga en caliente, ni mensajes de error detallados en el navegador. Hay un proceso Node ejecutando `dist/server/entry.mjs`. Hazlo en tu Mac:
+
+```bash
+node dist/server/entry.mjs
+```
+
+```text
+23:40:27 [@astrojs/node] Server listening on http://localhost:4321
+```
+
+Arranca y dice que escucha. En otra terminal:
+
+```bash
+curl -s -o /dev/null -w "GET / -> %{http_code}\n" http://localhost:4321/
+curl -s -o /dev/null -w "GET /api/resumen -> %{http_code}\n" http://localhost:4321/api/resumen
+curl -s -o /dev/null -w "GET /estadisticas -> %{http_code}\n" http://localhost:4321/estadisticas
+```
+
+```text
+GET / -> 200
+GET /api/resumen -> 500
+GET /estadisticas -> 500
+```
+
+La portada funciona y lo demás da 500. En la terminal del servidor:
+
+```text
+23:40:30 [ERROR] EnvInvalidVariables: The following environment variables defined in `env.schema` are invalid:
+
+- MONGODB_URI is missing
+```
+
+**El servidor compilado no lee `.env`.** `astro dev` y `astro build` sí lo leen (por eso el _build_ pasó la validación de `validateSecrets`), pero `node dist/server/entry.mjs` es Node a secas, y Node solo ve las variables del proceso. La portada funcionó porque está prerenderizada: es un archivo de `dist/client` que se envía sin ejecutar nada. El error aparece en la **primera petición** que necesita una variable secreta, no al arrancar. Un servidor puede pasar días «en marcha» y roto.
+
+Para pasarle las variables, Node tiene `--env-file` (desde Node 20.6). Para el servidor con Ctrl+C y vuelve a arrancarlo:
+
+```bash
+node --env-file=.env dist/server/entry.mjs
+```
+
+```text
+23:40:48 [@astrojs/node] Server listening on http://localhost:4321
+```
+
+```text
+GET / -> 200
+GET /estadisticas -> 302 http://localhost:4321/entrar?volver=%2Festadisticas
+GET /api/resumen -> 401
+GET /entrar -> 200
+```
+
+Ahora sí: la página privada redirige a `/entrar` (el _middleware_ de I5.3), la API sin sesión responde 401 y la página de entrada se renderiza en el servidor. Medido en el Mac, el servidor tardó **0,15 s** desde el arranque hasta la primera respuesta, y el proceso ocupa **149 MB** de memoria (RSS).
+
+### `HOST` y `PORT`: dónde escucha
+
+El mensaje dice `localhost`, pero ¿qué es `localhost` exactamente? `lsof` lista los puertos abiertos y el proceso que escucha en cada uno:
+
+```bash
+lsof -nP -iTCP:4321 -sTCP:LISTEN
+```
+
+```text
+COMMAND   PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+node    27363 tú     14u  IPv6 0x601dedf48e2b9866      0t0  TCP [::1]:4321 (LISTEN)
+```
+
+```bash
+curl -s -m 3 -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4321/
+```
+
+```text
+000
+```
+
+En el Mac, `localhost` es **`::1`**, la dirección local de IPv6, y el servidor **no** responde en `127.0.0.1`, la de IPv4. Tampoco desde otro equipo de tu red. El adaptador escucha por defecto solo en la propia máquina, y es buena idea: una app recién compilada no debería quedar abierta a cualquiera. Para elegir dónde, las variables `HOST` y `PORT`:
+
+```bash
+HOST=0.0.0.0 PORT=4322 node --env-file=.env dist/server/entry.mjs
+```
+
+```text
+23:41:04 [@astrojs/node] Server listening on
+  local: http://localhost:4322
+  network: http://192.168.1.50:4322
+```
+
+```text
+node    27386 tú     12u  IPv4 0x739a751ed71e5868      0t0  TCP *:4322 (LISTEN)
+127.0.0.1 -> 200
+localhost -> 200
+IP-de-la-red -> 200
+```
+
+`0.0.0.0` significa «en todas las interfaces»: ahora responde en `127.0.0.1`, en `localhost` y desde cualquier equipo de tu red, con tu IP (aquí, `192.168.1.50`). Y si el puerto ya está ocupado, por ejemplo con un segundo servidor:
+
+```text
+Error: listen EADDRINUSE: address already in use 0.0.0.0:4322
+```
+
+El proceso termina con código **1**. Es lo que quieres: un servidor que no puede escuchar debe morir y avisar, no seguir como si nada.
+
+<Callout type="risk">
+
+- **Un servidor sin variables arranca igual:** `Server listening` no significa que funcione. Comprueba siempre una ruta que use la base de datos después de arrancar; en A4.5 lo automatizarás con `/api/health`.
+- **`--env-file` falla si el archivo no existe:** `node --env-file=.env` sin `.env` termina al momento con `node: .env: not found` (código 9). En un servidor, las variables pueden venir de otro sitio (`systemd`, Docker, el panel de un PaaS), y entonces no se usa `--env-file`.
+- **`localhost` no es lo mismo en todas partes:** en el Mac fue `::1`; en Ubuntu (Paso 5) será `127.0.0.1`. Si Nginx (A4.3) pide `http://127.0.0.1:4321` y la app escucha en `::1`, la conexión falla. En un servidor, fija siempre `HOST` (`127.0.0.1` detrás de Nginx, `0.0.0.0` dentro de un contenedor, A4.2) en lugar de fiarte del valor por defecto.
+- **`HOST=0.0.0.0` en un portátil abre la app a la red:** en la red de una cafetería, cualquiera puede entrar en tu app, con tu base de datos detrás. Úsalo solo para probar y vuelve al valor por defecto.
+
+</Callout>
+
+## Paso 4: lo que el servidor de Node no hace
+
+Con el servidor en marcha (con `HOST=127.0.0.1` para usar siempre la misma dirección), pide los mismos tipos de archivo que pediste a Vercel en el Paso 1:
+
+```bash
+HOST=127.0.0.1 node --env-file=.env dist/server/entry.mjs
+```
+
+```bash
+curl -s -D - -o /dev/null -H "Accept-Encoding: gzip, br" http://127.0.0.1:4321/_astro/react.CmU_e8vp.js
+curl -s -D - -o /dev/null -H "Accept-Encoding: gzip, br" http://127.0.0.1:4321/
+curl -s -D - -o /dev/null -H "Accept-Encoding: gzip, br" http://127.0.0.1:4321/entrar
+```
+
+```text
+== /_astro/react.CmU_e8vp.js
+HTTP/1.1 200 OK
+Cache-Control: public, max-age=31536000, immutable
+ETag: W/"1ec4-1a18b517098"
+Content-Type: text/javascript; charset=utf-8
+Content-Length: 7876
+== /
+HTTP/1.1 200 OK
+Cache-Control: public, max-age=0
+ETag: W/"2129-1a18b517166"
+Content-Type: text/html; charset=utf-8
+Content-Length: 8489
+== /entrar
+HTTP/1.1 200 OK
+content-type: text/html
+Transfer-Encoding: chunked
+```
+
+Compara con Vercel:
+
+- **Sin compresión:** el JavaScript llega con sus 7876 bytes, aunque `curl` dijo que entendía Brotli y gzip. Todo el JavaScript del cliente suma **398 661 bytes**; comprimido con gzip, serían **128 569** (un 32 %). Cada visitante descarga el triple de lo necesario.
+- **La caché del navegador, sí:** `Cache-Control: … immutable` para `_astro/`, y `max-age=0` con `ETag` para las páginas prerenderizadas (el navegador pregunta si cambiaron y, si no, recibe un 304 vacío). Es Astro quien lo decide, y tu servidor lo hace igual que Vercel.
+- **Las páginas SSR, sin `Cache-Control`:** se generan en cada petición y salen en trozos (`chunked`), sin compresión.
+- **Sin HTTPS, sin HTTP/2, sin CDN:** `HTTP/1.1` en claro, desde un único proceso en una única máquina.
+
+Y lo que no se ve en las cabeceras:
+
+- **Nadie lo reinicia:** si el proceso termina (un error no capturado, falta de memoria, un reinicio del servidor), la app queda caída hasta que alguien la arranque. Eso lo resolviste en I6.4 con `systemd`.
+- **Un solo núcleo:** un proceso Node ejecuta tu JavaScript en un hilo. En un servidor de 2 núcleos, uno queda libre para MongoDB, Nginx y el sistema.
+- **Ningún _build_ automático:** nadie compila tu app al hacer `git push`.
+
+<Callout type="risk">
+
+- **No añadas compresión dentro de Node:** se puede, pero comprimir consume CPU en el mismo hilo que atiende las peticiones. Lo habitual es que lo haga quien está delante, Nginx o Caddy (A4.3), que además puede guardar los archivos ya comprimidos.
+- **`immutable` solo es seguro con _hash_ en el nombre:** Astro lo pone en `_astro/`, donde cada cambio genera otro nombre. Si algún día sirves desde Nginx tu carpeta `public/` con esa misma cabecera, un `logo.svg` cambiado no llegaría a los navegadores que ya lo tienen en caché durante un año.
+
+</Callout>
+
+## Paso 5: llevarla a un servidor Linux
+
+Ahora, al Ubuntu de I6. La idea más sencilla: copiar `dist/`, que es «la app compilada». En el Mac, empaqueta `dist`, `package.json`, `package-lock.json` y `.env` en un `.tgz`:
+
+```bash
+tar -czf paquete.tgz dist package.json package-lock.json .env
+```
+
+Al descomprimirlo en Ubuntu aparecen decenas de avisos y archivos de más:
+
+```text
+tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'
+…
+._.env  ._dist  ._package-lock.json  ._package.json  .env  dist  package-lock.json  package.json
+```
+
+El `tar` de macOS guarda los atributos extendidos de cada archivo (metadatos propios del Mac) y crea archivos `._*` para ellos. Linux no los entiende. Empaqueta sin ellos:
+
+```bash
+COPYFILE_DISABLE=1 tar --no-xattrs -czf paquete.tgz dist package.json package-lock.json .env
+scp paquete.tgz deploy@tu-servidor:/tmp/
+```
+
+En el servidor, como `deploy`, descomprímelo en `/opt/entrenos` (la carpeta de I6.4) y arráncalo:
+
+```bash
+cd /opt/entrenos
+tar xzf /tmp/paquete.tgz && rm /tmp/paquete.tgz
+node --env-file=.env dist/server/entry.mjs
+```
+
+```text
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'html-escaper' imported from /opt/entrenos/dist/server/entry.mjs
+```
+
+Lo que viste en el Paso 2: faltan las dependencias. Hay que instalarlas en el servidor, y solo las de producción:
+
+```bash
+npm ci --omit=dev
+```
+
+```text
+bash: npm: command not found
+```
+
+### La versión de Node
+
+El Ubuntu de I6 tiene el Node de sus repositorios:
+
+```bash
+dpkg -l nodejs npm | tail -n 2
+```
+
+```text
+ii  nodejs  22.22.1+dfsg+~cs22.19.15-1ubuntu1  arm64  evented I/O for V8 javascript
+un  npm     <none>                             <none> (no description available)
+```
+
+Dos problemas. Ubuntu 26.04 trae **Node 22.22.1 sin `npm`**, y Astro 7 pide en su `package.json` (`engines`) **Node 22.23.4 o superior**. La versión de la distribución se queda congelada durante la vida de esa versión de Ubuntu. Usa la misma versión mayor de Node que en tu Mac, desde el repositorio de **NodeSource**, que publica Node para Debian y Ubuntu y se actualiza con `apt upgrade` como el resto del sistema (I6.2). Para Node 26, la LTS actual:
+
+```bash
+# La clave con la que NodeSource firma sus paquetes
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | sudo gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
+
+# El repositorio, que solo acepta paquetes firmados con esa clave
+printf "Types: deb\nURIs: https://deb.nodesource.com/node_26.x\nSuites: nodistro\nComponents: main\nSigned-By: /etc/apt/keyrings/nodesource.gpg\n" | sudo tee /etc/apt/sources.list.d/nodesource.sources
+
+sudo apt-get update
+sudo apt-get install -y nodejs
+node -v && npm -v
+```
+
+```text
+v26.13.0
+11.20.0
+```
+
+El paquete `nodejs` de NodeSource sustituye al de Ubuntu e incluye `npm`. Ahora sí:
+
+```bash
+cd /opt/entrenos
+npm ci --omit=dev
+du -sh node_modules
+```
+
+```text
+found 0 vulnerabilities
+238M	node_modules
+```
+
+`npm ci` instala exactamente las versiones de `package-lock.json`, las mismas que probaste en tu equipo; tardó 6,9 s. `--omit=dev` deja fuera las `devDependencies`: en tu Mac, `node_modules` ocupa 313 MB. Arranca:
+
+```bash
+node --env-file=.env dist/server/entry.mjs
+```
+
+```text
+23:43:30 [@astrojs/node] Server listening on http://localhost:4321
+```
+
+```bash
+ss -ltn | grep 4321
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4321/
+curl -s -m 3 -o /dev/null -w "%{http_code}\n" "http://[::1]:4321/"
+```
+
+```text
+LISTEN 0      511        127.0.0.1:4321       0.0.0.0:*
+200
+000
+```
+
+El mismo comando, el mismo mensaje (`localhost`), y otra dirección: en Ubuntu escucha en **`127.0.0.1`**, porque su `/etc/hosts` asocia `localhost` solo a IPv4 (`::1` es `ip6-localhost`). Las rutas responden igual que en el Mac (200, 302, 401). Y la memoria, en un servidor con 2 GB:
+
+```text
+RSS tras arrancar: 101 MB
+RSS tras 300 peticiones SSR: 173 MB
+```
+
+<Callout type="risk">
+
+- **`--omit=dev` no lo deja todo fuera:** en este servidor quedaron `vitest`, `jsdom`, `msw` y `typescript` (unos 40 MB). `npm ls vitest --omit=dev` dice por qué: `better-auth` declara `vitest` como dependencia _peer_ opcional, y `package-lock.json` lo marca `devOptional`, que `--omit=dev` sigue instalando. No se ejecutan, pero ocupan disco y, en A4.2, tamaño de imagen.
+- **No copies `node_modules` desde el Mac:** algunos paquetes incluyen binarios compilados para cada sistema y arquitectura (macOS ARM, Linux x86…). Instala siempre en la máquina donde se ejecuta.
+- **No ejecutes `curl … | sudo bash`:** muchas guías instalan Node con `curl -fsSL https://deb.nodesource.com/setup_26.x | sudo -E bash -`, que ejecuta como `root` un _script_ que no has leído. Añadir el repositorio a mano, como arriba, hace lo mismo y ves cada línea.
+- **El `.env` viaja en el paquete:** contiene la contraseña de tu MongoDB y el secreto de Better Auth. Pásalo solo por `scp` (cifrado) y deja en el servidor `chmod 600 .env`, que solo `deploy` pueda leerlo (I6.2). En A4.5 lo separarás del código para no copiarlo en cada despliegue.
+
+</Callout>
+
+## Paso 6: VPS, PaaS, Coolify o Vercel
+
+Ya sabes qué hay que montar. Ahora, quién lo monta. Las cuatro opciones, de más a menos trabajo para ti:
+
+- **VPS** (Hetzner, DigitalOcean): una máquina virtual con Ubuntu y una IP. Tú instalas Node, Nginx, el certificado, `systemd`, las actualizaciones de seguridad y las copias de seguridad. Es lo que harás en este curso.
+- **VPS con Coolify:** Coolify es un panel de código abierto que instalas en tu VPS. Le conectas tu repositorio y él construye la imagen de Docker, la arranca, pone el proxy con HTTPS y despliega en cada `push`. Un Vercel propio, en tu máquina.
+- **PaaS** (Railway, Render, Fly.io): les das el repositorio o una imagen de Docker y ellos se ocupan de la máquina, el HTTPS y los reinicios. Tu app sigue siendo un servidor Node de larga duración, como en el Paso 3, no funciones _serverless_.
+- **Vercel:** todo lo del Paso 1, sin servidor que mantener.
+
+### Lo que cuesta
+
+Precios consultados en las páginas oficiales el 29 de octubre de 2026, sin impuestos. Cambian a menudo: compruébalos antes de decidir.
+
+| Opción               | Lo más pequeño                                                                    | Precio al mes                     |
+| -------------------- | --------------------------------------------------------------------------------- | --------------------------------- |
+| Vercel Hobby         | Uso personal, **no comercial**; 100 GB de transferencia                           | 0 $                               |
+| Vercel Pro           | Por miembro del equipo; 1 TB de transferencia y 20 $ de crédito incluidos         | 20 $                              |
+| Hetzner CX23         | 2 vCPU, 4 GB, 40 GB NVMe, 20 TB de tráfico, IPv4 incluida                         | 5,99 € (ese día, «no disponible») |
+| Hetzner CPX12        | 1 vCPU, 2 GB, 40 GB NVMe                                                          | 11,99 €                           |
+| DigitalOcean Basic   | 1 vCPU, 512 MiB, 10 GiB; o 1 vCPU, 1 GiB, 25 GiB                                  | 4 $ · 6 $                         |
+| Railway Hobby        | 5 $ de uso incluidos; después, unos 10 $ por GB de RAM y 20 $ por vCPU al mes     | desde 5 $                         |
+| Render Free          | 0,1 CPU, 512 MB; **se apaga tras 15 min** sin tráfico y tarda ~1 min en volver    | 0 $                               |
+| Fly.io shared-cpu-1x | 256 MB · 512 MB · 1 GB, sin capa gratuita                                         | 2,19 $ · 3,69 $ · 6,70 $          |
+| Coolify              | Autoalojado: gratis y de código abierto. En su nube: el panel, con tus servidores | 0 · 5 $ (2 servidores)            |
+
+Fíjate en la memoria: tu app ocupó entre 101 y 173 MB en el Paso 5, y MongoDB, si lo pones en la misma máquina, necesita bastante más. Una máquina de 512 MB no da para las dos cosas; con 2–4 GB vas holgado.
+
+### Los límites
+
+Vercel también tiene límites que un servidor propio no tiene (de su documentación, para funciones con _Fluid compute_, el modo por defecto):
+
+- **Duración:** una petición puede ejecutarse hasta **300 s** en Hobby y hasta 800 s en Pro. Un proceso largo (generar un informe enorme, procesar un vídeo) no cabe en una petición.
+- **Tamaño:** el cuerpo de la petición o de la respuesta de una función no puede pasar de **4,5 MB**; más, y responde `413`. Subir un archivo grande a tu app exige mandarlo directamente a un almacenamiento de archivos.
+- **Memoria:** 2 GB por función (4 GB en Pro).
+- **_Cold starts_:** cuando una función lleva un rato sin tráfico, la siguiente petición espera a que arranque. Es la misma idea que el Render gratuito al despertar, a menor escala.
+- **Sin procesos de fondo:** nada se queda en marcha entre peticiones. Una tarea cada noche necesita un _cron_ de la plataforma, no un `setInterval`.
+
+En tu VPS, ninguno de estos límites existe: el proceso está siempre en marcha, sin _cold starts_, y una petición dura lo que tú quieras. A cambio, si la máquina se cae, la app se cae.
+
+### Cómo decidir
+
+- **Vercel**, si tu app encaja en sus límites y no quieres administrar nada. Esta plataforma está en Vercel: páginas, _endpoints_ y MongoDB Atlas, sin procesos de fondo ni archivos grandes. Si tu proyecto es comercial, el plan Pro.
+- **PaaS**, si necesitas un servidor siempre en marcha (WebSockets, colas, tareas largas) pero no quieres administrar Linux.
+- **VPS**, si quieres control total, el coste más bajo y predecible con tráfico alto, o aprender cómo funciona todo. El precio no incluye tu tiempo: actualizar el sistema, vigilar el disco, renovar certificados.
+- **VPS con Coolify**, si quieres el precio del VPS con una experiencia parecida a la de un PaaS, y aceptas mantener también Coolify.
+
+<Callout type="risk">
+
+- **El plan Hobby de Vercel no permite uso comercial:** para un cliente o un producto que cobra, necesitas Pro. Es una condición de uso, no un límite técnico: nada te avisa al desplegar.
+- **La transferencia se paga aparte en casi todos:** Vercel cobra desde 0,15 $ por GB por encima de lo incluido, Railway 0,05 $ por GB. Un vídeo que se hace viral puede costar más que el servidor. Hetzner incluye 20 TB.
+- **Un VPS barato «no disponible»:** el día de la consulta, los servidores más baratos de Hetzner aparecían como no disponibles en su web. Elige pensando en el plan siguiente, no solo en el más bajo.
+- **Gratis suele significar «se duerme»:** el Render gratuito tarda en torno a un minuto en despertar. Para una demo vale; para una app con usuarios, no.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Compila tu app de entrenamiento con el adaptador de Node y ejecútala en local como en producción: con las variables de `.env`, `NODE_ENV=production` y `HOST` y `PORT` explícitos.
+2. Escribe un _script_ `scripts/produccion.sh` que lo haga todo de una vez: compilar, arrancar, esperar a que responda, comprobar que cada tipo de ruta responde con su código (prerenderizada, SSR, privada, API sin sesión, inexistente), enseñar las cabeceras de un recurso de `_astro/` y la memoria del proceso, y parar el servidor al terminar, también si algo falla.
+3. Añade a `package.json` un _script_ `start` para arrancar la app compilada.
+
+</Callout>
+
+Solución. `scripts/produccion.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/produccion.sh
+# Compila la app y la ejecuta como en producción; comprueba rutas y cabeceras, y la para al terminar.
+# Uso: bash scripts/produccion.sh   (desde la raíz del proyecto, con .env relleno)
+set -euo pipefail
+
+PUERTO="${PORT:-4330}"
+BASE="http://127.0.0.1:$PUERTO"
+
+[ -f .env ] || { echo "Falta .env (cp .env.example .env)"; exit 1; }
+if lsof -nP -iTCP:"$PUERTO" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "El puerto $PUERTO está ocupado: elige otro con PORT=4331 bash scripts/produccion.sh"; exit 1
+fi
+
+echo "== 1. Build"
+npm run build > /tmp/entrenos-build.log 2>&1 || { tail -n 20 /tmp/entrenos-build.log; exit 1; }
+du -sh dist/client dist/server
+
+echo "== 2. Arranque, como en producción"
+NODE_ENV=production HOST=127.0.0.1 PORT="$PUERTO" node --env-file=.env dist/server/entry.mjs > /tmp/entrenos-server.log 2>&1 &
+PID=$!
+trap 'kill "$PID" 2>/dev/null || true' EXIT # pase lo que pase, el servidor se para al salir
+
+for _ in $(seq 1 50); do
+  curl -s -o /dev/null "$BASE/" && break
+  kill -0 "$PID" 2>/dev/null || { echo "El servidor ha terminado:"; cat /tmp/entrenos-server.log; exit 1; }
+  sleep 0.1
+done
+
+echo "== 3. Rutas"
+comprobar() { # ruta, código esperado
+  local codigo
+  codigo=$(curl -s -o /dev/null -w "%{http_code}" "$BASE$1")
+  if [ "$codigo" = "$2" ]; then echo "  ok   $1 -> $codigo"; else echo "  FALLO $1 -> $codigo (esperaba $2)"; FALLOS=1; fi
+}
+FALLOS=0
+comprobar /             200 # prerenderizada: un archivo de dist/client
+comprobar /entrar       200 # SSR: la renderiza Node en cada petición
+comprobar /estadisticas 302 # privada: el middleware redirige a /entrar
+comprobar /api/resumen  401 # API privada sin sesión
+comprobar /no-existe    404
+
+echo "== 4. Cabeceras (lo que Vercel añade y aquí no hay)"
+JS=$(ls dist/client/_astro/*.js | head -n 1)
+curl -s -D - -o /dev/null -H "Accept-Encoding: gzip, br" "$BASE/_astro/$(basename "$JS")" |
+  grep -iE "^(cache-control|content-encoding|content-length)" | sed 's/^/  /'
+grep -iE "error" /tmp/entrenos-server.log && FALLOS=1
+
+echo "== 5. Memoria del proceso"
+ps -o rss= -p "$PID" | awk '{printf "  %.0f MB\n", $1/1024}'
+
+exit "$FALLOS"
+```
+
+```bash
+bash scripts/produccion.sh
+```
+
+```text
+== 1. Build
+460K	dist/client
+696K	dist/server
+== 2. Arranque, como en producción
+== 3. Rutas
+  ok   / -> 200
+  ok   /entrar -> 200
+  ok   /estadisticas -> 302
+  ok   /api/resumen -> 401
+  ok   /no-existe -> 404
+== 4. Cabeceras (lo que Vercel añade y aquí no hay)
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Length: 8339
+== 5. Memoria del proceso
+  148 MB
+```
+
+Termina con código 0, y después no queda nada escuchando en el puerto 4330. Ninguna línea `content-encoding`: la compresión es lo primero que tendrás que añadir (A4.3). Las comprobaciones de los casos de error:
+
+```text
+$ bash scripts/produccion.sh          # con un .env sin MONGODB_URI
+== 1. Build
+…
+[EnvInvalidVariables] The following environment variables defined in `env.schema` are invalid:
+- MONGODB_URI is missing
+
+$ bash scripts/produccion.sh          # con otro proceso en el puerto 4330
+El puerto 4330 está ocupado: elige otro con PORT=4331 bash scripts/produccion.sh
+```
+
+- **`set -euo pipefail`:** el _script_ se detiene en el primer comando que falla, en cualquier variable sin definir y en cualquier fallo dentro de una tubería (I6.6).
+- **`trap … EXIT`:** el servidor se para al salir, termine bien o mal. Sin él, un fallo en la mitad dejaría un Node huérfano ocupando el puerto, y la siguiente ejecución fallaría con `EADDRINUSE`.
+- **La espera comprueba también que el proceso siga vivo (`kill -0`):** si el servidor muere al arrancar, el _script_ enseña su registro en vez de esperar 5 segundos para nada.
+- **`grep -iE "error"` en el registro del servidor:** recuerda el Paso 3. Una página puede responder bien mientras otra ruta escribe un error.
+
+Y el _script_ `start` en `package.json`, junto a los demás:
+
+```json
+{
+  "dev": "astro dev",
+  "build": "astro build",
+  "preview": "astro preview",
+  "start": "node --env-file=.env dist/server/entry.mjs",
+  "astro": "astro",
+  "check": "astro check",
+  "test": "vitest",
+  "test:run": "vitest run",
+  "test:coverage": "vitest run --coverage",
+  "test:e2e": "node scripts/e2e.mjs"
+}
+```
+
+```text
+$ npm run build && PORT=4331 npm start
+> entrenos-app@0.0.1 start
+> node --env-file=.env dist/server/entry.mjs
+
+23:47:01 [@astrojs/node] Server listening on http://localhost:4331
+```
+
+<Callout type="risk">
+
+- **El _script_ comprueba que responde, no que funciona entero:** no inicia sesión ni guarda un entreno. Para eso tienes los tests E2E de I7.5. Este _script_ responde a otra pregunta: si el _build_ de producción arranca y sirve con las variables de verdad.
+- **`/tmp/entrenos-*.log` se sobrescribe en cada ejecución:** si dos personas o dos terminales lo ejecutan a la vez en la misma máquina, se pisan los registros. Para eso existe `PORT`: puertos distintos para ejecuciones distintas. Los registros siguen compartidos.
+- **`npm start` en el servidor, sin `systemd`, muere al cerrar la sesión de SSH** (I6.4). Úsalo para probar; en A4.5, el servicio de `systemd` ejecutará directamente `node`, sin `npm` en medio.
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes exactamente qué tendrías que montar tú si dejaras Vercel: ejecutar `dist/server/entry.mjs` con sus variables (no lee `.env`) y con `HOST` y `PORT` explícitos; instalar en el servidor la versión de Node correcta y las dependencias con `npm ci --omit=dev`; mantener el proceso vivo con `systemd`; y poner delante quien comprima, sirva HTTPS con HSTS y redirija `http://`. Y sabes cuándo no merece la pena: si la app cabe en los límites de Vercel (300 s, 4,5 MB, sin procesos de fondo), o si un PaaS te da el servidor siempre en marcha sin administrar Linux.
+
+</Callout>
+
+## Resumen
+
+- Vercel te da, medido en esta plataforma: `308` a HTTPS, HSTS de dos años, Brotli (un JS de 209 191 bytes viaja en 66 730), CDN con `x-vercel-cache: HIT`, HTTP/2, _build_ en cada `push`, _previews_, funciones que se reinician solas y _rollback_.
+- `@astrojs/node` en modo `standalone` genera un servidor completo: `dist/client` (estáticos) y `dist/server/entry.mjs`, que importa sus dependencias de `node_modules`.
+- El servidor compilado **no lee `.env`**: arranca igual y falla en la primera ruta que usa una variable secreta. Usa `node --env-file=.env`.
+- Por defecto escucha en `localhost`, que en el Mac fue `::1` y en Ubuntu `127.0.0.1`. Fija `HOST` y `PORT`; con el puerto ocupado termina con código 1.
+- Node sirve `_astro/` con caché `immutable`, pero sin compresión, sin HTTPS y sin nadie que lo reinicie.
+- En Ubuntu: Node de NodeSource (la de la distribución, 22.22.1 y sin `npm`, es más antigua que la que pide Astro 7), `npm ci --omit=dev` y `tar` sin los metadatos del Mac. La app ocupó entre 101 y 173 MB.
+- VPS, PaaS, Coolify o Vercel: más control y menos coste a cambio de más trabajo, y al revés. El plan Hobby de Vercel no admite uso comercial.
