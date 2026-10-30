@@ -1,0 +1,905 @@
+---
+sectionId: "A3.6"
+course: "A3"
+title: "SQL vs MongoDB: decidir con criterio"
+order: 6
+minutes: 75
+summary: "Cargas los mismos datos en PostgreSQL y MongoDB en la misma máquina, comparas qué rechaza cada uno, mides consultas y transacciones de forma justa y escribes el ADR de la base de datos de esta plataforma."
+---
+
+Después de tres cursos de MongoDB (B5, I4 y A2) y cinco secciones de PostgreSQL, toca la pregunta de verdad: **¿cuál usar?** Las respuestas habituales ("MongoDB escala mejor", "SQL es más rápido", "los documentos son más flexibles") son medias verdades que dependen del caso. En esta sección vas a poner las dos bases de datos en la misma máquina, con los mismos datos, y a compararlas en lo que se puede medir: qué datos incorrectos rechaza cada una, cuánto tardan las consultas y las escrituras de esta plataforma y cuánto cambia el resultado con un buen diseño. Lo que no se puede medir en un portátil (escalar a muchos servidores, el ecosistema, el equipo) lo verás como criterios. Y terminarás escribiendo la decisión de esta plataforma como lo hacen los equipos: un **ADR**.
+
+**Lo que tendrás al terminar:** MongoDB y PostgreSQL en la misma VM, un proyecto `comparar` que carga en los dos los mismos datos, una tabla de qué rechaza cada uno, las medidas de cinco consultas y dos escrituras, y el ADR de Dani Academy.
+
+**Requisitos:** las secciones A2.1 (transacciones en MongoDB), A3.3 (índices y `EXPLAIN`) y A3.4 (`pg`, el rol `academy_app` y el reenvío del puerto 5432), con PostgreSQL en una VM Linux.
+
+## Paso 1: las dos bases, en la misma máquina y con los mismos datos
+
+Una comparación solo vale si las dos bases juegan en las mismas condiciones. Si PostgreSQL está en una VM y MongoDB en tu portátil, cada consulta a la VM paga un viaje de red que la otra no paga, y medirías la red, no la base de datos. Así que MongoDB va a la misma VM que PostgreSQL. Descarga la versión de servidor para Linux (aquí, ARM64 y Ubuntu 24.04, que también funciona en la 26.04) y arráncala como _replica set_, como en A2.1:
+
+```bash
+curl -sSfL -o mongo.tgz https://fastdl.mongodb.org/linux/mongodb-linux-aarch64-ubuntu2404-8.2.6.tgz
+sudo mkdir -p /opt/mongodb && sudo tar -xzf mongo.tgz -C /opt/mongodb --strip-components=1 && rm mongo.tgz
+mkdir -p /var/tmp/mongo-a36
+/opt/mongodb/bin/mongod --replSet rs0 --dbpath /var/tmp/mongo-a36 --bind_ip 127.0.0.1 --port 27017 \
+  --wiredTigerCacheSizeGB 0.25 --fork --logpath /var/tmp/mongo-a36.log
+```
+
+```text
+{"t":{"$date":"2026-10-29T19:42:46.102-06:00"},"s":"I",  "c":"-",        "id":8991200, "ctx":"main","msg":"Shuffling initializers","attr":{"seed":966840340}}
+about to fork child process, waiting until server is ready for connections.
+forked process: 157661
+child process started successfully, parent exiting
+```
+
+`--wiredTigerCacheSizeGB 0.25` limita la caché de MongoDB, porque la VM tiene 2 GB y también aloja PostgreSQL. Con los datos de esta sección, las dos caben enteras en memoria.
+
+En tu equipo, crea el proyecto `comparar` con los dos _drivers_, su `.env` y una base nueva en PostgreSQL:
+
+```bash
+sudo -u postgres psql -c "CREATE DATABASE comparar OWNER academy_app"   # en la VM
+mkdir comparar && cd comparar
+```
+
+```json
+{
+  "name": "comparar",
+  "private": true,
+  "type": "module"
+}
+```
+
+Guárdalo como `package.json` e instala los _drivers_:
+
+```bash
+npm install pg mongodb
+npm install -D typescript @types/pg @types/node
+```
+
+Y el `.env`, con la clave de `academy_app` de A3.4:
+
+```bash
+DATABASE_URL=postgres://academy_app:cambia-esta-clave@localhost:5432/comparar
+MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
+```
+
+```json
+{
+  "compilerOptions": {
+    "target": "es2024",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src"]
+}
+```
+
+Si tu VM reenvía los puertos (Lima lo hace sola), `127.0.0.1:27017` y `localhost:5432` llevan a la VM por el mismo camino. `src/00-replica.ts` convierte el `mongod` en un _replica set_ de un nodo:
+
+```ts
+// Archivo: src/00-replica.ts
+// Convierte el mongod recién arrancado en un replica set de un nodo (lo necesitan las transacciones)
+import { MongoClient } from "mongodb";
+
+const cliente = await MongoClient.connect("mongodb://127.0.0.1:27017/?directConnection=true");
+const admin = cliente.db("admin");
+await admin.command({ replSetInitiate: { _id: "rs0", members: [{ _id: 0, host: "127.0.0.1:27017" }] } });
+
+// Tarda unos segundos en ser primario: hasta entonces no acepta escrituras
+for (let segundos = 0; segundos < 30; segundos++) {
+  if ((await admin.command({ hello: 1 })).isWritablePrimary) {
+    const { version } = await admin.command({ buildInfo: 1 });
+    console.log(`MongoDB ${version}: primario del replica set rs0 tras ${segundos} s`);
+    break;
+  }
+  await new Promise((r) => setTimeout(r, 1000));
+}
+await cliente.close();
+```
+
+```text
+$ node src/00-replica.ts
+MongoDB 8.2.6: primario del replica set rs0 tras 1 s
+```
+
+Los datos tienen que ser **idénticos** en las dos bases. `src/datos.ts` lee el temario real que exportaste en A3.5 (copia `cursos.csv` y `secciones.csv` en `comparar/datos/`) y genera los usuarios, sus lecturas y sus intentos con un generador con semilla. `Math.random()` no admite semilla, así que cada carga daría datos distintos:
+
+```ts
+// Archivo: src/datos.ts
+// Los mismos datos para las dos bases: el temario real (los CSV de A3.5) y usuarios generados con semilla fija
+import { readFileSync } from "node:fs";
+
+/** Un CSV con todos los campos entre comillas, como los que escribe exportar-temario.mjs */
+function leerCsv(ruta: string): Record<string, string>[] {
+  const [cabecera, ...filas] = readFileSync(ruta, "utf8").trim().split("\n").map((linea) =>
+    [...linea.matchAll(/"((?:[^"]|"")*)"/g)].map((m) => m[1]!.replaceAll('""', '"')),
+  );
+  return filas.map((f) => Object.fromEntries(cabecera!.map((c, i) => [c, f[i]!])));
+}
+
+// mulberry32: un generador pseudoaleatorio con semilla, para que cada carga dé los mismos datos
+function generador(semilla: number) {
+  return () => {
+    semilla = (semilla + 0x6d2b79f5) | 0;
+    let t = Math.imul(semilla ^ (semilla >>> 15), 1 | semilla);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export const cursos = leerCsv("datos/cursos.csv").map((c) => ({
+  id: c.id!, titulo: c.titulo!, nivel: c.nivel!, orden: Number(c.orden),
+}));
+export const secciones = leerCsv("datos/secciones.csv").map((s) => ({
+  id: s.id!, cursoId: s.curso_id!, titulo: s.titulo!, orden: Number(s.orden), minutos: Number(s.minutos),
+}));
+
+const azar = generador(42);
+const FIN = Date.UTC(2026, 9, 1); // 1 de octubre de 2026
+const DIA = 86_400_000;
+
+export const usuarios = Array.from({ length: 2000 }, (_, i) => {
+  const n = String(i + 1).padStart(4, "0");
+  return { id: `u${n}`, nombre: `Usuario ${i + 1}`, email: `u${n}@example.com` };
+});
+
+export const lecturas = usuarios.flatMap((u) =>
+  secciones
+    .filter(() => azar() < 0.3)
+    .map((s) => ({ usuarioId: u.id, cursoId: s.cursoId, seccionId: s.id, leidaEn: new Date(FIN - azar() * 300 * DIA) })),
+);
+
+const conSecciones = [...new Set(secciones.map((s) => s.cursoId))].sort();
+export const intentos = Array.from({ length: 6000 }, () => {
+  const nota = Math.floor(azar() * 6);
+  return {
+    usuarioId: usuarios[Math.floor(azar() * usuarios.length)]!.id,
+    cursoId: conSecciones[Math.floor(azar() * conSecciones.length)]!,
+    respuestas: Array.from({ length: 5 }, () => Math.floor(azar() * 4)),
+    nota,
+    aprobado: nota >= 4,
+    enviadoEn: new Date(FIN - azar() * 300 * DIA),
+  };
+});
+```
+
+`src/conexiones.ts`:
+
+```ts
+// Archivo: src/conexiones.ts
+// Las dos bases, en la misma máquina (la VM) y por el mismo camino de red
+import pg from "pg";
+import { MongoClient } from "mongodb";
+
+pg.types.setTypeParser(pg.types.builtins.INT8, (v) => Number(v)); // count(*) como número (A3.4)
+
+export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL!, max: 5 });
+export const mongo = await MongoClient.connect(process.env.MONGODB_URI!, { maxPoolSize: 5 });
+export const mdb = mongo.db("comparar");
+
+export async function cerrar() {
+  await pool.end();
+  await mongo.close();
+}
+```
+
+`src/01-cargar.ts` carga cada base con **su** diseño: PostgreSQL con tablas normalizadas y claves ajenas, como en A3.1, y MongoDB como esta plataforma, con `section_progress` y `quiz_attempts`, sus validadores `$jsonSchema` y las secciones dentro de su curso. Los índices son los equivalentes en las dos:
+
+```ts
+// Archivo: src/01-cargar.ts
+// Carga los mismos datos en PostgreSQL (tablas normalizadas) y en MongoDB (el diseño de la plataforma)
+import { cerrar, mdb, pool } from "./conexiones.ts";
+import { cursos, intentos, lecturas, secciones, usuarios } from "./datos.ts";
+
+// ── PostgreSQL ─────────────────────────────────────────────
+await pool.query(`
+  DROP TABLE IF EXISTS intentos, lecturas, secciones, cursos, usuarios;
+  CREATE TABLE cursos (id text PRIMARY KEY, titulo text NOT NULL, nivel text NOT NULL, orden int NOT NULL UNIQUE);
+  CREATE TABLE secciones (
+    id text PRIMARY KEY, curso_id text NOT NULL REFERENCES cursos(id),
+    titulo text NOT NULL, orden int NOT NULL, minutos int NOT NULL CHECK (minutos BETWEEN 10 AND 240));
+  CREATE TABLE usuarios (id text PRIMARY KEY, nombre text NOT NULL, email text NOT NULL UNIQUE);
+  CREATE TABLE lecturas (
+    usuario_id text NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    curso_id   text NOT NULL REFERENCES cursos(id),
+    seccion_id text NOT NULL REFERENCES secciones(id),
+    leida_en   timestamptz NOT NULL,
+    PRIMARY KEY (usuario_id, seccion_id));
+  CREATE TABLE intentos (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    usuario_id text NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    curso_id   text NOT NULL REFERENCES cursos(id),
+    respuestas smallint[] NOT NULL CHECK (cardinality(respuestas) = 5),
+    nota smallint NOT NULL CHECK (nota BETWEEN 0 AND 5),
+    aprobado boolean NOT NULL,
+    enviado_en timestamptz NOT NULL);
+`);
+
+/** INSERT de muchas filas en un solo viaje: un array por columna y unnest */
+async function insertarPg(tabla: string, columnas: Record<string, string>, filas: Record<string, unknown>[]) {
+  const nombres = Object.keys(columnas);
+  const arrays = nombres.map((c) => filas.map((f) => f[c]));
+  const unnest = nombres.map((c, i) => `$${i + 1}::${columnas[c]}[]`).join(", ");
+  const sqlColumnas = nombres.map((c) => c.replace(/[A-Z]/g, (l) => "_" + l.toLowerCase())).join(", ");
+  await pool.query(`INSERT INTO ${tabla} (${sqlColumnas}) SELECT * FROM unnest(${unnest})`, arrays);
+}
+
+const inicioPg = performance.now();
+await insertarPg("cursos", { id: "text", titulo: "text", nivel: "text", orden: "int" }, cursos);
+await insertarPg("secciones", { id: "text", cursoId: "text", titulo: "text", orden: "int", minutos: "int" }, secciones);
+await insertarPg("usuarios", { id: "text", nombre: "text", email: "text" }, usuarios);
+await insertarPg("lecturas", { usuarioId: "text", cursoId: "text", seccionId: "text", leidaEn: "timestamptz" }, lecturas);
+// respuestas es un array en cada fila, y unnest aplanaría un array de arrays: viaja como texto
+// ('{1,0,3,1,2}') y se convierte en el SELECT
+await pool.query(
+  `INSERT INTO intentos (usuario_id, curso_id, respuestas, nota, aprobado, enviado_en)
+   SELECT u, c, r::smallint[], n, a, e
+   FROM unnest($1::text[], $2::text[], $3::text[], $4::smallint[], $5::boolean[], $6::timestamptz[]) AS t(u, c, r, n, a, e)`,
+  [
+    intentos.map((i) => i.usuarioId), intentos.map((i) => i.cursoId), intentos.map((i) => `{${i.respuestas.join(",")}}`),
+    intentos.map((i) => i.nota), intentos.map((i) => i.aprobado), intentos.map((i) => i.enviadoEn),
+  ],
+);
+await pool.query(`
+  CREATE INDEX ON lecturas (leida_en);
+  CREATE INDEX ON intentos (usuario_id, curso_id, enviado_en DESC);
+`);
+await pool.query("VACUUM ANALYZE"); // aparte: varias sentencias en un texto son una transacción, y VACUUM no admite estar en una
+const msPg = Math.round(performance.now() - inicioPg);
+
+// ── MongoDB ────────────────────────────────────────────────
+await mdb.dropDatabase();
+const validador = (required: string[], properties: Record<string, object>) => ({
+  validator: { $jsonSchema: { bsonType: "object", required, properties } },
+});
+await mdb.createCollection("courses");
+await mdb.createCollection("users");
+await mdb.createCollection("section_progress", validador(["userId", "courseId", "sectionId", "readAt"], {
+  userId: { bsonType: "string" }, courseId: { bsonType: "string", pattern: "^([BIA][1-8]|P1)$" },
+  sectionId: { bsonType: "string" }, readAt: { bsonType: "date" },
+}));
+await mdb.createCollection("quiz_attempts", validador(["userId", "courseId", "answers", "score", "passed", "submittedAt"], {
+  answers: { bsonType: "array", minItems: 5, maxItems: 5 }, score: { bsonType: "int", minimum: 0, maximum: 5 },
+  passed: { bsonType: "bool" }, submittedAt: { bsonType: "date" },
+}));
+
+const inicioMongo = performance.now();
+// Las secciones van DENTRO de su curso: siempre se leen juntas y nunca por separado
+await mdb.collection("courses").insertMany(cursos.map((c) => ({
+  _id: c.id as never, title: c.titulo, level: c.nivel, order: c.orden,
+  sections: secciones.filter((s) => s.cursoId === c.id).map((s) => ({ id: s.id, title: s.titulo, order: s.orden, minutes: s.minutos })),
+})));
+await mdb.collection("users").insertMany(usuarios.map((u) => ({ _id: u.id as never, name: u.nombre, email: u.email })));
+await mdb.collection("section_progress").insertMany(
+  lecturas.map((l) => ({ userId: l.usuarioId, courseId: l.cursoId, sectionId: l.seccionId, readAt: l.leidaEn })),
+);
+await mdb.collection("quiz_attempts").insertMany(intentos.map((i) => ({
+  userId: i.usuarioId, courseId: i.cursoId, answers: i.respuestas, score: i.nota, total: 5, passed: i.aprobado, submittedAt: i.enviadoEn,
+})));
+await mdb.collection("users").createIndex({ email: 1 }, { unique: true });
+await mdb.collection("section_progress").createIndex({ userId: 1, sectionId: 1 }, { unique: true });
+await mdb.collection("section_progress").createIndex({ readAt: 1 });
+await mdb.collection("quiz_attempts").createIndex({ userId: 1, courseId: 1, submittedAt: -1 });
+const msMongo = Math.round(performance.now() - inicioMongo);
+
+const { rows: [pgN] } = await pool.query(
+  "SELECT (SELECT count(*) FROM lecturas) AS lecturas, (SELECT count(*) FROM intentos) AS intentos",
+);
+console.log("PostgreSQL:", pgN, `· carga e índices en ${msPg} ms`);
+console.log("MongoDB:   ", {
+  lecturas: await mdb.collection("section_progress").countDocuments(),
+  intentos: await mdb.collection("quiz_attempts").countDocuments(),
+}, `· carga e índices en ${msMongo} ms`);
+await cerrar();
+```
+
+```text
+$ node --env-file=.env src/01-cargar.ts
+PostgreSQL: { lecturas: 59349, intentos: 6000 } · carga e índices en 616 ms
+MongoDB:    { lecturas: 59349, intentos: 6000 } · carga e índices en 783 ms
+```
+
+Las mismas 59 349 lecturas y 6000 intentos en las dos bases, y una carga de tiempo parecido. La de PostgreSQL incluye `VACUUM ANALYZE`.
+
+<Callout type="risk">
+
+- **Compara cada base con su mejor diseño, no con el de la otra:** meter las secciones en una colección aparte y hacer `$lookup` en cada consulta sería usar MongoDB como si fuera SQL, y perdería. Al revés, guardar en PostgreSQL un `jsonb` con todo el progreso de un usuario sería usarlo como MongoDB. El diseño de cada uno sale de cómo se leen los datos (I4).
+- **Mide en la misma máquina y por el mismo camino:** una base local contra otra en la red o en la nube compara la red. Y con los datos en caché, como aquí, mides la base de datos, no el disco.
+- **Una VM de 2 GB no es un servidor de producción:** las cifras de esta sección sirven para comparar las dos bases entre sí, no para saber cuánto tardarán en Atlas o en Neon.
+
+</Callout>
+
+## Paso 2: qué datos incorrectos rechaza cada una
+
+`src/02-esquema.ts` intenta escribir los errores que tiene una aplicación real en las dos bases:
+
+```ts
+// Archivo: src/02-esquema.ts
+// Qué datos incorrectos rechaza cada base: claves ajenas y CHECK frente a $jsonSchema e índices únicos
+import { cerrar, mdb, pool } from "./conexiones.ts";
+
+const progreso = mdb.collection("section_progress");
+const intentos = mdb.collection("quiz_attempts");
+const ahora = new Date("2026-10-01T10:00:00Z");
+// Una sección que u0002 no ha leído, para que el último caso no choque con un duplicado
+const { rows: [{ libre }] } = await pool.query(
+  "SELECT min(id) AS libre FROM secciones WHERE id NOT IN (SELECT seccion_id FROM lecturas WHERE usuario_id = 'u0002')",
+);
+
+/** Ejecuta un intento de escritura y resume si entró o qué error dio */
+async function probar(fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    return "ACEPTA";
+  } catch (error) {
+    // De PostgreSQL basta el nombre de la restricción; de MongoDB, el principio del mensaje
+    const e = error as { message: string; constraint?: string; codeName?: string };
+    return `rechaza: ${e.constraint ?? e.message.split("\n")[0]!.slice(0, 45)}`;
+  }
+}
+
+const casos: [string, () => Promise<unknown>, () => Promise<unknown>][] = [
+  [
+    "una lectura de una sección que no existe (B1.99)",
+    () => pool.query("INSERT INTO lecturas VALUES ('u0001', 'B1', 'B1.99', now())"),
+    () => progreso.insertOne({ userId: "u0001", courseId: "B1", sectionId: "B1.99", readAt: ahora }),
+  ],
+  [
+    "una lectura de un usuario que no existe",
+    () => pool.query("INSERT INTO lecturas VALUES ('u9999', 'B1', 'B1.1', now())"),
+    () => progreso.insertOne({ userId: "u9999", courseId: "B1", sectionId: "B1.1", readAt: ahora }),
+  ],
+  [
+    "la misma sección leída dos veces",
+    () => pool.query("INSERT INTO lecturas SELECT usuario_id, curso_id, seccion_id, now() FROM lecturas LIMIT 1"),
+    async () => progreso.insertOne({ ...(await progreso.findOne({}, { projection: { _id: 0 } })) }),
+  ],
+  [
+    "un curso con un id mal escrito (Z9)",
+    () => pool.query("INSERT INTO lecturas VALUES ('u0001', 'Z9', 'B1.1', now())"),
+    () => progreso.insertOne({ userId: "u0001", courseId: "Z9", sectionId: "B1.1", readAt: ahora }),
+  ],
+  [
+    "una nota de 9",
+    () => pool.query("INSERT INTO intentos (usuario_id, curso_id, respuestas, nota, aprobado, enviado_en) VALUES ('u0001', 'B1', '{0,0,0,0,0}', 9, true, now())"),
+    () => intentos.insertOne({ userId: "u0001", courseId: "B1", answers: [0, 0, 0, 0, 0], score: 9, total: 5, passed: true, submittedAt: ahora }),
+  ],
+  [
+    "una fecha guardada como texto",
+    () => pool.query("INSERT INTO lecturas VALUES ('u0001', 'B1', 'B1.2', 'ayer')"),
+    () => progreso.insertOne({ userId: "u0001", courseId: "B1", sectionId: "B1.2", readAt: "ayer" }),
+  ],
+  [
+    "un campo que no existe en el modelo",
+    () => pool.query("INSERT INTO lecturas (usuario_id, curso_id, seccion_id, leida_en, nota) VALUES ('u0002', $1, $2, now(), 5)", [libre.split(".")[0], libre]),
+    () => progreso.insertOne({ userId: "u0002", courseId: libre.split(".")[0], sectionId: libre, readAt: ahora, nota: 5 }),
+  ],
+];
+
+console.log("Caso".padEnd(50), "PostgreSQL".padEnd(42), "MongoDB");
+for (const [nombre, enPg, enMongo] of casos) {
+  console.log(nombre.padEnd(50), (await probar(enPg)).padEnd(42), await probar(enMongo));
+}
+
+// Borrar un usuario: ¿qué pasa con sus lecturas?
+const usuario = "u0003";
+await pool.query("DELETE FROM usuarios WHERE id = $1", [usuario]);
+await mdb.collection("users").deleteOne({ _id: usuario as never });
+const { rows: [pgQuedan] } = await pool.query("SELECT count(*) AS n FROM lecturas WHERE usuario_id = $1", [usuario]);
+const mongoQuedan = await progreso.countDocuments({ userId: usuario });
+console.log(`\nTras borrar ${usuario}: lecturas que quedan en PostgreSQL ${pgQuedan.n}, en MongoDB ${mongoQuedan}`);
+
+// Deshace las escrituras de prueba que entraron, para que las medidas siguientes partan de los datos de la carga
+await progreso.deleteMany({ $or: [{ sectionId: "B1.99" }, { userId: { $in: ["u9999", "u0003"] } }, { nota: { $exists: true } }] });
+await cerrar();
+```
+
+```text
+$ node --env-file=.env src/02-esquema.ts
+Caso                                               PostgreSQL                                 MongoDB
+una lectura de una sección que no existe (B1.99)   rechaza: lecturas_seccion_id_fkey          ACEPTA
+una lectura de un usuario que no existe            rechaza: lecturas_usuario_id_fkey          ACEPTA
+la misma sección leída dos veces                   rechaza: lecturas_pkey                     rechaza: E11000 duplicate key error collection: compar
+un curso con un id mal escrito (Z9)                rechaza: lecturas_curso_id_fkey            rechaza: Document failed validation
+una nota de 9                                      rechaza: intentos_nota_check               rechaza: Document failed validation
+una fecha guardada como texto                      rechaza: invalid input syntax for type timestamp with  rechaza: Document failed validation
+un campo que no existe en el modelo                rechaza: column "nota" of relation "lecturas" does not ACEPTA
+
+Tras borrar u0003: lecturas que quedan en PostgreSQL 0, en MongoDB 25
+```
+
+- **Lo que rechazan las dos:** una lectura repetida (índice único), un curso con un formato imposible, una nota fuera de rango y una fecha que no es fecha. El `$jsonSchema` de MongoDB cubre los tipos y los rangos de un documento, igual que los `CHECK` y los tipos de una tabla.
+- **Lo que solo rechaza PostgreSQL:** una lectura de una sección o de un usuario que **no existen**. Un validador de MongoDB ve un documento, no puede mirar en otra colección. La plataforma lo compensa en el código: `setSectionRead` comprueba con `getSectionById` que la sección existe antes de escribir. Funciona mientras todo el código pase por ese servicio.
+- **Un campo que no existe en el modelo:** PostgreSQL no tiene columna `nota` en `lecturas`; MongoDB guarda el campo extra, porque su validador no tiene `additionalProperties: false`. Los de la plataforma tampoco lo tienen.
+- **Borrar al usuario:** en PostgreSQL, sus 25 lecturas se van con él (`ON DELETE CASCADE`). En MongoDB se quedan, huérfanas, hasta que el código las borre.
+
+<Callout type="risk">
+
+- **En MongoDB, la integridad entre colecciones es responsabilidad del código:** que una lectura apunte a una sección existente, o que borrar a un usuario borre sus datos, lo tiene que hacer cada servicio, en cada camino (la API, un _script_, una migración). En PostgreSQL lo hace la base de datos para todos.
+- **Un validador que no se actualiza no protege nada:** en esta plataforma, `db-setup` no puede cambiar los validadores en Atlas (el usuario no tiene permiso para `collMod`, Tanda 12), así que un campo nuevo no queda validado hasta que alguien lo cambie a mano en Atlas. Un `ALTER TABLE` en una migración va con el código.
+- **`additionalProperties: false` es un arma de doble filo:** rechaza los campos que no conoce, también los de una versión nueva del código que se despliega antes que el validador. Si lo activas, cambia el validador antes que el código.
+
+</Callout>
+
+## Paso 3: las mismas consultas, medidas de forma justa
+
+`src/medir.ts` repite cada consulta 200 veces, tras 20 de calentamiento, y se queda con la mediana: una sola medida varía mucho de una ejecución a otra.
+
+```ts
+// Archivo: src/medir.ts
+// Mediana de N ejecuciones, en milisegundos, tras unas de calentamiento
+export async function medir(fn: () => Promise<unknown>, veces = 200): Promise<number> {
+  for (let i = 0; i < 20; i++) await fn();
+  const tiempos: number[] = [];
+  for (let i = 0; i < veces; i++) {
+    const inicio = performance.now();
+    await fn();
+    tiempos.push(performance.now() - inicio);
+  }
+  tiempos.sort((a, b) => a - b);
+  return Math.round(tiempos[Math.floor(veces / 2)]! * 1000) / 1000;
+}
+```
+
+`src/03-consultas.ts` escribe cada consulta en las dos bases, **comprueba que dan exactamente el mismo resultado** y solo entonces la mide:
+
+```ts
+// Archivo: src/03-consultas.ts
+// Las mismas cuatro consultas en las dos bases: primero se comprueba que dan lo mismo, después se miden
+import { isDeepStrictEqual } from "node:util";
+import { cerrar, mdb, pool } from "./conexiones.ts";
+import { medir } from "./medir.ts";
+
+const U = "u0042";
+const DESDE = new Date("2026-09-01T00:00:00Z");
+const progreso = mdb.collection("section_progress");
+
+const consultas: Record<string, { pg: () => Promise<unknown>; mongo: () => Promise<unknown> }> = {
+  // 1. El panel de un usuario: secciones leídas y totales de cada curso
+  "panel de un usuario": {
+    pg: async () =>
+      (await pool.query(
+        `SELECT c.id AS curso, count(l.seccion_id) AS leidas,
+                (SELECT count(*) FROM secciones s WHERE s.curso_id = c.id) AS total
+         FROM cursos c LEFT JOIN lecturas l ON l.curso_id = c.id AND l.usuario_id = $1
+         GROUP BY c.id ORDER BY c.orden`, [U])).rows,
+    mongo: () =>
+      mdb.collection("courses").aggregate([
+        { $sort: { order: 1 } },
+        { $lookup: { from: "section_progress", let: { c: "$_id" }, as: "leidas",
+            pipeline: [{ $match: { userId: U, $expr: { $eq: ["$courseId", "$$c"] } } }, { $count: "n" }] } },
+        { $project: { _id: 0, curso: "$_id", leidas: { $ifNull: [{ $first: "$leidas.n" }, 0] }, total: { $size: "$sections" } } },
+      ]).toArray(),
+  },
+  // 1b. El mismo panel como lo hace la plataforma (progress.repo.ts, allReadSectionIds): un find de las
+  //     lecturas del usuario, y la cuenta por curso en el código
+  "panel, como la plataforma": {
+    pg: async () =>
+      (await pool.query(
+        `SELECT c.id AS curso, count(l.seccion_id) AS leidas,
+                (SELECT count(*) FROM secciones s WHERE s.curso_id = c.id) AS total
+         FROM cursos c LEFT JOIN lecturas l ON l.curso_id = c.id AND l.usuario_id = $1
+         GROUP BY c.id ORDER BY c.orden`, [U])).rows,
+    mongo: async () => {
+      const [leidas, cursos] = await Promise.all([
+        progreso.find({ userId: U }, { projection: { _id: 0, courseId: 1 } }).toArray(),
+        mdb.collection("courses").find({}, { projection: { order: 1, total: { $size: "$sections" } } }).sort({ order: 1 }).toArray(),
+      ]);
+      const porCurso = Map.groupBy(leidas, (l) => l.courseId as string);
+      return cursos.map((c) => ({ curso: c._id, leidas: porCurso.get(c._id as unknown as string)?.length ?? 0, total: c.total }));
+    },
+  },
+  // 2. La última nota de cada curso de un usuario
+  "última nota por curso": {
+    pg: async () =>
+      (await pool.query(
+        `SELECT DISTINCT ON (curso_id) curso_id AS curso, nota FROM intentos
+         WHERE usuario_id = $1 ORDER BY curso_id, enviado_en DESC`, [U])).rows,
+    mongo: () =>
+      mdb.collection("quiz_attempts").aggregate([
+        { $match: { userId: U } },
+        { $sort: { courseId: 1, submittedAt: -1 } },
+        { $group: { _id: "$courseId", nota: { $first: "$score" } } },
+        { $sort: { _id: 1 } },
+        { $project: { _id: 0, curso: "$_id", nota: 1 } },
+      ]).toArray(),
+  },
+  // 3. Las lecturas de un usuario con el título de su sección (una relación)
+  "lecturas con su título": {
+    pg: async () =>
+      (await pool.query(
+        `SELECT l.seccion_id AS seccion, s.titulo FROM lecturas l JOIN secciones s ON s.id = l.seccion_id
+         WHERE l.usuario_id = $1 ORDER BY l.seccion_id`, [U])).rows,
+    mongo: () =>
+      progreso.aggregate([
+        { $match: { userId: U } },
+        { $lookup: { from: "courses", localField: "courseId", foreignField: "_id", as: "curso" } },
+        { $project: { _id: 0, seccion: "$sectionId",
+            titulo: { $first: { $map: { input: { $filter: { input: { $first: "$curso.sections" }, cond: { $eq: ["$$this.id", "$sectionId"] } } }, in: "$$this.title" } } } } },
+        { $sort: { seccion: 1 } },
+      ]).toArray(),
+  },
+  // 4. Un informe de administración: las 5 secciones más leídas desde el 1 de septiembre
+  "informe: 5 más leídas": {
+    pg: async () =>
+      (await pool.query(
+        `SELECT seccion_id AS seccion, count(*) AS lecturas FROM lecturas WHERE leida_en >= $1
+         GROUP BY seccion_id ORDER BY lecturas DESC, seccion_id LIMIT 5`, [DESDE])).rows,
+    mongo: () =>
+      progreso.aggregate([
+        { $match: { readAt: { $gte: DESDE } } },
+        { $group: { _id: "$sectionId", lecturas: { $sum: 1 } } },
+        { $sort: { lecturas: -1, _id: 1 } },
+        { $limit: 5 },
+        { $project: { _id: 0, seccion: "$_id", lecturas: 1 } },
+      ]).toArray(),
+  },
+};
+
+console.log("Consulta".padEnd(24), "¿mismo resultado?".padEnd(18), "filas".padEnd(6), "PostgreSQL".padEnd(12), "MongoDB");
+for (const [nombre, { pg, mongo }] of Object.entries(consultas)) {
+  const [a, b] = [await pg(), await mongo()];
+  const igual = isDeepStrictEqual(a, b);
+  if (!igual) console.log({ pg: (a as unknown[]).slice(0, 3), mongo: (b as unknown[]).slice(0, 3) });
+  const [tPg, tMongo] = [await medir(pg), await medir(mongo)];
+  console.log(nombre.padEnd(24), (igual ? "sí" : "NO").padEnd(18), String((a as unknown[]).length).padEnd(6), `${tPg} ms`.padEnd(12), `${tMongo} ms`);
+}
+await cerrar();
+```
+
+```text
+$ node --env-file=.env src/03-consultas.ts
+Consulta                 ¿mismo resultado?  filas  PostgreSQL   MongoDB
+panel de un usuario      sí                 24     0.387 ms     1.285 ms
+panel, como la plataforma sí                 24     0.374 ms     0.401 ms
+última nota por curso    sí                 3      0.226 ms     0.316 ms
+lecturas con su título   sí                 30     0.25 ms      0.512 ms
+informe: 5 más leídas    sí                 5      0.84 ms      3.008 ms
+```
+
+- **El panel de un usuario empata si se escribe bien en cada base:** con un `$lookup` por cada uno de los 24 cursos, MongoDB tarda 3,3 veces más (1,29 frente a 0,39 ms). Escrito como lo hace la plataforma (un `find` de las lecturas del usuario y la cuenta en el código), 0,40 frente a 0,37 ms. El diseño de la consulta importa más que la base de datos.
+- **La última nota y las lecturas con su título:** PostgreSQL gana, más en la que necesita una relación. Un `JOIN` es lo que mejor hace una base relacional, y `$lookup` es una herramienta que MongoDB tiene pero no está pensada para usarse en cada consulta.
+- **El informe de administración, unas 3,6 veces más rápido en PostgreSQL** (0,84 frente a 3,0 ms), con un índice sobre la fecha en las dos.
+
+Ese último número merece una segunda mirada: los dos índices son solo sobre la fecha, así que las dos bases tienen que ir a la tabla o a los documentos para leer la sección. `src/03b-informe-cubierto.ts` repite el informe con un índice que **cubre** la consulta en las dos (A3.3, y _covered queries_ en A2.2):
+
+```ts
+// Archivo: src/03b-informe-cubierto.ts
+// El informe con un índice que lo cubre en las dos bases: fecha y sección, sin ir a la tabla ni al documento
+import { cerrar, mdb, pool } from "./conexiones.ts";
+import { medir } from "./medir.ts";
+
+const DESDE = new Date("2026-09-01T00:00:00Z");
+const progreso = mdb.collection("section_progress");
+
+await pool.query("CREATE INDEX IF NOT EXISTS lecturas_fecha_seccion ON lecturas (leida_en, seccion_id)");
+await pool.query("VACUUM ANALYZE lecturas");
+await progreso.createIndex({ readAt: 1, sectionId: 1 });
+
+const pg = async () =>
+  (await pool.query(
+    `SELECT seccion_id AS seccion, count(*) AS lecturas FROM lecturas WHERE leida_en >= $1
+     GROUP BY seccion_id ORDER BY lecturas DESC, seccion_id LIMIT 5`, [DESDE])).rows;
+const pipeline = [
+  { $match: { readAt: { $gte: DESDE } } },
+  { $project: { _id: 0, sectionId: 1 } }, // solo campos del índice: la consulta puede quedarse en él
+  { $group: { _id: "$sectionId", lecturas: { $sum: 1 } } },
+  { $sort: { lecturas: -1, _id: 1 } },
+  { $limit: 5 },
+];
+const mongo = () => progreso.aggregate(pipeline, { hint: { readAt: 1, sectionId: 1 } }).toArray();
+
+const { rows: plan } = await pool.query(
+  `EXPLAIN (ANALYZE, COSTS OFF, BUFFERS OFF) SELECT seccion_id, count(*) FROM lecturas WHERE leida_en >= $1 GROUP BY seccion_id`, [DESDE]);
+const nodoPg = plan.map((r) => r["QUERY PLAN"] as string).find((l) => l.includes("Scan"))!.trim();
+const explicado = JSON.stringify(await progreso.aggregate(pipeline, { hint: { readAt: 1, sectionId: 1 } }).explain("executionStats"));
+
+console.log("PostgreSQL:", nodoPg.replace(/\(actual.*/, "").trim(), `· ${await medir(pg)} ms`);
+console.log("MongoDB:   ", `documentos leídos ${explicado.match(/"totalDocsExamined":(\d+)/)?.[1]}, claves ${explicado.match(/"totalKeysExamined":(\d+)/)?.[1]}`, `· ${await medir(mongo)} ms`);
+
+await pool.query("DROP INDEX lecturas_fecha_seccion");
+await progreso.dropIndex("readAt_1_sectionId_1");
+await cerrar();
+```
+
+```text
+$ node --env-file=.env src/03b-informe-cubierto.ts
+PostgreSQL: ->  Index Only Scan using lecturas_fecha_seccion on lecturas · 0.715 ms
+MongoDB:    documentos leídos 0, claves 6129 · 1.232 ms
+```
+
+Con el índice adecuado, MongoDB ya no lee ningún documento (solo las 6129 claves del índice) y la diferencia baja de 3,6 a 1,7 veces. Las agregaciones siguen siendo más rápidas en PostgreSQL, pero el índice pesaba más que la base de datos.
+
+<Callout type="risk">
+
+- **No compares una consulta bien escrita contra una mal escrita:** el panel con `$lookup` habría "demostrado" que MongoDB es tres veces más lento, y era el diseño de la consulta. Antes de concluir nada, comprueba con `EXPLAIN` y con `explain()` que cada base usa el índice que le corresponde.
+- **Comprueba que las dos consultas dan lo mismo:** una versión que olvida un filtro o un curso sin lecturas parecería más rápida. `isDeepStrictEqual` lo impide.
+- **Décimas de milisegundo no deciden una base de datos:** para una página que hace 3 consultas, 0,5 ms de diferencia se pierden en la red y en el renderizado. Importan cuando una consulta se repite miles de veces por segundo o recorre millones de filas.
+
+</Callout>
+
+## Paso 4: escrituras y transacciones
+
+`src/04-escrituras.ts` mide la escritura más frecuente de la plataforma (marcar una sección como leída) y una transacción de dos escrituras (un intento y su resumen, como en A2.1). Las dos bases confirman solo cuando el dato está a salvo en disco:
+
+```ts
+// Archivo: src/04-escrituras.ts
+// Escrituras: una sola fila o documento, y una transacción de dos escrituras (como en A2.1)
+import { cerrar, mdb, mongo, pool } from "./conexiones.ts";
+import { medir } from "./medir.ts";
+
+// Durabilidad equivalente: PostgreSQL confirma tras escribir el WAL en disco (synchronous_commit = on);
+// MongoDB, con writeConcern "majority" (el valor por defecto en un replica set), tras escribir su diario
+const { rows: [{ synchronous_commit }] } = await pool.query("SHOW synchronous_commit");
+const wc = (await mdb.admin().command({ getDefaultRWConcern: 1 })).defaultWriteConcern;
+console.log(`PostgreSQL synchronous_commit = ${synchronous_commit} · MongoDB writeConcern = ${JSON.stringify(wc)}\n`);
+
+await pool.query(`
+  DROP TABLE IF EXISTS resumen;
+  CREATE TABLE resumen (usuario_id text NOT NULL, curso_id text NOT NULL, intentos int NOT NULL,
+                        PRIMARY KEY (usuario_id, curso_id))`);
+await mdb.collection("resumen").deleteMany({});
+
+// Lecturas válidas que todavía no existen (usuario y sección reales): las mismas en las dos bases.
+// 440 = 20 de calentamiento + 200 medidas, para cada base
+const { rows: libres } = await pool.query(`
+  SELECT u.id AS usuario, s.id AS seccion, s.curso_id AS curso
+  FROM usuarios u CROSS JOIN secciones s
+  WHERE NOT EXISTS (SELECT 1 FROM lecturas l WHERE l.usuario_id = u.id AND l.seccion_id = s.id)
+  ORDER BY u.id, s.id LIMIT 440`);
+let n = 0; // la siguiente lectura libre
+let r = 0; // y el siguiente resumen (sin clave ajena: cualquier usuario sirve)
+const intento = () => ({ answers: [1, 0, 3, 1, 2], score: 4, total: 5, passed: true, submittedAt: new Date() });
+
+const escrituras: Record<string, { pg: () => Promise<unknown>; mongo: () => Promise<unknown> }> = {
+  "marcar una sección leída": {
+    pg: () => {
+      const l = libres[n++]!;
+      return pool.query("INSERT INTO lecturas VALUES ($1, $2, $3, now())", [l.usuario, l.curso, l.seccion]);
+    },
+    mongo: () => {
+      const l = libres[n++]!;
+      return mdb.collection("section_progress").insertOne({ userId: l.usuario, courseId: l.curso, sectionId: l.seccion, readAt: new Date() });
+    },
+  },
+  "intento + resumen (transacción)": {
+    pg: async () => {
+      const cliente = await pool.connect();
+      try {
+        const u = `r${r++}`;
+        await cliente.query("BEGIN");
+        await cliente.query(
+          "INSERT INTO intentos (usuario_id, curso_id, respuestas, nota, aprobado, enviado_en) VALUES ('u0001', 'B1', '{1,0,3,1,2}', 4, true, now())");
+        await cliente.query(
+          "INSERT INTO resumen VALUES ($1, 'B1', 1) ON CONFLICT (usuario_id, curso_id) DO UPDATE SET intentos = resumen.intentos + 1", [u]);
+        await cliente.query("COMMIT");
+      } catch (error) {
+        await cliente.query("ROLLBACK");
+        throw error;
+      } finally {
+        cliente.release();
+      }
+    },
+    mongo: async () => {
+      const sesion = mongo.startSession();
+      try {
+        const u = `r${r++}`;
+        await sesion.withTransaction(async () => {
+          await mdb.collection("quiz_attempts").insertOne({ userId: "u0001", courseId: "B1", ...intento() }, { session: sesion });
+          await mdb.collection("resumen").updateOne(
+            { userId: u, courseId: "B1" }, { $inc: { intentos: 1 } }, { upsert: true, session: sesion });
+        });
+      } finally {
+        await sesion.endSession();
+      }
+    },
+  },
+};
+
+console.log("Escritura".padEnd(34), "PostgreSQL".padEnd(12), "MongoDB");
+for (const [nombre, { pg, mongo: enMongo }] of Object.entries(escrituras)) {
+  console.log(nombre.padEnd(34), `${await medir(pg)} ms`.padEnd(12), `${await medir(enMongo)} ms`);
+}
+
+// Deja los datos como tras la carga
+const nuevas = libres.map((l) => [l.usuario, l.seccion]);
+await pool.query("DELETE FROM intentos WHERE id > 6000; DROP TABLE resumen");
+await pool.query("DELETE FROM lecturas WHERE (usuario_id, seccion_id) IN (SELECT * FROM unnest($1::text[], $2::text[]))",
+  [nuevas.map((x) => x[0]), nuevas.map((x) => x[1])]);
+await mdb.collection("section_progress").deleteMany({ $or: libres.map((l) => ({ userId: l.usuario, sectionId: l.seccion })) });
+await mdb.collection("quiz_attempts").deleteMany({ submittedAt: { $gt: new Date("2026-10-02") } });
+await mdb.collection("resumen").drop();
+await cerrar();
+```
+
+```text
+$ node --env-file=.env src/04-escrituras.ts
+PostgreSQL synchronous_commit = on · MongoDB writeConcern = {"w":"majority","wtimeout":0}
+
+Escritura                          PostgreSQL   MongoDB
+marcar una sección leída           0.281 ms     0.402 ms
+intento + resumen (transacción)    0.666 ms     0.893 ms
+```
+
+- **PostgreSQL escribe más rápido aquí:** 0,28 frente a 0,40 ms por lectura, y eso comprobando tres claves ajenas en cada `INSERT`.
+- **Las dos tienen transacciones de verdad:** todo o nada, con un coste parecido (0,67 frente a 0,89 ms). La diferencia práctica es otra: en MongoDB solo funcionan en un _replica set_, y pensadas para unos pocos documentos, porque el diseño de documentos busca que casi todo cambie en uno solo; en PostgreSQL, cualquier sentencia es ya una transacción.
+
+<Callout type="risk">
+
+- **Revisa lo que mides antes de creerlo:** en la primera versión de este archivo, el `INSERT` de PostgreSQL usaba usuarios que no existían, la clave ajena lo rechazaba y un `.catch(() => {})` escondía el error. PostgreSQL salía siete veces más lento… midiendo errores. Nunca silencies los errores de una prueba de rendimiento.
+- **La durabilidad tiene que ser la misma:** con `synchronous_commit = off` en PostgreSQL o `{ w: 1, j: false }` en MongoDB, cualquiera de las dos escribe más rápido, a cambio de perder las últimas escrituras si el servidor se cae. Compara con la configuración que usarías en producción.
+- **Una transacción larga bloquea en las dos:** las reglas de A3.3 (transacciones cortas, bloquear en el mismo orden, reintentar ante un conflicto) valen también para MongoDB, que aborta la transacción con un `WriteConflict`.
+
+</Callout>
+
+## Paso 5: lo que no se mide en un portátil
+
+Las medidas anteriores comparan una base de datos en un solo servidor. Las decisiones de verdad dependen también de cosas que no caben en una VM:
+
+| Criterio               | PostgreSQL                                                            | MongoDB                                                                    |
+| ---------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Esquema                | Fijo, con migraciones que van con el código (A3.4)                    | Flexible: cada documento puede tener otra forma; la validación es opcional |
+| Relaciones             | `JOIN`, claves ajenas y `ON DELETE`, en la base de datos              | Documentos incrustados o referencias; la integridad, en el código          |
+| Consultas e informes   | SQL, funciones de ventana, CTE recursivas (A3.2, A3.5)                | _Pipeline_ de agregación; `$lookup` para lo ocasional                      |
+| Transacciones          | Siempre, con niveles de aislamiento (A3.3)                            | En _replica set_; pensadas para pocos documentos                           |
+| Escalar las escrituras | Un servidor principal; más allá, particiones o extensiones como Citus | _Sharding_ incluido: repartir una colección entre servidores               |
+| Tipado en TypeScript   | Tipos inferidos del esquema con Drizzle (A3.4)                        | `Collection<T>` describe lo que esperas, no lo que hay                     |
+| Servicio gestionado    | Neon, Supabase, RDS…                                                  | Atlas                                                                      |
+
+- **Escalar:** casi ninguna aplicación necesita repartir sus escrituras entre servidores. Un solo PostgreSQL o un solo _replica set_ de MongoDB aguantan muchísimo más que esta plataforma. El _sharding_ de MongoDB importa cuando una colección no cabe en un servidor, y para entonces sabrás si es tu caso.
+- **Tipado:** `db.collection<QuizAttemptDoc>()` es una promesa que hace tu código, no una comprobación. En A3.4 los tipos salían del esquema, y la base de datos rechazaba lo que no encajaba.
+- **El equipo y lo que ya existe:** la base de datos que el equipo conoce y que la plataforma ya usa tiene una ventaja enorme. Cambiarla cuesta migraciones, nuevos fallos y aprender de nuevo.
+
+## Paso 6: cuándo brilla cada una, y por qué no elegir solo una
+
+| Necesidad                                                | Mejor opción típica              | Por qué (lo que has visto)                                                            |
+| -------------------------------------------------------- | -------------------------------- | ------------------------------------------------------------------------------------- |
+| Muchas relaciones N:M e informes cruzados                | PostgreSQL                       | `JOIN` e informes más rápidos (Paso 3), claves ajenas (Paso 2), CTE recursivas (A3.5) |
+| Documentos que se leen y escriben enteros                | MongoDB                          | El panel de la plataforma: un `find` y listo; sin migraciones para cambiar la forma   |
+| Dinero, inventario, plazas: invariantes entre filas      | PostgreSQL                       | Integridad referencial y `SERIALIZABLE` (A3.3)                                        |
+| Datos de forma muy variable (eventos, configuración)     | MongoDB, o `jsonb` en PostgreSQL | Los dos los guardan bien; `jsonb` con GIN (A3.2)                                      |
+| Prototipo que cambia cada día                            | MongoDB                          | Sin migraciones mientras el modelo se mueve                                           |
+| Varias personas o servicios escribiendo los mismos datos | PostgreSQL                       | La base de datos protege las reglas para todos, no solo para tu código                |
+
+Las dos no se excluyen. **Persistencia políglota** es usar cada almacén para lo que mejor hace: PostgreSQL para el núcleo transaccional, MongoDB para un catálogo de documentos, Redis para la caché o las colas. El precio es real: dos sistemas que mantener, sin transacciones ni `JOIN` entre ellos, y datos que hay que sincronizar. Antes de añadir un segundo almacén, comprueba si el primero ya lo resuelve: PostgreSQL tiene `jsonb` y búsqueda de texto (A3.3); MongoDB tiene transacciones.
+
+Lo que lo hace posible sin reescribir la aplicación es lo que hiciste en A3.4: **repositorios con un contrato que no habla de ninguna base de datos**. El servicio no sabe si `quizAttempts` es MongoDB o PostgreSQL, y los mismos tests lo prueban con las dos.
+
+<Callout type="risk">
+
+- **"Escala mejor" no es un argumento hasta que tienes el problema:** elegir MongoDB por el _sharding_, o PostgreSQL por si algún día hay informes, es decidir por un futuro que quizá no llegue. Decide por los patrones de acceso que tienes, y deja la puerta abierta con los repositorios.
+- **Dos bases de datos son dos fuentes de verdad:** si un dato vive en las dos, alguna vez no coincidirán. Que cada dato tenga **un** dueño, y que el otro almacén sea una copia que se puede reconstruir.
+- **No cambies de base de datos por una consulta:** un informe lento en MongoDB se arregla antes con un índice (Paso 3) o una colección precalculada que migrando la plataforma entera.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe un ADR (_Architecture Decision Record_) que justifique por qué Dani Academy usa MongoDB.
+2. Basa cada argumento en datos de esta plataforma o en una medida de este curso, no en opiniones.
+3. Incluye qué cambiaría si mañana necesitara PostgreSQL, y qué señales indicarían que ha llegado ese momento.
+
+</Callout>
+
+Un ADR es un documento corto que guarda **una** decisión de arquitectura: el contexto en el que se tomó, la decisión, las alternativas y sus consecuencias. No se reescribe: si la decisión cambia, se escribe otro que lo sustituye. Así, quien llegue dentro de un año sabrá por qué el código es como es.
+
+Solución. `docs/adr/0001-base-de-datos.md`:
+
+```markdown
+# ADR 0001: MongoDB como base de datos de Dani Academy
+
+- Estado: aceptado
+- Fecha: 2026-10-29
+- Decisión revisable si se cumple alguna de las señales del final
+
+## Contexto
+
+Dani Academy es una plataforma personal de estudio: Astro 7 con islas de React, desplegada en
+Vercel (funciones en pdx1) contra MongoDB Atlas M0 en us-west-2.
+
+- **El contenido no está en la base de datos:** cursos, secciones y evaluaciones son archivos
+  (colecciones de contenido de Astro) que se despliegan con el código. La base de datos solo
+  guarda lo que hace cada usuario.
+- **Los datos de usuario son pocos tipos y casi sin relaciones entre sí:** `section_progress`,
+  `quiz_attempts`, `study_sessions`, `notes` y `rate_limits`, más las colecciones de Better Auth
+  (`user`, `session`, `account`, `rateLimit`). Cada documento pertenece a un usuario y se lee
+  siempre filtrando por `userId`.
+- **Las consultas son de un solo usuario:** el panel, la última nota por curso, la racha y el
+  historial. No hay informes entre usuarios ni `JOIN` en ningún camino de la aplicación.
+- **La autenticación es Better Auth con su adaptador de MongoDB,** que usa transacciones (necesita
+  un replica set, y Atlas lo es).
+- **Una sola persona mantiene la plataforma,** y el temario ya cubría MongoDB (cursos B5, I4 y A2).
+
+## Decisión
+
+MongoDB (Atlas), con un repositorio por colección (`src/server/repositories/`) y validadores
+`$jsonSchema` creados por `scripts/db-setup.ts`.
+
+## Alternativas consideradas
+
+**PostgreSQL gestionado (Neon o Supabase) con Drizzle.** Medido en A3.6, con los mismos datos
+en la misma máquina:
+
+- Rechaza por sí solo lo que MongoDB acepta: lecturas de secciones o usuarios que no existen y
+  campos fuera del modelo. Borra en cascada los datos de un usuario.
+- Las consultas de un usuario son iguales en la práctica (el panel, 0,37 frente a 0,40 ms) y las
+  escrituras algo más rápidas (0,28 frente a 0,40 ms). Las agregaciones globales son más rápidas
+  (1,7 veces con el mismo índice), pero la plataforma no tiene ninguna.
+
+## Consecuencias
+
+Positivas:
+
+- Sin migraciones: cambiar la forma de un documento no requiere desplegar SQL.
+- Cada consulta de la aplicación es un `find` o una agregación sobre una colección, por usuario,
+  con su índice (medido en A2.2 y A3.6).
+- Un solo servicio gestionado y gratuito (Atlas M0) para los datos y la autenticación.
+
+Negativas, y cómo se compensan:
+
+- La integridad entre colecciones depende del código: `setSectionRead` comprueba que la sección
+  existe; borrar a un usuario no borra sus datos (hay que hacerlo explícitamente).
+- Los validadores no se actualizan solos: el usuario de Atlas no tiene permiso para `collMod`, y
+  `db-setup` solo puede crearlos (Tanda 12).
+- Los tipos de TypeScript de cada colección los escribe el código, no salen de la base de datos.
+
+## Qué cambiaría con PostgreSQL
+
+1. **Esquema:** las tablas con Drizzle y sus migraciones con `drizzle-kit` (A3.4).
+2. **Repositorios:** uno nuevo por colección, con la misma interfaz. El contrato de A3.4 ya pasa
+   los mismos tests con MongoDB y con PostgreSQL para `quiz_attempts`; el resto de servicios no
+   cambia.
+3. **Autenticación:** Better Auth tiene adaptadores para Drizzle y Kysely, con su propio esquema
+   y migraciones.
+4. **Conexiones:** un pool de `pg` por instancia con `attachDatabasePool`, y la URL con pooler de
+   Neon o Supabase (A3.4).
+5. **Datos:** un script que exporte cada colección e importe en su tabla, como en A3.2, y que
+   rechazará los datos huérfanos que hoy existan (Paso 2 de A3.6).
+
+## Señales para revisar esta decisión
+
+- Aparecen informes entre usuarios o entre cursos (un panel de administración, rankings) que se
+  consultan a menudo y con datos al momento.
+- Aparecen relaciones N:M con reglas que la base de datos debería proteger (grupos, cursos con
+  varios autores, pagos).
+- Escriben en la base de datos otros servicios además de esta aplicación.
+- Un dato huérfano o inconsistente llega a producción porque un camino del código no comprobó
+  una referencia.
+```
+
+Lo que hace bueno a este ADR:
+
+- **Cada argumento se puede comprobar:** las colecciones existen en `db-setup.ts`, las medidas son las de este curso, y el problema de `collMod` está en las notas de la Tanda 12. Nada de "MongoDB es más moderno" o "SQL es más serio".
+- **Reconoce lo que se pierde:** la integridad entre colecciones es un coste real de esta decisión, y el ADR dice cómo se compensa hoy.
+- **Termina con señales, no con un "para siempre":** describe qué tendría que pasar para revisarla, y qué cambiaría entonces, con el trabajo ya medido en A3.4.
+
+<Callout type="risk">
+
+- **Un ADR que no se puede rebatir no sirve:** si no aparecen las alternativas y las consecuencias negativas, es una justificación, no una decisión. Escríbelo para alguien que no estaba cuando se tomó.
+- **Las medidas caducan:** "0,37 frente a 0,40 ms" es cierto con estos datos, esta versión y esta máquina. Pon la fecha, y vuelve a medir antes de revisar la decisión.
+- **No reescribas un ADR aceptado:** si la decisión cambia, escribe el 0002, que dice "sustituye al 0001", y marca el 0001 como sustituido. El historial es lo valioso.
+
+</Callout>
+
+<Callout type="mastery">
+
+Eliges la base de datos por criterios técnicos: qué integridad necesita el modelo, cómo se leen y se escriben los datos, qué informes hacen falta y qué conoce el equipo. Comparas dos opciones con los mismos datos, en las mismas condiciones y con el mejor diseño de cada una, desconfías de las medidas que no has comprobado, y dejas la decisión escrita en un ADR con sus alternativas, sus consecuencias y las señales para revisarla.
+
+</Callout>
+
+## Resumen
+
+- Para comparar dos bases de datos: mismos datos, misma máquina, el mejor diseño de cada una y resultados comprobados antes de medir.
+- PostgreSQL protege la integridad entre tablas (claves ajenas, cascadas); en MongoDB, esa integridad la pone el código.
+- Con consultas bien escritas, las de un usuario empatan; los `JOIN` y las agregaciones son más rápidos en PostgreSQL, y un buen índice reduce mucho la diferencia.
+- Las dos tienen transacciones con un coste parecido; MongoDB las necesita menos porque el diseño de documentos busca cambiar uno solo.
+- Lo que no se mide en un portátil (escalar, el ecosistema, el equipo) también decide, y la persistencia políglota tiene un coste que hay que justificar.
+- Un ADR guarda una decisión con su contexto, sus alternativas, sus consecuencias y las señales para revisarla.
