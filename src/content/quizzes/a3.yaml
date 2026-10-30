@@ -1,0 +1,59 @@
+course: A3
+passingScore: 4
+questions:
+  - prompt: "¿Para qué sirve una CTE (`WITH`)?"
+    options:
+      - "Para guardar el resultado de una consulta en disco y leerlo más rápido en las consultas siguientes."
+      - "Para crear una tabla temporal que dura toda la sesión de `psql`."
+      - "Para poner nombre a cada paso de una consulta y leerla de arriba abajo en lugar de anidar subconsultas; con `WITH RECURSIVE`, además, para recorrer relaciones de una tabla consigo misma."
+      - "Para obligar a PostgreSQL a usar un índice que de otro modo no usaría."
+    answer: 2
+    explanation: "En A3.2, el panel se escribió como `leidas` y después `avance`, en orden, en lugar de una subconsulta dentro de otra. En A3.5, `WITH RECURSIVE` sacó los 9 prerrequisitos de A8, hasta B1 a 4 saltos. Una CTE no es una caché: PostgreSQL puede calcularla como una subconsulta más (para calcularla una sola vez existe `AS MATERIALIZED`), y lo que se guarda en disco es una vista materializada."
+
+  - prompt: "¿Qué devuelve esta consulta?"
+    code: |
+      WITH numeradas AS (
+        SELECT curso_id, puntuacion,
+               ROW_NUMBER() OVER (PARTITION BY curso_id ORDER BY fecha DESC) AS rn
+        FROM evaluaciones
+        WHERE usuario_id = 'u_00042'
+      )
+      SELECT curso_id, puntuacion FROM numeradas WHERE rn = 1;
+    options:
+      - "La última evaluación de cada curso de ese usuario: la ventana numera las de cada curso de la más reciente a la más antigua, sin agrupar las filas, y `rn = 1` se queda con la primera."
+      - "La mejor nota de cada curso de ese usuario."
+      - "Solo la evaluación más reciente de todas, de un único curso."
+      - "Un error, porque no se puede filtrar por una función de ventana."
+    answer: 0
+    explanation: "Una función de ventana calcula sobre un grupo de filas sin juntarlas: cada evaluación sigue en el resultado, con su número dentro de su curso. Es la forma de resolver el último de cada grupo de A3.2. No se puede filtrar por `rn` en el mismo `WHERE` en que se calcula, y por eso va en una CTE y se filtra fuera. La mejor nota sería `ORDER BY puntuacion DESC`, o un simple `max`."
+
+  - prompt: "¿Qué pasa si el correo que llega en la petición es `x'; DROP TABLE usuarios; --`?"
+    code: |
+      const { rows } = await pool.query(
+        `SELECT nombre FROM usuarios WHERE email = '${email}'`,
+      );
+    options:
+      - "Nada: `pg` escapa las comillas del texto automáticamente."
+      - "Da un error de sintaxis de SQL y no se ejecuta nada."
+      - "Solo devuelve todos los usuarios, pero no puede cambiar nada."
+      - "PostgreSQL ejecuta las dos sentencias y borra la tabla; con `pool.query(sql, [email])` y `$1`, el valor viaja aparte y nunca se interpreta como SQL."
+    answer: 3
+    explanation: "Medido en A3.4: con esa entrada, la tabla `usuarios` dejó de existir, y el error que se vio llegó después del daño. Sin parámetros, `pg` usa el protocolo simple, que acepta varias sentencias separadas por `;`. Con `x' OR '1'='1` devolvió los tres usuarios. Con `$1`, las dos entradas fueron solo un correo que no existe. Drizzle también pasa los valores como parámetros, incluso dentro de su plantilla `sql`; `sql.raw()`, no."
+
+  - prompt: "¿Qué es una vista materializada?"
+    options:
+      - "Una vista que se recalcula sola cada vez que cambian las tablas de las que lee."
+      - "Una consulta cuyo resultado se guarda en disco: se lee muy rápido, pero no ve los cambios hasta que se ejecuta `REFRESH MATERIALIZED VIEW`."
+      - "Un índice que abarca columnas de varias tablas a la vez."
+      - "Una vista que aplica automáticamente las políticas de Row Level Security de sus tablas."
+    answer: 1
+    explanation: "En A3.5, el progreso medio por etiqueta costaba 167 ms en vivo y 0,18 ms desde la vista materializada. A cambio, tras 1439 lecturas nuevas, la vista normal ya decía 6168 y la materializada seguía en 4729 hasta el `REFRESH`. `REFRESH … CONCURRENTLY` deja leerla mientras se recalcula, y para eso pide un índice único. Y no aplica RLS: desde `panel_progreso`, u42 veía a 1999 usuarios."
+
+  - prompt: "¿En cuál de estos casos elegirías PostgreSQL sobre MongoDB?"
+    options:
+      - "Para guardar la configuración de cada usuario, con campos distintos según lo que haya activado cada uno."
+      - "Para un prototipo cuyo modelo de datos cambia cada día."
+      - "Para matrículas con pagos y plazas limitadas: varias tablas relacionadas, informes entre ellas y una base de datos que impida datos huérfanos o vender la misma plaza dos veces."
+      - "Para cualquier aplicación con muchos usuarios, porque PostgreSQL escala mejor por defecto."
+    answer: 2
+    explanation: "En A3.6, con los mismos datos, MongoDB aceptó lecturas de secciones y usuarios que no existían y dejó 25 lecturas huérfanas al borrar un usuario; PostgreSQL rechazó todo eso con sus claves ajenas. Los JOIN y los informes fueron más rápidos en PostgreSQL, y `SERIALIZABLE` evita el sesgo de escritura (A3.3). La configuración variable cabe en MongoDB o en `jsonb`, un prototipo cambiante va mejor sin migraciones y escalar no decide nada hasta que tienes ese problema."
