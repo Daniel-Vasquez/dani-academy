@@ -1,0 +1,1507 @@
+---
+sectionId: "A3.3"
+course: "A3"
+title: "Índices, planes y transacciones en PostgreSQL"
+order: 3
+minutes: 90
+summary: "Lees EXPLAIN ANALYZE sobre un millón de filas, eliges índices B-tree, parciales y GIN, buscas en español en las lecciones de la plataforma y provocas en dos sesiones el fallo de cada nivel de aislamiento."
+---
+
+En A3.2 escribiste las consultas del panel de progreso, y todas tardaban menos de un milisegundo. Con 69 000 lecturas, cualquier plan es rápido. La pregunta de esta sección es qué pasa cuando la tabla crece, y la respuesta está en el plan de ejecución: PostgreSQL te enseña qué va a hacer (`EXPLAIN`) y qué hizo de verdad (`EXPLAIN ANALYZE`). Es lo mismo que el `explain` de MongoDB en A2.2, con otro vocabulario. Después vas a elegir índices con criterio, buscar texto en español sobre el contenido de esta misma plataforma y ver con tus ojos qué hace cada nivel de aislamiento cuando dos sesiones tocan los mismos datos a la vez.
+
+**Lo que tendrás al terminar:** una tabla `actividad` de un millón de filas con sus índices, la búsqueda de texto de las lecciones de Dani Academy, seis escenarios de concurrencia que se ejecutan en dos sesiones a la vez, y las tres consultas del panel optimizadas sobre un millón de lecturas.
+
+**Requisitos:** la sección A3.2, con la base `progreso` y su tabla `cursos`, y la carpeta `pg-lab`. Todos los archivos se ejecutan desde `pg-lab` con `sudo -u postgres psql -X -d progreso -f archivo.sql`.
+
+## Paso 1: un millón de filas y tu primer `EXPLAIN ANALYZE`
+
+Para que los planes enseñen algo hacen falta datos. `generate_series` genera filas sin escribirlas a mano, y `setseed` fija la semilla de `random()`, así que tus datos serán los mismos cada vez que lo ejecutes, y los mismos que los de esta lección. `20-actividad.sql`:
+
+```sql
+-- Archivo: 20-actividad.sql
+-- Un millón de eventos de actividad: 20 000 usuarios, los 24 cursos y un año de fechas.
+-- setseed fija la semilla de random(): cada vez que lo ejecutes saldrán los mismos datos
+DROP TABLE IF EXISTS actividad;
+
+CREATE TABLE actividad (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  usuario_id text NOT NULL,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  tipo       text NOT NULL CHECK (tipo IN ('lectura', 'evaluacion', 'nota')),
+  creado     timestamptz NOT NULL,
+  duracion_s integer NOT NULL CHECK (duracion_s > 0)
+);
+
+SELECT setseed(0.42);
+
+INSERT INTO actividad (usuario_id, curso_id, tipo, creado, duracion_s)
+SELECT
+  'u_' || lpad((floor(random() * 20000) + 1)::text, 5, '0'),
+  (ARRAY(SELECT id FROM cursos ORDER BY id))[floor(random() * 24) + 1],
+  CASE WHEN r < 0.80 THEN 'lectura' WHEN r < 0.95 THEN 'evaluacion' ELSE 'nota' END,
+  timestamptz '2026-10-01 00:00:00+00' - random() * interval '365 days',
+  30 + floor(random() * 1770)::int
+FROM (SELECT random() AS r FROM generate_series(1, 1000000)) AS g;
+
+ANALYZE actividad;
+
+SELECT count(*) AS filas, count(DISTINCT usuario_id) AS usuarios,
+       pg_size_pretty(pg_total_relation_size('actividad')) AS tamano
+FROM actividad;
+
+SELECT tipo, count(*), round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct
+FROM actividad GROUP BY tipo ORDER BY count(*) DESC;
+```
+
+```bash
+sudo -u postgres psql -X -d progreso -f 20-actividad.sql
+```
+
+```text
+DROP TABLE
+CREATE TABLE
+ setseed
+---------
+
+(1 row)
+
+INSERT 0 1000000
+ANALYZE
+  filas  | usuarios | tamano
+---------+----------+--------
+ 1000000 |    20000 | 94 MB
+(1 row)
+
+    tipo    | count  | pct
+------------+--------+------
+ lectura    | 799425 | 79.9
+ evaluacion | 150368 | 15.0
+ nota       |  50207 |  5.0
+(3 rows)
+```
+
+Ahora, una consulta típica de una app: las 10 últimas actividades de un usuario. `21-explain.sql` la pide dos veces, con `EXPLAIN` y con `EXPLAIN ANALYZE`:
+
+```sql
+-- Archivo: 21-explain.sql
+-- Las 10 últimas actividades de un usuario, todavía sin índices
+
+-- 1. EXPLAIN: el plan que el planificador ELIGE, con sus estimaciones. No ejecuta la consulta
+EXPLAIN
+SELECT id, curso_id, tipo, creado FROM actividad
+WHERE usuario_id = 'u_00042'
+ORDER BY creado DESC
+LIMIT 10;
+
+-- 2. EXPLAIN ANALYZE: la EJECUTA y añade lo que pasó de verdad (filas, tiempos y páginas leídas)
+EXPLAIN ANALYZE
+SELECT id, curso_id, tipo, creado FROM actividad
+WHERE usuario_id = 'u_00042'
+ORDER BY creado DESC
+LIMIT 10;
+```
+
+```text
+                                        QUERY PLAN
+------------------------------------------------------------------------------------------
+ Limit  (cost=15496.81..15497.98 rows=10 width=27)
+   ->  Gather Merge  (cost=15496.81..15502.63 rows=50 width=27)
+         Workers Planned: 2
+         ->  Sort  (cost=14496.79..14496.84 rows=21 width=27)
+               Sort Key: creado DESC
+               ->  Parallel Seq Scan on actividad  (cost=0.00..14496.33 rows=21 width=27)
+                     Filter: (usuario_id = 'u_00042'::text)
+(7 rows)
+
+                                                               QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=15496.81..15497.98 rows=10 width=27) (actual time=17.653..19.293 rows=10.00 loops=1)
+   Buffers: shared hit=9364
+   ->  Gather Merge  (cost=15496.81..15502.63 rows=50 width=27) (actual time=17.652..19.291 rows=10.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9364
+         ->  Sort  (cost=14496.79..14496.84 rows=21 width=27) (actual time=15.956..15.957 rows=7.67 loops=3)
+               Sort Key: creado DESC
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=9364
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               Worker 1:  Sort Method: top-N heapsort  Memory: 26kB
+               ->  Parallel Seq Scan on actividad  (cost=0.00..14496.33 rows=21 width=27) (actual time=0.679..15.926 rows=17.67 loops=3)
+                     Filter: (usuario_id = 'u_00042'::text)
+                     Rows Removed by Filter: 333316
+                     Buffers: shared hit=9288
+ Planning Time: 0.015 ms
+ Execution Time: 19.302 ms
+(18 rows)
+```
+
+El plan es un árbol: **se lee de dentro afuera**. Cada línea con `->` es un nodo que entrega filas al de arriba. Aquí, de abajo arriba:
+
+| Nodo                             | Qué hace                                                                                                                      |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `Parallel Seq Scan on actividad` | Lee la tabla entera, repartida entre 3 procesos (el principal y 2 _workers_), y se queda con las filas del usuario (`Filter`) |
+| `Sort`                           | Cada proceso ordena las suyas por `creado DESC`                                                                               |
+| `Gather Merge`                   | Junta los resultados ordenados de los tres procesos                                                                           |
+| `Limit`                          | Se queda con las 10 primeras                                                                                                  |
+
+Y lo que dice cada número:
+
+- **`cost=15496.81..15497.98`**: la estimación del planificador, en unidades arbitrarias (no son milisegundos). El primer número es el coste hasta la primera fila y el segundo, hasta la última. Sirve para comparar planes entre sí.
+- **`rows=21`** (estimadas) frente a **`rows=17.67 loops=3`** (reales): cada proceso devolvió 17,67 filas de media, 53 en total. **Comparar estimadas con reales es lo más importante de un plan**: si se parecen, el planificador sabía lo que hacía. En el Paso 3 verás qué pasa cuando no.
+- **`Rows Removed by Filter: 333316`**: filas leídas y descartadas en cada proceso, un millón en total para devolver 53. Este es el cuello de botella: el equivalente de `totalDocsExamined` muy por encima de `nReturned` en MongoDB (A2.2).
+- **`Buffers: shared hit=9364`**: páginas de 8 kB que encontró en la caché de PostgreSQL (`shared_buffers`), unos 73 MB. Si no estuvieran ahí, saldrían como `read=`.
+- **`Execution Time: 19.302 ms`**: el tiempo real. `Planning Time` es lo que tardó en decidir el plan.
+
+PostgreSQL 18 escribe las filas reales con decimales (`rows=10.00`) y añade `Buffers` a `EXPLAIN ANALYZE` sin tener que pedirlo con `BUFFERS`. En versiones anteriores verás `rows=10` y tendrás que escribir `EXPLAIN (ANALYZE, BUFFERS)`.
+
+<Callout type="risk">
+
+- **`EXPLAIN ANALYZE` ejecuta la sentencia:** con un `SELECT` no pasa nada, pero con un `UPDATE` o un `DELETE`, los cambios son de verdad. El Paso 3 lo demuestra y enseña cómo analizarlos sin cambiar nada.
+- **El mismo SQL puede tener planes distintos:** al ejecutar dos veces `20-actividad.sql`, el plan de `21-explain.sql` cambió de un `Sort` encima del `Gather` a un `Gather Merge`, porque `ANALYZE` calcula las estadísticas con una muestra aleatoria y los costes salen un poco distintos. Lee el plan que tienes delante, no el que esperabas.
+- **`read=` no significa disco:** tras reiniciar PostgreSQL, la misma consulta salió con `read=9288` y, repetida, con `read=9006`, y tardó lo mismo las dos veces (30 ms): las páginas venían de la caché del sistema operativo. Además, PostgreSQL lee las tablas grandes (más de un cuarto de `shared_buffers`) con un búfer circular pequeño para no vaciar su caché, así que una tabla grande casi nunca sale como `hit` entera.
+
+</Callout>
+
+## Paso 2: índices B-tree, del simple al que no necesita leer la tabla
+
+Un índice B-tree es un árbol ordenado de valores que apunta a las filas. `22-btree.sql` mide la consulta del Paso 1 con un índice simple, con uno compuesto y con una consulta que solo usa la segunda columna del compuesto. `\set` guarda la consulta en una variable de `psql` para no repetirla:
+
+```sql
+-- Archivo: 22-btree.sql
+-- La misma consulta, con índices cada vez mejores. COSTS OFF quita las estimaciones del plan
+\set consulta 'SELECT id, curso_id, tipo, creado FROM actividad WHERE usuario_id = ''u_00042'' ORDER BY creado DESC LIMIT 10'
+
+-- 1. Índice de una columna: encuentra las filas del usuario, pero todavía hay que ordenarlas
+CREATE INDEX actividad_usuario ON actividad (usuario_id);
+EXPLAIN (ANALYZE, COSTS OFF) :consulta;
+
+-- 2. Índice compuesto en el orden de la consulta: filtra por usuario y ya viene ordenado
+DROP INDEX actividad_usuario;
+CREATE INDEX actividad_usuario_creado ON actividad (usuario_id, creado DESC);
+EXPLAIN (ANALYZE, COSTS OFF) :consulta;
+
+-- 3. El prefijo izquierdo: sin usuario_id, el índice (usuario_id, creado) no sirve para filtrar por fecha
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT count(*) FROM actividad WHERE creado >= '2026-09-30';
+```
+
+```text
+CREATE INDEX
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ Limit (actual time=0.086..0.087 rows=10.00 loops=1)
+   Buffers: shared hit=56 read=3
+   ->  Sort (actual time=0.085..0.086 rows=10.00 loops=1)
+         Sort Key: creado DESC
+         Sort Method: top-N heapsort  Memory: 26kB
+         Buffers: shared hit=56 read=3
+         ->  Bitmap Heap Scan on actividad (actual time=0.028..0.068 rows=53.00 loops=1)
+               Recheck Cond: (usuario_id = 'u_00042'::text)
+               Heap Blocks: exact=53
+               Buffers: shared hit=53 read=3
+               ->  Bitmap Index Scan on actividad_usuario (actual time=0.017..0.017 rows=53.00 loops=1)
+                     Index Cond: (usuario_id = 'u_00042'::text)
+                     Index Searches: 1
+                     Buffers: shared read=3
+ Planning:
+   Buffers: shared hit=90 read=1
+ Planning Time: 0.156 ms
+ Execution Time: 0.101 ms
+(18 rows)
+
+DROP INDEX
+CREATE INDEX
+                                                 QUERY PLAN
+------------------------------------------------------------------------------------------------------------
+ Limit (actual time=0.039..0.067 rows=10.00 loops=1)
+   Buffers: shared hit=10 read=3
+   ->  Index Scan using actividad_usuario_creado on actividad (actual time=0.038..0.066 rows=10.00 loops=1)
+         Index Cond: (usuario_id = 'u_00042'::text)
+         Index Searches: 1
+         Buffers: shared hit=10 read=3
+ Planning:
+   Buffers: shared hit=19 read=1
+ Planning Time: 0.174 ms
+ Execution Time: 0.084 ms
+(10 rows)
+
+                                            QUERY PLAN
+--------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=20.494..23.100 rows=1.00 loops=1)
+   Buffers: shared hit=9288
+   ->  Gather (actual time=20.336..23.093 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9288
+         ->  Partial Aggregate (actual time=17.536..17.537 rows=1.00 loops=3)
+               Buffers: shared hit=9288
+               ->  Parallel Seq Scan on actividad (actual time=0.017..17.477 rows=689.67 loops=3)
+                     Filter: (creado >= '2026-09-30 00:00:00-06'::timestamp with time zone)
+                     Rows Removed by Filter: 332644
+                     Buffers: shared hit=9288
+ Planning:
+   Buffers: shared hit=14
+ Planning Time: 0.063 ms
+ Execution Time: 23.110 ms
+(16 rows)
+```
+
+- **Índice de una columna (`Bitmap Index Scan` → `Bitmap Heap Scan`):** encuentra las 53 filas del usuario en el índice, las lee de la tabla (53 páginas) y todavía las **ordena** (`Sort`). De 19 ms a 0,1 ms.
+- **Índice compuesto en el orden de la consulta (`Index Scan`):** las filas salen del índice ya ordenadas por `creado DESC`, así que no hay `Sort` y `Limit` se detiene a las 10 (`rows=10.00`): lee 13 páginas en lugar de 59.
+- **El prefijo izquierdo:** el índice está ordenado primero por `usuario_id`. Sin esa columna, las fechas están desperdigadas por todo el índice y PostgreSQL vuelve a leer la tabla entera (23 ms). La regla es la misma que la ESR de MongoDB (B5.6): igualdad primero, luego orden y rango.
+
+`23-btree-avanzado.sql` va más allá: el _skip scan_ de PostgreSQL 18, los índices que responden sin leer la tabla y los índices parciales:
+
+```sql
+-- Archivo: 23-btree-avanzado.sql
+-- PostgreSQL 18: skip scan. Con pocos valores en la primera columna, el índice sí sirve sin ella
+CREATE INDEX actividad_tipo_creado ON actividad (tipo, creado);
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT count(*) FROM actividad WHERE creado >= '2026-09-30';
+DROP INDEX actividad_tipo_creado;
+
+-- Index Only Scan: si el índice tiene TODAS las columnas que pide la consulta, no lee la tabla
+DROP INDEX actividad_usuario_creado;
+CREATE INDEX actividad_usuario_creado ON actividad (usuario_id, creado DESC) INCLUDE (curso_id, tipo);
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT curso_id, tipo, creado FROM actividad WHERE usuario_id = 'u_00042' ORDER BY creado DESC LIMIT 10;
+
+-- ...pero solo se ahorra la tabla en las páginas marcadas como "todo visible" por VACUUM
+VACUUM actividad;
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT curso_id, tipo, creado FROM actividad WHERE usuario_id = 'u_00042' ORDER BY creado DESC LIMIT 10;
+
+-- Índice parcial: solo las notas (el 5 %)
+CREATE INDEX actividad_notas ON actividad (usuario_id, creado DESC) WHERE tipo = 'nota';
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id, creado FROM actividad WHERE usuario_id = 'u_00042' AND tipo = 'nota' ORDER BY creado DESC;
+-- Sin la condición del índice en la consulta, el parcial no se puede usar
+EXPLAIN (COSTS OFF)
+SELECT id, creado FROM actividad WHERE usuario_id = 'u_00042' AND tipo <> 'lectura' ORDER BY creado DESC;
+
+SELECT indexrelid::regclass AS indice, pg_size_pretty(pg_relation_size(indexrelid)) AS tamano
+FROM pg_index WHERE indrelid = 'actividad'::regclass ORDER BY pg_relation_size(indexrelid) DESC;
+```
+
+```text
+CREATE INDEX
+                                               QUERY PLAN
+--------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=1.259..1.259 rows=1.00 loops=1)
+   Buffers: shared hit=1861 read=19
+   ->  Bitmap Heap Scan on actividad (actual time=0.355..1.206 rows=2069.00 loops=1)
+         Recheck Cond: (creado >= '2026-09-30 00:00:00-06'::timestamp with time zone)
+         Heap Blocks: exact=1850
+         Buffers: shared hit=1861 read=19
+         ->  Bitmap Index Scan on actividad_tipo_creado (actual time=0.228..0.228 rows=2069.00 loops=1)
+               Index Cond: (creado >= '2026-09-30 00:00:00-06'::timestamp with time zone)
+               Index Searches: 4
+               Buffers: shared hit=11 read=19
+ Planning:
+   Buffers: shared hit=79 read=1
+ Planning Time: 0.189 ms
+ Execution Time: 1.278 ms
+(14 rows)
+
+DROP INDEX
+DROP INDEX
+CREATE INDEX
+                                                   QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------
+ Limit (actual time=0.021..0.035 rows=10.00 loops=1)
+   Buffers: shared hit=10 read=3
+   ->  Index Only Scan using actividad_usuario_creado on actividad (actual time=0.020..0.033 rows=10.00 loops=1)
+         Index Cond: (usuario_id = 'u_00042'::text)
+         Heap Fetches: 10
+         Index Searches: 1
+         Buffers: shared hit=10 read=3
+ Planning:
+   Buffers: shared hit=63 read=1 dirtied=3
+ Planning Time: 0.143 ms
+ Execution Time: 0.042 ms
+(11 rows)
+
+VACUUM
+                                                   QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------
+ Limit (actual time=0.009..0.010 rows=10.00 loops=1)
+   Buffers: shared hit=4
+   ->  Index Only Scan using actividad_usuario_creado on actividad (actual time=0.008..0.009 rows=10.00 loops=1)
+         Index Cond: (usuario_id = 'u_00042'::text)
+         Heap Fetches: 0
+         Index Searches: 1
+         Buffers: shared hit=4
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 0.056 ms
+ Execution Time: 0.019 ms
+(11 rows)
+
+CREATE INDEX
+                                         QUERY PLAN
+--------------------------------------------------------------------------------------------
+ Index Scan using actividad_notas on actividad (actual time=0.012..0.014 rows=3.00 loops=1)
+   Index Cond: (usuario_id = 'u_00042'::text)
+   Index Searches: 1
+   Buffers: shared hit=3 read=2
+ Planning:
+   Buffers: shared hit=21 read=1
+ Planning Time: 0.142 ms
+ Execution Time: 0.022 ms
+(8 rows)
+
+                        QUERY PLAN
+-----------------------------------------------------------
+ Sort
+   Sort Key: creado DESC
+   ->  Bitmap Heap Scan on actividad
+         Recheck Cond: (usuario_id = 'u_00042'::text)
+         Filter: (tipo <> 'lectura'::text)
+         ->  Bitmap Index Scan on actividad_usuario_creado
+               Index Cond: (usuario_id = 'u_00042'::text)
+(7 rows)
+
+          indice          | tamano
+--------------------------+---------
+ actividad_usuario_creado | 47 MB
+ actividad_pkey           | 21 MB
+ actividad_notas          | 1560 kB
+(3 rows)
+```
+
+- **_Skip scan_ (nuevo en PostgreSQL 18):** con `(tipo, creado)` y solo 3 valores de `tipo`, PostgreSQL busca las fechas dentro de cada tipo, una búsqueda por valor (`Index Searches: 4`), y la consulta por fecha baja de 23 ms a 1,3 ms. Con 20 000 usuarios en la primera columna no compensa, y por eso en `22-btree.sql` no lo usó.
+- **`INCLUDE` e _Index Only Scan_:** si el índice tiene todas las columnas que pide la consulta, no hace falta ir a la tabla. `INCLUDE` añade columnas que no ordenan, solo viajan con el índice.
+- **`Heap Fetches: 10` antes de `VACUUM` y `0` después:** el índice no sabe si una fila es visible para tu transacción (puede estar borrada o sin confirmar). PostgreSQL lo comprueba en el _visibility map_, que `VACUUM` mantiene. Con una tabla recién cargada, ninguna página está marcada como "todo visible" y tiene que ir a la tabla de todos modos. De 0,042 ms a 0,019 ms.
+- **Índice parcial:** `actividad_notas` solo indexa las notas, el 5 % de las filas. Ocupa 1,5 MB frente a los 47 MB del compuesto. A cambio, la consulta tiene que incluir la condición del índice (`tipo = 'nota'`): con `tipo <> 'lectura'`, que también incluye las notas, PostgreSQL no puede demostrar que basta con el índice parcial y usa otro.
+
+<Callout type="risk">
+
+- **Cada índice cuesta en cada escritura:** `INSERT`, `UPDATE` y `DELETE` mantienen todos los índices de la tabla. En el ejercicio medirás un índice de más que encarece las inserciones un 20 % para ganar nada. Crea un índice por cada consulta que lo necesite, no por si acaso.
+- **El orden de las columnas decide para qué sirve un compuesto:** `(usuario_id, creado)` sirve para "las de un usuario, por fecha"; `(creado, usuario_id)` sirve para "las de un rango de fechas". No son intercambiables, y el _skip scan_ solo ayuda cuando la primera columna tiene pocos valores.
+- **Un índice puede ocupar media tabla:** el compuesto con `INCLUDE` ocupa 47 MB, la mitad de los 94 MB de la tabla. `\di+` y `pg_relation_size` te dicen cuánto ocupa cada uno.
+
+</Callout>
+
+## Paso 3: cuando el índice existe y no se usa
+
+Que exista un índice no significa que PostgreSQL vaya a usarlo. `24-sin-indice.sql` prueba dos motivos frecuentes: una función sobre la columna y una condición que devuelve casi toda la tabla:
+
+```sql
+-- Archivo: 24-sin-indice.sql
+-- Tres motivos por los que PostgreSQL no usa un índice que existe
+CREATE INDEX actividad_creado ON actividad (creado);
+
+-- 1. Una función sobre la columna: el índice guarda "creado", no "date(creado)"
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT count(*) FROM actividad WHERE date(creado) = '2026-09-30';
+-- ¿Y un índice sobre date(creado)? Con timestamptz no se puede: el día depende de la zona horaria
+CREATE INDEX ON actividad (date(creado));
+-- La solución: un rango sobre la columna tal cual
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT count(*) FROM actividad WHERE creado >= '2026-09-30' AND creado < '2026-10-01';
+
+-- 2. Poca selectividad: con el 80 % de las filas, leer la tabla entera es más barato
+CREATE INDEX actividad_tipo ON actividad (tipo);
+EXPLAIN (ANALYZE, COSTS OFF) SELECT avg(duracion_s) FROM actividad WHERE tipo = 'lectura';
+EXPLAIN (ANALYZE, COSTS OFF) SELECT avg(duracion_s) FROM actividad WHERE tipo = 'nota';
+DROP INDEX actividad_tipo;
+```
+
+```text
+CREATE INDEX
+                                            QUERY PLAN
+--------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=34.872..35.954 rows=1.00 loops=1)
+   Buffers: shared hit=9288
+   ->  Gather (actual time=33.543..35.950 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9288
+         ->  Partial Aggregate (actual time=31.504..31.505 rows=1.00 loops=3)
+               Buffers: shared hit=9288
+               ->  Parallel Seq Scan on actividad (actual time=0.042..31.470 rows=689.67 loops=3)
+                     Filter: (date(creado) = '2026-09-30'::date)
+                     Rows Removed by Filter: 332644
+                     Buffers: shared hit=9288
+ Planning:
+   Buffers: shared hit=103 read=1
+ Planning Time: 0.184 ms
+ Execution Time: 35.978 ms
+(16 rows)
+
+psql:24-sin-indice.sql:9: ERROR:  functions in index expression must be marked IMMUTABLE
+                                                                       QUERY PLAN
+--------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate (actual time=0.168..0.168 rows=1.00 loops=1)
+   Buffers: shared hit=4 read=6
+   ->  Index Only Scan using actividad_creado on actividad (actual time=0.008..0.103 rows=2069.00 loops=1)
+         Index Cond: ((creado >= '2026-09-30 00:00:00-06'::timestamp with time zone) AND (creado < '2026-10-01 00:00:00-06'::timestamp with time zone))
+         Heap Fetches: 0
+         Index Searches: 1
+         Buffers: shared hit=4 read=6
+ Planning:
+   Buffers: shared hit=13 read=3
+ Planning Time: 0.107 ms
+ Execution Time: 0.176 ms
+(11 rows)
+
+CREATE INDEX
+                                             QUERY PLAN
+-----------------------------------------------------------------------------------------------------
+ Finalize Aggregate (actual time=38.533..39.681 rows=1.00 loops=1)
+   Buffers: shared hit=9288
+   ->  Gather (actual time=37.167..39.668 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9288
+         ->  Partial Aggregate (actual time=35.134..35.135 rows=1.00 loops=3)
+               Buffers: shared hit=9288
+               ->  Parallel Seq Scan on actividad (actual time=0.005..22.851 rows=266475.00 loops=3)
+                     Filter: (tipo = 'lectura'::text)
+                     Rows Removed by Filter: 66858
+                     Buffers: shared hit=9288
+ Planning:
+   Buffers: shared hit=44 read=4
+ Planning Time: 0.336 ms
+ Execution Time: 39.697 ms
+(16 rows)
+
+                                            QUERY PLAN
+--------------------------------------------------------------------------------------------------
+ Aggregate (actual time=9.712..9.712 rows=1.00 loops=1)
+   Buffers: shared hit=9241 read=45
+   ->  Bitmap Heap Scan on actividad (actual time=1.702..7.489 rows=50207.00 loops=1)
+         Recheck Cond: (tipo = 'nota'::text)
+         Heap Blocks: exact=9241
+         Buffers: shared hit=9241 read=45
+         ->  Bitmap Index Scan on actividad_tipo (actual time=1.057..1.057 rows=50207.00 loops=1)
+               Index Cond: (tipo = 'nota'::text)
+               Index Searches: 1
+               Buffers: shared read=45
+ Planning Time: 0.067 ms
+ Execution Time: 9.723 ms
+(12 rows)
+
+DROP INDEX
+```
+
+- **`date(creado)` no usa el índice de `creado`:** el índice guarda valores de `creado`, no de `date(creado)`, así que PostgreSQL calcula la función fila a fila (36 ms).
+- **Y no puedes indexar `date(creado)`:** un índice de expresión exige funciones `IMMUTABLE` (mismo resultado siempre), y el día de un `timestamptz` depende de la zona horaria de la sesión. Es la misma trampa del día y la zona horaria de A3.2, ahora en forma de error.
+- **La solución es un rango sobre la columna tal cual:** `creado >= '2026-09-30' AND creado < '2026-10-01'` usa el índice (_Index Only Scan_, 0,18 ms). Las fechas del rango también se interpretan en la zona de la sesión, igual que `date()`, así que el resultado es el mismo.
+- **Con el 80 % de las filas, leer la tabla es lo correcto:** para `tipo = 'lectura'` ir del índice a la tabla 800 000 veces sería más lento que leer la tabla seguida, y el planificador lo sabe (40 ms con _Seq Scan_). Con el 5 % (`'nota'`), sí usa el índice (10 ms).
+
+El otro motivo, y el más traicionero, son las **estadísticas viejas**. El planificador decide con un resumen de los datos que guarda `ANALYZE`: cuántas filas hay, los valores más frecuentes y su reparto. `autovacuum` lo actualiza solo, pero no al instante. `25-estadisticas.sql` lo desactiva un momento para ver el plan que sale justo después de una carga masiva:
+
+```sql
+-- Archivo: 25-estadisticas.sql
+-- Estadísticas viejas: un usuario nuevo con 200 000 eventos que el planificador todavía no conoce.
+-- Se desactiva autovacuum en la tabla para ver el plan ANTES de que se actualicen solas
+ALTER TABLE actividad SET (autovacuum_enabled = false);
+
+INSERT INTO actividad (usuario_id, curso_id, tipo, creado, duracion_s)
+SELECT 'u_importado', 'A3', 'lectura', timestamptz '2026-10-01 00:00:00+00' - g * interval '1 minute', 60
+FROM generate_series(1, 200000) AS g;
+
+-- El planificador cree que 'u_importado' no existe (rows estimadas = 1)
+EXPLAIN ANALYZE
+SELECT curso_id, count(*), sum(duracion_s) FROM actividad WHERE usuario_id = 'u_importado' GROUP BY curso_id;
+
+ANALYZE actividad;
+
+EXPLAIN ANALYZE
+SELECT curso_id, count(*), sum(duracion_s) FROM actividad WHERE usuario_id = 'u_importado' GROUP BY curso_id;
+
+-- Lo deja todo como estaba
+DELETE FROM actividad WHERE usuario_id = 'u_importado';
+ALTER TABLE actividad RESET (autovacuum_enabled);
+VACUUM ANALYZE actividad;
+```
+
+```text
+ALTER TABLE
+INSERT 0 200000
+                                                                      QUERY PLAN
+------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=237.94..238.77 rows=22 width=19) (actual time=51.246..51.247 rows=1.00 loops=1)
+   Group Key: curso_id
+   Buffers: shared hit=3304, temp read=442 written=444
+   ->  Sort  (cost=237.94..238.09 rows=61 width=7) (actual time=30.383..40.236 rows=200000.00 loops=1)
+         Sort Key: curso_id
+         Sort Method: external merge  Disk: 3536kB
+         Buffers: shared hit=3304, temp read=442 written=444
+         ->  Bitmap Heap Scan on actividad  (cost=4.90..236.13 rows=61 width=7) (actual time=3.469..15.066 rows=200000.00 loops=1)
+               Recheck Cond: (usuario_id = 'u_importado'::text)
+               Heap Blocks: exact=1870
+               Buffers: shared hit=3301
+               ->  Bitmap Index Scan on actividad_usuario_creado  (cost=0.00..4.88 rows=61 width=0) (actual time=3.343..3.343 rows=200000.00 loops=1)
+                     Index Cond: (usuario_id = 'u_importado'::text)
+                     Index Searches: 1
+                     Buffers: shared hit=1431
+ Planning:
+   Buffers: shared hit=49 read=5
+ Planning Time: 0.659 ms
+ Execution Time: 51.415 ms
+(19 rows)
+
+ANALYZE
+                                                                     QUERY PLAN
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+ Finalize GroupAggregate  (cost=19034.44..19041.87 rows=24 width=19) (actual time=29.510..29.731 rows=1.00 loops=1)
+   Group Key: curso_id
+   Buffers: shared hit=9858 read=1315 written=51
+   ->  Gather Merge  (cost=19034.44..19041.19 rows=58 width=19) (actual time=29.507..29.729 rows=3.00 loops=1)
+         Workers Planned: 2
+         Workers Launched: 2
+         Buffers: shared hit=9858 read=1315 written=51
+         ->  Sort  (cost=18034.42..18034.48 rows=24 width=19) (actual time=26.567..26.568 rows=1.00 loops=3)
+               Sort Key: curso_id
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=9858 read=1315 written=51
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               Worker 1:  Sort Method: quicksort  Memory: 25kB
+               ->  Partial HashAggregate  (cost=18033.62..18033.87 rows=24 width=19) (actual time=26.546..26.547 rows=1.00 loops=3)
+                     Group Key: curso_id
+                     Batches: 1  Memory Usage: 32kB
+                     Buffers: shared hit=9842 read=1315 written=51
+                     Worker 0:  Batches: 1  Memory Usage: 32kB
+                     Worker 1:  Batches: 1  Memory Usage: 32kB
+                     ->  Parallel Seq Scan on actividad  (cost=0.00..17407.00 rows=83550 width=7) (actual time=14.422..19.060 rows=66666.67 loops=3)
+                           Filter: (usuario_id = 'u_importado'::text)
+                           Rows Removed by Filter: 333333
+                           Buffers: shared hit=9842 read=1315 written=51
+ Planning:
+   Buffers: shared hit=42 read=4
+ Planning Time: 0.123 ms
+ Execution Time: 29.750 ms
+(27 rows)
+
+DELETE 200000
+ALTER TABLE
+VACUUM
+```
+
+Antes de `ANALYZE`, el planificador estima **61 filas** para `u_importado` y salen **200 000**: 3 000 veces más. Con 61 filas, ordenar es barato, así que elige un `Sort` que no cabe en `work_mem` (4 MB) y acaba escribiendo en disco (`external merge Disk: 3536kB`), 51 ms. Después de `ANALYZE` estima unas 250 000 (83 550 por proceso), cambia a una lectura en paralelo con `HashAggregate` en memoria y tarda 30 ms. Cuando un plan es malo, busca primero la línea donde las filas estimadas y las reales más se separan: ahí empieza el problema.
+
+Una última advertencia, porque vas a analizar muchas sentencias: `EXPLAIN ANALYZE` las ejecuta. `28-explain-borra.sql` analiza un `DELETE` dentro de una transacción que se deshace:
+
+```sql
+-- Archivo: 28-explain-borra.sql
+-- EXPLAIN ANALYZE ejecuta la sentencia: con DELETE, borra de verdad
+SELECT count(*) AS notas_antes FROM actividad WHERE tipo = 'nota';
+BEGIN;
+EXPLAIN (ANALYZE, COSTS OFF) DELETE FROM actividad WHERE tipo = 'nota';
+SELECT count(*) AS notas_dentro_de_la_transaccion FROM actividad WHERE tipo = 'nota';
+ROLLBACK;
+SELECT count(*) AS notas_tras_rollback FROM actividad WHERE tipo = 'nota';
+```
+
+```text
+ notas_antes
+-------------
+       50207
+(1 row)
+
+BEGIN
+                                            QUERY PLAN
+---------------------------------------------------------------------------------------------------
+ Delete on actividad (actual time=19.081..19.082 rows=0.00 loops=1)
+   Buffers: shared hit=68108 read=775 dirtied=3925
+   ->  Bitmap Heap Scan on actividad (actual time=2.410..11.396 rows=50207.00 loops=1)
+         Recheck Cond: (tipo = 'nota'::text)
+         Heap Blocks: exact=9241
+         Buffers: shared hit=8660 read=775
+         ->  Bitmap Index Scan on actividad_notas (actual time=1.618..1.618 rows=50207.00 loops=1)
+               Index Searches: 1
+               Buffers: shared hit=194
+ Planning:
+   Buffers: shared hit=3
+ Planning Time: 0.022 ms
+ Execution Time: 19.159 ms
+(13 rows)
+
+ notas_dentro_de_la_transaccion
+--------------------------------
+                              0
+(1 row)
+
+ROLLBACK
+ notas_tras_rollback
+---------------------
+               50207
+(1 row)
+```
+
+Dentro de la transacción, las 50 207 notas ya no existen: el `DELETE` se ejecutó de verdad. Solo el `ROLLBACK` las devuelve.
+
+<Callout type="risk">
+
+- **Analiza siempre un `UPDATE` o un `DELETE` entre `BEGIN` y `ROLLBACK`:** sin la transacción, `EXPLAIN ANALYZE DELETE` borra las filas sin pedir confirmación. Y fuera de `psql`, en producción, no lo ejecutes nunca sobre datos reales.
+- **Tras una carga masiva, ejecuta `ANALYZE`:** `autovacuum` actualiza las estadísticas cuando cambia una parte de la tabla (por defecto, el 10 % más 50 filas), pero puede tardar un rato, y mientras tanto las consultas usan planes pensados para otros datos. `ANALYZE tabla` tarda segundos.
+- **`SET enable_seqscan = off` es para diagnosticar, no para arreglar:** sirve para ver qué plan tendría PostgreSQL con un índice (lo usarás en el Paso 4), pero en una aplicación esconde el problema de verdad, que casi siempre es un índice que no encaja o unas estadísticas viejas.
+
+</Callout>
+
+## Paso 4: búsqueda de texto en español con GIN
+
+Un B-tree ordena valores enteros, y no sirve para preguntar "¿qué lecciones hablan de transacciones?". Para eso, PostgreSQL convierte el texto en un `tsvector` (las raíces de sus palabras) y lo indexa con **GIN**, un índice invertido: de cada palabra, la lista de filas que la contienen. Es el mismo tipo de índice que usaste para `jsonb` en A3.2, y la idea del índice `text` de MongoDB (A2.3).
+
+Para buscar sobre algo real, vas a cargar las lecciones de esta plataforma. `exportar-secciones.mjs` lee los `.mdx` de Dani Academy y escribe `datos/secciones.csv` con el título, el resumen y el texto de cada lección, sin el código. Ejecútalo con Node donde tengas el repositorio, y deja el CSV en `pg-lab/datos/`. Si PostgreSQL está en otra máquina o en una VM, cópialo allí, por ejemplo con `scp`:
+
+```js
+// Archivo: exportar-secciones.mjs
+// Exporta las lecciones de Dani Academy (título, resumen y texto sin código) a datos/secciones.csv
+// Uso: node exportar-secciones.mjs ../dani-academy/src/content/sections
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const raiz = process.argv[2];
+if (!raiz) throw new Error("Falta la ruta de src/content/sections");
+
+const campo = (fm, nombre) => fm.match(new RegExp(`^${nombre}: "(.*)"$`, "m"))?.[1] ?? "";
+const csv = (valor) => `"${String(valor).replaceAll('"', '""')}"`;
+
+/** Texto legible: sin bloques de código, sin etiquetas MDX y sin la sintaxis de Markdown */
+function textoPlano(mdx) {
+  return mdx
+    .replace(/^(`{3,})[^\n]*\n[\s\S]*?^\1\s*$/gm, " ") // bloques de código
+    .replace(/<\/?[A-Z][^>]*>/g, " ") // <Callout …> y </Callout>
+    .replace(/`([^`]*)`/g, "$1") // código en línea: se queda el texto
+    .replace(/[#*_>|-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const filas = [["id", "curso_id", "titulo", "resumen", "cuerpo"]];
+for (const curso of readdirSync(raiz).sort()) {
+  for (const archivo of readdirSync(join(raiz, curso)).sort()) {
+    if (!archivo.endsWith(".mdx") || archivo.startsWith("_")) continue;
+    const [, fm, cuerpo] = readFileSync(join(raiz, curso, archivo), "utf8").split(/^---$/m);
+    filas.push([campo(fm, "sectionId"), campo(fm, "course"), campo(fm, "title"), campo(fm, "summary"), textoPlano(cuerpo)]);
+  }
+}
+
+mkdirSync("datos", { recursive: true });
+writeFileSync("datos/secciones.csv", filas.map((f) => f.map(csv).join(",")).join("\n") + "\n");
+console.log(`${filas.length - 1} secciones exportadas a datos/secciones.csv`);
+```
+
+```bash
+node exportar-secciones.mjs ../dani-academy/src/content/sections
+```
+
+```text
+97 secciones exportadas a datos/secciones.csv
+```
+
+`26-busqueda.sql` carga las lecciones y enseña qué hace la configuración `spanish` con el texto:
+
+```sql
+-- Archivo: 26-busqueda.sql
+-- Búsqueda de texto completo en español sobre las lecciones de Dani Academy
+DROP TABLE IF EXISTS secciones;
+CREATE TABLE secciones (
+  id       text PRIMARY KEY,
+  curso_id text NOT NULL REFERENCES cursos(id),
+  titulo   text NOT NULL,
+  resumen  text NOT NULL,
+  cuerpo   text NOT NULL
+);
+\copy secciones FROM 'datos/secciones.csv' WITH (FORMAT csv, HEADER true)
+
+-- 1. Qué guarda to_tsvector: lexemas (raíces) sin las palabras vacías, con su posición
+SELECT to_tsvector('spanish', 'Los índices aceleran las consultas; un índice compuesto, más.');
+SELECT to_tsvector('simple',  'Los índices aceleran las consultas; un índice compuesto, más.');
+
+-- 2. ILIKE busca el texto tal cual; la búsqueda de texto, la palabra en cualquier forma
+SELECT count(*) AS con_ilike FROM secciones WHERE cuerpo ILIKE '%índice %';
+SELECT count(*) AS con_tsquery FROM secciones WHERE to_tsvector('spanish', cuerpo) @@ to_tsquery('spanish', 'índice');
+
+-- 3. Qué hace 'spanish' con tildes, ñ, ü y palabras vacías
+SELECT palabra, to_tsvector('spanish', palabra) AS spanish
+FROM unnest(ARRAY['sesión', 'sesion', 'contraseña', 'contrasena', 'pingüino', 'pinguino', 'también', 'tambien']) AS palabra;
+```
+
+```text
+DROP TABLE
+CREATE TABLE
+COPY 97
+                   to_tsvector
+-------------------------------------------------
+ 'aceler':3 'compuest':8 'consult':5 'indic':2,7
+(1 row)
+
+                                          to_tsvector
+------------------------------------------------------------------------------------------------
+ 'aceleran':3 'compuesto':8 'consultas':5 'las':4 'los':1 'más':9 'un':6 'índice':7 'índices':2
+(1 row)
+
+ con_ilike
+-----------
+        32
+(1 row)
+
+ con_tsquery
+-------------
+          50
+(1 row)
+
+  palabra   |    spanish
+------------+---------------
+ sesión     | 'sesion':1
+ sesion     | 'sesion':1
+ contraseña | 'contraseñ':1
+ contrasena | 'contrasen':1
+ pingüino   | 'pingüin':1
+ pinguino   | 'pinguin':1
+ también    |
+ tambien    | 'tambi':1
+(8 rows)
+```
+
+- **`to_tsvector('spanish', …)` guarda raíces:** "índices" e "índice" son `'indic'`, y desaparecen las palabras vacías ("los", "las", "un", "más"). Con `'simple'`, cada palabra queda tal cual.
+- **Por eso encuentra más que `ILIKE`:** `ILIKE '%índice %'` encuentra 32 lecciones con esa palabra exacta seguida de un espacio; la búsqueda de texto encuentra 50, porque también cuenta "índices", "índice," o "índice." al final de una frase.
+- **Las tildes agudas no importan; la ñ y la ü, sí:** el _stemmer_ español quita las tildes al sacar la raíz, así que "sesion" encuentra "sesión". Pero conserva la ñ y la ü: quien escriba "contrasena" desde un teclado sin ñ no encuentra "contraseña".
+- **"también" es palabra vacía, "tambien" no:** la lista de palabras vacías tiene las palabras con tilde. Sin tilde, "tambien" se indexa como `'tambi'`.
+
+`27-busqueda-indice.sql` arregla lo de la ñ con una configuración propia, guarda el `tsvector` en una columna con pesos, la indexa con GIN y hace la búsqueda que haría alguien en un buscador:
+
+```sql
+-- Archivo: 27-busqueda-indice.sql
+-- Una configuración "es" = spanish + unaccent, una columna tsvector con pesos y un índice GIN
+
+-- 1. "es": como spanish, pero quitando antes ñ, ü y tildes (unaccent)
+CREATE EXTENSION IF NOT EXISTS unaccent;
+DROP TEXT SEARCH CONFIGURATION IF EXISTS es;
+CREATE TEXT SEARCH CONFIGURATION es (COPY = spanish);
+ALTER TEXT SEARCH CONFIGURATION es
+  ALTER MAPPING FOR hword, hword_part, word WITH unaccent, spanish_stem;
+
+SELECT to_tsvector('es', 'contraseña pingüino también') AS es,
+       to_tsquery('es', 'contrasena & pinguino') AS consulta;
+
+-- 2. Columna generada: se calcula sola al insertar o actualizar. El título pesa más (A) que el resumen (B) y el cuerpo (C)
+ALTER TABLE secciones ADD COLUMN busqueda tsvector GENERATED ALWAYS AS (
+  setweight(to_tsvector('es', titulo), 'A') ||
+  setweight(to_tsvector('es', resumen), 'B') ||
+  setweight(to_tsvector('es', cuerpo), 'C')
+) STORED;
+
+-- 3. Sin índice, calculando el tsvector en cada consulta, frente a la columna con GIN
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id FROM secciones WHERE to_tsvector('es', cuerpo) @@ websearch_to_tsquery('es', 'transacciones');
+
+CREATE INDEX secciones_busqueda ON secciones USING gin (busqueda);
+SET enable_seqscan = off; -- con 97 filas, el planificador preferiría leer la tabla: se fuerza para ver el GIN
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT id FROM secciones WHERE busqueda @@ websearch_to_tsquery('es', 'transacciones');
+RESET enable_seqscan;
+
+-- 4. Lo que escribiría alguien en el buscador: comillas para frases y - para excluir
+SELECT websearch_to_tsquery('es', 'transacciones "replica set" -postgresql') AS consulta;
+
+SELECT id, titulo, round(ts_rank(busqueda, q)::numeric, 3) AS relevancia,
+       ts_headline('es', cuerpo, q, 'StartSel=«, StopSel=», MaxFragments=1, MaxWords=14, MinWords=8') AS fragmento
+FROM secciones, websearch_to_tsquery('es', 'transacciones "replica set" -postgresql') AS q
+WHERE busqueda @@ q
+ORDER BY relevancia DESC
+LIMIT 5;
+
+-- 5. El precio de unaccent: "año" y "ano" se vuelven la misma palabra, y "también" deja de ser palabra vacía
+SELECT to_tsvector('es', 'año ano también') AS es, to_tsvector('spanish', 'año ano también') AS spanish;
+```
+
+```text
+CREATE EXTENSION
+psql:27-busqueda-indice.sql:5: NOTICE:  extension "unaccent" already exists, skipping
+psql:27-busqueda-indice.sql:6: ERROR:  cannot drop text search configuration es because other objects depend on it
+DETAIL:  column busqueda of table secciones depends on text search configuration es
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+psql:27-busqueda-indice.sql:7: ERROR:  duplicate key value violates unique constraint "pg_ts_config_cfgname_index"
+DETAIL:  Key (cfgname, cfgnamespace)=(es, 2200) already exists.
+ALTER TEXT SEARCH CONFIGURATION
+                 es                  |        consulta
+-------------------------------------+-------------------------
+ 'contrasen':1 'pinguin':2 'tambi':3 | 'contrasen' & 'pinguin'
+(1 row)
+
+psql:27-busqueda-indice.sql:19: ERROR:  column "busqueda" of relation "secciones" already exists
+                                   QUERY PLAN
+--------------------------------------------------------------------------------
+ Seq Scan on secciones (actual time=1.625..62.997 rows=10.00 loops=1)
+   Filter: (to_tsvector('es'::regconfig, cuerpo) @@ '''transaccion'''::tsquery)
+   Rows Removed by Filter: 87
+   Buffers: shared hit=314
+ Planning:
+   Buffers: shared hit=56
+ Planning Time: 0.095 ms
+ Execution Time: 63.002 ms
+(8 rows)
+
+psql:27-busqueda-indice.sql:25: ERROR:  relation "secciones_busqueda" already exists
+SET
+                                         QUERY PLAN
+---------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on secciones (actual time=0.032..0.035 rows=10.00 loops=1)
+   Recheck Cond: (busqueda @@ '''transaccion'''::tsquery)
+   Heap Blocks: exact=4
+   Buffers: shared hit=7
+   ->  Bitmap Index Scan on secciones_busqueda (actual time=0.028..0.028 rows=10.00 loops=1)
+         Index Cond: (busqueda @@ '''transaccion'''::tsquery)
+         Index Searches: 1
+         Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=36
+ Planning Time: 0.126 ms
+ Execution Time: 0.048 ms
+(12 rows)
+
+RESET
+                      consulta
+----------------------------------------------------
+ 'transaccion' & 'replic' <-> 'set' & !'postgresql'
+(1 row)
+
+  id  |             titulo              | relevancia |                                                fragmento
+------+---------------------------------+------------+----------------------------------------------------------------------------------------------------------
+ A2.1 | Transacciones y consistencia    |      0.893 | conectado a un «replica» «set» . Las «transacciones» solo funcionan en un «replica» «set»
+ I8.5 | Tests end-to-end con Playwright |      0.820 | también. Un «replica» «set», no un servidor suelto: Better Auth usa «transacciones» al crear
+ I5.2 | Better Auth con MongoDB         |      0.714 | ninguno. Las «transacciones» necesitan un «replica» «set» . emailAndPassword activa el acceso con correo
+(3 rows)
+
+         es          |     spanish
+---------------------+-----------------
+ 'ano':1,2 'tambi':3 | 'ano':2 'año':1
+(1 row)
+```
+
+- **La configuración `es`:** es una copia de `spanish` que pasa cada palabra por `unaccent` antes del _stemmer_. Ahora "contrasena" encuentra "contraseña", y "pinguino", "pingüino".
+- **Columna generada (`GENERATED ALWAYS AS … STORED`):** PostgreSQL la calcula al insertar o actualizar, y nunca se queda desfasada. `setweight` marca de dónde viene cada palabra: título (A), resumen (B) y cuerpo (C).
+- **De 63 ms a 0,048 ms:** sin la columna, cada búsqueda calcula el `tsvector` de las 97 lecciones; con el GIN, lee la lista de "transaccion" y va directa a las 10 filas. Con 97 filas, el planificador preferiría leer la tabla, y por eso se fuerza el índice con `enable_seqscan = off` para verlo.
+- **`websearch_to_tsquery` entiende lo que escribe una persona:** palabras sueltas (AND), una frase entre comillas (`<->`: una palabra detrás de otra) y `-` para excluir. No da error con una sintaxis rara, al contrario que `to_tsquery`, así que puedes pasarle lo que escriba quien busca.
+- **`ts_rank` y `ts_headline`:** la relevancia tiene en cuenta cuántas veces aparecen las palabras y su peso, y A2.1, cuyo título es "Transacciones y consistencia", sale primera. `ts_headline` marca las palabras encontradas en un fragmento del cuerpo.
+
+<Callout type="risk">
+
+- **`unaccent` tiene su precio:** convierte la ñ en n, así que "año" y "ano" se vuelven la misma palabra (la última consulta de la salida), igual que con el índice `text` de MongoDB en A2.3. Y como actúa antes que el _stemmer_, las palabras vacías con tilde ("también", "está") dejan de reconocerse y se indexan. Decide si te compensa: para un buscador de lecciones, sí.
+- **El índice GIN tiene que coincidir con la consulta:** `busqueda @@ q` usa el índice de la columna, pero `to_tsvector('es', cuerpo) @@ q` lo recalcula y no lo usa. Busca siempre sobre la misma expresión que indexaste, y con la misma configuración.
+- **`ts_headline` es caro:** procesa el texto completo de cada fila. Aplícalo solo a las filas que vas a mostrar (después de `LIMIT`), nunca a todas las coincidencias.
+
+</Callout>
+
+## Paso 5: transacciones a la vez, niveles de aislamiento y bloqueos
+
+En A2.1 usaste una transacción de MongoDB para guardar un intento y actualizar su resumen a la vez. PostgreSQL las tiene desde siempre, pero hay una pregunta que una transacción sola no responde: **¿qué ve cada una cuando hay otra a la vez?** Eso lo decide el nivel de aislamiento. Para verlo hacen falta dos sesiones que se crucen, y `dos-sesiones.sh` las lanza: el mismo archivo dos veces, con medio segundo de diferencia, y con el nombre de cada sesión en la variable `:sesion`:
+
+```sh
+#!/bin/sh
+# Archivo: dos-sesiones.sh
+# Uso: ./dos-sesiones.sh escenario.sql
+# Ejecuta el mismo archivo en dos sesiones de psql A LA VEZ (base progreso): A empieza primero y
+# B medio segundo después. Cada una recibe su nombre en la variable :sesion. Al final, muestra
+# lo que vio cada sesión
+set -e
+sesion() { sudo -u postgres psql -X -q -d progreso -v sesion="$1" -f "$2" > "/tmp/sesion-$1.txt" 2>&1; }
+sesion A "$1" &
+sleep 0.5
+sesion B "$1" &
+wait
+echo "──── Sesión A"; cat /tmp/sesion-A.txt
+echo "──── Sesión B"; cat /tmp/sesion-B.txt
+```
+
+La tabla, `30-resumen.sql`, es el resumen de A2.1: cuántas secciones lleva leídas cada usuario en cada curso. **Ejecútala antes de cada escenario**, porque cada uno parte de 5 lecturas en A3:
+
+```sql
+-- Archivo: 30-resumen.sql
+-- El resumen del panel: cuántas secciones lleva leídas cada usuario en cada curso (como en A2.1)
+DROP TABLE IF EXISTS resumen;
+CREATE TABLE resumen (
+  usuario_id text NOT NULL,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  leidas     integer NOT NULL DEFAULT 0 CHECK (leidas >= 0),
+  PRIMARY KEY (usuario_id, curso_id)
+);
+INSERT INTO resumen VALUES ('u_00042', 'A3', 5), ('u_00042', 'B1', 8);
+SELECT * FROM resumen ORDER BY curso_id;
+```
+
+```text
+DROP TABLE
+CREATE TABLE
+INSERT 0 2
+ usuario_id | curso_id | leidas
+------------+----------+--------
+ u_00042    | A3       |      5
+ u_00042    | B1       |      8
+(2 rows)
+```
+
+### La actualización perdida, en `READ COMMITTED`
+
+`READ COMMITTED`, el nivel por defecto, garantiza que cada consulta ve datos confirmados. Pero entre la lectura y la escritura de la aplicación pueden pasar cosas. `31-perdida.sql` hace lo que haría un código ingenuo: leer el contador, sumarle uno y escribirlo:
+
+```sql
+-- Archivo: 31-perdida.sql
+-- Leer, calcular en la app y escribir: la forma ingenua de "sumar una lectura"
+BEGIN;
+SELECT leidas FROM resumen WHERE usuario_id = 'u_00042' AND curso_id = 'A3' \gset
+\echo :sesion leyó :leidas
+SELECT pg_sleep(1) \g /dev/null
+UPDATE resumen SET leidas = :leidas + 1 WHERE usuario_id = 'u_00042' AND curso_id = 'A3';
+COMMIT;
+```
+
+```bash
+chmod +x dos-sesiones.sh
+./dos-sesiones.sh 31-perdida.sql
+sudo -u postgres psql -X -d progreso -f 32-ver.sql
+```
+
+```text
+──── Sesión A
+A leyó 5
+──── Sesión B
+B leyó 5
+ curso_id | leidas
+----------+--------
+ A3       |      6
+ B1       |      8
+(2 rows)
+```
+
+Las dos leyeron 5, las dos escribieron 6. **Se perdió una lectura**, sin ningún error. Hay dos formas de arreglarlo:
+
+```sql
+-- Archivo: 33-atomica.sql
+-- La suma la hace la base de datos: el UPDATE bloquea la fila hasta el COMMIT
+BEGIN;
+\timing on
+UPDATE resumen SET leidas = leidas + 1 WHERE usuario_id = 'u_00042' AND curso_id = 'A3'
+RETURNING :'sesion' AS sesion, leidas;
+\timing off
+SELECT pg_sleep(1) \g /dev/null
+COMMIT;
+```
+
+```text
+──── Sesión A
+ sesion | leidas
+--------+--------
+ A      |      6
+(1 row)
+
+Time: 0.462 ms
+──── Sesión B
+ sesion | leidas
+--------+--------
+ B      |      7
+(1 row)
+
+Time: 469.568 ms
+ curso_id | leidas
+----------+--------
+ A3       |      7
+ B1       |      8
+(2 rows)
+```
+
+```sql
+-- Archivo: 34-for-update.sql
+-- Si la app necesita leer antes de escribir: FOR UPDATE bloquea la fila desde la lectura
+BEGIN;
+\timing on
+SELECT leidas FROM resumen WHERE usuario_id = 'u_00042' AND curso_id = 'A3' FOR UPDATE \gset
+\timing off
+\echo :sesion leyó :leidas
+SELECT pg_sleep(1) \g /dev/null
+UPDATE resumen SET leidas = :leidas + 1 WHERE usuario_id = 'u_00042' AND curso_id = 'A3';
+COMMIT;
+```
+
+```text
+──── Sesión A
+Time: 0.378 ms
+A leyó 5
+──── Sesión B
+Time: 481.679 ms
+B leyó 6
+ curso_id | leidas
+----------+--------
+ A3       |      7
+ B1       |      8
+(2 rows)
+```
+
+- **`UPDATE … SET leidas = leidas + 1`:** la suma la hace la base de datos con el valor actual. El `UPDATE` bloquea la fila hasta el `COMMIT`, así que el de B **espera** a que A termine (470 ms) y después suma sobre el 6. Es el `$inc` de MongoDB (A2.1). Siempre que puedas, escribe así.
+- **`SELECT … FOR UPDATE`:** cuando la aplicación tiene que leer antes de decidir, bloquea la fila desde la lectura. B espera en el `SELECT` (482 ms) y lee ya el 6.
+
+### `REPEATABLE READ`: una foto fija que no deja escribir encima
+
+```sql
+-- Archivo: 35-repeatable.sql
+-- REPEATABLE READ: la transacción ve una foto fija y no deja escribir sobre algo que otro cambió
+BEGIN ISOLATION LEVEL REPEATABLE READ;
+SELECT leidas FROM resumen WHERE usuario_id = 'u_00042' AND curso_id = 'A3' \gset
+\echo :sesion leyó :leidas
+SELECT pg_sleep(1) \g /dev/null
+UPDATE resumen SET leidas = :leidas + 1 WHERE usuario_id = 'u_00042' AND curso_id = 'A3';
+COMMIT;
+```
+
+```text
+──── Sesión A
+A leyó 5
+──── Sesión B
+B leyó 5
+psql:35-repeatable.sql:7: ERROR:  could not serialize access due to concurrent update
+ curso_id | leidas
+----------+--------
+ A3       |      6
+ B1       |      8
+(2 rows)
+```
+
+En `REPEATABLE READ`, toda la transacción ve los datos tal como estaban al empezar. Cuando B intenta escribir sobre una fila que A cambió después, PostgreSQL no la deja (`could not serialize access due to concurrent update`) y la transacción entera de B se cancela. No hay actualización perdida, pero **tu aplicación tiene que reintentar** la transacción de B desde el principio.
+
+### `SERIALIZABLE` y el sesgo de escritura
+
+Hay un fallo que ni `FOR UPDATE` evita fácilmente: dos transacciones que **leen** lo mismo y **escriben** cosas distintas. La regla de la app es "cada usuario destaca como mucho 2 secciones". `36-destacadas.sql` prepara la tabla con una ya destacada:
+
+```sql
+-- Archivo: 36-destacadas.sql
+-- Regla de la app: cada usuario puede destacar como mucho 2 secciones. Ya tiene 1
+DROP TABLE IF EXISTS destacadas;
+CREATE TABLE destacadas (
+  usuario_id text NOT NULL,
+  seccion_id text NOT NULL REFERENCES secciones(id),
+  PRIMARY KEY (usuario_id, seccion_id)
+);
+INSERT INTO destacadas VALUES ('u_00042', 'A3.1');
+```
+
+Y las dos sesiones comprueban la regla y destacan una sección distinta cada una, primero en `READ COMMITTED` y después en `SERIALIZABLE` (ejecuta `36-destacadas.sql` antes de cada una, y `36-ver.sql` al terminar):
+
+```sql
+-- Archivo: 37-read-committed.sql
+-- Comprobar la regla (máximo 2 destacadas) y después insertar, en READ COMMITTED
+BEGIN ISOLATION LEVEL READ COMMITTED;
+SELECT count(*) AS n FROM destacadas WHERE usuario_id = 'u_00042' \gset
+\echo :sesion ve :n destacada: cabe una más
+SELECT CASE :'sesion' WHEN 'A' THEN 'A3.2' ELSE 'A2.1' END AS seccion \gset
+SELECT pg_sleep(1) \g /dev/null
+INSERT INTO destacadas VALUES ('u_00042', :'seccion');
+COMMIT;
+```
+
+```text
+──── Sesión A
+A ve 1 destacada: cabe una más
+──── Sesión B
+B ve 1 destacada: cabe una más
+    destacadas    | total
+------------------+-------
+ A2.1, A3.1, A3.2 |     3
+(1 row)
+```
+
+```sql
+-- Archivo: 38-serializable.sql
+-- Comprobar la regla (máximo 2 destacadas) y después insertar, en SERIALIZABLE
+BEGIN ISOLATION LEVEL SERIALIZABLE;
+SELECT count(*) AS n FROM destacadas WHERE usuario_id = 'u_00042' \gset
+\echo :sesion ve :n destacada: cabe una más
+SELECT CASE :'sesion' WHEN 'A' THEN 'A3.2' ELSE 'A2.1' END AS seccion \gset
+SELECT pg_sleep(1) \g /dev/null
+INSERT INTO destacadas VALUES ('u_00042', :'seccion');
+COMMIT;
+```
+
+```text
+──── Sesión A
+A ve 1 destacada: cabe una más
+──── Sesión B
+B ve 1 destacada: cabe una más
+psql:38-serializable.sql:8: ERROR:  could not serialize access due to read/write dependencies among transactions
+DETAIL:  Reason code: Canceled on identification as a pivot, during write.
+HINT:  The transaction might succeed if retried.
+ destacadas | total
+------------+-------
+ A3.1, A3.2 |     2
+(1 row)
+```
+
+En `READ COMMITTED`, las dos vieron 1, las dos insertaron y el usuario acaba con **3**: la regla se ha roto, aunque cada transacción por separado era correcta. En `SERIALIZABLE`, PostgreSQL detecta que el resultado no coincide con ejecutarlas una detrás de otra y cancela B (`could not serialize access due to read/write dependencies`). El `HINT` lo dice: reintenta.
+
+| Nivel                          | Qué evita                                                                           | Qué tiene que hacer tu código                                       |
+| ------------------------------ | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `READ COMMITTED` (por defecto) | Leer datos sin confirmar                                                            | Escribir de forma atómica (`x = x + 1`) o bloquear con `FOR UPDATE` |
+| `REPEATABLE READ`              | Además, que los datos cambien durante la transacción                                | Reintentar ante el error `40001`                                    |
+| `SERIALIZABLE`                 | Además, el sesgo de escritura: el resultado es el de ejecutarlas una detrás de otra | Reintentar ante el error `40001` (más a menudo)                     |
+
+### Interbloqueos (_deadlocks_)
+
+```sql
+-- Archivo: 39-deadlock.sql
+-- Cada sesión actualiza las mismas dos filas, pero en orden contrario
+SELECT CASE :'sesion' WHEN 'A' THEN 'A3' ELSE 'B1' END AS primero,
+       CASE :'sesion' WHEN 'A' THEN 'B1' ELSE 'A3' END AS segundo \gset
+BEGIN;
+UPDATE resumen SET leidas = leidas + 1 WHERE usuario_id = 'u_00042' AND curso_id = :'primero';
+\echo :sesion bloqueó :primero
+SELECT pg_sleep(1) \g /dev/null
+\timing on
+UPDATE resumen SET leidas = leidas + 1 WHERE usuario_id = 'u_00042' AND curso_id = :'segundo';
+\timing off
+COMMIT;
+```
+
+```text
+──── Sesión A
+A bloqueó A3
+psql:39-deadlock.sql:10: ERROR:  deadlock detected
+DETAIL:  Process 153460 waits for ShareLock on transaction 1197; blocked by process 153465.
+Process 153465 waits for ShareLock on transaction 1196; blocked by process 153460.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,2) in relation "resumen"
+Time: 1002.713 ms (00:01.003)
+──── Sesión B
+B bloqueó B1
+Time: 462.910 ms
+ curso_id | leidas
+----------+--------
+ A3       |      6
+ B1       |      9
+(2 rows)
+```
+
+A bloquea A3 y espera a B1; B bloquea B1 y espera a A3. Ninguna puede seguir. PostgreSQL espera `deadlock_timeout` (1 s por defecto), encuentra el ciclo y cancela una de las dos (aquí, A), que se deshace entera. B termina normalmente. Por eso el resumen final tiene las dos sumas de B y ninguna de A.
+
+<Callout type="risk">
+
+- **Los errores `40001` (serialización) y `40P01` (_deadlock_) son normales: reintenta.** Con `REPEATABLE READ` y `SERIALIZABLE` no son fallos del código, sino la forma en que PostgreSQL te avisa de un cruce. Repite la transacción entera desde el `BEGIN`, unas pocas veces y con una espera aleatoria, no solo la sentencia que falló.
+- **Bloquea siempre en el mismo orden:** si todas las transacciones actualizan los cursos por orden alfabético, no puede haber un ciclo. El interbloqueo de `39-deadlock.sql` existe porque cada sesión los toma en un orden distinto.
+- **Una transacción abierta es un bloqueo abierto:** mientras A dormía con el `UPDATE` hecho, B esperaba. Si tu código abre una transacción y después llama a una API lenta, cada petición que toque esa fila esperará. Haz el trabajo lento fuera, y usa `SET lock_timeout = '2s'` para que una espera larga dé error en lugar de colgar la petición.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Genera con `generate_series` un millón de lecturas y 200 000 evaluaciones con la estructura de A3.2, sin más índices que las claves primarias.
+2. Mide con `EXPLAIN ANALYZE` las tres consultas principales del panel de progreso de un usuario: secciones leídas de cada curso, última nota de cada curso y lecturas por día de los últimos 30 días.
+3. Optimízalas hasta que todas usen un índice, y decide con medidas qué índices **no** crear.
+
+</Callout>
+
+Solución. `40-generar.sql` crea las dos tablas. Cada usuario lee 50 secciones distintas, así que la clave primaria `(usuario_id, seccion_id)` se cumple sin conflictos:
+
+```sql
+-- Archivo: 40-generar.sql
+-- El panel de progreso a escala: 1 000 000 de lecturas y 200 000 evaluaciones, sin más índices que las claves
+DROP TABLE IF EXISTS lecturas_1m, evaluaciones_1m;
+
+CREATE TABLE lecturas_1m (
+  usuario_id text NOT NULL,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  seccion_id text NOT NULL,
+  leida_en   timestamptz NOT NULL,
+  PRIMARY KEY (usuario_id, seccion_id)
+);
+
+CREATE TABLE evaluaciones_1m (
+  id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  usuario_id text NOT NULL,
+  curso_id   text NOT NULL REFERENCES cursos(id),
+  puntuacion smallint NOT NULL CHECK (puntuacion BETWEEN 0 AND 5),
+  fecha      timestamptz NOT NULL
+);
+
+SELECT setseed(0.7);
+
+-- Cada usuario lee 50 secciones distintas: g recorre los usuarios y k (0–49) las secciones
+INSERT INTO lecturas_1m
+SELECT 'u_' || lpad(((g - 1) % 20000 + 1)::text, 5, '0'),
+       c.id,
+       c.id || '.' || ((g - 1) / 20000 / 24 + 1),
+       timestamptz '2026-10-01 00:00:00+00' - random() * interval '365 days'
+FROM generate_series(1, 1000000) AS g
+JOIN (SELECT id, row_number() OVER (ORDER BY id) - 1 AS n FROM cursos) AS c
+  ON c.n = ((g - 1) / 20000) % 24;
+
+INSERT INTO evaluaciones_1m (usuario_id, curso_id, puntuacion, fecha)
+SELECT 'u_' || lpad((floor(random() * 20000) + 1)::text, 5, '0'),
+       (ARRAY(SELECT id FROM cursos ORDER BY id))[floor(random() * 24) + 1],
+       floor(random() * 6)::smallint,
+       timestamptz '2026-10-01 00:00:00+00' - random() * interval '365 days'
+FROM generate_series(1, 200000);
+
+VACUUM ANALYZE lecturas_1m, evaluaciones_1m;
+SELECT (SELECT count(*) FROM lecturas_1m) AS lecturas, (SELECT count(*) FROM evaluaciones_1m) AS evaluaciones;
+```
+
+```text
+DROP TABLE
+CREATE TABLE
+CREATE TABLE
+ setseed
+---------
+
+(1 row)
+
+INSERT 0 1000000
+INSERT 0 200000
+VACUUM
+ lecturas | evaluaciones
+----------+--------------
+  1000000 |       200000
+(1 row)
+```
+
+`41-consultas.sql` mide las tres consultas tal como están:
+
+```sql
+-- Archivo: 41-consultas.sql
+-- Las tres consultas del panel de progreso de un usuario (las de A3.2, sobre las tablas grandes)
+\set usuario '''u_00042'''
+
+-- 1. Secciones leídas de cada curso
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT c.id, count(l.seccion_id) AS leidas, c.secciones
+FROM cursos c
+LEFT JOIN lecturas_1m l ON l.curso_id = c.id AND l.usuario_id = :usuario
+GROUP BY c.id, c.secciones;
+
+-- 2. Última nota de cada curso
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT DISTINCT ON (curso_id) curso_id, puntuacion, fecha
+FROM evaluaciones_1m
+WHERE usuario_id = :usuario
+ORDER BY curso_id, fecha DESC;
+
+-- 3. Lecturas por día en los últimos 30 días (hasta el 1 de octubre)
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT date_trunc('day', leida_en) AS dia, count(*)
+FROM lecturas_1m
+WHERE usuario_id = :usuario
+  AND leida_en >= timestamptz '2026-10-01 00:00:00+00' - interval '30 days'
+GROUP BY 1
+ORDER BY 1;
+```
+
+```text
+                                                 QUERY PLAN
+-------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=0.275..0.282 rows=24.00 loops=1)
+   Group Key: c.id
+   Buffers: shared hit=57
+   ->  Sort (actual time=0.272..0.274 rows=50.00 loops=1)
+         Sort Key: c.id
+         Sort Method: quicksort  Memory: 26kB
+         Buffers: shared hit=57
+         ->  Hash Right Join (actual time=0.080..0.232 rows=50.00 loops=1)
+               Hash Cond: (l.curso_id = c.id)
+               Buffers: shared hit=54
+               ->  Bitmap Heap Scan on lecturas_1m l (actual time=0.023..0.167 rows=50.00 loops=1)
+                     Recheck Cond: (usuario_id = 'u_00042'::text)
+                     Heap Blocks: exact=50
+                     Buffers: shared hit=53
+                     ->  Bitmap Index Scan on lecturas_1m_pkey (actual time=0.016..0.016 rows=50.00 loops=1)
+                           Index Cond: (usuario_id = 'u_00042'::text)
+                           Index Searches: 1
+                           Buffers: shared hit=3
+               ->  Hash (actual time=0.039..0.039 rows=24.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                     Buffers: shared hit=1
+                     ->  Seq Scan on cursos c (actual time=0.029..0.031 rows=24.00 loops=1)
+                           Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=128 read=1
+ Planning Time: 1.247 ms
+ Execution Time: 0.351 ms
+(27 rows)
+
+                                             QUERY PLAN
+-----------------------------------------------------------------------------------------------------
+ Unique (actual time=7.375..8.586 rows=9.00 loops=1)
+   Buffers: shared hit=1517
+   ->  Gather Merge (actual time=7.374..8.582 rows=11.00 loops=1)
+         Workers Planned: 1
+         Workers Launched: 1
+         Buffers: shared hit=1517
+         ->  Sort (actual time=2.941..2.942 rows=5.50 loops=2)
+               Sort Key: curso_id, fecha DESC
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=1517
+               Worker 0:  Sort Method: quicksort  Memory: 25kB
+               ->  Parallel Seq Scan on evaluaciones_1m (actual time=0.416..2.914 rows=5.50 loops=2)
+                     Filter: (usuario_id = 'u_00042'::text)
+                     Rows Removed by Filter: 99994
+                     Buffers: shared hit=1471
+ Planning:
+   Buffers: shared hit=57
+ Planning Time: 0.067 ms
+ Execution Time: 8.598 ms
+(19 rows)
+
+                                                   QUERY PLAN
+----------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=0.058..0.060 rows=5.00 loops=1)
+   Group Key: (date_trunc('day'::text, leida_en))
+   Buffers: shared hit=53
+   ->  Sort (actual time=0.056..0.056 rows=6.00 loops=1)
+         Sort Key: (date_trunc('day'::text, leida_en))
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=53
+         ->  Bitmap Heap Scan on lecturas_1m (actual time=0.018..0.051 rows=6.00 loops=1)
+               Recheck Cond: (usuario_id = 'u_00042'::text)
+               Filter: (leida_en >= ('2026-09-30 18:00:00-06'::timestamp with time zone - '30 days'::interval))
+               Rows Removed by Filter: 44
+               Heap Blocks: exact=50
+               Buffers: shared hit=53
+               ->  Bitmap Index Scan on lecturas_1m_pkey (actual time=0.007..0.007 rows=50.00 loops=1)
+                     Index Cond: (usuario_id = 'u_00042'::text)
+                     Index Searches: 1
+                     Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=17
+ Planning Time: 0.080 ms
+ Execution Time: 0.073 ms
+(21 rows)
+```
+
+Leer los planes antes de crear nada ahorra trabajo:
+
+- **Consultas 1 y 3: ya usan un índice.** La clave primaria `(usuario_id, seccion_id)` empieza por `usuario_id`, así que sirve para "las lecturas de un usuario" (`Bitmap Index Scan on lecturas_1m_pkey`, 50 filas). 0,35 ms y 0,07 ms.
+- **Consulta 2: el cuello de botella.** `evaluaciones_1m` no tiene ningún índice por usuario: `Parallel Seq Scan`, 99 994 filas descartadas en cada proceso para quedarse con 11, 8,6 ms.
+
+`42-indices.sql` crea el índice que falta, con las columnas en el orden de la consulta (igualdad, después orden) y la nota en `INCLUDE` para no ir a la tabla:
+
+```sql
+-- Archivo: 42-indices.sql
+-- Solo el índice que falta: la última nota por curso de un usuario
+CREATE INDEX evaluaciones_1m_ultima ON evaluaciones_1m (usuario_id, curso_id, fecha DESC) INCLUDE (puntuacion);
+
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT DISTINCT ON (curso_id) curso_id, puntuacion, fecha
+FROM evaluaciones_1m
+WHERE usuario_id = 'u_00042'
+ORDER BY curso_id, fecha DESC;
+```
+
+```text
+CREATE INDEX
+                                                     QUERY PLAN
+---------------------------------------------------------------------------------------------------------------------
+ Unique (actual time=0.018..0.022 rows=9.00 loops=1)
+   Buffers: shared hit=1 read=3
+   ->  Index Only Scan using evaluaciones_1m_ultima on evaluaciones_1m (actual time=0.017..0.018 rows=11.00 loops=1)
+         Index Cond: (usuario_id = 'u_00042'::text)
+         Heap Fetches: 0
+         Index Searches: 1
+         Buffers: shared hit=1 read=3
+ Planning:
+   Buffers: shared hit=95 read=1
+ Planning Time: 0.140 ms
+ Execution Time: 0.039 ms
+(11 rows)
+```
+
+De 8,6 ms a 0,039 ms: _Index Only Scan_, sin `Sort` (el índice ya está ordenado por curso y fecha) y sin leer la tabla (`Heap Fetches: 0`).
+
+¿Y la consulta 3? Filtra la fecha con `Filter` después de leer las 50 lecturas del usuario (`Rows Removed by Filter: 44`). Un índice `(usuario_id, leida_en)` la llevaría al índice. `43-coste-escritura.sql` mide lo que gana y lo que cuesta:
+
+```sql
+-- Archivo: 43-coste-escritura.sql
+-- ¿Merece la pena un índice (usuario_id, leida_en) para la consulta 3? Lo que gana y lo que cuesta
+\set usuario '''u_00042'''
+\timing on
+-- Lo que gana: la consulta 3 con el índice
+CREATE INDEX lecturas_1m_usuario_fecha ON lecturas_1m (usuario_id, leida_en);
+EXPLAIN (ANALYZE, COSTS OFF)
+SELECT date_trunc('day', leida_en) AS dia, count(*) FROM lecturas_1m
+WHERE usuario_id = :usuario AND leida_en >= timestamptz '2026-10-01 00:00:00+00' - interval '30 days'
+GROUP BY 1 ORDER BY 1;
+
+-- Lo que cuesta: 100 000 lecturas nuevas, con y sin el índice (se deshacen al terminar)
+BEGIN;
+INSERT INTO lecturas_1m SELECT 'n_' || g, 'A3', 'A3.1', now() FROM generate_series(1, 100000) AS g;
+ROLLBACK;
+DROP INDEX lecturas_1m_usuario_fecha;
+BEGIN;
+INSERT INTO lecturas_1m SELECT 'n_' || g, 'A3', 'A3.1', now() FROM generate_series(1, 100000) AS g;
+ROLLBACK;
+\timing off
+SELECT pg_size_pretty(pg_relation_size('lecturas_1m_pkey')) AS clave_primaria;
+```
+
+```text
+Timing is on.
+CREATE INDEX
+Time: 695.397 ms
+                                                                       QUERY PLAN
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate (actual time=0.028..0.030 rows=5.00 loops=1)
+   Group Key: (date_trunc('day'::text, leida_en))
+   Buffers: shared hit=1 read=3
+   ->  Sort (actual time=0.025..0.026 rows=6.00 loops=1)
+         Sort Key: (date_trunc('day'::text, leida_en))
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=1 read=3
+         ->  Index Only Scan using lecturas_1m_usuario_fecha on lecturas_1m (actual time=0.021..0.022 rows=6.00 loops=1)
+               Index Cond: ((usuario_id = 'u_00042'::text) AND (leida_en >= ('2026-09-30 18:00:00-06'::timestamp with time zone - '30 days'::interval)))
+               Heap Fetches: 0
+               Index Searches: 1
+               Buffers: shared hit=1 read=3
+ Planning:
+   Buffers: shared hit=83 read=1
+ Planning Time: 0.190 ms
+ Execution Time: 0.049 ms
+(16 rows)
+
+Time: 1.299 ms
+BEGIN
+Time: 0.013 ms
+INSERT 0 100000
+Time: 498.946 ms
+ROLLBACK
+Time: 0.128 ms
+DROP INDEX
+Time: 2.884 ms
+BEGIN
+Time: 0.046 ms
+INSERT 0 100000
+Time: 415.462 ms
+ROLLBACK
+Time: 0.078 ms
+Timing is off.
+ clave_primaria
+----------------
+ 44 MB
+(1 row)
+```
+
+Con el índice, la consulta 3 lee 4 páginas en lugar de 53 y pasa de 0,07 ms a 0,05 ms: nadie lo notará. En cambio, 100 000 lecturas nuevas tardan 499 ms con el índice y 415 ms sin él, un 20 % más en cada escritura, y la tabla de lecturas es la que más se escribe de la plataforma (una fila cada vez que alguien marca una sección). **Decisión: no se crea.** Las tres consultas usan un índice y solo se añadió uno.
+
+<Callout type="risk">
+
+- **Los tiempos dependen de la máquina y de la caché:** la misma consulta 2 tardó 4,6 ms en una ejecución y 8,6 ms en otra. Compara siempre el plan (qué nodos, cuántas filas, cuántas páginas) además del tiempo, y mide varias veces antes de decidir.
+- **Una consulta por usuario sobre 50 filas siempre es rápida:** el índice que de verdad importa es el que evita leer la tabla entera (la consulta 2). Optimizar de 0,07 ms a 0,05 ms no compensa un 20 % más en cada escritura.
+
+</Callout>
+
+<Callout type="mastery">
+
+Lees un `EXPLAIN ANALYZE` de dentro afuera y encuentras el cuello de botella: el nodo que lee la tabla entera, el `Rows Removed by Filter` enorme o la línea donde las filas estimadas y las reales se separan. Eliges el índice que lo resuelve (compuesto en el orden de la consulta, parcial o con `INCLUDE`), compruebas que se usa y descartas con medidas los que solo encarecen las escrituras. Y sabes qué hace cada nivel de aislamiento cuando dos transacciones se cruzan.
+
+</Callout>
+
+## Resumen
+
+- `EXPLAIN` muestra el plan elegido y `EXPLAIN ANALYZE` lo ejecuta y mide: se lee de dentro afuera, comparando filas estimadas con reales.
+- Un B-tree compuesto sirve en el orden de sus columnas: igualdad primero, luego orden y rango. `INCLUDE` y `VACUUM` permiten no leer la tabla, y un índice parcial ocupa una fracción.
+- Un índice no se usa con una función sobre la columna, con condiciones poco selectivas o con estadísticas viejas: reescribe como rango y ejecuta `ANALYZE` tras cargar datos.
+- La búsqueda de texto convierte el texto en raíces (`to_tsvector`) y se indexa con GIN. En español, `unaccent` iguala la ñ y la ü, a cambio de juntar "año" y "ano".
+- En `READ COMMITTED`, leer y luego escribir pierde actualizaciones: escribe de forma atómica o con `FOR UPDATE`. `REPEATABLE READ` y `SERIALIZABLE` evitan más fallos, pero obligan a reintentar.
+- Los interbloqueos se evitan bloqueando siempre en el mismo orden y con transacciones cortas.
