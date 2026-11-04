@@ -1,5 +1,6 @@
 import { useEffect, useReducer, useRef } from "react";
 import { actions } from "astro:actions";
+import { CODE_BLOCK_CLASS, CopyCodeButton } from "@/components/code/CopyCodeButton";
 import { cn } from "@/lib/cn";
 import { renderInline } from "@/lib/inline-code";
 import type { PublicQuestion, SubmitQuizResult } from "@/server/services/quiz.service";
@@ -187,9 +188,12 @@ export default function Quiz({ courseId, courseHref, questions }: Props) {
           {renderInline(question.prompt)}
         </h2>
         {question.code && (
-          <pre className="overflow-x-auto rounded-xl border border-surface-2 bg-surface p-4 font-mono text-sm leading-relaxed">
-            <code>{question.code}</code>
-          </pre>
+          <div key={step} className={CODE_BLOCK_CLASS}>
+            <pre className="overflow-x-auto rounded-xl border border-surface-2 bg-surface p-4 font-mono text-sm leading-relaxed">
+              <code>{question.code}</code>
+            </pre>
+            <CopyCodeButton />
+          </div>
         )}
         <div className="space-y-2" role="radiogroup" aria-labelledby="quiz-question">
           {question.options.map((option, i) => (
