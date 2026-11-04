@@ -19,6 +19,11 @@ export const SESSION_GAP_MINUTES = 30; // más de 30 min sin latidos → sesión
 export const IDLE_AFTER_MINUTES = 5; // sin interacción durante 5 min → no se cuentan latidos
 
 export const THEME_STORAGE_KEY = "da-theme";
+export const SIDEBAR_STORAGE_KEY = "da-sidebar";
+
+/** Ancho de lectura; crece al ocultar el índice del curso para aprovechar el espacio libre */
+export const READING_WIDTH_CLASS =
+  "mx-auto max-w-[68ch] transition-[max-width] duration-300 ease-in-out lg:sidebar-closed:max-w-[100ch]";
 
 /** Límites de uso por usuario (Tanda 9): ventana fija, contador en la colección rate_limits */
 export const RATE_LIMITS = {
