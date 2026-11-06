@@ -1,0 +1,727 @@
+---
+sectionId: "A4.3"
+course: "A4"
+title: "Nginx como reverse proxy"
+order: 3
+minutes: 90
+summary: "Pones la app detrás de Nginx en el puerto 80, descubres qué se rompe sin cada cabecera (formularios, registro, límite de intentos), comprimes con gzip y Brotli, sirves los estáticos y pruebas Caddy."
+---
+
+Tu app corre en un contenedor, publicada solo en `127.0.0.1:4321` (A4.2): nadie de fuera puede llegar a ella. Falta alguien que reciba a los visitantes en el puerto 80 y les pase las peticiones. Ese alguien es un **_reverse proxy_**, un servidor que se pone delante de tu app y habla con internet por ella. **Nginx** es el más usado.
+
+Una analogía: tu app es la cocina de un restaurante, y Nginx, el **camarero de la puerta**. Recibe a todo el mundo, sirve él mismo lo que ya está preparado (el agua, el pan: los archivos estáticos), lleva a cocina solo lo que hay que cocinar (las páginas SSR) y, si la cocina se para, sigue en la puerta para decirlo. Pero un mensajero también puede estorbar: si no le cuenta a la cocina quién es el cliente, para quién es el pedido y desde qué mesa llama, la cocina toma decisiones equivocadas. Casi toda esta sección trata de ese recado.
+
+**Lo que tendrás al terminar:** la app en el puerto 80 detrás de Nginx, con formularios, registro y límite de intentos funcionando; compresión gzip y Brotli; los estáticos servidos por Nginx y precomprimidos; y un _script_ que comprueba todo desde fuera del servidor. Además, sabrás hacer lo mismo con Caddy.
+
+**Requisitos:** la app `entrenos-app` con el `Dockerfile` y el `compose.yaml` de A4.2, en el servidor de I6, con `ufw` activo (I6.5) y los puertos 80 y 443 permitidos. En las salidas, la IP del servidor es `192.168.64.2`, la de I6.5: usa la tuya.
+
+## Paso 1: por qué no exponer Node en el puerto 80
+
+La idea más directa sería quitar Nginx de la ecuación y arrancar Node en el puerto 80. En el servidor, con un usuario normal:
+
+```bash
+node -e 'require("http").createServer((q, r) => r.end("hola")).listen(80, "0.0.0.0")'
+```
+
+```text
+Error: listen EACCES: permission denied 0.0.0.0:80
+```
+
+En Linux, los puertos por debajo de 1024 son **privilegiados**: solo `root` puede abrirlos. El límite se ve aquí:
+
+```bash
+sysctl net.ipv4.ip_unprivileged_port_start
+```
+
+```text
+net.ipv4.ip_unprivileged_port_start = 1024
+```
+
+Ejecutar Node como `root` para abrir el puerto significaría que un fallo en tu app, o en cualquiera de sus cientos de dependencias, da el control de todo el servidor. En A4.2 te aseguraste de lo contrario, con `USER node`. Nginx resuelve el dilema así:
+
+```bash
+sudo apt-get install -y nginx
+ps -o user,args -C nginx
+```
+
+```text
+USER     COMMAND
+root     nginx: master process /usr/sbin/nginx -g daemon on; master_pr…
+www-data nginx: worker process
+www-data nginx: worker process
+```
+
+El proceso principal arranca como `root` solo para abrir los puertos, y las peticiones las atienden trabajadores (`worker`) como `www-data`, un usuario sin privilegios. Uno por núcleo: este servidor tiene dos. Node, en cambio, ejecuta tu JavaScript en un solo hilo (A4.1).
+
+Esa es la primera razón. Las demás las vas a medir en esta sección; en A4.1 viste lo que le falta a Node:
+
+- **Comprimir:** Node no lo hace. Nginx lo hace fuera del hilo de tu app (Paso 5).
+- **Servir archivos:** Nginx sirve un JavaScript tres veces más rápido que Node (Paso 6).
+- **HTTPS:** los certificados se configuran y renuevan en Nginx, sin tocar la app (A4.4).
+- **Quedarse en pie:** si reinicias o se cae la app, Nginx sigue respondiendo, y un despliegue puede cambiar de versión detrás de él sin que nadie lo note (A4.5).
+- **Poner límites:** rechaza cuerpos enormes antes de que lleguen a tu código (Paso 7).
+
+<Callout type="risk">
+
+- **Comprueba el valor en tu servidor:** si `ip_unprivileged_port_start` es `0`, cualquier usuario puede abrir el puerto 80, y el `EACCES` no aparecerá. Pasa en las máquinas virtuales de Lima, que lo fijan en `/etc/sysctl.d/99-lima.conf`, y dentro de los contenedores de Docker. Lo normal en un VPS es 1024. Si quieres repetir la medición: `sudo sysctl net.ipv4.ip_unprivileged_port_start=1024` (dura hasta reiniciar).
+- **`setcap` o `authbind` dejan a Node abrir el 80 sin ser `root`,** pero solo resuelven esa primera razón. Siguen faltando compresión, HTTPS y todo lo demás.
+
+</Callout>
+
+## Paso 2: el primer `proxy_pass`
+
+Ubuntu organiza los sitios de Nginx en dos carpetas: **`sites-available`** contiene las configuraciones, y **`sites-enabled`**, enlaces a las que están activas. Recién instalado, Nginx responde con su página de bienvenida:
+
+```bash
+curl -sI http://127.0.0.1/ | grep -iE "^(HTTP|server)"
+```
+
+```text
+HTTP/1.1 200 OK
+Server: nginx/1.28.3 (Ubuntu)
+```
+
+Levanta la app (`docker compose up -d`) y escribe la configuración más corta posible, con `sudo nano /etc/nginx/sites-available/entrenos`:
+
+```nginx
+# Archivo: /etc/nginx/sites-available/entrenos (primera versión: solo proxy_pass)
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  server_name _;
+
+  location / {
+    proxy_pass http://127.0.0.1:4321;
+  }
+}
+```
+
+- **`server`:** un sitio. **`listen 80 default_server`** escucha en el puerto 80, en IPv4 y en IPv6, y atiende cualquier petición que no corresponda a otro sitio.
+- **`server_name _`:** sin dominio todavía; lo pondrás en A4.4.
+- **`location /`:** las peticiones cuya ruta empieza por `/`, es decir, todas.
+- **`proxy_pass`:** las reenvía a tu app.
+
+Activa el sitio, quita el de bienvenida y recarga:
+
+```bash
+sudo rm /etc/nginx/sites-enabled/default
+sudo ln -s /etc/nginx/sites-available/entrenos /etc/nginx/sites-enabled/entrenos
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+```text
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+```
+
+**`nginx -t`** revisa la configuración sin aplicarla. Hazlo siempre antes de recargar. **`reload`** aplica los cambios sin cortar las conexiones abiertas.
+
+Prueba desde **tu equipo**, no desde el servidor: es lo que verá un visitante.
+
+```bash
+curl -s -m 3 -o /dev/null -w "4321 directo -> %{http_code}\n" http://192.168.64.2:4321/
+curl -s -o /dev/null -w "GET / -> %{http_code}\n" http://192.168.64.2/
+curl -s -o /dev/null -w "GET /entrar -> %{http_code}\n" http://192.168.64.2/entrar
+```
+
+```text
+4321 directo -> 000
+GET / -> 200
+GET /entrar -> 200
+```
+
+El puerto 4321 no responde desde fuera, y el 80, sí. La web carga. Parece hecho, pero prueba a registrarte y a enviar un formulario. Con `curl`, mandando la misma cabecera `Origin` que enviaría un navegador en esa página:
+
+```bash
+B=http://192.168.64.2
+curl -s -w " -> %{http_code}\n" -H "origin: $B" -H "content-type: application/json" \
+  -d '{"email":"prueba@prueba.test","password":"una-clave-de-prueba-larga","name":"Prueba"}' $B/api/auth/sign-up/email
+curl -s -w " -> %{http_code}\n" -H "origin: $B" -H "content-type: application/x-www-form-urlencoded" -d "a=1" $B/nuevo-accion
+```
+
+```text
+{"message":"Invalid origin","code":"INVALID_ORIGIN"} -> 403
+Cross-site POST form submissions are forbidden -> 403
+```
+
+Las páginas funcionan y **nadie puede registrarse ni enviar un formulario**. Un `curl` a la portada nunca lo habría descubierto.
+
+<Callout type="risk">
+
+- **Comprueba siempre desde fuera:** `curl` en el servidor pasa por encima del _firewall_ y de la red. Un puerto que responde en `127.0.0.1` puede estar cerrado para todos los demás, y al revés.
+- **Una configuración rota impide recargar, no tumba el sitio:** si `nginx -t` falla, no recargues. Si recargas igualmente, Nginx rechaza la configuración nueva y sigue con la anterior, pero un `restart` con un error lo dejaría parado. Por eso `nginx -t` y después `reload`.
+- **Un enlace en `sites-enabled` a un archivo que no existe hace fallar `nginx -t`** (`open() … failed`): si eliminas un sitio de `sites-available`, quita también su enlace.
+
+</Callout>
+
+## Paso 3: que la app sepa dónde está
+
+Astro y Better Auth se protegen de la misma forma contra peticiones falsificadas desde otras webs (CSRF, I5.2): comparan el `Origin` de la petición con su propia dirección. Y su dirección la deducen de lo que les llega. Por defecto, `proxy_pass` manda como `Host` la dirección de destino, `127.0.0.1:4321`: la app cree que vive ahí, y `http://192.168.64.2` le parece otra web.
+
+Este es un buen ejemplo de por qué hay que cambiar las cosas de una en una. Son **tres arreglos distintos**, y hacen falta los tres.
+
+**Primero, las cabeceras.** Añádelas dentro de `location /`:
+
+```nginx
+  location / {
+    proxy_pass http://127.0.0.1:4321;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  }
+```
+
+- **`Host`:** el dominio que escribió el visitante.
+- **`X-Forwarded-Proto`:** si llegó por `http` o `https` (Node siempre recibe `http`). Lo necesitarás en A4.4.
+- **`X-Forwarded-For`:** la IP del visitante (Paso 4).
+
+Tras `nginx -t` y `reload`, el resultado es **exactamente el mismo**: 403 y 403. Las cabeceras llegan, pero nadie se fía de ellas todavía.
+
+**Segundo, `BETTER_AUTH_URL`.** Better Auth compara `Origin` con esa variable, y en tu `.env` sigue siendo `http://localhost:4321`. Edita el `.env` **del servidor**:
+
+```bash
+BETTER_AUTH_URL=http://192.168.64.2
+```
+
+Recrea el contenedor con `docker compose up -d`, y el registro ya funciona:
+
+```text
+{"token":"…","user":{"name":"Prueba","email":"prueba@prueba.test",…}} -> 200
+Cross-site POST form submissions are forbidden -> 403
+```
+
+**Tercero, `allowedDomains`.** El formulario sigue fallando, aunque ahora el `Host` es correcto. Astro no se fía de `Host` ni de `X-Forwarded-*`, porque cualquiera puede mandar esas cabeceras a mano. Solo las acepta para los dominios de una lista, `security.allowedDomains`; sin ella, la app se cree en `localhost`. Añádela a `astro.config.mjs`, detrás del adaptador:
+
+```js
+  adapter: node({
+    mode: "standalone",
+  }),
+
+  security: {
+    // Detrás de un proxy: los únicos dominios por los que Astro acepta Host y X-Forwarded-* (A4.3).
+    // Se fija en el build; sin esto, la app se cree en localhost y rechaza los formularios
+    allowedDomains: process.env.APP_HOSTNAME ? [{ hostname: process.env.APP_HOSTNAME }] : [],
+  },
+```
+
+Se fija en el _build_, igual que `PUBLIC_NOMBRE_APP` (A4.2), así que debe llegar como argumento de construcción. En el `Dockerfile`, en la etapa `build`, junto a los otros `ARG`:
+
+```dockerfile
+ARG PUBLIC_NOMBRE_APP="Mi entreno"
+ARG OBJETIVO_SEMANAL_MINUTOS=150
+ARG APP_HOSTNAME
+```
+
+En `compose.yaml`, en `build.args`:
+
+```yaml
+    build:
+      context: .
+      args:
+        PUBLIC_NOMBRE_APP: "Mi entreno"
+        APP_HOSTNAME: ${APP_HOSTNAME:?Añade APP_HOSTNAME a .env} # dominio o IP pública, sin http
+```
+
+Y en el `.env` del servidor, que Compose lee para sustituir `${…}`:
+
+```bash
+APP_HOSTNAME=192.168.64.2
+```
+
+`${APP_HOSTNAME:?…}` hace que Compose se niegue a seguir si falta, en lugar de construir una imagen que rechaza todos los formularios:
+
+```text
+error while interpolating services.app.build.args.APP_HOSTNAME: required variable APP_HOSTNAME is missing a value: Añade APP_HOSTNAME a .env
+```
+
+Reconstruye con `docker compose up -d --build` y repite las pruebas, más otras dos: un dominio falso y una web ajena.
+
+```bash
+curl -s -o /dev/null -w "formulario, Origin de la web -> %{http_code}\n" -H "origin: $B" \
+  -H "content-type: application/x-www-form-urlencoded" -d a=1 $B/nuevo-accion
+curl -s -o /dev/null -w "formulario, Host y Origin falsos -> %{http_code}\n" -H "host: malo.com" -H "origin: http://malo.com" \
+  -H "content-type: application/x-www-form-urlencoded" -d a=1 $B/nuevo-accion
+```
+
+```text
+formulario, Origin de la web -> 302
+formulario, Host y Origin falsos -> 403
+```
+
+302 es la redirección a `/entrar`, porque `curl` no ha iniciado sesión: el formulario ha pasado. Y el dominio falso sigue en 403, que es para lo que sirve la lista. Con sesión, todo el flujo funciona a través de Nginx:
+
+```text
+registro 200
+entreno 201
+estadisticas con sesión 200
+```
+
+<Callout type="risk">
+
+- **El `.env` del servidor no es el de tu equipo:** `BETTER_AUTH_URL` y `APP_HOSTNAME` cambian. Con la URL del servidor, el registro falla si entras por `localhost`. El `compose-prueba.sh` de A4.2 usa `localhost`: en el servidor necesitaría su propio `.env`.
+- **Cambiar `APP_HOSTNAME` exige reconstruir la imagen:** `docker compose up -d` a secas no basta, porque se fija en el _build_. Un cambio de `BETTER_AUTH_URL`, en cambio, basta con recrear el contenedor. Lo mismo que en A4.2 con las públicas y las secretas.
+- **Vale tu dominio, no un comodín:** `allowedDomains` admite patrones como `**.tudominio.com`, pero cuanto más amplio, más dominios puede usar alguien para engañar a la app. Pon solo los tuyos.
+- **Astro ya confía en `X-Forwarded-Proto`:** medido directamente contra la app, con `x-forwarded-proto: https` y `Origin: https://…`, el formulario pasa (302). Es lo que necesitarás en A4.4. Por eso Node solo debe recibir tráfico de Nginx: si estuviera abierto, cualquiera podría mandar esa cabecera. Publicar en `127.0.0.1` no es opcional.
+
+</Callout>
+
+## Paso 4: `X-Forwarded-For` y la IP del visitante
+
+Para Node, todas las peticiones vienen ahora del mismo sitio: Nginx. La IP real viaja en `X-Forwarded-For`, y Better Auth la usa para limitar los intentos de inicio de sesión (I5.5): tres fallos seguidos y el siguiente recibe un 429. ¿Qué pasa si no la envías?
+
+Un atacante falla la contraseña cinco veces desde una IP. Después, otro usuario, desde otra IP, intenta entrar con su primer intento:
+
+```text
+sin X-Forwarded-For
+  atacante: 401 401 401 429 429
+  otro usuario (otra IP): 429
+
+con X-Forwarded-For $remote_addr
+  atacante: 401 401 401 429 429
+  otro usuario (otra IP): 401
+```
+
+**Sin la cabecera, un solo atacante deja sin entrar a todos tus usuarios.** Better Auth no sabe quién es quién, usa un único contador y lo avisa en el registro de la app:
+
+```text
+WARN [Better Auth]: Rate limiting could not determine a client IP and is falling back to a single shared per-path bucket.
+```
+
+El 401 del segundo caso es el correcto: ese usuario tiene su propio contador (y solo le ha fallado la contraseña de esta prueba).
+
+¿Qué valor enviar? Casi todos los tutoriales usan `$proxy_add_x_forwarded_for`, que **añade** la IP real a lo que mandó el cliente. Con un cliente normal, una IP; con uno que envía su propia cabecera, dos: `1.2.3.4, 192.168.64.1`. Better Auth solo acepta una cabecera con exactamente una IP: con dos, no se fía y usa el contador compartido. Medido, un atacante que manda su propia cabecera tampoco se salta el límite (401 401 401 429 429): cae en ese contador común.
+
+**`$remote_addr`** es más simple y limpio: sustituye la cabecera por la IP real de la conexión, y lo que mande el cliente desaparece.
+
+```nginx
+    proxy_set_header X-Forwarded-For $remote_addr;
+```
+
+Y el registro de Nginx ya tiene la IP real de cada visitante:
+
+```text
+192.168.64.1 - - [05/Nov/2026:19:35:52 -0600] "POST /api/auth/sign-in/email HTTP/1.1" 429 67 "-" "curl/8.7.1"
+```
+
+<Callout type="risk">
+
+- **`$remote_addr` solo es correcto si Nginx habla directamente con internet:** con otro proxy delante (Cloudflare, un balanceador), `$remote_addr` es la IP de ese proxy, y todos tus usuarios volverían a parecer uno. En ese caso se usa `$proxy_add_x_forwarded_for` con la opción `advanced.ipAddress.trustedProxies` de Better Auth, que recorre la lista saltándose tus proxies de confianza.
+- **En desarrollo no verás este problema:** sin `NODE_ENV=production`, Better Auth usa `127.0.0.1` cuando no hay cabecera. Aparece solo en producción.
+- **Vigila el aviso:** busca `could not determine a client IP` en `docker compose logs app` tras cada cambio de Nginx. Es la única señal de que el límite de intentos se ha vuelto compartido.
+
+</Callout>
+
+## Paso 5: compresión
+
+En A4.1 mediste que Node no comprime. `nginx.conf` trae `gzip on`, así que debería estar resuelto. Míralo desde tu equipo:
+
+```bash
+JS=$(curl -s $B/entrar | grep -oE '/_astro/client\.[^"]+\.js' | head -n 1)
+curl -s -o /dev/null -w "%{size_download} bytes\n" -H "accept-encoding: gzip, br" "$B$JS"
+```
+
+```text
+212892 bytes
+```
+
+**Sin comprimir.** `gzip on` solo se aplica a `text/html`, salvo que `gzip_types` diga otra cosa, y esa línea viene comentada. El HTML sí bajaba (de 6686 a 2910 bytes en `/entrar`); justo lo más pesado, no. Ubuntu incluye el módulo de **Brotli**, que comprime mejor:
+
+```bash
+sudo apt-get install -y libnginx-mod-http-brotli-filter libnginx-mod-http-brotli-static
+```
+
+Los archivos de `conf.d` se aplican a todos los sitios. Crea `/etc/nginx/conf.d/compresion.conf`:
+
+```nginx
+# Archivo: /etc/nginx/conf.d/compresion.conf
+# gzip on ya viene en nginx.conf, pero solo para text/html
+gzip_vary on;
+gzip_proxied any;
+gzip_comp_level 5;
+gzip_min_length 1024;
+gzip_types text/css text/javascript application/javascript application/json image/svg+xml;
+
+brotli on;
+brotli_comp_level 5;
+brotli_min_length 1024;
+brotli_types text/css text/javascript application/javascript application/json image/svg+xml;
+```
+
+- **`gzip_vary on`:** añade `Vary: Accept-Encoding`. Sin ella, una caché intermedia podría guardar la versión comprimida y dársela a un cliente que no la entiende.
+- **`gzip_proxied any`:** comprime también lo que viene de Node.
+- **`gzip_comp_level 5`:** equilibrio entre tamaño y CPU, porque esto se hace en cada petición.
+- **`gzip_min_length 1024`:** por debajo de 1 kB no compensa.
+- **`*_types`:** lo que se comprime. `text/html` va siempre incluido. Nunca añadas imágenes JPEG o WebP: ya están comprimidas.
+
+```text
+/_astro/client.XI9U0KhD.js   sin comprimir  212892 B
+                             gzip            66546 B   Content-Encoding: gzip
+                             Brotli          62495 B   Content-Encoding: br
+/entrar (SSR)                sin comprimir    6686 B
+                             gzip             2747 B   Content-Encoding: gzip
+                             Brotli           2511 B   Content-Encoding: br
+```
+
+Un 29 % del tamaño original con Brotli, y el navegador elige lo que entiende mediante `Accept-Encoding`. Ya tienes lo que medías en Vercel en A4.1.
+
+<Callout type="risk">
+
+- **`gzip on` no significa «comprimido»:** compruébalo siempre con `curl` y `Accept-Encoding`, mirando los bytes recibidos. Sin esa cabecera, la respuesta nunca se comprime, y puedes concluir que no funciona.
+- **Comprimir secretos junto con datos del atacante tiene riesgos:** si una respuesta comprimida mezcla un secreto con texto que controla el atacante, el tamaño puede delatar el secreto (ataques BREACH). No pongas tokens en páginas que repiten parámetros de la URL.
+
+</Callout>
+
+## Paso 6: servir los estáticos con Nginx
+
+Los archivos de `_astro/` llevan un _hash_ en el nombre y no cambian nunca (A4.1). Node no aporta nada al servirlos: Nginx puede leerlos del disco directamente. Pero están dentro de la imagen, así que hay que sacarlos.
+
+**Comprimir en cada petición, sin embargo, es caro.** Medido en el servidor (2 núcleos, con el medidor en la misma máquina: valen las proporciones, no las cifras):
+
+```text
+                                                 pet/s    p99
+JS sin comprimir, Node directo                    3944   18 ms
+JS sin comprimir, Nginx desde el disco           12562   13 ms
+JS con Brotli, comprimiendo en cada petición       578   70 ms
+JS con Brotli, precomprimido                      2884   15 ms
+```
+
+Compara cada par por separado. Sin compresión, Nginx multiplica por tres a Node. Con Brotli, que es lo que pide un navegador, comprimir cada vez deja 578 peticiones por segundo: 212 kB de JavaScript comprimidos una y otra vez. No compares entre los dos grupos: la cifra baja con `Accept-Encoding` aunque el archivo sea más pequeño, y esta medición no permite atribuirlo a Nginx.
+
+La solución es comprimir **una sola vez**, al publicar, al nivel máximo, y que Nginx sirva el `.br` ya hecho: cinco veces más rápido, y además más pequeño, 56 771 bytes frente a 62 495.
+
+`scripts/publicar-estaticos.sh` lo hace en el servidor. Necesita la orden `brotli` (`sudo apt-get install -y brotli`):
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/publicar-estaticos.sh
+# En el servidor: saca _astro de la imagen, lo precomprime y lo deja donde lo sirve Nginx.
+# Uso: bash scripts/publicar-estaticos.sh [imagen]   (por defecto, entrenos:local)
+set -euo pipefail
+
+IMAGEN="${1:-entrenos:local}"
+DESTINO=/var/www/entrenos/_astro
+TEMPORAL="$(mktemp -d)"
+CONTENEDOR="$(docker create "$IMAGEN")"
+trap 'docker rm "$CONTENEDOR" >/dev/null; rm -rf "$TEMPORAL"' EXIT
+
+docker cp "$CONTENEDOR:/app/dist/client/_astro/." "$TEMPORAL/"
+
+# Nivel máximo: se comprime una vez aquí, no en cada petición
+find "$TEMPORAL" -type f \( -name '*.js' -o -name '*.css' -o -name '*.svg' \) -size +1k \
+  -exec brotli -q 11 -k -f {} \; -exec gzip -9 -k -f {} \;
+
+# Sin borrar lo anterior: una pestaña abierta aún pide los archivos de la versión previa
+sudo mkdir -p "$DESTINO"
+sudo cp -r "$TEMPORAL/." "$DESTINO/"
+sudo chmod -R a+rX "$DESTINO"
+echo "✓ $(find "$TEMPORAL" -type f | wc -l | tr -d ' ') archivos en $DESTINO ($IMAGEN)"
+```
+
+```bash
+bash scripts/publicar-estaticos.sh
+```
+
+```text
+✓ 37 archivos en /var/www/entrenos/_astro (entrenos:local)
+```
+
+- **`docker create`:** crea un contenedor sin arrancarlo, solo para poder copiar de él. El `trap` lo borra al terminar, pase lo que pase.
+- **`brotli -q 11` y `gzip -9`:** el nivel máximo, porque se hace una vez. `-k` conserva el original.
+- **Sin borrar lo anterior:** quien tiene una pestaña abierta tiene un HTML que apunta a los archivos de la versión anterior.
+
+Y la configuración completa del sitio. Sustituye `/etc/nginx/sites-available/entrenos`:
+
+```nginx
+# Archivo: /etc/nginx/sites-available/entrenos
+upstream entrenos_app {
+  server 127.0.0.1:4321;
+  keepalive 16; # conexiones abiertas con Node: no abre una nueva por petición
+}
+
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  server_name _;
+
+  server_tokens off;
+  client_max_body_size 1m;
+
+  # Lo que llega a Node: los location heredan estas cabeceras de server
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-For $remote_addr;
+
+  # Recursos con hash: los sirve Nginx. Si falta alguno, se lo pide a Node
+  location /_astro/ {
+    root /var/www/entrenos;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    access_log off;
+    brotli_static on;
+    gzip_static on;
+    try_files $uri @app;
+  }
+
+  location / {
+    proxy_pass http://entrenos_app;
+  }
+
+  location @app {
+    proxy_pass http://entrenos_app;
+  }
+}
+```
+
+- **`upstream`:** da nombre al destino. **`keepalive 16`** mantiene conexiones abiertas con Node en lugar de abrir una por petición: medido, entre 2110 y 2602 peticiones SSR por segundo con ella, y entre 1577 y 1895 sin ella. Necesita `proxy_http_version 1.1` y `Connection ""`.
+- **Cabeceras a nivel de `server`:** todas las `location` las heredan, así que no se repiten. Ojo: una `location` con su propio `proxy_set_header` deja de heredar **todas** las demás.
+- **`location /_astro/`:** como es más específica que `/`, gana. `root` sirve `/var/www/entrenos/_astro/…`.
+- **`add_header Cache-Control`:** Nginx no la pone sola, y es la de Astro (A4.1): un año, `immutable`.
+- **`brotli_static` y `gzip_static`:** si existe `archivo.js.br` y el navegador acepta Brotli, envía ese.
+- **`try_files $uri @app`:** si el archivo no está (te olvidaste de publicar los estáticos), en lugar de un 404 se lo pide a Node. `@app` es una `location` con nombre, que solo se alcanza así.
+- **`server_tokens off`:** deja `Server: nginx`, sin la versión, para no dar pistas de qué vulnerabilidades probar.
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+curl -s -o /dev/null -D - -H "accept-encoding: br" "$B$JS" | grep -iE "^(HTTP|server|content-encoding|content-length|cache-control)"
+```
+
+```text
+HTTP/1.1 200 OK
+Server: nginx
+Content-Length: 56771
+Content-Encoding: br
+Cache-Control: public, max-age=31536000, immutable
+```
+
+<Callout type="risk">
+
+- **Publica los estáticos en cada despliegue:** si actualizas la imagen y no ejecutas el _script_, `try_files` salva la situación, pero Node vuelve a servir (y Nginx a comprimir) esos archivos. Funciona, y solo lo notas en el rendimiento. En A4.5 irá dentro del despliegue.
+- **`add_header` tampoco se hereda si la `location` tiene el suyo:** las cabeceras de seguridad que pongas en `server` desaparecen de `/_astro/` en cuanto esa `location` usa `add_header`. Lo verás en A5.
+- **`keepalive` y el cierre de Node:** Node cierra una conexión inactiva a los 5 s, y Nginx podría reutilizarla justo entonces. En 12 intentos de `POST` justo al caducar no se dio ningún error, pero si ves `upstream prematurely closed` en `/var/log/nginx/error.log` con errores 502 sueltos, esta es la primera sospecha.
+- **Pasar por Nginx cuesta poco:** la SSR a través de él dio unas 2600 pet/s, frente a 2833 con Node directo. Con el medidor en el mismo servidor de dos núcleos, todos compiten por la CPU: mide en tu máquina.
+
+</Callout>
+
+## Paso 7: cuando algo falla
+
+**Un cuerpo demasiado grande.** `client_max_body_size 1m` rechaza las peticiones que lo superan antes de que lleguen a Node:
+
+```bash
+head -c 2000000 /dev/zero | curl -s -o /dev/null -w "POST 2 MB -> %{http_code}\n" \
+  -H "origin: $B" -H "content-type: application/json" --data-binary @- $B/api/auth/sign-in/email
+```
+
+```text
+POST 2 MB -> 413
+```
+
+**La app parada.** Con `docker compose stop app`:
+
+```text
+GET /entrar -> 502      <title>502 Bad Gateway
+GET / -> 502
+GET /_astro/client.XI9U0KhD.js -> 200
+```
+
+Nginx sigue en pie y responde 502 (_Bad Gateway_): la cocina no contesta. Los archivos que sirve él mismo siguen en 200. La causa está en `/var/log/nginx/error.log`, el primer sitio donde mirar ante un 502:
+
+```text
+2026/11/05 19:40:08 [error] 129386#129386: *1137 connect() failed (111: Connection refused) while connecting to upstream, client: 192.168.64.1, server: _, request: "GET /…
+```
+
+`docker compose start app` y todo vuelve. Reinicia la app y tus usuarios verán 502 durante unos segundos: es lo que resolverás en A4.5.
+
+<Callout type="risk">
+
+- **502, 504 y 413 son de Nginx, no de tu app:** 502, Node no responde; 504, Node tarda más de 60 s (`proxy_read_timeout`); 413, cuerpo demasiado grande. Si los buscas en el registro de la app, no estarán. Y no los busques en el código: mira primero `error.log`.
+- **Si un día aceptas subidas de archivos,** sube `client_max_body_size` solo en esa `location`, no en todo el sitio.
+- **`/` también da 502, aunque esté prerenderizada:** la sirve Node. Podrías copiar también los HTML de `dist/client` a Nginx, pero entonces cada cambio de contenido exigiría publicarlos y el _middleware_ dejaría de ejecutarse para ellos. No merece la pena.
+
+</Callout>
+
+## Paso 8: la alternativa más simple, Caddy
+
+**Caddy** es otro _reverse proxy_, cuya idea es que lo habitual venga hecho. Este `Caddyfile` hace lo mismo que tus dos archivos de Nginx (en el puerto 8080, para probarlo junto a Nginx):
+
+```text
+# Archivo: /etc/caddy/Caddyfile
+:8080 {
+	encode zstd gzip
+
+	handle /_astro/* {
+		root * /var/www/entrenos
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server {
+			precompressed br gzip
+		}
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:4321
+	}
+}
+```
+
+```bash
+docker run -d --rm --name caddy --network host \
+  -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" -v /var/www/entrenos:/var/www/entrenos:ro caddy:2-alpine
+```
+
+Medido contra la misma app, desde el servidor:
+
+```text
+JS:         Content-Encoding: br, Content-Length: 56771, Cache-Control: public, max-age=31536000, immutable
+/entrar:    Content-Encoding: zstd
+formulario -> 302
+registro -> 200
+sign-in con X-Forwarded-For propio: 401 401 401 429 429
+```
+
+Sin configurar ninguna cabecera: `reverse_proxy` manda `Host` y `X-Forwarded-*` correctos por defecto, y comprime con **zstd** si el navegador lo acepta. Y lo que más lo distingue: si en lugar de `:8080` escribes un dominio, **Caddy obtiene y renueva el certificado HTTPS él solo** (lo que harás a mano en A4.4).
+
+|                          | Nginx                                  | Caddy                                         |
+| ------------------------ | -------------------------------------- | --------------------------------------------- |
+| Cabeceras del proxy      | Las escribes tú                        | Correctas por defecto                         |
+| HTTPS                    | Certbot y configuración (A4.4)         | Automático con un dominio                     |
+| Brotli al vuelo          | Con módulo                             | No lo incluye (sí sirve `.br` precomprimidos) |
+| Documentación y ejemplos | Enorme: casi todo se explica con Nginx | Menor                                         |
+| Versión en Ubuntu 26.04  | 1.28.3                                 | 2.6.2 (la imagen de Docker es 2.11.9)         |
+
+El curso sigue con Nginx porque lo encontrarás en casi cualquier servidor que heredes y porque obliga a entender cada pieza. En un proyecto propio, Caddy es una elección perfectamente razonable.
+
+<Callout type="risk">
+
+- **`caddy` de `apt` va muy por detrás:** Ubuntu 26.04 instala la 2.6.2, frente a la 2.11.9 de la imagen oficial. Usa la imagen de Docker o el repositorio propio de Caddy.
+- **`--network host`:** el contenedor usa la red del servidor directamente, para llegar a `127.0.0.1:4321`. Dentro de Compose, usa el nombre del servicio (`reverse_proxy app:4321`).
+- **No dejes los dos en el mismo puerto:** Nginx y Caddy no pueden escuchar a la vez en el 80. Si cambias a Caddy, para Nginx: `sudo systemctl disable --now nginx`.
+- **`allowedDomains` y `BETTER_AUTH_URL` siguen siendo necesarios con Caddy:** el Paso 3 es de tu app, no de Nginx.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Sirve tu app en el VPS de I6 detrás de Nginx en el puerto 80, con la configuración del Paso 6, y comprueba que el puerto 4321 no responde desde fuera.
+2. Escribe `scripts/comprobar-proxy.sh`, para ejecutar **desde tu equipo**, que reciba la IP del servidor y compruebe: que Node no responde desde fuera; que Nginx no enseña su versión; que cada tipo de ruta responde con su código; que un formulario con `Origin` de la web pasa y uno de otra web no; que el registro funciona; que el JS principal llega con Brotli y caché de un año; y que un cuerpo de 2 MB se rechaza.
+3. Comprueba que detecta fallos: quita `proxy_set_header Host` y publica el puerto de Compose sin `127.0.0.1`.
+
+</Callout>
+
+Solución. El punto 1 son los Pasos 2 a 6. `scripts/comprobar-proxy.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/comprobar-proxy.sh
+# Desde tu equipo, nunca desde el servidor: comprueba lo que ve alguien de fuera.
+# Uso: bash scripts/comprobar-proxy.sh 203.0.113.10
+set -uo pipefail
+
+SERVIDOR="${1:?Indica la IP o el dominio del servidor}"
+BASE="http://$SERVIDOR"
+FALLOS=0
+
+bien() { echo "  ok    $1"; }
+mal() { echo "  FALLO $1"; FALLOS=1; }
+comprobar() { # descripción, valor obtenido, valor esperado
+  if [ "$2" = "$3" ]; then bien "$1"; else mal "$1: $2 (esperaba $3)"; fi
+}
+cabecera() { tr -d '\r' | grep -i "^$1:" | cut -d' ' -f2- | head -n 1; }
+
+echo "== Lo que no debe verse"
+if curl -s -m 3 -o /dev/null "http://$SERVIDOR:4321/"; then
+  mal "Node responde desde fuera en el puerto 4321"
+else
+  bien "Node no responde desde fuera en el puerto 4321"
+fi
+comprobar "Nginx no enseña su versión" "$(curl -s -I "$BASE/entrar" | cabecera server)" "nginx"
+
+echo "== Rutas a través de Nginx"
+comprobar "/ (prerenderizada)" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/")" 200
+comprobar "/entrar (SSR)" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/entrar")" 200
+comprobar "/estadisticas (privada)" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/estadisticas")" 302
+comprobar "/api/resumen (sin sesión)" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/resumen")" 401
+
+echo "== El dominio y las cabeceras llegan bien a la app"
+comprobar "formulario con Origin de la web" "$(curl -s -o /dev/null -w '%{http_code}' \
+  -H "origin: $BASE" -H 'content-type: application/x-www-form-urlencoded' -d a=1 "$BASE/nuevo-accion")" 302
+comprobar "formulario con Origin de otra web" "$(curl -s -o /dev/null -w '%{http_code}' \
+  -H 'origin: http://otra-web.test' -H 'content-type: application/x-www-form-urlencoded' -d a=1 "$BASE/nuevo-accion")" 403
+comprobar "registro" "$(curl -s -o /dev/null -w '%{http_code}' -H "origin: $BASE" -H 'content-type: application/json' \
+  -d "{\"email\":\"proxy-$(date +%s)@prueba.test\",\"password\":\"$(openssl rand -hex 12)\",\"name\":\"Prueba\"}" \
+  "$BASE/api/auth/sign-up/email")" 200
+
+echo "== Estáticos y compresión"
+JS="$(curl -s "$BASE/entrar" | grep -oE '/_astro/client\.[^"]+\.js' | head -n 1)" # el mayor; los de < 1 kB no se comprimen
+CABECERAS="$(curl -s -o /dev/null -D - -H 'accept-encoding: br' "$BASE$JS")"
+comprobar "$JS comprimido" "$(cabecera content-encoding <<< "$CABECERAS")" "br"
+comprobar "caché de un año" "$(cabecera cache-control <<< "$CABECERAS")" "public, max-age=31536000, immutable"
+comprobar "cuerpo de 2 MB rechazado" "$(head -c 2000000 /dev/zero | curl -s -o /dev/null -w '%{http_code}' \
+  -H "origin: $BASE" -H 'content-type: application/json' --data-binary @- "$BASE/api/auth/sign-in/email")" 413
+
+[ "$FALLOS" = 0 ] && echo "Todo correcto"
+exit "$FALLOS"
+```
+
+```bash
+bash scripts/comprobar-proxy.sh 192.168.64.2
+```
+
+```text
+== Lo que no debe verse
+  ok    Node no responde desde fuera en el puerto 4321
+  ok    Nginx no enseña su versión
+== Rutas a través de Nginx
+  ok    / (prerenderizada)
+  ok    /entrar (SSR)
+  ok    /estadisticas (privada)
+  ok    /api/resumen (sin sesión)
+== El dominio y las cabeceras llegan bien a la app
+  ok    formulario con Origin de la web
+  ok    formulario con Origin de otra web
+  ok    registro
+== Estáticos y compresión
+  ok    /_astro/client.XI9U0KhD.js comprimido
+  ok    caché de un año
+  ok    cuerpo de 2 MB rechazado
+Todo correcto
+```
+
+Código de salida 0. Con los dos fallos del punto 3 (`Host` comentado en Nginx y `"4321:4321"` en `compose.yaml`):
+
+```text
+  FALLO Node responde desde fuera en el puerto 4321
+  FALLO formulario con Origin de la web: 403 (esperaba 302)
+```
+
+- **`set -uo pipefail`, sin `-e`:** aquí un fallo no debe parar el _script_, sino anotarse y seguir: quieres la lista completa.
+- **`<<<`:** pasa el contenido de `$CABECERAS` a la función como entrada, para no pedir el mismo archivo dos veces.
+- **El JS `client.*`, el mayor:** por debajo de 1 kB no se comprime, y elegir uno pequeño daría un fallo falso. Le pasó a la primera versión de este _script_.
+- **Un `Origin` de otra web también se prueba:** una configuración que deja pasar todo daría ok en la primera prueba. Hay que comprobar también que lo malo se rechaza.
+
+<Callout type="risk">
+
+- **El _script_ crea un usuario en cada ejecución:** con un correo `proxy-<fecha>@prueba.test`. En un servidor con datos reales, bórralos o quita esa comprobación.
+- **Ejecútalo desde fuera:** en el servidor, `4321` respondería siempre y el primer «ok» sería falso.
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes explicar por qué Node no debe exponerse en el puerto 80: abrirlo exige privilegios que tu app no debe tener, y Nginx lo hace con un proceso `root` mínimo y trabajadores sin privilegios; además comprime, sirve los archivos tres veces más rápido, limita lo que entra y sigue en pie cuando la app no lo está. Y sabes lo que exige estar detrás de un proxy: `Host`, `BETTER_AUTH_URL` y `allowedDomains` para que funcionen formularios y registro, y `X-Forwarded-For` para que un atacante no bloquee a todos tus usuarios.
+
+</Callout>
+
+## Resumen
+
+- En Linux, un usuario normal no puede abrir el puerto 80 (`EACCES`). Nginx lo abre como `root` y atiende con trabajadores `www-data`.
+- Solo con `proxy_pass` las páginas cargan, pero registro y formularios dan **403**: la app se cree en `127.0.0.1:4321`.
+- Hacen falta tres arreglos: `proxy_set_header Host`, `BETTER_AUTH_URL` y `security.allowedDomains`, que se fija en el _build_ con `APP_HOSTNAME`. Con solo las cabeceras no cambia nada.
+- Sin `X-Forwarded-For`, Better Auth usa un contador compartido: **un atacante bloquea el inicio de sesión de todos**. Con un solo proxy, `$remote_addr`.
+- `gzip on` no comprime el JavaScript: faltan `gzip_types`. Con Brotli, 212 892 bytes bajan a 62 495; precomprimido, a 56 771.
+- Nginx sirve el archivo 3 veces más rápido que Node. Comprimir en cada petición lo hunde (578 pet/s); precomprimir, una vez al publicar, multiplica por cinco. `try_files … @app` evita 404 si faltan los estáticos.
+- 413, 502 y 504 son de Nginx: mira `/var/log/nginx/error.log`. Con la app parada, Nginx sigue respondiendo.
+- `nginx -t` antes de cada `reload`, y prueba siempre desde fuera del servidor.
+- **Caddy** hace lo mismo en 16 líneas, con cabeceras correctas por defecto y HTTPS automático con un dominio.
