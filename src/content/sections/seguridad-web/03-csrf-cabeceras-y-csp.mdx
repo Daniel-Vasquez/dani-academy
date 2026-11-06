@@ -1,0 +1,401 @@
+---
+sectionId: "A5.3"
+course: "A5"
+title: "CSRF, cabeceras y CSP"
+order: 3
+minutes: 90
+summary: "Mides en un navegador real qué detienen SameSite y checkOrigin frente a CSRF, añades cabeceras de seguridad que cubran cada respuesta y activas una CSP que bloquea el XSS aunque el fallo siga en el código."
+---
+
+Hasta ahora has protegido el servidor. Pero parte del ataque ocurre en el navegador de tu usuario, con su sesión ya iniciada, y ahí tu app no controla nada directamente. Lo que sí puede es **dar instrucciones al navegador**: «no envíes esta _cookie_ desde otras webs», «no me metas en un _iframe_», «no ejecutes ningún _script_ que yo no haya autorizado». Esta sección trata de esas instrucciones, y de comprobar que se cumplen.
+
+Una analogía: tu usuario entra en una oficina con su tarjeta de empleado, y el guardia abre a cualquiera que la lleve. Un **CSRF** es que alguien en la calle le entregue un sobre: «deja esto en caja». Entra con su tarjeta, y el guardia ve a un empleado de verdad, pero la orden es del extraño. Las **cabeceras** son las normas del edificio: no entrar con sobres de fuera, no abrir ventanas a la calle. Y la **CSP** es una lista de personas autorizadas: aunque un intruso se cuele, nadie obedece a quien no esté en ella.
+
+**Lo que tendrás al terminar:** sabrás qué ataque detiene cada cabecera, con cuáles cuentas en cada tipo de respuesta, una CSP activa con _hashes_ y un _script_ que comprueba todo.
+
+**Requisitos:** A5.2 y la app con Nginx de A4. Las variantes vulnerables se midieron solo en el servidor de pruebas, con un navegador Chromium real, y se han borrado. No las reproduzcas en tu app.
+
+## Paso 1: CSRF
+
+**CSRF** (_Cross-Site Request Forgery_) funciona porque el navegador adjunta las _cookies_ a las peticiones hacia un dominio, vengan de donde vengan. Si Ana tiene sesión en tu app y abre una web maliciosa, esa web puede hacer que **el navegador de Ana** envíe una petición a tu app, con su sesión. No lee la respuesta, pero la acción se ejecuta.
+
+Tu app tiene dos defensas, y lo interesante es medir qué hace cada una. Se compilaron tres variantes en el laboratorio, y Ana visitó una web atacante con cada una: una web ajena (`atacante.test`) y un **subdominio hermano** (`blog.entrenos.test`), el caso de un blog o de una app comprometida en tu mismo dominio. Se considera ejecutado si apareció un entreno nuevo en la cuenta de Ana.
+
+**Variante C, sin defensas** (`SameSite=None` y `checkOrigin: false`):
+
+```text
+SE EJECUTA  atacante.test       fetch text/plain
+bloqueado   atacante.test       fetch application/json
+SE EJECUTA  atacante.test       formulario POST
+SE EJECUTA  blog.entrenos.test  fetch text/plain
+bloqueado   blog.entrenos.test  fetch application/json
+SE EJECUTA  blog.entrenos.test  formulario POST
+```
+
+Un formulario oculto que se envía solo, y Ana ha creado un entreno sin saberlo. `application/json` se salvó por otra razón: el navegador pregunta antes con un `OPTIONS` (_preflight_), y la app no autoriza a otros orígenes. **`text/plain` no pregunta**, y tu _endpoint_ lee el cuerpo con `request.json()` sin mirar el tipo.
+
+**Variante B, solo `SameSite=Lax`:**
+
+```text
+bloqueado   atacante.test       fetch text/plain
+bloqueado   atacante.test       fetch application/json
+bloqueado   atacante.test       formulario POST
+SE EJECUTA  blog.entrenos.test  fetch text/plain
+bloqueado   blog.entrenos.test  fetch application/json
+SE EJECUTA  blog.entrenos.test  formulario POST
+```
+
+`SameSite` dice cuándo se envía la _cookie_:
+
+- **`Strict`:** solo desde tu propio sitio. Si alguien llega por un enlace externo, parecerá que no tiene sesión.
+- **`Lax`:** también al navegar con un enlace (GET), pero no en un POST desde otra web. Es el valor de Better Auth.
+- **`None`:** siempre, y exige `Secure`.
+
+Detiene a la web ajena. Pero **«sitio» no es «dominio exacto»**: `blog.entrenos.test` y `academy.entrenos.test` son el mismo sitio, y la _cookie_ viaja.
+
+**Variante A, la de tu app** (`Lax` y `checkOrigin` de Astro):
+
+```text
+bloqueado   atacante.test       fetch text/plain
+bloqueado   atacante.test       fetch application/json
+bloqueado   atacante.test       formulario POST
+bloqueado   blog.entrenos.test  fetch text/plain
+bloqueado   blog.entrenos.test  fetch application/json
+bloqueado   blog.entrenos.test  formulario POST
+```
+
+Astro compara la cabecera `Origin`, que el navegador pone y la página no puede falsificar, con el dominio de `allowedDomains` (A4.3), y rechaza con 403 los POST de formulario de otro origen. Es lo que viste romperse en A4.3, ahora desde el lado bueno. Better Auth comprueba lo mismo con `BETTER_AUTH_URL`. **Dos capas, y cada una cubre lo que la otra no.**
+
+**Lo que ninguna detiene.** Una ruta de laboratorio que cambiaba datos con un `GET`, visitada desde la web atacante, en las tres variantes:
+
+```text
+SE EJECUTA  atacante.test       GET al navegar
+SE EJECUTA  blog.entrenos.test  GET al navegar
+```
+
+`Lax` envía la _cookie_ al navegar, y `checkOrigin` solo mira los POST. **Un GET nunca debe cambiar nada.** Un enlace de «borrar» con `<a href="/borrar?id=1">` es un CSRF esperando a ocurrir.
+
+<Callout type="risk">
+
+- **No desactives `checkOrigin` para arreglar un 403:** si detrás de un proxy fallan los formularios, la causa es `allowedDomains` (A4.3).
+- **`checkOrigin` solo mira formularios:** `application/x-www-form-urlencoded`, `multipart/form-data` y `text/plain`. El JSON se apoya en el _preflight_ de CORS, así que no abras CORS con `Access-Control-Allow-Origin` reflejando el origen.
+- **Un `SameSite=None` también elimina tu primera capa:** algunos lo ponen para un _widget_ o un _iframe_. Hazlo solo sabiendo qué pierdes.
+- **Un fallo de XSS se salta todo esto:** un _script_ en tu propia web es del mismo origen. Por eso no basta con CSRF (Paso 4).
+- **Al medir, cuidado con las herramientas:** las primeras pruebas dieron resultados falsos. Chromium bloqueaba las peticiones a una IP privada, y Playwright, al interceptar rutas, respondía él mismo al _preflight_. Comprueba siempre en los registros que la petición ha llegado.
+
+</Callout>
+
+## Paso 2: qué detiene cada cabecera
+
+Sin ninguna cabecera, medido en un navegador:
+
+```text
+iframe desde otra web: SE CARGA, con su formulario
+Referer que recibe la otra web: https://academy.entrenos.test/
+script servido como text/plain: SE EJECUTA
+cámara en la política: true · geolocalización: true
+```
+
+**`X-Frame-Options: DENY` detiene el _clickjacking_.** Otra web carga la tuya en un _iframe_ invisible encima de un botón inocente. La víctima cree pulsar «Ver premio» y pulsa «Borrar cuenta» en tu app, con su sesión. Con la cabecera:
+
+```text
+iframe desde otra web: bloqueado · chrome-error://chromewebdata/
+```
+
+**`X-Content-Type-Options: nosniff` detiene la confusión de tipos.** Los navegadores intentaban adivinar el tipo de un archivo. Si un usuario sube un `.txt` con JavaScript y otra página lo carga con `<script src>`, se ejecuta. Con `nosniff`, el tipo declarado manda:
+
+```text
+script servido como text/plain: bloqueado
+```
+
+**`Referrer-Policy` limita lo que se filtra.** Al seguir un enlace externo, el navegador cuenta de dónde vienes. Si la URL lleva un dato sensible (`/entrar?codigo=SECRETO`), debe quedarse en casa. `strict-origin-when-cross-origin` envía solo el dominio. Medido con y sin la cabecera, la otra web recibió lo mismo, `https://academy.entrenos.test/`, porque ya es el valor por defecto de Chromium: la cabecera lo fija para todos los navegadores.
+
+**`Permissions-Policy` desactiva funciones que no usas.** Si un _script_ se cuela, no podrá pedir la cámara:
+
+```text
+cámara en la política: false · geolocalización: false
+```
+
+**`Strict-Transport-Security`** obliga a usar HTTPS, y ya la conoces (A4.4).
+
+<Callout type="risk">
+
+- **`preload` e `includeSubDomains`:** el ejemplo que se ve en muchas guías los lleva. Ya viste en A4.4 por qué no conviene ponerlos sin pensarlo.
+- **`X-XSS-Protection` está obsoleta:** no la añadas. Los navegadores retiraron ese filtro.
+- **Si necesitas que te enmarquen,** un `frame-ancestors` en la CSP permite listar dominios. `X-Frame-Options` no.
+- **`Referrer-Policy` no sustituye a no poner secretos en la URL:** las URL acaban en registros e historiales.
+
+</Callout>
+
+## Paso 3: dónde ponerlas
+
+El ejemplo clásico las pone en el _middleware_:
+
+```ts
+// src/middleware.ts (fragmento)
+const cabeceras = defineMiddleware(async (_ctx, next) => {
+  const r = await next();
+  r.headers.set("X-Content-Type-Options", "nosniff");
+  r.headers.set("X-Frame-Options", "DENY");
+  r.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  r.headers.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  return r;
+});
+```
+
+Funciona en `/entrar`. Pero mira cada tipo de respuesta:
+
+```text
+                                       HSTS nosniff frame referrer permissions
+/entrar                            200   ✓     ✓      ✓      ✓        ✓
+/                                  200   ✓     ·      ·      ·        ·
+/_astro/client.XI9U0KhD.js         200   ✓     ·      ·      ·        ·
+/no-existe                         404   ✓     ✓      ✓      ✓        ✓
+```
+
+**La portada prerenderizada y los estáticos no pasan por el _middleware_.** Esa portada se puede enmarcar. Esta plataforma, en Vercel, tiene lo mismo: medido en producción, `/login` lleva todas, y sus archivos de `_astro/` y `favicon.svg`, solo HSTS, la que añade Vercel. Allí el riesgo es bajo, porque esos archivos no son páginas y llevan su tipo correcto, pero conviene saberlo: en Vercel se añaden a todo con `headers` en `vercel.json`.
+
+En tu servidor, Nginx ve todas las respuestas. Crea `/etc/nginx/snippets/cabeceras.conf`:
+
+```nginx
+# Archivo: /etc/nginx/snippets/cabeceras.conf
+# Un solo archivo, incluido en cada bloque con add_header propio (un add_header anula los heredados)
+add_header Strict-Transport-Security "max-age=31536000" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-Frame-Options "DENY" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+```
+
+En `/etc/nginx/sites-available/entrenos`, cambia las dos líneas de HSTS de A4.4. En el bloque `server`:
+
+```nginx
+  include snippets/cabeceras.conf;
+```
+
+Y en `location /_astro/`:
+
+```nginx
+  location /_astro/ {
+    root /var/www/entrenos;
+    # Un add_header propio anula todos los de server: hay que repetirlos
+    include snippets/cabeceras.conf;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    access_log off;
+    brotli_static on;
+    gzip_static on;
+    try_files $uri @app;
+  }
+```
+
+`always` las añade también a los errores. Y un solo archivo evita la trampa de A4.4: un `add_header` en una `location` anula los de `server`, así que hay que repetirlos, y así se repiten sin copiar.
+
+```text
+                                       HSTS nosniff frame referrer permissions
+/entrar                            200   ✓     ✓      ✓      ✓        ✓
+/                                  200   ✓     ✓      ✓      ✓        ✓
+/_astro/client.XI9U0KhD.js         200   ✓     ✓      ✓      ✓        ✓
+/no-existe                         404   ✓     ✓      ✓      ✓        ✓
+```
+
+<Callout type="risk">
+
+- **Comprueba más de una URL:** un análisis de la portada no dice nada de los estáticos o los errores. El caso de la tabla pasó desapercibido con solo mirar `/entrar`.
+- **Si usas Nginx y además el _middleware_, habrá cabeceras duplicadas:** elige un sitio. Nginx no sobrescribe las que vienen de Node.
+- **El HSTS de un año da por hecho que ya pasaste las etapas de A4.4.** Si no, deja el valor que tuvieras.
+
+</Callout>
+
+## Paso 4: Content Security Policy
+
+La **CSP** es la cabecera más potente y la más delicada: dice de dónde puede cargar la página cada tipo de recurso, y **qué código puede ejecutar**. Astro la genera. En `astro.config.mjs`, dentro de `security`:
+
+```js
+  security: {
+    csp: {
+      directives: [
+        "default-src 'self'",
+        "img-src 'self' data:",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ],
+    },
+    // Detrás de un proxy: los únicos dominios por los que Astro acepta Host y X-Forwarded-* (A4.3).
+    // Se fija en el build; sin esto, la app se cree en localhost y rechaza los formularios
+    allowedDomains: process.env.APP_HOSTNAME ? [{ hostname: process.env.APP_HOSTNAME }] : [],
+  },
+```
+
+- **`default-src 'self'`:** por defecto, solo tu dominio.
+- **`object-src 'none'`:** nada de `<object>` ni `<embed>`.
+- **`base-uri 'self'`:** impide que una etiqueta `<base>` inyectada cambie adónde apuntan tus rutas relativas.
+- **`form-action 'self'`:** tus formularios solo se envían a tu web. Un `<form>` inyectado no puede mandar datos fuera.
+
+Astro añade `script-src` y `style-src`, con el _hash_ de cada _script_ que genera:
+
+```text
+default-src 'self';img-src 'self' data:;object-src 'none';base-uri 'self';form-action 'self'; script-src 'self' 'sha256-…'; style-src 'self' 'sha256-…';
+```
+
+Lo que importa es lo que **no** aparece: `'unsafe-inline'`. El navegador solo ejecuta archivos de tu dominio y bloques cuyo _hash_ coincide exactamente. La prueba: una ruta de laboratorio con el `set:html` vulnerable de A5.2, y los mismos ataques.
+
+```text
+bloqueado  img onerror      Executing inline event handler violates the following Content Security Policy directive…
+bloqueado  script en línea  Executing inline script violates the following Content Security Policy directive…
+bloqueado  script externo   Loading the script 'https://example.com/x.js' violates the following Content Security Policy directive…
+```
+
+**El fallo sigue en el código, y el ataque no funciona.** En A5.2, lo mismo se ejecutó. Eso es defensa en profundidad. Y la app sigue funcionando: la isla de React hidrata, sin un solo aviso en `/entrar`.
+
+**_Hashes_ y _nonces_.** Hay dos formas de autorizar un _script_ en línea:
+
+- **_Nonce_:** un valor aleatorio distinto en cada respuesta. No sirve en páginas prerenderizadas, porque el HTML no cambia.
+- **_Hash_:** la huella del contenido. Sirve en cualquier página, y es lo que usa Astro.
+
+Un `<script is:inline>` no se procesa, así que Astro no conoce su _hash_:
+
+```text
+inline sin hash: bloqueado · inline con hash: EJECUTA
+```
+
+Es el caso del _script_ del tema, que debe ejecutarse antes de pintar para evitar el parpadeo. Esta plataforma lo resuelve así, en `BaseLayout.astro`:
+
+```astro
+---
+import { createHash } from "node:crypto";
+import themeInit from "@/scripts/theme-init.js?raw";
+
+// Astro no calcula el hash de los scripts is:inline: se registra aquí sobre el mismo texto
+Astro.csp?.insertScriptHash(`sha256-${createHash("sha256").update(themeInit).digest("base64")}`);
+---
+
+<script is:inline set:html={themeInit} />
+```
+
+El `set:html` es seguro porque `themeInit` es un archivo de tu repositorio, y el _hash_ se calcula sobre el mismo texto que se incrusta: si cambias el _script_, cambia solo.
+
+**Cabecera o `<meta>`.** Medido en tu app:
+
+```text
+/entrar (SSR):        cabecera Content-Security-Policy
+/ (prerenderizada):   <meta http-equiv="content-security-policy">
+```
+
+Un archivo estático no puede llevar una cabecera calculada, así que Astro la escribe en el HTML. Y `frame-ancestors` **no funciona en `<meta>`**: por eso `X-Frame-Options` sigue siendo necesaria.
+
+<Callout type="risk">
+
+- **`'unsafe-inline'` en `script-src` anula casi todo:** el XSS volvería a ejecutarse. En `style-src` el riesgo es mucho menor: esta plataforma la permite porque Shiki pinta el código con estilos en línea.
+- **Solo en `build`:** en `astro dev` no hay CSP. Prueba siempre la versión compilada: algo que funciona en desarrollo puede romperse en producción.
+- **Lo externo hay que declararlo:** analíticas, fuentes o CDN. Añádelos a la directiva que toque, sin ampliar `default-src`.
+- **La CSP no sustituye a escapar:** con `set:html` vulnerable, un atacante puede seguir inyectando HTML y CSS, aunque no ejecute JavaScript. Es la segunda capa, no la primera.
+- **Prueba antes de activarla en una app grande:** `Content-Security-Policy-Report-Only` avisa de lo que bloquearía, sin bloquearlo.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade las cabeceras de seguridad y la CSP a tu app, y comprueba en un navegador que todo sigue funcionando: inicio de sesión, formularios y las islas.
+2. Escribe `scripts/comprobar-cabeceras.sh`, que compruebe las cinco cabeceras en cada tipo de respuesta y que la CSP no permita código en línea.
+3. Consigue una A en [securityheaders.com](https://securityheaders.com) con tu dominio.
+
+</Callout>
+
+Solución. Los puntos 1 y 2 son los Pasos 3 y 4. `scripts/comprobar-cabeceras.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/comprobar-cabeceras.sh
+# Comprueba las cabeceras en cada tipo de respuesta, no solo en la portada.
+# Uso: bash scripts/comprobar-cabeceras.sh academy.tudominio.com
+set -uo pipefail
+
+BASE="https://${1:?Indica el dominio}"
+FALLOS=0
+JS="$(curl -s "$BASE/entrar" | grep -oE '/_astro/client\.[^"]+\.js' | head -n 1)"
+
+revisar() { # ruta, descripción
+  local cabeceras falta=""
+  cabeceras="$(curl -s -o /dev/null -D - "$BASE$1")"
+  for nombre in strict-transport-security x-content-type-options x-frame-options referrer-policy permissions-policy; do
+    grep -qi "^$nombre:" <<< "$cabeceras" || falta="$falta $nombre"
+  done
+  if [ -z "$falta" ]; then echo "  ok    $2"; else echo "  FALLO $2: falta$falta"; FALLOS=1; fi
+}
+
+echo "== Cabeceras en cada tipo de respuesta"
+revisar /entrar "página SSR"
+revisar / "página prerenderizada"
+revisar "$JS" "estático de Nginx"
+revisar /no-existe "error 404"
+
+echo "== CSP"
+CSP="$(curl -s -o /dev/null -D - "$BASE/entrar" | tr -d '\r' | grep -i '^content-security-policy:')"
+SCRIPT_SRC="$(grep -oE "script-src[^;]*" <<< "$CSP")"
+if [ -z "$CSP" ]; then echo "  FALLO /entrar sin CSP"; FALLOS=1; else echo "  ok    /entrar tiene CSP"; fi
+if grep -qE "unsafe-inline|unsafe-eval" <<< "$SCRIPT_SRC"; then echo "  FALLO script-src permite código en línea"; FALLOS=1; else echo "  ok    script-src sin unsafe-inline ni unsafe-eval"; fi
+if curl -s "$BASE/" | grep -qi 'http-equiv="content-security-policy"'; then echo "  ok    la página prerenderizada lleva CSP en <meta>"; else echo "  FALLO / sin CSP en <meta>"; FALLOS=1; fi
+
+[ "$FALLOS" = 0 ] && echo "Todo correcto"
+exit "$FALLOS"
+```
+
+```bash
+bash scripts/comprobar-cabeceras.sh academy.tudominio.com
+```
+
+```text
+== Cabeceras en cada tipo de respuesta
+  ok    página SSR
+  ok    página prerenderizada
+  ok    estático de Nginx
+  ok    error 404
+== CSP
+  ok    /entrar tiene CSP
+  ok    script-src sin unsafe-inline ni unsafe-eval
+  ok    la página prerenderizada lleva CSP en <meta>
+Todo correcto
+```
+
+Código de salida 0. Quitando el `include` de `location /_astro/`, justo la trampa de `add_header`:
+
+```text
+  FALLO estático de Nginx: falta strict-transport-security x-content-type-options x-frame-options referrer-policy permissions-policy
+```
+
+Código de salida 1. Solo esa línea: las páginas siguen bien, y por eso la comprobación debe mirar cada tipo de respuesta.
+
+<Callout type="note" title="securityheaders.com no se ha medido">
+
+Ese análisis necesita un dominio público, y el servidor de pruebas no lo es. El punto 3 te toca hacerlo a ti. Si te falta nota, mira qué cabecera señala y añádela a `cabeceras.conf`.
+
+</Callout>
+
+<Callout type="risk">
+
+- **Una A en un analizador no significa que tu app sea segura:** solo comprueba que las cabeceras existen, no si tu CSP permite demasiado. Esa nota tampoco dice nada de los estáticos, si analiza solo la portada.
+- **`grep -oE "script-src[^;]*"`:** mira solo esa directiva. Un `'unsafe-inline'` en `style-src` no hace fallar el _script_, a propósito.
+- **Tras un cambio en Nginx, espera un momento:** el `reload` tarda, y una comprobación lanzada al instante puede ver aún la configuración anterior (A4.4).
+
+</Callout>
+
+<Callout type="mastery">
+
+Sabes qué ataque mitiga cada cabecera: `SameSite` y `checkOrigin` frente a CSRF, y cuál cubre al otro en un subdominio; `X-Frame-Options` frente al _clickjacking_; `nosniff` frente a la confusión de tipos; `Referrer-Policy` frente a las filtraciones por URL; `Permissions-Policy` para limitar funciones; y una CSP sin `unsafe-inline` que bloquea el XSS aunque el fallo siga en el código. Y las compruebas en cada tipo de respuesta, no solo en la portada.
+
+</Callout>
+
+## Resumen
+
+- **CSRF:** una web ajena hace que el navegador de la víctima actúe con su sesión.
+- `SameSite=Lax` detiene a una web ajena, pero no a un subdominio hermano. `checkOrigin` cubre ese caso. Tu app tiene las dos, y todos los POST quedaron bloqueados.
+- **Un GET que cambia datos se ejecutó en todas las variantes:** los GET nunca deben modificar nada.
+- `X-Frame-Options` detuvo el _iframe_, `nosniff` un `text/plain` ejecutado como _script_, y `Permissions-Policy` desactivó cámara y geolocalización.
+- **El _middleware_ no cubre las páginas prerenderizadas ni los estáticos.** En tu servidor, Nginx, con un archivo común incluido en cada bloque.
+- **CSP** con _hashes_ y sin `unsafe-inline` en `script-src`: el mismo XSS de A5.2 quedó bloqueado en los tres casos, y la app siguió funcionando.
+- Un `<script is:inline>` necesita su _hash_ con `Astro.csp.insertScriptHash`.
+- En las páginas prerenderizadas, la CSP va en `<meta>`, donde `frame-ancestors` no funciona.
+- Comprueba cada tipo de respuesta, y la versión compilada: en `astro dev` no hay CSP.
