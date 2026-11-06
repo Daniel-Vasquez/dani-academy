@@ -1,0 +1,50 @@
+course: A5
+passingScore: 4
+questions:
+  - prompt: 'Este inicio de sesión recibe el cuerpo `{"email":"ana@prueba.test","clave":{"$ne":null}}`. ¿Qué ocurre?'
+    code: |
+      const body = await request.json();
+      const cuenta = await cuentas.findOne({ email: body.email, clave: body.clave });
+    options:
+      - "Nada: el driver de MongoDB convierte cualquier valor en texto antes de consultar, así que no coincide con ninguna cuenta."
+      - "Da un error de sintaxis en MongoDB, porque `$ne` no se puede usar dentro de un filtro de `findOne`."
+      - "Solo funciona si el atacante conoce antes la contraseña cifrada que está guardada en la base de datos."
+      - "MongoDB interpreta el objeto como un operador: «clave distinta de null» se cumple y entra sin conocer la contraseña."
+    answer: 3
+    explanation: "Medido en A5.2: entró sin la contraseña, y con `$gt` en el correo se elegía a otra cuenta. Se detiene comprobando el tipo antes de consultar, con `z.string()`, que respondió 400, o con `$eq`, que compara literalmente. Validar no basta si el esquema admite objetos: con `z.any()` o `z.unknown()`, la inyección pasó igual."
+
+  - prompt: "¿Qué distingue a los tres tipos de XSS?"
+    options:
+      - "Por dónde llega el código: el reflejado viene en la URL y la página lo repite, el almacenado se guarda en tu base y ataca a quien lo vea, y el de DOM lo escribe tu propio JavaScript sin pasar por el servidor."
+      - "El lenguaje del ataque: el reflejado usa JavaScript, el almacenado usa SQL y el de DOM usa CSS."
+      - "Su gravedad: el reflejado solo afecta a páginas estáticas, el almacenado a las de SSR y el de DOM a las islas de React."
+      - "El navegador: cada tipo funciona únicamente en un motor distinto, y por eso hay que probar en varios."
+    answer: 0
+    explanation: "En A5.2, en un navegador real, `<img onerror>` se ejecutó con `set:html`, `dangerouslySetInnerHTML` e `innerHTML`; con `{q}` en Astro y `{html}` en React se pintó como texto. El almacenado es el peor, porque ataca a todo el que lo vea. `HttpOnly` ocultó la cookie, pero el script leyó los datos con la sesión de la víctima: la defensa está en escapar la salida, y una CSP sin `unsafe-inline` lo bloqueó como segunda capa (A5.3)."
+
+  - prompt: "¿Qué mitiga una cookie de sesión con `SameSite=Lax`?"
+    options:
+      - "Que un script de tu propia página lea la cookie con `document.cookie`, gracias a que queda oculta para JavaScript."
+      - "El XSS almacenado, porque impide que el navegador ejecute código que venga de otro sitio."
+      - "El CSRF desde otra web: el navegador no envía la cookie en un POST que llega de otro sitio, aunque sí al navegar con un enlace."
+      - "Cualquier petición que cambie datos, venga de donde venga, incluidos los GET y los subdominios de tu dominio."
+    answer: 2
+    explanation: "Medido en A5.3: con solo `SameSite=Lax`, los POST desde una web ajena quedaron bloqueados, pero los de un subdominio hermano se ejecutaron, porque es el mismo sitio. Lo cubre `checkOrigin` de Astro, y con las dos capas se bloquearon todos. Un GET que cambiaba datos se ejecutó en todas las variantes: un GET nunca debe modificar nada. Ocultar la cookie a JavaScript es `HttpOnly`, no `SameSite`."
+
+  - prompt: "Un usuario supera el límite de peticiones de un endpoint. ¿Qué debe responder la API?"
+    options:
+      - "`403 Forbidden`, porque el usuario ya no tiene permiso para esa ruta, sin más información."
+      - "`429 Too Many Requests`, con la cabecera `Retry-After` indicando cuántos segundos esperar."
+      - "`503 Service Unavailable`, para que el cliente crea que el servidor está caído y deje de insistir."
+      - "`200 OK` con un mensaje de error en el cuerpo, para no dar pistas a un posible atacante."
+    answer: 1
+    explanation: "En A5.4, el límite de 10 altas por hora respondió 429 con `Retry-After`. Nginx responde 503 por defecto, y por eso se configura `limit_req_status 429`: un 503 parecería una caída a tus monitores. La regla va en la capa de servicio: con el límite en el endpoint, la Action siguió guardando entrenos, 13 en total. Y el mapa de errores debe conocer el 429, o sale un 500."
+
+  - prompt: "Descubres que has subido un secreto a un repositorio. ¿Qué haces primero?"
+    options:
+      - "Borrar el archivo y hacer un commit nuevo, porque así el secreto deja de estar disponible en el repositorio."
+      - "Reescribir la historia con `git filter-repo` y, una vez limpia, seguir usando el mismo secreto."
+      - "Rotarlo: darlo por comprometido, cambiarlo y revocar lo que dependa de él; después revisar qué pasó y limpiar Git."
+      - "Hacer privado el repositorio, ya que nadie más podrá verlo a partir de ese momento."
+    answer: 2
+    explanation: "En A5.5, tras borrar el archivo, `gitleaks` siguió encontrando el secreto en la historia. `git filter-repo` limpió el repositorio, pero un clon hecho antes lo conservaba, y lo mismo ocurre con forks y cachés. Por eso se cambia la cerradura antes de buscar la llave. La rotación de `BETTER_AUTH_SECRET` tardó 17,6 s, sin errores: cerró todas las sesiones y hubo que retirar la instancia antigua para que `volver.sh` no la arrancara."
