@@ -1,0 +1,535 @@
+---
+sectionId: "A5.4"
+course: "A5"
+title: "Rate limiting y abuso"
+order: 4
+minutes: 90
+summary: "Mides los límites de Better Auth, comparas cuatro algoritmos, creas uno propio con MongoDB y TTL que vale para endpoints y Actions, limitas por cuenta y frenas una avalancha en Nginx antes de que llegue a Node."
+---
+
+Todo lo que has construido funciona bien con una petición. Pero nada impide a un _script_ enviar mil por segundo: probar contraseñas, crear basura en tu base de datos o, simplemente, gastar tu servidor. Sin límites, tu app no distingue a una persona de un bucle. **_Rate limiting_** es decidir cuánto puede pedir cada quién, y responder «ahora no» con educación cuando se pasa.
+
+Una analogía: un **torniquete** en la entrada del metro deja pasar a una persona cada vez, y a nadie le estorba. Pero quien quiera meter a cien de golpe se encuentra una barrera. Hay tres sitios donde ponerlos: en la calle, antes de que nadie entre (Nginx); en la puerta de cada andén, según quién seas (tu app); y en la taquilla, para que nadie compre mil billetes con la misma tarjeta (la cuenta).
+
+**Lo que tendrás al terminar:** el inicio de sesión protegido por IP y por cuenta, con contadores que sobreviven a los despliegues; un límite por usuario que devuelve `429` con `Retry-After`, en _endpoints_ y Actions; Nginx rechazando las avalanchas antes de tocar Node; y un _script_ que lo comprueba.
+
+**Requisitos:** la app de A5.3, en Compose detrás de Nginx. Pruébalo solo en tu servidor.
+
+## Paso 1: lo que ya tienes, y lo que le falta
+
+Better Auth limita por IP sin que hagas nada. Cuatro contraseñas erróneas seguidas:
+
+```text
+401 401 401 429
+x-retry-after: 10
+{"message":"Too many requests. Please try again later."}
+```
+
+Tres intentos cada 10 s. Parece poco, pero son **25 920 contraseñas al día** desde una sola IP, y tiene dos huecos.
+
+**Primer hueco: un reinicio lo borra.** El contador vive en la memoria del proceso. Con el contador lleno, tras `docker compose restart`:
+
+```text
+401 401 401 429
+```
+
+Otros tres intentos. Cada despliegue (A4.5) pone a cero los contadores. Y con dos instancias, cada una tendría los suyos.
+
+**Segundo hueco: limita por IP, no por cuenta.** Se simularon 50 máquinas contra una misma cuenta, con 50 IP distintas, directamente contra el puerto de la app:
+
+```text
+50 intentos, 50 IP: {"401":50}
+```
+
+Ni un solo 429. Una red de equipos comprometidos (_botnet_) prueba contraseñas contra tu cuenta sin que el límite la vea nunca.
+
+Los dos se resuelven en `src/lib/auth.ts`, dentro de `betterAuth({ … })`. Esta plataforma usa los mismos valores para el contador:
+
+```ts
+import { createHash } from "node:crypto";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+import { repos } from "../repositories";
+
+  // Por IP, y en MongoDB: en memoria, cada reinicio o despliegue pondría los contadores a cero
+  rateLimit: {
+    enabled: true,
+    storage: "database",
+    window: 60,
+    max: 100,
+    customRules: {
+      "/sign-in/email": { window: 60, max: 5 },
+      "/sign-up/email": { window: 60 * 60, max: 5 },
+    },
+  },
+  // Por cuenta: el límite por IP no para a quien reparte el ataque entre muchas máquinas
+  hooks: {
+    before: createAuthMiddleware(async (ctx) => {
+      if (ctx.path !== "/sign-in/email") return;
+      const correo = String(ctx.body?.email ?? "").toLowerCase();
+      const clave = createHash("sha256").update(correo).digest("hex"); // sin datos personales
+      const { permitido } = await repos.limites.contar(`login:${clave}`, 20, 3600);
+      if (!permitido) {
+        throw new APIError("TOO_MANY_REQUESTS", { message: "Demasiados intentos con esta cuenta" });
+      }
+    }),
+  },
+```
+
+`repos.limites` lo crearás en el Paso 3. Medido después:
+
+```text
+intentos: 401 401 401 401 401 429 429
+tras reiniciar: 429 429
+50 intentos, 50 IP: {"401":20,"429":30} · primer 429 en el intento 21
+mismo correo en mayúsculas: 429
+```
+
+El contador sobrevive, en la colección `rateLimit`, y el ataque repartido se corta en el intento 21.
+
+**Y esto tiene un precio, medido también:**
+
+```text
+la dueña, con la contraseña correcta y otra IP: 429 {"message":"Demasiados intentos con esta cuenta"}
+```
+
+**Quien conozca un correo puede dejar a su dueño sin entrar** durante hasta una hora. Es un compromiso real: protegiste la cuenta de que la adivinen a cambio de que la puedan bloquear. Por eso 20 por hora, y no 5, y por eso conviene avisar al dueño y ofrecerle otra vía, como un enlace por correo. No hay una respuesta perfecta, y debes decidirla sabiendo qué das a cambio.
+
+<Callout type="risk">
+
+- **`x-retry-after` no es estándar:** la cabecera de HTTP es `Retry-After`. La de Better Auth la usa su cliente; un cliente genérico no la entiende. Tus límites propios usan la estándar (Paso 3).
+- **El contador cuenta también los aciertos:** un usuario legítimo que entra muchas veces suma. Con 20 por hora no debería notarlo.
+- **No guardes el correo en la clave:** los `_id` de `limites` acaban en copias y registros. El _hash_ permite contar sin guardar el dato.
+- **Un límite de 5 por minuto y usuarios tras una misma IP:** una oficina o un _campus_ comparten IP. Si muchos fallan a la vez, se bloquean entre sí.
+- **Prueba de contraseñas filtradas:** un atacante que prueba una sola contraseña contra miles de cuentas no activa el límite por cuenta. Lo frena el de IP, y lo que de verdad lo para es un segundo factor.
+
+</Callout>
+
+## Paso 2: cuatro formas de contar
+
+«10 peticiones por minuto» parece una sola regla, pero hay varios algoritmos, con resultados distintos. `scripts/ventanas.mjs` los compara con las mismas peticiones:
+
+```js
+// Archivo: scripts/ventanas.mjs
+// Cuatro algoritmos con el mismo límite y las mismas peticiones. Uso: node scripts/ventanas.mjs
+const MAX = 10; // 10 peticiones
+const VENTANA = 60_000; // por minuto
+
+function ventanaFija() {
+  const cuentas = new Map();
+  return (t) => {
+    const ventana = Math.floor(t / VENTANA);
+    const n = (cuentas.get(ventana) ?? 0) + 1;
+    cuentas.set(ventana, n);
+    return n <= MAX;
+  };
+}
+
+function registroDeslizante() {
+  const marcas = [];
+  return (t) => {
+    while (marcas.length && marcas[0] <= t - VENTANA) marcas.shift();
+    if (marcas.length >= MAX) return false;
+    marcas.push(t);
+    return true;
+  };
+}
+
+function contadorDeslizante() {
+  const cuentas = new Map();
+  return (t) => {
+    const ventana = Math.floor(t / VENTANA);
+    const anterior = cuentas.get(ventana - 1) ?? 0;
+    const actual = cuentas.get(ventana) ?? 0;
+    const pesoAnterior = 1 - (t % VENTANA) / VENTANA; // cuánto de la ventana pasada sigue dentro
+    if (anterior * pesoAnterior + actual >= MAX) return false;
+    cuentas.set(ventana, actual + 1);
+    return true;
+  };
+}
+
+function cubetaDeFichas() {
+  let fichas = MAX;
+  let ultima = 0;
+  return (t) => {
+    fichas = Math.min(MAX, fichas + (t - ultima) * (MAX / VENTANA)); // se rellena con el tiempo
+    ultima = t;
+    if (fichas < 1) return false;
+    fichas -= 1;
+    return true;
+  };
+}
+
+function probar(nombre, permitir) {
+  let pico = 0;
+  for (let i = 0; i < 20; i++) if (permitir(59_000 + i * 100)) pico++; // 20 peticiones en los 2 s del cambio de minuto
+  let despues = 0;
+  for (let i = 0; i < 300; i++) if (permitir(62_000 + i * 200)) despues++; // 5 por segundo el minuto siguiente
+  console.log(`${nombre.padEnd(20)} pico en 2 s: ${String(pico).padStart(2)} de 20 · el minuto siguiente: ${despues}`);
+}
+
+probar("ventana fija", ventanaFija());
+probar("registro deslizante", registroDeslizante());
+probar("contador deslizante", contadorDeslizante());
+probar("cubeta de fichas", cubetaDeFichas());
+```
+
+```text
+ventana fija         pico en 2 s: 20 de 20 · el minuto siguiente: 10
+registro deslizante  pico en 2 s: 10 de 20 · el minuto siguiente: 10
+contador deslizante  pico en 2 s: 11 de 20 · el minuto siguiente: 10
+cubeta de fichas     pico en 2 s: 10 de 20 · el minuto siguiente: 10
+```
+
+- **Ventana fija:** un contador por minuto, que vuelve a cero a la hora en punto. Es el más simple, y el problema se ve en la primera línea: **20 de 20 en 2 s** con un límite de 10. Diez al final de un minuto y diez al principio del siguiente: el doble de lo prometido.
+- **Registro deslizante:** guarda la hora de cada petición y cuenta las del último minuto. Exacto, pero guarda una marca por petición.
+- **Contador deslizante:** dos contadores, y una media ponderada entre ellos. Casi exacto (11), y casi tan barato como la ventana fija.
+- **Cubeta de fichas (_token bucket_):** cada petición gasta una ficha, y las fichas se reponen a ritmo constante. Permite ráfagas breves y controla la media. `limit_req` de Nginx (Paso 4) usa una idea parecida, la cubeta con agujero (_leaky bucket_).
+
+**¿Cuál usar?** Para el resto de esta sección, ventana fija: el pico doble dura segundos, y para «10 entrenos por hora» no es grave. Si lo fuera, contador deslizante.
+
+<Callout type="risk">
+
+- **Una ventana fija no es un límite exacto:** si escribes en tu documentación «máximo 10 por hora», en realidad son hasta 20 en un momento dado. Si es un límite de negocio (pagos, cuotas), usa uno exacto.
+- **El registro deslizante consume memoria por usuario:** un atacante que envía mucho hace crecer justo lo que usas para frenarlo.
+
+</Callout>
+
+## Paso 3: un límite propio con MongoDB
+
+Better Auth solo protege sus rutas. Para las tuyas, un contador en MongoDB. Crea `src/repositories/limites.repo.ts`:
+
+```ts
+// Archivo: src/repositories/limites.repo.ts
+// Ventana fija con un contador en MongoDB; el índice TTL borra las ventanas caducadas
+import type { Db } from "mongodb";
+
+type LimiteDoc = { _id: string; n: number; expira: Date };
+
+export function crearLimitesRepo(db: Db) {
+  const col = db.collection<LimiteDoc>("limites");
+
+  return {
+    /** Cuenta una petición. Atómico: $inc no pierde cuentas aunque lleguen a la vez */
+    async contar(clave: string, max: number, ventanaSeg: number, ahora = Date.now()) {
+      const ventanaMs = ventanaSeg * 1000;
+      const inicio = Math.floor(ahora / ventanaMs) * ventanaMs;
+      const fin = inicio + ventanaMs;
+      const doc = await col.findOneAndUpdate(
+        { _id: `${clave}:${inicio}` },
+        { $inc: { n: 1 }, $setOnInsert: { expira: new Date(fin) } },
+        { upsert: true, returnDocument: "after" },
+      );
+      return { permitido: (doc?.n ?? 1) <= max, reintentarEn: Math.ceil((fin - ahora) / 1000) };
+    },
+  };
+}
+
+export type LimitesRepo = ReturnType<typeof crearLimitesRepo>;
+```
+
+- **`_id` con la clave y el inicio de la ventana:** `crear-entreno:ana:1793941200000`. Cada ventana es un documento.
+- **`$inc` con `upsert`:** atómico, así que dos peticiones simultáneas no pueden leer el mismo número. Medido con 50 peticiones a la vez en 40 ventanas, y un límite de 10: pasaron **400, exactamente**.
+- **`$setOnInsert`:** la fecha de caducidad solo se escribe al crear.
+
+En `src/repositories/index.ts`, añádelo a `repos`:
+
+```ts
+import { crearLimitesRepo } from "./limites.repo";
+
+export const repos = {
+  entrenos: crearEntrenosRepo(db),
+  limites: crearLimitesRepo(db),
+};
+```
+
+Un índice **TTL** borra las ventanas caducadas. En `scripts/crear-indices.mjs`, dentro del `try`:
+
+```js
+  // TTL: MongoDB borra cada ventana cuando pasa su fecha de «expira»
+  await db.collection("limites").createIndex({ expira: 1 }, { expireAfterSeconds: 0, name: "limites_ttl" });
+```
+
+Medido con una ventana ya caducada: desapareció a los **49 s**. El proceso de limpieza de MongoDB pasa cada minuto, así que no es instantáneo. No afecta al límite, porque cada ventana tiene su propio `_id`.
+
+**La respuesta correcta es `429`** (_Too Many Requests_), y `Retry-After` dice cuántos segundos esperar. En `src/lib/errores.ts`, antes de `aRespuesta`:
+
+```ts
+/** 429: el cliente ha superado un límite. reintentarEn, en segundos, va en Retry-After */
+export class DemasiadasPeticionesError extends HttpError {
+  constructor(public readonly reintentarEn: number) {
+    super(429, "Demasiadas peticiones. Prueba más tarde.");
+  }
+}
+```
+
+Y en `aRespuesta`, antes de la comprobación de `HttpError`:
+
+```ts
+  if (e instanceof DemasiadasPeticionesError) {
+    return Response.json(
+      { error: e.message },
+      { status: 429, headers: { "Retry-After": String(e.reintentarEn) } },
+    );
+  }
+```
+
+**¿Dónde se comprueba?** La idea natural es en el _endpoint_. Medido con ese límite en `POST /api/entrenos`, 12 altas por el _endpoint_ y 3 por la Action, con la misma sesión:
+
+```text
+endpoint: 201 201 201 201 201 201 201 201 201 201 429 429
+action:   200 200 200
+entrenos guardados: 13
+```
+
+**La Action no se enteró.** Son dos puertas hacia la misma regla. Pertenece a la capa de servicio (I3.5), por donde pasan las dos. En `src/services/entrenos.service.ts`:
+
+```ts
+import { DemasiadasPeticionesError, NoEncontradoError, validar } from "../lib/errores";
+import type { LimitesRepo } from "../repositories/limites.repo";
+
+type Dependencias = {
+  entrenos: Pick<EntrenosRepo, "listar" | "crear" | "obtener" | "actualizar" | "borrar">;
+  limites: Pick<LimitesRepo, "contar">;
+};
+
+const MAX_ENTRENOS_POR_HORA = 10;
+
+export function crearServicioEntrenos({ entrenos, limites }: Dependencias) {
+  /** Regla: aquí, y no en el endpoint, para que valga también en las Actions */
+  async function crear(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+    const clave = `crear-entreno:${userId}`;
+    const { permitido, reintentarEn } = await limites.contar(clave, MAX_ENTRENOS_POR_HORA, 3600);
+    if (!permitido) throw new DemasiadasPeticionesError(reintentarEn);
+    return entrenos.crear(userId, datos);
+  }
+```
+
+Sustituye `crear: (userId, datos) => entrenos.crear(userId, datos),` del objeto que devuelve por `crear,`. En `src/services/index.ts`, pásale `limites: repos.limites`. Y en la Action, el error debe convertirse:
+
+```ts
+  crearEntreno: defineAction({
+    accept: "form",
+    input: EntrenoSchema,
+    handler: async (entreno, ctx) => servicios.entrenos.crear(idUsuario(ctx), entreno).catch(comoActionError),
+  }),
+```
+
+Con solo eso, la primera prueba dio esto:
+
+```text
+action: 500 500 500
+{"type":"AstroActionError","code":"INTERNAL_SERVER_ERROR","status":500,"message":"Demasiadas peticiones. Prueba más tarde."}
+```
+
+El límite funcionaba, pero el mapa `CODIGOS` de `src/actions/index.ts` no conocía el 429, y lo convertía en un 500. Añádelo:
+
+```ts
+const CODIGOS: Record<number, ActionErrorCode> = {
+  400: "BAD_REQUEST",
+  401: "UNAUTHORIZED",
+  403: "FORBIDDEN",
+  404: "NOT_FOUND",
+  409: "CONFLICT",
+  422: "UNPROCESSABLE_CONTENT",
+  429: "TOO_MANY_REQUESTS",
+};
+```
+
+```text
+endpoint: 201 201 201 201 201 201 201 201 201 201 429 429
+retry-after: 3422
+action:   429 429 429
+entrenos guardados: 10
+```
+
+Dos puertas, un solo contador. Y el límite es **por usuario**, con su `userId`, porque ya hay sesión. Antes de iniciar sesión solo tienes la IP o el correo.
+
+<Callout type="risk">
+
+- **Actualiza tus tests:** `crearServicioEntrenos` pide ahora `limites`. En los tests del servicio (I3.5), pásale uno falso: `limites: { contar: async () => ({ permitido: true, reintentarEn: 0 }) }`.
+- **El límite falla cerrado:** con MongoDB caído, crear un entreno da 500 en 5 s, y no pasa nadie. Es lo correcto para escribir: sin base no se podría guardar. Para un límite en otro almacén (Redis), decide si, al caer, dejas pasar a todos o a nadie.
+- **`esFormulario` redirige:** tu _endpoint_ convierte cualquier error de un `<form>` en `/nuevo?error=1`. Un 429 por esa vía no lleva `Retry-After`: añade un mensaje claro si es importante.
+- **Colisiones (`E11000`):** dos `upsert` simultáneos sobre una ventana nueva pueden chocar. Esta plataforma reintenta por si acaso. Aquí no apareció ninguna en 2000 peticiones concurrentes, así que el reintento se ha dejado fuera, pero si lo ves en tus registros, ya sabes qué es: añade una segunda llamada en ese `catch`.
+- **Con mucho tráfico, Redis:** cada comprobación es una escritura en MongoDB. Redis hace lo mismo en memoria, con caducidad incluida. No se ha medido aquí.
+
+</Callout>
+
+## Paso 4: la primera barrera, en Nginx
+
+Todo lo anterior ocurre **dentro de Node**: la petición ya ha llegado, y ya ha costado CPU. Nginx puede rechazarla antes. Crea `/etc/nginx/conf.d/limites.conf`:
+
+```nginx
+# Archivo: /etc/nginx/conf.d/limites.conf
+# Zonas compartidas: 10 MB guardan unas 160 000 IP. Se aplican en cada location
+limit_req_zone $binary_remote_addr zone=login:10m rate=10r/m;
+limit_req_zone $binary_remote_addr zone=app:10m rate=20r/s;
+limit_req_status 429; # sin esto, Nginx responde 503, que parece una caída
+```
+
+Y en el bloque `server` de HTTPS, en `/etc/nginx/sites-available/entrenos`:
+
+```nginx
+  location / {
+    limit_req zone=app burst=40 nodelay;
+    proxy_pass http://entrenos_app;
+  }
+
+  location = /api/auth/sign-in/email {
+    limit_req zone=login burst=5 nodelay;
+    proxy_pass http://entrenos_app;
+  }
+```
+
+- **`rate=20r/s`:** el ritmo que se sostiene por IP. **`burst=40`:** cuántas peticiones de más admite de golpe, porque cargar una página pide varias a la vez.
+- **`nodelay`:** atiende el _burst_ al momento, en vez de repartirlo en el tiempo.
+- **`location =`:** coincide con esa ruta exacta, y gana a `/`.
+- **`location /_astro/` no lleva límite:** los estáticos los sirve Nginx, y no cuestan casi nada.
+
+Una avalancha de 5 s contra `/entrar`, con 20 conexiones:
+
+```text
+pet/s 50749 · 2xx 140 · 4xx 253574 · 5xx 0
+llegaron a Node: 140
+tras la avalancha, una persona normal: 200
+```
+
+**253 574 rechazadas, y solo 140 llegaron a Node**, y una persona normal entra sin problema. Las respuestas 429 de Nginx no llevan `Retry-After`, pero sí tus cabeceras de seguridad, y quedan en `error.log`:
+
+```text
+limiting requests, excess: 5.945 by zone "login", client: 127.0.0.1, server: academy.entrenos.test…
+```
+
+**La IP real.** Todos estos límites dependen de saber quién llama. En A4.3 mediste lo que pasa sin `X-Forwarded-For`, y A4.3 dejó `$remote_addr`, que sobrescribe lo que envíe el cliente. Mira `clientAddress` en Astro:
+
+```text
+a través de Nginx:                         {"clientAddress":"127.0.0.1","xff":"127.0.0.1"}
+a través de Nginx, con X-Forwarded-For 1.2.3.4:  {"clientAddress":"127.0.0.1","xff":"127.0.0.1"}
+directo al puerto de la app, con esa cabecera:   {"clientAddress":"1.2.3.4","xff":"1.2.3.4"}
+```
+
+A través de Nginx, la mentira se ignora (aquí la IP real es la del propio servidor, que hizo la prueba). **Directamente contra Node, se acepta.** Si el puerto de la app estuviera abierto, cualquiera podría inventarse una IP en cada petición y saltarse todos los límites por IP. Por eso `127.0.0.1:4321` no es opcional.
+
+<Callout type="risk">
+
+- **Sin `limit_req_status 429`, responde 503:** tus monitores lo tomarían por una caída.
+- **Nginx no sabe quién es el usuario:** solo limita por IP. Usuarios tras una misma IP (oficina, red móvil) comparten el cubo. Por eso `app` es generoso, y el límite fino va en la app.
+- **`/api/health` también pasa por `location /`:** un monitor cada minuto no molesta, pero un balanceador que preguntara muchas veces podría recibir 429.
+- **Un `location` nuevo no hereda `limit_req`:** cada ruta que añadas debe llevar su `limit_req`, o queda sin límite.
+- **Esto no frena un ataque distribuido de verdad (DDoS):** con muchas IP, tu enlace se satura antes de llegar a Nginx. Eso se resuelve delante, con un servicio como Cloudflare, que cambia cómo obtienes la IP real (A4.3).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Aplica el límite de 10 altas por hora y usuario, y devuelve `429` con la cabecera `Retry-After`, tanto en el _endpoint_ como en la Action.
+2. Escribe `scripts/comprobar-limites.sh`, que compruebe desde fuera: que los 10 primeros pasan, que el 11.º da 429 con un `Retry-After` válido, que la Action cuenta igual, y que el inicio de sesión acaba en 429.
+3. Comprueba que detecta la falta de límites, ejecutándolo contra una versión anterior.
+
+</Callout>
+
+Solución. El punto 1 es el Paso 3. `scripts/comprobar-limites.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/comprobar-limites.sh
+# Comprueba desde fuera los límites de la app. Crea un usuario y 10 entrenos. SOLO en un servidor tuyo.
+# Uso: bash scripts/comprobar-limites.sh academy.tudominio.com
+set -uo pipefail
+
+BASE="https://${1:?Indica el dominio}"
+COOKIES="$(mktemp)"
+CABECERAS="$(mktemp)"
+trap 'rm -f "$COOKIES" "$CABECERAS"' EXIT
+FALLOS=0
+
+comprobar() { # descripción, valor obtenido, valor esperado
+  if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FALLO $1: $2 (esperaba $3)"; FALLOS=1; fi
+}
+json() { curl -s -m 12 -H 'content-type: application/json' -H "origin: $BASE" "$@"; }
+
+json -c "$COOKIES" -o /dev/null -d "{\"email\":\"limites-$(date +%s)@prueba.test\",\"password\":\"$(openssl rand -hex 12)\",\"name\":\"Prueba\"}" \
+  "$BASE/api/auth/sign-up/email"
+
+echo "== Crear entrenos: 10 por hora y usuario"
+CODIGOS=""
+for _ in $(seq 1 11); do
+  CODIGOS="$CODIGOS $(json -b "$COOKIES" -o /dev/null -D "$CABECERAS" -w '%{http_code}' \
+    -d '{"tipo":"running","minutos":10,"fecha":"2026-01-15","sensacion":3}' "$BASE/api/entrenos")"
+done
+comprobar "los 10 primeros pasan" "$(grep -o 201 <<< "$CODIGOS" | wc -l | tr -d ' ')" 10
+comprobar "el 11.º se rechaza" "${CODIGOS##* }" 429
+RETRY="$(tr -d '\r' < "$CABECERAS" | grep -i '^retry-after:' | cut -d' ' -f2)"
+if [[ "$RETRY" =~ ^[0-9]+$ ]] && [ "$RETRY" -le 3600 ]; then echo "  ok    Retry-After: $RETRY s"; else echo "  FALLO Retry-After: «$RETRY»"; FALLOS=1; fi
+
+echo "== La Action cuenta igual: no es otra puerta"
+comprobar "Action tras el límite" "$(curl -s -m 12 -b "$COOKIES" -o /dev/null -w '%{http_code}' -H "origin: $BASE" -H 'accept: application/json' \
+  -F tipo=running -F minutos=10 -F fecha=2026-01-15 -F sensacion=3 "$BASE/_actions/crearEntreno")" 429
+
+echo "== Inicio de sesión"
+INTENTOS=""
+for _ in 1 2 3 4 5 6 7; do
+  INTENTOS="$INTENTOS $(json -o /dev/null -w '%{http_code}' -d "{\"email\":\"nadie@prueba.test\",\"password\":\"clave-equivocada-123\"}" "$BASE/api/auth/sign-in/email")"
+done
+comprobar "acaba en 429" "${INTENTOS##* }" 429
+
+[ "$FALLOS" = 0 ] && echo "Todo correcto"
+exit "$FALLOS"
+```
+
+```bash
+bash scripts/comprobar-limites.sh academy.tudominio.com
+```
+
+```text
+== Crear entrenos: 10 por hora y usuario
+  ok    los 10 primeros pasan
+  ok    el 11.º se rechaza
+  ok    Retry-After: 3113 s
+== La Action cuenta igual: no es otra puerta
+  ok    Action tras el límite
+== Inicio de sesión
+  ok    acaba en 429
+Todo correcto
+```
+
+Código de salida 0. Contra una versión sin los límites, desplegada con `bash scripts/desplegar.sh <versión>` (A4.5):
+
+```text
+  FALLO los 10 primeros pasan: 11 (esperaba 10)
+  FALLO el 11.º se rechaza: 201 (esperaba 429)
+  FALLO Retry-After: «»
+  FALLO Action tras el límite: 200 (esperaba 429)
+  ok    acaba en 429
+```
+
+Código de salida 1. El inicio de sesión sigue en 429 porque esa barrera está en Nginx: otra capa, independiente del código. Vuelve después a la versión buena.
+
+- **Se comprueba `Retry-After` como número:** una cabecera vacía o mal formada no sirve a ningún cliente.
+- **La prueba de la Action va después del límite:** comparten contador, así que debe dar 429 a la primera. Si diera 200, habría una segunda puerta.
+- **Usuario nuevo en cada ejecución:** así el contador por usuario empieza a cero.
+
+<Callout type="risk">
+
+- **Consume tu propio límite de registro:** 5 por hora desde tu IP. Si lo ejecutas muchas veces, verás fallos que no lo son. Espera, o bórralo de `rateLimit` en un entorno de prueba.
+- **Crea datos:** un usuario y 10 entrenos en cada ejecución. Solo en tu servidor, y límpialos después.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tus _endpoints_ sensibles no aceptan peticiones ilimitadas. Nginx rechaza las avalanchas antes de que lleguen a Node; Better Auth limita por IP, con el contador en MongoDB para que sobreviva a los despliegues; un límite por cuenta frena los ataques repartidos, y conoces su precio; y tus reglas de negocio se limitan en la capa de servicio, para que valgan en cada puerta, con un `429` y un `Retry-After`. Y sabes por qué nada de esto funciona si alguien puede hablar directamente con Node.
+
+</Callout>
+
+## Resumen
+
+- Better Auth limita por IP, pero en memoria: un reinicio borra el contador. `storage: "database"` lo evita.
+- 50 IP contra una cuenta no recibieron ningún 429. Un límite **por cuenta** lo cortó en el intento 21, a cambio de que un atacante pueda bloquear a la dueña.
+- Algoritmos: la **ventana fija** dejó pasar 20 de 20 en el cambio de minuto; el **registro deslizante**, 10; el **contador deslizante**, 11; y la **cubeta de fichas**, 10.
+- Límite propio: `$inc` con `upsert` (atómico: 400 de 400 esperadas) y un índice TTL, que borró la ventana a los 49 s.
+- Responde `429` con `Retry-After`. Better Auth envía `x-retry-after`, que no es estándar.
+- **En el servicio, no en el _endpoint_:** con el límite en el _endpoint_, la Action guardó 13 entrenos. Y el mapa `CODIGOS` debe conocer el 429, o sale un 500.
+- `limit_req` en Nginx: 253 574 peticiones rechazadas y 140 en Node. Con `limit_req_status 429`, o responde 503.
+- Directamente contra Node, una IP falsa se acepta. El puerto de la app no debe estar abierto.
