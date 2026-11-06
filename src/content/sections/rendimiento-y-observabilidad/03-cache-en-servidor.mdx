@@ -1,0 +1,486 @@
+---
+sectionId: "A6.3"
+course: "A6"
+title: "Caché en servidor"
+order: 3
+minutes: 80
+summary: "Montas una CDN con Nginx, ves caer de 1000 a 1 las peticiones que llegan a Node, provocas una fuga de datos privados para aprender a evitarla, y mides por qué invalidar es lo más difícil."
+---
+
+Si mil personas piden la misma página, ¿hace falta generarla mil veces? En A6.2 redujiste lo que descarga el navegador. Ahora toca el servidor: guardar una respuesta ya hecha y entregarla sin repetir el trabajo. Es lo que más rendimiento da por línea escrita, y también la forma más fácil de enseñarle a un usuario los datos de otro.
+
+Una analogía: una panadería. Hornear cada barra al pedirla es lento, así que hay un mostrador con pan hecho. Eso es la **caché**. Funciona porque todos quieren el mismo pan. Ahora imagina que alguien encarga una tarta con su nombre, y la dejas en el mostrador: el siguiente cliente se la lleva. Toda esta sección trata de dos preguntas: qué puede ir al mostrador, y cuándo tirar lo que ya no está fresco.
+
+**Lo que tendrás al terminar:** una CDN delante de tu app, una caché en memoria con sus límites, una defensa que evita guardar respuestas privadas y un _script_ que falla si alguna se cuela.
+
+**Requisitos:** la app desplegada con Nginx (A4), y el recolector de A6.1.
+
+## Paso 1: una página que vale la pena guardar
+
+Esta página pública recorre toda la colección, así que cuesta generarla. `src/pages/comunidad.astro`:
+
+```astro
+---
+// Archivo: src/pages/comunidad.astro
+// Pública y cara de generar: un resumen de toda la comunidad, sin datos de nadie en concreto
+import Base from "../layouts/Base.astro";
+import { repos } from "../repositories";
+import { cacheDatos } from "../lib/cache-memoria";
+
+export const prerender = false;
+
+const filas = await cacheDatos.obtener("comunidad", () => repos.entrenos.comunidad());
+const total = filas.reduce((suma, f) => suma + f.total, 0);
+Astro.response.headers.set("Cache-Control", "public, s-maxage=60, stale-while-revalidate=600");
+---
+
+<Base titulo="Comunidad">
+  <h1>La comunidad</h1>
+  <p id="total">{total} entrenos registrados</p>
+  <ul>{filas.map((f) => <li>{f.tipo}: {f.total} entrenos, {f.minutos} minutos</li>)}</ul>
+  <p id="generada">HTML generado: {new Date().toISOString()}</p>
+</Base>
+```
+
+En `src/repositories/entrenos.repo.ts`, la consulta, que nunca devuelve el `userId`:
+
+```ts
+/** Toda la comunidad, sin userId: recorre la colección entera, por eso es cara */
+async comunidad(): Promise<{ tipo: string; total: number; minutos: number }[]> {
+  return col
+    .aggregate<{ tipo: string; total: number; minutos: number }>([
+      { $group: { _id: "$tipo", total: { $sum: 1 }, minutos: { $sum: "$minutos" } } },
+      { $project: { _id: 0, tipo: "$_id", total: 1, minutos: 1 } },
+      { $sort: { tipo: 1 } },
+    ])
+    .toArray();
+},
+```
+
+La cabecera `Cache-Control` indica quién puede guardar la respuesta y cuánto tiempo:
+
+| Directiva                    | Significado                                                   |
+| ---------------------------- | ------------------------------------------------------------- |
+| `public`                     | La puede guardar cualquiera, incluida una caché compartida    |
+| `private`                    | Solo el navegador de ese usuario                              |
+| `no-store`                   | Nadie la guarda                                               |
+| `max-age=60`                 | 60 s de validez, en el navegador                              |
+| `s-maxage=60`                | 60 s de validez, en las cachés compartidas                    |
+| `stale-while-revalidate=600` | Hasta 600 s más, sirve la copia vieja mientras trae una nueva |
+
+`public, s-maxage=60, stale-while-revalidate=600` se lee así: durante 60 s, sirve la copia; hasta 10 minutos después, sirve la copia y actualízala detrás. El usuario nunca espera. El navegador ignora `s-maxage`, así que siempre le pregunta a la CDN, y por eso puedes actualizarla sin depender de lo que cada navegador guardó.
+
+## Paso 2: una CDN en tu servidor
+
+Una **CDN** es una caché compartida entre tus usuarios y tu servidor. En Vercel ya la tienes, pero en un VPS no, así que Nginx hará ese papel. Primero, la carpeta y `/etc/nginx/conf.d/cache.conf`:
+
+```bash
+sudo mkdir -p /var/cache/nginx/entrenos
+sudo chown www-data /var/cache/nginx/entrenos
+```
+
+```nginx
+# Archivo: /etc/nginx/conf.d/cache.conf
+proxy_cache_path /var/cache/nginx/entrenos levels=1:2 keys_zone=cdn:10m max_size=200m inactive=1h use_temp_path=off;
+```
+
+`/etc/nginx/snippets/cdn.conf`:
+
+```nginx
+# Archivo: /etc/nginx/snippets/cdn.conf
+proxy_cache cdn;
+proxy_cache_lock on;                # con la caché vacía, solo una petición llega a Node
+proxy_cache_background_update on;   # refresca en segundo plano, sin hacer esperar a nadie
+proxy_cache_use_stale updating error timeout http_500 http_502 http_503 http_504;
+
+# Un add_header propio anula todos los de server: hay que repetirlos
+include snippets/cabeceras.conf;
+add_header X-Cache $upstream_cache_status always; # HIT, MISS, STALE…
+```
+
+En el sitio, añade `include snippets/cdn.conf;` a `location /`, y una entrada propia para la página, sin el límite de peticiones de A5.4 porque casi nada llegará a Node:
+
+```nginx
+location = /comunidad {
+  include snippets/cdn.conf;
+  proxy_cache_key $scheme$host$uri; # sin la query: ?utm=loquesea no esquiva la caché
+  proxy_pass http://entrenos_app;
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+curl -sI https://academy.tudominio.com/comunidad
+```
+
+Para medir bien, la prueba usó `s-maxage=10` y `stale-while-revalidate=30`. La última columna es la hora a la que se generó el HTML:
+
+```text
+MISS     81 ms  07:02:44.383Z
+STALE     7 ms  07:02:44.383Z   ← 12 s después: copia vieja, y al instante
+HIT       7 ms  07:02:56.352Z   ← un segundo más tarde, ya actualizada
+```
+
+| Estado     | Qué ha pasado                                        |
+| ---------- | ---------------------------------------------------- |
+| `MISS`     | No estaba: se generó en Node                         |
+| `HIT`      | Servida desde la caché                               |
+| `STALE`    | Copia caducada, servida mientras se actualiza        |
+| `UPDATING` | Copia caducada, y ya hay una actualización en marcha |
+
+En **Vercel**, según su documentación (no se ha medido aquí), la cabecera equivalente es `x-vercel-cache`, y hay dos diferencias que conviene conocer: una función solo se guarda si `Cache-Control` lleva `s-maxage`, y esa directiva se quita antes de llegar al navegador.
+
+## Paso 3: lo que se gana
+
+Con 300 000 entrenos de prueba, 1000 peticiones, 50 a la vez, por HTTPS desde el propio servidor. Dos tandas de cada:
+
+```text
+              Tiempo total    Mediana    Llegaron a Node
+Sin caché     36,1 s          1637 ms    1000
+Sin caché     32,8 s          1576 ms    1000
+Con caché     3,0 s           60 ms      1
+Con caché     3,0 s           59 ms      1
+```
+
+Once veces más rápido, y **una sola** consulta a la base de datos en lugar de mil. Esos 60 ms son sobre todo de lanzar 50 `curl` a la vez en la misma máquina: una sola petición con `HIT` tardó 7 ms.
+
+El peligro aparece cuando la caché está vacía y llegan todas a la vez, la llamada **avalancha**. Con 200 peticiones simultáneas:
+
+```text
+proxy_cache_lock off:  llegaron a Node 27
+proxy_cache_lock on:   llegó a Node 1
+```
+
+Y si Node se cae:
+
+```text
+/comunidad      STALE, en 3 ms
+/estadisticas   502
+```
+
+La página pública sigue funcionando con su última copia, gracias a `proxy_cache_use_stale error`.
+
+<Callout type="risk">
+
+- **Por defecto, la query forma parte de la clave:** sin `proxy_cache_key`, `/comunidad?utm=a` y `?utm=b` dieron `MISS`, y cada uno fue una consulta. Cualquiera podía esquivar la caché añadiendo `?x=` y un número. Con esa clave, todas dieron `HIT`. Pero si tu página cambia según la query, debe seguir en la clave, o servirás la versión equivocada.
+- **`stale-while-revalidate` no es un límite estricto aquí:** en la prueba se sirvió una copia de 44 s con `s-maxage=10` y `swr=30`. Según su documentación, las opciones de `proxy_cache_use_stale` tienen prioridad sobre la cabecera. Si la cifra te importa, ajusta esa línea.
+- **`max-age` también lo usa una CDN:** Nginx lo respeta, así que `public, max-age=3600` queda guardado en el navegador de cada usuario una hora, donde ya no lo puedes cambiar. Por eso aquí se usa `s-maxage`.
+- **Una caché esconde los errores:** puedes seguir sirviendo una página antigua mientras Node está caído, y no enterarte. Lo verás en A6.4.
+- **Cachear una respuesta de error la multiplica:** esta configuración solo guarda lo que tu página marca, así que no pongas `public` antes de saber que todo ha ido bien.
+- **Cuando la página es rápida, no compensa:** la caché añade un sitio más donde algo puede estar desactualizado. Mide antes.
+
+</Callout>
+
+## Paso 4: lo que nunca se guarda
+
+Esto es lo más importante de la sección. Una caché compartida no sabe quién eres: la clave es la URL, sin la _cookie_. Se reprodujo con dos usuarias de prueba, Ana y Bea, en dos errores distintos.
+
+**Error 1: `public` en una página privada.** Un `Cache-Control` copiado en `/estadisticas`:
+
+```text
+Ana      /estadisticas  200  MISS  public, s-maxage=60  Estadísticas de Ana
+Bea      /estadisticas  200  HIT   public, s-maxage=60  Estadísticas de Ana
+anónimo  /estadisticas  200  HIT   public, s-maxage=60  Estadísticas de Ana
+```
+
+**Bea ve los datos de Ana. Y alguien sin sesión, también:** Nginx responde antes de llegar a Node, así que el _middleware_ que protege esa ruta (I5) ni se ejecuta.
+
+**Error 2: una sola línea en Nginx.** Sin tocar la app, con `proxy_cache_valid 200 1m;` en `cdn.conf`, que sirve para guardar lo que no trae cabecera:
+
+```text
+Ana      /api/entrenos  200  MISS  "tipo":"fuerza"
+anónimo  /api/entrenos  200  HIT   "tipo":"fuerza"
+```
+
+Aquí la página no declaró nada y aun así se guardó: una API privada respondiendo sin sesión. Sin esa línea, el anónimo recibía su 401 de siempre.
+
+La causa de fondo es la misma: **si tu código no dice nada, decide otro.** Así que hazlo al revés: que todo sea privado salvo lo que se declare público. En `src/middleware.ts`:
+
+```ts
+/** 3. Lo que genera el servidor es privado, salvo lo que se declare público y sea sin sesión */
+const cacheSegura = defineMiddleware(async (ctx, next) => {
+  const respuesta = await next();
+  if (ctx.isPrerendered) return respuesta; // una página estática no lleva datos de nadie
+
+  const esPublica = respuesta.headers.get("cache-control")?.includes("public");
+  if (!esPublica || ctx.locals.usuario) respuesta.headers.set("Cache-Control", "private, no-store");
+  return respuesta;
+});
+
+export const onRequest = sequence(registrar, cargarSesion, cacheSegura, proteger);
+```
+
+Va antes de `proteger` para cubrir también sus redirecciones y sus 401. Se probó con **los dos errores a la vez**:
+
+```text
+Ana      /estadisticas  200  MISS  private, no-store  Estadísticas de Ana
+Bea      /estadisticas  200  MISS  private, no-store  Estadísticas de Bea
+anónimo  /estadisticas  302  MISS  private, no-store
+Ana      /api/entrenos  200  MISS  private, no-store  "tipo":"fuerza"
+anónimo  /api/entrenos  401  MISS  private, no-store
+```
+
+Y la isla de sesión de A6.2 también lo pasó: cada una recibió su nombre, y el anónimo «Sin sesión». Es la razón de que `/comunidad` se pueda guardar aunque la barra muestre tu nombre: el HTML no lo lleva, lo pide la isla aparte.
+
+| Se puede guardar                 | Nunca                                    |
+| -------------------------------- | ---------------------------------------- |
+| Páginas iguales para todos       | Lo que depende de quién lo pide          |
+| Recursos con _hash_ (`/_astro/`) | Respuestas con `Set-Cookie`              |
+| Resúmenes sin datos de nadie     | Respuestas a un POST o PUT               |
+| Respuestas públicas de una API   | Formularios con tokens o datos de sesión |
+
+<Callout type="risk">
+
+- **Revisa una página pública antes de marcarla:** si muestra el nombre del usuario en el HTML, no es pública. El _middleware_ evita guardarla cuando la pide alguien con sesión, pero solo si `usuario` está en `locals`.
+- **Después de una fuga, una caché sigue sirviendo el dato:** arreglar el código no basta. En Nginx hay que vaciarla: `sudo find /var/cache/nginx/entrenos -type f -delete`. En Vercel, según su documentación, invalidar sigue sirviendo la copia vieja mientras se actualiza: para retirar algo sensible hace falta borrarla.
+- **`Vary: Cookie` no es una solución:** crea una copia por usuario, y según su documentación, Vercel la rechaza. Si la respuesta es de un usuario, es privada.
+- **Nunca `proxy_ignore_headers Set-Cookie`:** Nginx y Vercel no guardan lo que trae `Set-Cookie`. Quitar esa protección puede repartir la sesión de una persona.
+- **`private` no significa cifrado ni seguro:** el dato queda en el navegador de ese usuario. En un ordenador compartido, por eso aquí es `no-store`.
+- **Prueba con dos usuarios y sin sesión:** con uno solo, todo parece correcto. La fuga apareció en la segunda línea.
+
+</Callout>
+
+## Paso 5: caché en memoria
+
+Una CDN solo guarda respuestas enteras y públicas. Para reutilizar un dato dentro de tu código, tienes la memoria del proceso. `src/lib/cache-memoria.ts`:
+
+```ts
+// Archivo: src/lib/cache-memoria.ts
+// Caché en la memoria de ESTE proceso: cada instancia tiene la suya y se pierde al reiniciar
+interface Entrada {
+  valor: Promise<unknown>;
+  caduca: number;
+}
+
+export function crearCache(ttlMs: number, maxEntradas = 500) {
+  const entradas = new Map<string, Entrada>();
+
+  return {
+    obtener<T>(clave: string, cargar: () => Promise<T>): Promise<T> {
+      const entrada = entradas.get(clave);
+      if (entrada && entrada.caduca > Date.now()) return entrada.valor as Promise<T>;
+
+      // Con un límite: sin él, cada clave nueva se queda en memoria para siempre
+      if (entradas.size >= maxEntradas) entradas.delete(entradas.keys().next().value as string);
+
+      // Se guarda la promesa, no el resultado: 50 peticiones a la vez comparten una sola consulta
+      const valor = cargar().catch((error: unknown) => {
+        entradas.delete(clave); // un error no se queda guardado hasta que caduque
+        throw error;
+      });
+      entradas.set(clave, { valor, caduca: Date.now() + ttlMs });
+      return valor;
+    },
+
+    borrar(clave: string) {
+      entradas.delete(clave);
+    },
+  };
+}
+
+export const cacheDatos = crearCache(60_000);
+```
+
+En `src/pages/comunidad.astro`:
+
+```ts
+import { cacheDatos } from "../lib/cache-memoria";
+
+const filas = await cacheDatos.obtener("comunidad", () => repos.entrenos.comunidad());
+```
+
+La línea clave es la que guarda la **promesa**. La versión habitual, `const valor = await cargar(); entradas.set(...)`, también tiene avalancha: hasta que termina la primera consulta, las demás no encuentran nada. Con 50 peticiones a la vez y la caché vacía, tres veces cada una:
+
+```text
+Guarda el resultado:  50, 7 y 20 consultas
+Guarda la promesa:    1, 1 y 1 consulta
+```
+
+Lo que tiene de engañoso es que depende del momento: el resultado salió tres veces distinto. La otra trampa aparece con dos instancias. Con **blue** y **green** activas y un entreno nuevo creado en una de ellas:
+
+```text
+antes:      activa 300084 · otra 300084
+al momento: activa 300085 · otra 300084
+a los 30 s: otra 300084
+a los 62 s: otra 300085
+```
+
+Cada proceso tiene su memoria: la otra instancia no se entera, y sigue dando el dato viejo hasta que caducan los 60 s. Según qué instancia te responda, ves un número u otro.
+
+<Callout type="risk">
+
+- **_Serverless_ lo empeora:** cada instancia tiene su propia memoria, nace y muere sola, y puede haber muchas a la vez. No cuentes con que exista. Sirve para evitar repetir trabajo, nunca para guardar algo que necesitas. Para compartir datos entre instancias hace falta una caché externa, como Redis.
+- **Reiniciar la vacía:** cada despliegue empieza de cero, con su pequeña avalancha.
+- **Sin límite, crece hasta romper:** un millón de entradas pequeñas ocuparon 170 MB. Por eso `maxEntradas`.
+- **Incluye al usuario en la clave:** si guardas datos privados, la clave debe ser `totales:${usuario.id}`. Con una clave `totales` a secas, reproduces la fuga del Paso 4 en tu propio código.
+- **Esta expulsión es simple:** elimina la entrada más antigua, no la menos usada. Para algo serio, usa una biblioteca como `lru-cache`.
+- **Un error no se queda guardado:** el `catch` borra la entrada. Sin él, una consulta fallida se devolvería a todos durante 60 s.
+
+</Callout>
+
+## Paso 6: invalidar
+
+Hay dos cosas difíciles en informática, dice el chiste, y una es invalidar la caché. La razón: guardar es una sola decisión, y saber cuándo deja de ser verdad exige conocer **todo lo que cambia ese dato**.
+
+En esta app, eso es fácil de resolver porque toda escritura pasa por el servicio de I3, tanto los _endpoints_ como las _Actions_. En `src/services/entrenos.service.ts`, añade `alCambiar?: () => void` a `Dependencias`, recíbelo en la función, y llámalo tras cada cambio:
+
+```ts
+async function crear(userId: string, datos: EntrenoInput): Promise<EntrenoDTO> {
+  const { permitido, reintentarEn } = await limites.contar(`crear-entreno:${userId}`, MAX_ENTRENOS_POR_HORA, 3600);
+  if (!permitido) throw new DemasiadasPeticionesError(reintentarEn);
+  const creado = await entrenos.crear(userId, datos);
+  alCambiar?.();
+  return creado;
+}
+```
+
+Lo mismo en `editar` y `borrar`. En `src/services/index.ts`:
+
+```ts
+entrenos: crearServicioEntrenos({
+  entrenos: repos.entrenos,
+  limites: repos.limites,
+  alCambiar: () => cacheDatos.borrar("comunidad"), // todos los cambios pasan por aquí
+}),
+```
+
+Eso resuelve la memoria de **esa** instancia, y fue lo que dio `300085` al momento en la activa. La CDN no se entera. Con `s-maxage=10`:
+
+```text
+al crear el entreno:  CDN 300083 · HIT
+a los 12 s:           CDN 300083 · STALE
+a los 13 s:           CDN 300084 · HIT
+```
+
+Tienes tres estrategias, y en la práctica se combinan:
+
+- **Caducidad corta:** aceptas que el dato tenga hasta X segundos de retraso. Es la más simple, y la que usa esta app. Decide cuántos segundos son aceptables en cada página.
+- **URL nueva:** si el contenido cambia, cambia el nombre. Es lo que hacen los recursos de `/_astro/` (A4): llevan un _hash_ y duran un año, porque nunca hay que invalidarlos.
+- **Borrar por etiqueta:** al escribir, avisas a la CDN. Vercel lo permite con la cabecera `Vercel-Cache-Tag` y `vercel cache invalidate --tag`. El Nginx gratuito no lo incluye.
+
+Astro 7 tiene además `Astro.cache`, con `maxAge`, `swr`, etiquetas e invalidación. Según su documentación, los proveedores para CDN son experimentales. Aquí no se ha usado: entender las cabeceras te sirve para cualquier CDN.
+
+<Callout type="risk">
+
+- **`stale-while-revalidate` retrasa los cambios:** con `swr=600` y poco tráfico, el primer visitante tras 10 minutos ve una copia de hace mucho. Por eso es para datos que toleran retraso.
+- **Invalidar en una instancia no invalida en las demás:** ya lo viste. Necesitarías avisar a todas, o usar una caché compartida.
+- **Lo que guarda el navegador no se invalida:** un `max-age` largo ya está en casa del usuario. Es otra razón para usar `s-maxage`.
+- **Los datos en dos sitios se desincronizan:** cada caché que añades es un sitio más donde algo puede estar mal. Empieza por la capa con menos riesgo: la CDN con caducidad corta.
+- **Un servicio con un punto único te facilita esto:** si cada ruta escribiera en MongoDB directamente, tendrías que acordarte en cada una. Es la ventaja de las capas de I3.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Aplica caché de CDN a las páginas públicas y verifica con `curl -I` el estado de la caché.
+
+</Callout>
+
+Solución. `/comunidad` ya usa `s-maxage=60, stale-while-revalidate=600`. `/acerca` es estática, y Node la sirve con `max-age=0`, así que aquí la caducidad la pone Nginx, **solo en esa ruta**:
+
+```nginx
+# Página estática: Node responde max-age=0, así que aquí se decide cuánto se guarda
+location = /acerca {
+  include snippets/cdn.conf;
+  proxy_ignore_headers Cache-Control;
+  proxy_cache_valid 200 10m;
+  proxy_pass http://entrenos_app;
+}
+```
+
+```bash
+curl -sI https://academy.tudominio.com/comunidad
+```
+
+```text
+HTTP/2 200
+cache-control: public, s-maxage=60, stale-while-revalidate=600
+x-cache: HIT
+```
+
+Comprobar una vez no basta: la lección importante es la del Paso 4. `scripts/comprobar-cache.sh` revisa las dos listas, y con la _cookie_ de un usuario de prueba:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/comprobar-cache.sh
+# Las páginas públicas se guardan y las privadas nunca. Si algo falla, termina con código 1.
+# Uso: COOKIE='nombre=valor' bash scripts/comprobar-cache.sh https://tudominio.com
+URL=${1:?Falta la URL}
+PUBLICAS=(/comunidad /acerca)
+PRIVADAS=(/estadisticas /notas /api/entrenos)
+fallos=0
+
+cabecera() { tr -d '\r' | grep -i "^$1:" | cut -d' ' -f2-; }
+
+for ruta in "${PUBLICAS[@]}"; do
+  curl -sI "$URL$ruta" >/dev/null # la primera llena la caché
+  respuesta=$(curl -sI "$URL$ruta")
+  estado=$(cabecera x-cache <<<"$respuesta")
+  if [[ $estado == HIT || $estado == STALE || $estado == UPDATING ]]; then
+    echo "ok     $ruta · $estado"
+  else
+    echo "FALLO  $ruta · debería venir de la caché, y vino: $estado"
+    fallos=$((fallos + 1))
+  fi
+done
+
+for ruta in "${PRIVADAS[@]}"; do
+  curl -sI -H "Cookie: $COOKIE" "$URL$ruta" >/dev/null
+  respuesta=$(curl -sI -H "Cookie: $COOKIE" "$URL$ruta")
+  estado=$(cabecera x-cache <<<"$respuesta")
+  control=$(cabecera cache-control <<<"$respuesta")
+  if [[ $estado != HIT && $estado != STALE && $control == *no-store* ]]; then
+    echo "ok     $ruta · $estado · $control"
+  else
+    echo "FALLO  $ruta · RESPUESTA PRIVADA EN CACHÉ: $estado · $control"
+    fallos=$((fallos + 1))
+  fi
+done
+
+exit $((fallos > 0))
+```
+
+```bash
+COOKIE='__Secure-better-auth.session_token=…' bash scripts/comprobar-cache.sh https://academy.tudominio.com
+```
+
+```text
+ok     /comunidad · HIT
+ok     /acerca · HIT
+ok     /estadisticas · MISS · private, no-store
+ok     /notas · MISS · private, no-store
+ok     /api/entrenos · MISS · private, no-store
+```
+
+Código de salida 0. Con una ruta que se guarda en la lista de privadas, para ver que funciona:
+
+```text
+FALLO  /comunidad · RESPUESTA PRIVADA EN CACHÉ: HIT · public, s-maxage=60, stale-while-revalidate=600
+```
+
+Código de salida 1.
+
+- **`proxy_cache_valid` solo en una ruta concreta:** en `cdn.conf`, es el Error 2 del Paso 4.
+- **Una ruta nueva debe entrar en la lista:** este _script_ solo comprueba lo que le indiques.
+- **En Vercel,** busca `x-vercel-cache`, y cambia la cabecera en el _script_. Una página estática sale como `PRERENDER`, según su documentación.
+- **Este _script_ ya demostró su utilidad:** tras un despliegue dio `FALLO` en las tres rutas privadas. El motivo era una etiqueta reutilizada, que había desplegado una imagen antigua sin el _middleware_. Usa una etiqueta distinta en cada versión.
+
+<Callout type="mastery">
+
+Nunca cacheas por error una respuesta privada: todo es privado salvo lo que declaras público, y lo compruebas con dos usuarios y sin sesión. Sabes que `s-maxage` es para la CDN, que la memoria de cada instancia es solo suya, y que guardar la promesa evita la avalancha. Antes de guardar algo, tienes la respuesta a cómo se actualizará.
+
+</Callout>
+
+## Resumen
+
+- `public, s-maxage=60, stale-while-revalidate=600`: CDN 1 minuto, y otros 10 sirviendo la copia mientras se actualiza.
+- **Nginx como CDN:** 1000 peticiones pasaron de 34 s a 3 s, y de 1000 consultas a 1.
+- **`proxy_cache_lock`:** de 27 peticiones a Node a 1, con la caché vacía.
+- **`proxy_cache_use_stale error`:** con Node caído, la página pública siguió funcionando.
+- **Una caché no conoce a tus usuarios:** la clave es la URL. Una línea de más entregó datos de Ana a alguien sin sesión.
+- **Todo privado por defecto:** el _middleware_ aguantó los dos errores a la vez.
+- **Memoria:** guarda la promesa, pon un límite, y recuerda que cada instancia tiene la suya: la otra tardó 60 s en verlo.
+- **Invalidar:** caducidad corta, URL nueva o etiquetas. Decide cuánto retraso aceptas.
+- **`comprobar-cache.sh`** falla si una respuesta privada se guarda.
