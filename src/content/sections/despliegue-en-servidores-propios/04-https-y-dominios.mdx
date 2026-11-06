@@ -1,0 +1,550 @@
+---
+sectionId: "A4.4"
+course: "A4"
+title: "HTTPS y dominios"
+order: 4
+minutes: 75
+summary: "Apuntas un subdominio al servidor, emites un certificado con Certbot, ves qué cambia en Nginx, activas HTTP/2 y HSTS, compruebas la renovación automática de principio a fin y sacas A+ en el análisis de TLS."
+---
+
+Tu app ya está en el puerto 80 detrás de Nginx, pero viaja en claro: cualquiera en la misma red puede leer contraseñas y _cookies_ de sesión. En B3.5 viste qué es HTTPS y Vercel te lo daba sin pedirlo. Ahora te toca a ti: un dominio que apunte al servidor, un certificado de una autoridad de confianza y una renovación que funcione sola, porque un certificado caducado convierte tu web en una pantalla de error.
+
+Una analogía: un certificado es un **DNI para tu dominio**. Lo expide una autoridad en la que los navegadores confían (Let's Encrypt, gratis), después de comprobar que el dominio es tuyo. Y caduca pronto a propósito: si te lo robaran, serviría durante poco tiempo. Por eso renovarlo a mano no es una opción; tiene que hacerlo una máquina.
+
+**Lo que tendrás al terminar:** tu subdominio con un certificado válido que se renueva solo; HTTP redirigido a HTTPS, con HSTS y HTTP/2; la IP del servidor sin dar acceso a la app; y un _script_ que lo comprueba todo desde fuera.
+
+**Requisitos:** la configuración de A4.3 (Nginx delante de la app en Compose, `ufw` con 80 y 443 abiertos), un dominio en Namecheap (B3.2) y un servidor **accesible desde internet**, porque Let's Encrypt tiene que llegar a él.
+
+<Callout type="note" title="Cómo se midió esta sección">
+
+Los servidores de Let's Encrypt no pueden llegar a un servidor de pruebas sin IP pública. Por eso las salidas son de **Pebble**, el servidor de pruebas que publica el propio Let's Encrypt, con el dominio ficticio `academy.entrenos.test`: Certbot 4.0.0 y Nginx hacen exactamente lo mismo, con validación real por el puerto 80. Las órdenes de la lección no llevan la opción que apunta a Pebble.
+
+Cambian tres cosas en tu caso: el emisor será Let's Encrypt; el certificado valdrá para todos los navegadores, no solo para quien confíe en Pebble; y la nota final debes medirla en SSL Labs, que no puede analizar un servidor privado. Aquí se midió con `testssl.sh`, que sigue la misma guía.
+
+</Callout>
+
+## Paso 1: el subdominio apunta a tu servidor
+
+Primero el DNS, porque sin él no hay certificado. En Namecheap, _Domain List_ → _Manage_ → _Advanced DNS_ → _Add New Record_:
+
+- **Type:** `A Record`.
+- **Host:** `academy` (para `academy.tudominio.com`).
+- **Value:** la IP pública del servidor.
+- **TTL:** `Automatic`.
+
+Es el mismo registro `A` de B3.2, y esta vez la IP es tuya, no la de Vercel. Comprueba que ya resuelve antes de seguir:
+
+```bash
+dig +short academy.tudominio.com A
+```
+
+Debe devolver exactamente la IP del servidor. Si no devuelve nada, espera unos minutos y vuelve a probar.
+
+Después, dile a Nginx cómo se llama. Certbot busca el bloque `server` cuyo `server_name` coincide con tu dominio. En `/etc/nginx/sites-available/entrenos`, cambia:
+
+```nginx
+  server_name academy.tudominio.com;
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+<Callout type="risk">
+
+- **Si tu dominio ya apunta a otro sitio, no lo reutilices para probar:** usa un subdominio nuevo. Cambiar el registro de `academy` cuando esta plataforma vive ahí en Vercel la dejaría fuera de servicio.
+- **El cambio tarda:** los resolutores guardan la respuesta anterior durante el TTL (B3.2). Con un subdominio nuevo suele ser cuestión de minutos.
+- **Un registro `AAAA` antiguo puede fallar la validación:** si el dominio tiene IPv6 en el DNS, Let's Encrypt lo probará. Debe apuntar a tu servidor, o no existir.
+
+</Callout>
+
+## Paso 2: Certbot y el primer certificado
+
+**Certbot** es el programa que pide y renueva los certificados. Habla el protocolo **ACME** con Let's Encrypt, y el reto es sencillo: «si el dominio es tuyo, publica este texto en una URL concreta». Es el **reto HTTP-01**: Let's Encrypt pide `http://tu-dominio/.well-known/acme-challenge/<token>`, siempre por el **puerto 80**. Si responde bien, el dominio es tuyo y emite el certificado.
+
+```bash
+sudo apt-get install -y certbot python3-certbot-nginx
+certbot --version
+systemctl is-active certbot.timer
+```
+
+```text
+certbot 4.0.0
+active
+```
+
+Primero, un ensayo. `--dry-run` usa el entorno de pruebas de Let's Encrypt y no guarda nada:
+
+```bash
+sudo certbot certonly --nginx --dry-run -d academy.tudominio.com --agree-tos -m tu@correo.com --no-eff-email
+```
+
+¿Por qué ensayar? Let's Encrypt limita las peticiones reales: **5 fallos de validación por dominio y hora**, y **5 certificados idénticos cada 7 días**, sin excepciones. Un error de DNS y cinco reintentos te dejan una hora bloqueado; con `--dry-run` no gastas ese margen.
+
+Así se ve el fallo más común, un DNS que apunta a otro sitio. Certbot **no cambia nada** en tu configuración:
+
+```text
+Certbot failed to authenticate some domains (authenticator: nginx). The Certificate Authority reported these problems:
+  Domain: academy.entrenos.test
+  Type:   connection
+  Detail: Get "http://academy.entrenos.test:80/.well-known/acme-challenge/1VWYQ_0Ch…": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+
+Hint: The Certificate Authority failed to verify the temporary nginx configuration changes made by Certbot. Ensure the listed domains point to this nginx server and that it is accessible from the internet.
+```
+
+Con el ensayo en verde, el certificado de verdad:
+
+```bash
+sudo certbot --nginx -d academy.tudominio.com --agree-tos -m tu@correo.com --no-eff-email
+```
+
+```text
+Key is saved at:         /etc/letsencrypt/live/academy.entrenos.test/privkey.pem
+This certificate expires on 2027-02-04.
+These files will be updated when the certificate renews.
+Certbot has set up a scheduled task to automatically renew this certificate in the background.
+
+Deploying certificate
+Successfully deployed certificate for academy.entrenos.test to /etc/nginx/sites-enabled/entrenos
+Congratulations! You have successfully enabled HTTPS on https://academy.entrenos.test
+```
+
+**¿Qué ha cambiado?** `--nginx` edita tu archivo. Este es el `diff` real (resumido): añade esto a tu bloque `server`, que ahora escucha en el 443, y crea otro para el puerto 80.
+
+```nginx
+    listen 443 ssl; # managed by Certbot
+    listen [::]:443 ssl ipv6only=on; # managed by Certbot
+    ssl_certificate /etc/letsencrypt/live/academy.entrenos.test/fullchain.pem; # managed by Certbot
+    ssl_certificate_key /etc/letsencrypt/live/academy.entrenos.test/privkey.pem; # managed by Certbot
+    include /etc/letsencrypt/options-ssl-nginx.conf; # managed by Certbot
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem; # managed by Certbot
+}
+
+server {
+    if ($host = academy.entrenos.test) {
+        return 301 https://$host$request_uri;
+    } # managed by Certbot
+
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  server_name academy.entrenos.test;
+    return 404; # managed by Certbot
+}
+```
+
+- **`fullchain.pem`:** tu certificado más el intermedio de la autoridad. **`privkey.pem`:** la clave privada, que nunca sale del servidor.
+- **`options-ssl-nginx.conf`:** ajustes seguros mantenidos por Certbot, como `ssl_protocols TLSv1.2 TLSv1.3`.
+- **El `server` del 80:** redirige a HTTPS.
+
+Los archivos de `live/` son enlaces a `archive/`. Al renovar, el enlace apunta a la versión nueva, y Nginx no necesita otra ruta.
+
+<Callout type="risk">
+
+- **`privkey.pem` es tu identidad:** con ella, alguien podría hacerse pasar por tu web. Solo `root` puede leerla, y no debe acabar en una imagen, en Git ni en una copia sin cifrar.
+- **Si `ufw` cierra el 80, la renovación falla:** el reto HTTP-01 solo funciona por ese puerto. No lo cierres aunque todo vaya por HTTPS. Si tu servidor no puede abrir el 80, o necesitas `*.tudominio.com`, hay que usar el reto DNS-01, que publica el texto en un registro TXT.
+- **Paquete `apt` o _snap_:** Certbot recomienda instalarlo con _snap_. Aquí se usa el de `apt`, como el resto del curso: es la versión 4.0.0, y su renovación se probó de principio a fin (Paso 4). Si eliges _snap_, las órdenes son las mismas, pero quita antes el paquete de `apt`.
+
+</Callout>
+
+## Paso 3: la app tiene que enterarse
+
+El certificado funciona, y sin embargo:
+
+```text
+GET https /entrar -> 200
+registro -> 403 {"message":"Invalid origin","code":"INVALID_ORIGIN"}
+formulario -> 403 Cross-site POST form submissions are forbidden
+```
+
+Es el Paso 3 de A4.3 otra vez: la app sigue creyendo que vive en la IP. En el `.env` del servidor:
+
+```bash
+APP_HOSTNAME=academy.tudominio.com
+BETTER_AUTH_URL=https://academy.tudominio.com
+```
+
+Y reconstruye, porque `APP_HOSTNAME` se fija en el _build_:
+
+```bash
+docker compose up -d --build
+```
+
+```text
+registro -> 200
+formulario -> 302
+entreno 201
+estadisticas con sesión 200
+```
+
+Mira las _cookies_ de sesión:
+
+```text
+set-cookie: __Secure-better-auth.session_token=…; Max-Age=604800; Path=/; HttpOnly; Secure; SameSite=Lax
+set-cookie: __Secure-better-auth.session_data=…; Max-Age=300; Path=/; HttpOnly; Secure; SameSite=Lax
+```
+
+Al ver una `BETTER_AUTH_URL` con `https`, Better Auth añade **`Secure`** (el navegador solo la envía por HTTPS) y el prefijo **`__Secure-`** (el navegador rechaza esa _cookie_ si no viene de HTTPS con `Secure`). Node sigue recibiendo HTTP de Nginx; lo importante es lo que ve el navegador, y por eso `X-Forwarded-Proto` era necesario.
+
+<Callout type="risk">
+
+- **Pasar a HTTPS cierra la sesión de todos:** la _cookie_ cambia de nombre. Medido con un token válido: con el nombre nuevo, `/estadisticas` responde 200; con el antiguo, 302 a `/entrar`. Ningún dato se pierde, pero avisa si la app ya tenía usuarios.
+- **Sin `BETTER_AUTH_URL` en `https`, las _cookies_ no llevan `Secure`,** y una petición por `http://` las enviaría en claro. Y `X-Forwarded-Proto $scheme` debe seguir en Nginx: sin él, Astro cree que la web va por `http` y rechaza los formularios.
+
+</Callout>
+
+## Paso 4: la renovación automática
+
+Tu certificado dura 90 días. El plan por defecto de Let's Encrypt baja a **64 días el 10 de febrero de 2027** y a 45 en febrero de 2028. Y desde junio de 2025 **ya no envía avisos de caducidad por correo**: si la renovación falla, te enterarás cuando la web deje de abrir. Certbot deja instalado un temporizador de `systemd`:
+
+```bash
+systemctl cat certbot.timer | grep -E "OnCalendar|Randomized"
+systemctl cat certbot.service | grep ExecStart
+```
+
+```text
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=43200
+ExecStart=/usr/bin/certbot -q renew --no-random-sleep-on-renew
+```
+
+Dos veces al día, a una hora aleatoria para no saturar a la autoridad, ejecuta `certbot renew`. Casi siempre no hace nada:
+
+```bash
+sudo certbot renew
+```
+
+```text
+The following certificates are not due for renewal yet:
+No renewals were attempted.
+```
+
+Certbot 4 renueva cuando queda **menos de un tercio de la vida** del certificado: a los 60 días en uno de 90. La comprobación que debes hacer tras cualquier cambio en Nginx es:
+
+```bash
+sudo certbot renew --dry-run
+```
+
+```text
+Simulating renewal of an existing certificate for academy.entrenos.test
+Congratulations, all simulated renewals succeeded:
+  /etc/letsencrypt/live/academy.entrenos.test/fullchain.pem (success)
+```
+
+¿Basta con eso? El ensayo no prueba que Nginx pase a usar el certificado nuevo. Por eso se probó el ciclo completo con certificados de **3 minutos**: se emitió uno, se esperó a superar la mitad de su vida, se lanzó el mismo servicio que dispara el temporizador, y se miró el número de serie que Nginx estaba sirviendo:
+
+```bash
+echo | openssl s_client -connect 127.0.0.1:443 -servername academy.tudominio.com 2>/dev/null | openssl x509 -noout -serial -dates
+sudo systemctl start certbot.service
+```
+
+```text
+serial=39185BFDE80116CB                                                  ← antes
+Certificate is due for renewal, auto-renewing...                         ← certbot.service
+serial=01DD18D7565AB4E0 notBefore=Nov  6 02:38:48 2026 GMT notAfter=Nov  6 02:41:47 2026 GMT
+```
+
+Certificado nuevo, servido por Nginx, sin ninguna orden manual: el plugin `--nginx` recarga Nginx al terminar. Ese es el criterio de esta sección.
+
+<Callout type="risk">
+
+- **Pon tu propia alarma:** sin correos de Let's Encrypt, nadie te avisará. El _script_ del ejercicio falla si quedan menos de 14 días; ejecútalo cada semana o usa un monitor externo (A4.6). Uno de 90 días se renueva cuando quedan 30, así que 14 significa que algo lleva dos semanas roto.
+- **Certbot en un _script_ o `cron` espera un rato aleatorio:** sin terminal, `certbot renew` duerme antes de empezar. No está colgado; `--no-random-sleep-on-renew` lo evita.
+- **Sin el plugin de Nginx, nadie recarga Nginx:** con `certonly --standalone`, por ejemplo, seguirá sirviendo el certificado antiguo aunque el nuevo esté en disco. Se resuelve con un _hook_ en `/etc/letsencrypt/renewal-hooks/deploy/` que ejecute `systemctl reload nginx`.
+- **`reload` no es instantáneo:** al probar esto, una comprobación lanzada justo después vio aún la configuración anterior. Espera un par de segundos antes de sacar conclusiones.
+
+</Callout>
+
+## Paso 5: el archivo definitivo, HTTP/2 y HSTS
+
+Lo que deja Certbot funciona, pero tiene tres carencias que se pueden medir:
+
+```text
+GET https /entrar -> 200  http_version=1.1
+http://IP -> 404
+https://IP -> 200
+```
+
+No hay **HTTP/2** (Certbot no lo activa). Y **la app responde por `https://IP`**: los escáneres que recorren internet llegan a ella, y el certificado que les enseña revela tu dominio. Sustituye `/etc/nginx/sites-available/entrenos` por esta versión, más limpia, con tu dominio en lugar de `academy.entrenos.test`:
+
+```nginx
+# Archivo: /etc/nginx/sites-available/entrenos
+upstream entrenos_app {
+  server 127.0.0.1:4321;
+  keepalive 16; # conexiones abiertas con Node: no abre una nueva por petición
+}
+
+# Lo que no pide tu dominio (escáneres que recorren IP): sin respuesta y sin enseñar el certificado
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  listen 443 ssl default_server;
+  listen [::]:443 ssl default_server;
+  server_name _;
+
+  ssl_reject_handshake on;
+  return 444;
+}
+
+# HTTP solo redirige. Certbot añade aquí su ruta temporal al renovar, así que no hace falta nada más
+server {
+  listen 80;
+  listen [::]:80;
+  server_name academy.entrenos.test;
+
+  server_tokens off;
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  http2 on;
+  server_name academy.entrenos.test;
+
+  ssl_certificate /etc/letsencrypt/live/academy.entrenos.test/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/academy.entrenos.test/privkey.pem;
+  include /etc/letsencrypt/options-ssl-nginx.conf;
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+  server_tokens off;
+  client_max_body_size 1m;
+
+  # 5 minutos para empezar: súbelo solo cuando hayas comprobado que HTTPS funciona (Paso 5)
+  add_header Strict-Transport-Security "max-age=300" always;
+
+  # Lo que llega a Node: los location heredan estas cabeceras de server
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-For $remote_addr;
+
+  # Recursos con hash: los sirve Nginx. Si falta alguno, se lo pide a Node
+  location /_astro/ {
+    root /var/www/entrenos;
+    # Un add_header propio anula todos los de server: hay que repetir HSTS
+    add_header Strict-Transport-Security "max-age=300" always;
+    add_header Cache-Control "public, max-age=31536000, immutable";
+    access_log off;
+    brotli_static on;
+    gzip_static on;
+    try_files $uri @app;
+  }
+
+  location / {
+    proxy_pass http://entrenos_app;
+  }
+
+  location @app {
+    proxy_pass http://entrenos_app;
+  }
+}
+```
+
+- **El primer `server`, `default_server`:** recoge todo lo que no pide tu dominio. **`ssl_reject_handshake on`** corta la conexión TLS sin enseñar ningún certificado, y **`return 444`** es un código propio de Nginx: cierra sin responder.
+- **El segundo `server`:** HTTP solo redirige. Sigue funcionando para renovar, porque Certbot añade su ruta temporal al `server` del dominio.
+- **`http2 on`:** varias peticiones por una misma conexión (A4.1).
+- **`add_header Strict-Transport-Security`:** HSTS. **`always`** la envía también en las respuestas de error.
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx && sudo certbot renew --dry-run
+```
+
+```text
+-- /entrar
+HTTP/2 200
+server: nginx
+strict-transport-security: max-age=300
+content-encoding: br
+http://IP -> 000
+https://IP -> 000  error: tlsv1 unrecognized name
+```
+
+La línea de HSTS en `/_astro/` no es decorativa. Sin ella, midiendo el JavaScript:
+
+```text
+-- /_astro/client.XI9U0KhD.js
+HTTP/2 200
+server: nginx
+content-encoding: br
+cache-control: public, max-age=31536000, immutable
+```
+
+**HSTS no aparece.** Es lo que anticipó A4.3: un `add_header` en una `location` anula todos los que venían de `server`. Por eso se repite ahí.
+
+**Sube HSTS poco a poco.** Una vez activo, el navegador se niega a entrar por HTTP durante todo el `max-age`, aunque quites la cabecera (A4.1). Empieza con 300 s (5 minutos), comprueba que todo va bien, y sube después: 604800 (una semana), y por último 31536000 (un año).
+
+El análisis con `testssl.sh` (`sudo apt-get install -y testssl.sh`, y `testssl --fast academy.tudominio.com`), que aplica la guía de SSL Labs:
+
+```text
+                                  max-age=300    max-age=31536000
+ Protocol Support (weighted)      100 (30)       100 (30)
+ Key Exchange     (weighted)      100 (30)       100 (30)
+ Cipher Strength  (weighted)      90 (36)        90 (36)
+ Final Score                      96             96
+ Overall Grade                    A-             A+
+```
+
+Misma puntuación y distinta nota: el `max-age` corto la deja en A-, y `testssl` recomienda al menos 15 552 000 s (6 meses). Solo se ofrecen TLS 1.2 y 1.3, y el análisis de protocolos lo confirma:
+
+```text
+ SSLv2      not offered (OK)
+ SSLv3      not offered (OK)
+ TLS 1      not offered
+ TLS 1.1    not offered
+ TLS 1.2    offered (OK)
+ TLS 1.3    offered (OK): final
+```
+
+<Callout type="risk">
+
+- **Cuidado al cambiar HSTS con `sed`:** `max-age=31536000` también aparece en la `Cache-Control` de `/_astro/`. Al devolver un valor a mano con `sed` en una prueba, esa cabecera quedó a 300 sin que nada fallara. Edita las líneas de una en una.
+- **`includeSubDomains` afecta a todo el dominio:** obligaría a HTTPS en cualquier subdominio, incluidos los que aún no lo tengan. No lo añadas sin revisarlos todos.
+- **La lista _preload_ no es para este curso:** `hstspreload.org` exige un año, `includeSubDomains` y `preload`, y su propia página la desaconseja para la mayoría de los sitios, porque salir de ella es lento.
+- **301 y `POST`:** al seguir un 301, un navegador puede cambiar `POST` por `GET`. Nadie debería enviar formularios por `http://` a estas alturas, pero un cliente de API con la URL antigua perdería el cuerpo. Vercel usa 308, que lo conserva (`return 308`).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Apunta un subdominio a tu VPS, emite el certificado y deja el archivo del Paso 5 con tu dominio. Comprueba `sudo certbot renew --dry-run`.
+2. Escribe `scripts/comprobar-https.sh`, para ejecutar desde tu equipo, que reciba el dominio y la IP, y compruebe: que el certificado es válido con su cadena completa y le quedan más de 14 días; la redirección de HTTP a HTTPS; HTTP/2; que TLS 1.1 se rechaza; HSTS en una página y en un JavaScript; que la IP no da acceso; que un formulario funciona; y que la _cookie_ de sesión es `Secure`.
+3. Sube HSTS a un año, cuando todo esté bien, y comprueba la nota en [SSL Labs](https://www.ssllabs.com/ssltest/).
+
+</Callout>
+
+Solución. `scripts/comprobar-https.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/comprobar-https.sh
+# Desde tu equipo: comprueba HTTPS tal como lo ve alguien de fuera.
+# Uso: bash scripts/comprobar-https.sh academy.tudominio.com 203.0.113.10
+set -uo pipefail
+
+DOMINIO="${1:?Indica el dominio}"
+IP="${2:?Indica la IP del servidor}"
+BASE="https://$DOMINIO"
+RESOLVER=(--resolve "$DOMINIO:443:$IP" --resolve "$DOMINIO:80:$IP") # directo a tu servidor, sin esperar al DNS
+FALLOS=0
+
+bien() { echo "  ok    $1"; }
+mal() { echo "  FALLO $1"; FALLOS=1; }
+comprobar() { # descripción, valor obtenido, valor esperado
+  if [ "$2" = "$3" ]; then bien "$1"; else mal "$1: $2 (esperaba $3)"; fi
+}
+peticion() { curl -s -m 8 "${RESOLVER[@]}" "$@"; }
+cabecera() { tr -d '\r' | grep -i "^$1:" | cut -d' ' -f2- | head -n 1; }
+
+echo "== Certificado"
+if peticion -o /dev/null "$BASE/entrar"; then
+  bien "válido para $DOMINIO, con cadena de confianza completa"
+else
+  mal "curl rechaza el certificado (código $?)"
+fi
+CERTIFICADO="$(openssl s_client -connect "$IP:443" -servername "$DOMINIO" </dev/null 2>/dev/null | openssl x509)"
+if openssl x509 -noout -checkend $((14 * 86400)) <<< "$CERTIFICADO" >/dev/null; then
+  bien "le quedan más de 14 días ($(openssl x509 -noout -enddate <<< "$CERTIFICADO" | cut -d= -f2))"
+else
+  mal "caduca en menos de 14 días: la renovación automática no está funcionando"
+fi
+
+echo "== Redirección y protocolo"
+comprobar "http:// redirige a https://" "$(peticion -o /dev/null -w '%{http_code} %{redirect_url}' "http://$DOMINIO/estadisticas")" \
+  "301 $BASE/estadisticas"
+comprobar "HTTP/2" "$(peticion -o /dev/null -w '%{http_version}' "$BASE/entrar")" "2"
+if peticion -o /dev/null --tls-max 1.1 "$BASE/entrar"; then mal "acepta TLS 1.1"; else bien "rechaza TLS 1.1"; fi
+
+echo "== HSTS, también en los estáticos"
+JS="$(peticion "$BASE/entrar" | grep -oE '/_astro/client\.[^"]+\.js' | head -n 1)"
+for ruta in /entrar "$JS"; do
+  HSTS="$(peticion -o /dev/null -D - "$BASE$ruta" | cabecera strict-transport-security)"
+  if [ -n "$HSTS" ]; then bien "$ruta: $HSTS"; else mal "$ruta sin Strict-Transport-Security"; fi
+done
+
+echo "== La IP no da acceso a la app"
+if curl -s -m 5 -o /dev/null "http://$IP/"; then mal "http://$IP responde"; else bien "http://$IP no responde"; fi
+if curl -sk -m 5 -o /dev/null "https://$IP/"; then mal "https://$IP responde"; else bien "https://$IP no responde"; fi
+
+echo "== La app sabe que está en HTTPS"
+comprobar "formulario con Origin de la web" "$(peticion -o /dev/null -w '%{http_code}' -H "origin: $BASE" \
+  -H 'content-type: application/x-www-form-urlencoded' -d a=1 "$BASE/nuevo-accion")" 302
+COOKIE="$(peticion -o /dev/null -D - -H "origin: $BASE" -H 'content-type: application/json' \
+  -d "{\"email\":\"https-$(date +%s)@prueba.test\",\"password\":\"$(openssl rand -hex 12)\",\"name\":\"Prueba\"}" \
+  "$BASE/api/auth/sign-up/email" | cabecera set-cookie)"
+case "$COOKIE" in
+  __Secure-*Secure*) bien "la cookie de sesión es Secure" ;;
+  *) mal "la cookie de sesión no es Secure: ${COOKIE%%=*}" ;;
+esac
+
+[ "$FALLOS" = 0 ] && echo "Todo correcto"
+exit "$FALLOS"
+```
+
+```bash
+bash scripts/comprobar-https.sh academy.tudominio.com 203.0.113.10
+```
+
+```text
+== Certificado
+  ok    válido para academy.entrenos.test, con cadena de confianza completa
+  ok    le quedan más de 14 días (Feb  4 02:38:56 2027 GMT)
+== Redirección y protocolo
+  ok    http:// redirige a https://
+  ok    HTTP/2
+  ok    rechaza TLS 1.1
+== HSTS, también en los estáticos
+  ok    /entrar: max-age=300
+  ok    /_astro/client.XI9U0KhD.js: max-age=300
+== La IP no da acceso a la app
+  ok    http://192.168.64.2 no responde
+  ok    https://192.168.64.2 no responde
+== La app sabe que está en HTTPS
+  ok    formulario con Origin de la web
+  ok    la cookie de sesión es Secure
+Todo correcto
+```
+
+Código de salida 0. Para comprobar que detecta fallos, se cambió `fullchain.pem` por `cert.pem`, el certificado sin el intermedio, que es un error clásico:
+
+```text
+  FALLO curl rechaza el certificado (código 60)
+  FALLO HTTP/2: 0 (esperaba 2)
+  FALLO /entrar sin Strict-Transport-Security
+  FALLO  sin Strict-Transport-Security
+  FALLO formulario con Origin de la web: 000 (esperaba 302)
+  FALLO la cookie de sesión no es Secure:
+```
+
+Código de salida 1. Si la primera comprobación falla, las demás fallan en cascada: arregla siempre la primera.
+
+- **`--resolve`:** obliga a `curl` a usar tu IP sin preguntar al DNS, así que comprueba este servidor aunque el DNS aún no se haya propagado.
+- **`openssl x509 -checkend`:** responde si el certificado sigue vigente dentro de N segundos. Es lo que convierte el _script_ en la alarma que Let's Encrypt ya no envía.
+- **`--tls-max 1.1`:** limita al cliente. Si la conexión funciona, el servidor acepta un protocolo antiguo.
+- **`-k` solo en la prueba de la IP:** allí no importa el certificado, solo si responde. En el resto, nunca desactives la verificación.
+
+<Callout type="risk">
+
+- **Crea un usuario en cada ejecución,** como el de A4.3. Si lo programas cada semana, quita esa parte o bórralos.
+- **`--tls-max 1.1` depende de tu `curl`:** si tu cliente ya no sabe hablar TLS 1.1, la conexión falla igualmente y el «ok» no demuestra nada. El análisis de `testssl` del Paso 5 sí lo prueba desde el servidor.
+- **`SSL Labs` necesita tu dominio público y puede tardar un par de minutos.** Marca _Do not show the results on the boards_ si no quieres que aparezca en sus listas. Su nota puede diferir de la de `testssl`, que avisa de que su implementación de la guía no está completa.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tu subdominio tiene un certificado válido que se renueva solo, y lo has comprobado: `certbot renew --dry-run` tras cada cambio, y un temporizador que renueva y deja a Nginx sirviendo el certificado nuevo sin intervención. Sabes que HTTP-01 necesita el puerto 80, que la app debe conocer su dominio `https` (y que cambiarlo cierra las sesiones), y que HSTS se sube por etapas y hay que repetirlo donde un `add_header` lo anula.
+
+</Callout>
+
+## Resumen
+
+- Orden: registro `A` en Namecheap, `dig` para confirmarlo, `server_name` en Nginx, `certbot --dry-run` y `certbot --nginx`.
+- Let's Encrypt comprueba el dominio con el reto HTTP-01, siempre por el **puerto 80**, y limita a 5 fallos por hora y 5 certificados idénticos cada 7 días: ensaya con `--dry-run`.
+- HTTPS activo no basta: `APP_HOSTNAME` y `BETTER_AUTH_URL` deben ser el dominio, o vuelven los 403. Las _cookies_ pasan a `__Secure-…; Secure`, y eso cierra las sesiones existentes.
+- Los certificados duran 90 días, 64 desde febrero de 2027 y 45 desde 2028, y Let's Encrypt ya no avisa por correo. `certbot.timer` renueva con menos de un tercio de vida. Probado de punta a punta: el certificado nuevo se sirve sin tocar nada.
+- Certbot no activa HTTP/2 y deja la app accesible por `https://IP`: `http2 on`, y un `default_server` con `ssl_reject_handshake on` y `return 444`.
+- HSTS en `server` no llega a `/_astro/`: un `add_header` propio lo anula. Súbelo por etapas: 300 s, una semana, un año. Con 300 s, A-; con un año, A+.
+- `fullchain.pem`, no `cert.pem`: sin el intermedio, la cadena falla.
