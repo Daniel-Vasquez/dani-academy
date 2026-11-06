@@ -1,0 +1,627 @@
+---
+sectionId: "A4.5"
+course: "A4"
+title: "Despliegues sin cortes y rollback"
+order: 5
+minutes: 90
+summary: "Mides el corte de un despliegue normal, creas /api/health, montas blue-green con Nginx y despliegas con tráfico continuo sin un solo error, también con una versión rota, y vuelves atrás en segundos."
+---
+
+Vercel despliega sin que nadie lo note: levanta la versión nueva, comprueba que funciona y solo entonces le pasa el tráfico. Si sale mal, un clic te devuelve a la anterior (A4.1). En tu servidor, `docker compose up -d --build` para la app y arranca otra, y si la nueva no funciona, tu web se queda caída hasta que tú reacciones. Esta sección construye lo que hace Vercel: **un despliegue fallido no debe dejar tu app caída**.
+
+Una analogía: cambiar una rueda con el coche en marcha es imposible, así que tienes **dos coches**. El azul lleva a los pasajeros. Preparas el verde al lado, compruebas que arranca, y solo entonces los pasajeros cambian de coche en un instante. Si el verde no arranca, nadie se ha enterado; si falla más tarde, el azul sigue aparcado ahí mismo. Por eso esta técnica se llama **_blue-green_**.
+
+**Lo que tendrás al terminar:** un _endpoint_ `/api/health`; dos instancias de la app detrás de Nginx; `desplegar.sh`, que solo pasa el tráfico a una versión sana; `volver.sh`, que vuelve atrás en unos segundos; y un ensayo que comprueba que una versión rota no afecta a nadie.
+
+**Requisitos:** la configuración de A4.4, con la app en Compose detrás de Nginx con HTTPS. Las salidas se midieron con 20 peticiones por segundo contra `https://academy.entrenos.test/entrar`.
+
+## Paso 1: mide el corte de hoy
+
+Lo que no se mide no se puede mejorar. `scripts/carga.mjs` hace peticiones continuas y cuenta las que fallan:
+
+```js
+// Archivo: scripts/carga.mjs
+// Peticiones continuas durante un despliegue: cuenta las que fallan y cuánto dura el corte.
+// Uso: node scripts/carga.mjs https://academy.tudominio.com/entrar 30
+const [url, segundos = "30"] = process.argv.slice(2);
+if (!url) {
+  console.error("Uso: node scripts/carga.mjs <url> [segundos]");
+  process.exit(1);
+}
+
+const PETICIONES_POR_SEGUNDO = 20;
+const inicio = Date.now();
+const resultados = [];
+
+async function pedir() {
+  const t = Date.now() - inicio;
+  try {
+    const res = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(10_000) });
+    await res.arrayBuffer();
+    resultados.push({ t, codigo: res.status });
+  } catch (error) {
+    resultados.push({ t, codigo: error.cause?.code ?? error.name });
+  }
+}
+
+const reloj = setInterval(pedir, 1000 / PETICIONES_POR_SEGUNDO);
+setTimeout(() => clearInterval(reloj), Number(segundos) * 1000);
+process.on("exit", () => {
+  const fallos = resultados.filter((r) => r.codigo !== 200);
+  const porCodigo = Object.groupBy(fallos, (r) => r.codigo);
+  console.log(`${resultados.length} peticiones, ${fallos.length} fallos`);
+  process.exitCode = fallos.length ? 1 : 0;
+  for (const [codigo, lista] of Object.entries(porCodigo)) console.log(`  ${codigo}: ${lista.length}`);
+  if (fallos.length) {
+    const desde = Math.min(...fallos.map((r) => r.t));
+    const hasta = Math.max(...fallos.map((r) => r.t));
+    console.log(`corte: ${((hasta - desde) / 1000).toFixed(2)} s (del segundo ${(desde / 1000).toFixed(1)} al ${(hasta / 1000).toFixed(1)})`);
+  }
+});
+```
+
+```bash
+node scripts/carga.mjs https://academy.tudominio.com/entrar 5
+```
+
+```text
+96 peticiones, 0 fallos
+```
+
+Ahora, con esa carga en marcha en otra terminal, despliega como hasta ahora:
+
+```bash
+node scripts/carga.mjs https://academy.tudominio.com/entrar 40
+```
+
+```bash
+docker compose up -d --build
+```
+
+```text
+776 peticiones, 18 fallos
+  502: 18
+corte: 0.87 s (del segundo 7.4 al 8.3)
+```
+
+Casi un segundo de errores 502: el contenedor viejo se para y el nuevo aún no escucha. No parece grave, pero eso es **cuando todo sale bien**. Si la versión nueva no arranca, se mide esto, y el corte dura lo que tardes en darte cuenta y reaccionar (aquí, 15 s, porque estaba esperándolo):
+
+```text
+570 peticiones, 293 fallos
+  502: 293
+corte: 15.37 s (del segundo 2.1 al 17.5)
+```
+
+Hay tres estrategias para evitarlo:
+
+- **Reinicio simple:** paras la versión vieja y arrancas la nueva. Lo que acabas de medir. Es aceptable en una app personal, y hay que asumir el corte.
+- **_Blue-green_:** dos entornos completos, y el tráfico cambia de golpe de uno a otro. Es lo que construirás. Consume el doble de memoria durante el despliegue.
+- **_Rolling_:** con varias instancias, se sustituyen de una en una, y siempre quedan algunas atendiendo. Es lo que hace Kubernetes. Necesita varias instancias y que dos versiones convivan un rato; con una sola instancia en un servidor, no aporta nada frente a _blue-green_.
+
+<Callout type="risk">
+
+- **Mide desde fuera y por la misma ruta que tus usuarios:** a través del dominio, con HTTPS. Medir contra `127.0.0.1:4321` no vería los 502 de Nginx.
+- **`carga.mjs` mide solo una URL:** elige una que use tu servidor (aquí, una página SSR). Una prerenderizada o un estático podrían seguir funcionando con la app caída (A4.3).
+- **Un corte de 0,87 s son 18 usuarios en esta carga:** si alguien estaba guardando un formulario, recibe un error. Por eso no es solo cuestión de tiempo.
+
+</Callout>
+
+## Paso 2: `/api/health`
+
+Antes de pasar el tráfico a una versión, hay que poder preguntarle si está bien. Crea `src/pages/api/health.ts`:
+
+```ts
+// Archivo: src/pages/api/health.ts
+// ¿Puede esta instancia atender peticiones? Lo preguntan Docker y el script de despliegue
+import type { APIRoute } from "astro";
+import { db } from "../../lib/mongo";
+
+export const prerender = false;
+
+const CABECERAS = { "cache-control": "no-store" }; // la respuesta debe ser siempre la de ahora
+
+export const GET: APIRoute = async () => {
+  const version = process.env.APP_VERSION ?? "dev";
+  try {
+    // Sin timeoutMS, con MongoDB caído tarda más de 12 s, y Docker necesita saberlo antes
+    await db.command({ ping: 1 }, { timeoutMS: 2_000 });
+    return Response.json({ ok: true, version }, { headers: CABECERAS });
+  } catch {
+    return Response.json({ ok: false, version }, { status: 503, headers: CABECERAS });
+  }
+};
+```
+
+- **`ping` a MongoDB:** comprueba lo que la app necesita para funcionar, no solo que el proceso esté vivo.
+- **`timeoutMS: 2_000`:** imprescindible. La primera versión no lo tenía y, con MongoDB parado, no respondía en 12 s, aunque el cliente tiene `serverSelectionTimeoutMS: 5_000`. Con esta línea, 503 en 2 s.
+- **`version`:** dice qué imagen responde. El despliegue lo usará para comprobar que está hablando con la versión correcta.
+- **`no-store`:** una respuesta de hace un minuto no dice nada de ahora.
+
+`/api/` es privada en el _middleware_, así que sin sesión respondería 401. En `src/middleware.ts`:
+
+```ts
+const PUBLICAS = ["/api/auth/", "/api/health"]; // Better Auth: registro, login y get-session van sin sesión
+```
+
+La versión llega como argumento del _build_. En la etapa final del `Dockerfile`, antes de `USER node`:
+
+```dockerfile
+COPY scripts ./scripts
+# La versión se ve en /api/health: así el despliegue comprueba que responde la imagen correcta
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
+# Los archivos son de root y el proceso es de node: la app puede leerlos, pero no cambiarlos
+USER node
+```
+
+```text
+{"ok":true,"version":"v1"} -> 200                 ← con MongoDB
+{"ok":false,"version":"v1"} -> 503 en 1.996928s   ← docker compose stop mongo
+```
+
+<Callout type="risk">
+
+- **Un _health check_ que se cuelga es peor que uno que falla:** Docker o Nginx esperan, y el problema se ve mucho después. Ponle siempre un límite de tiempo menor que el `timeout` de quien lo llama (aquí, 2 s frente a 4 s).
+- **Es público:** no devuelvas nombres de bases de datos, IP ni mensajes de error. `ok` y la versión bastan. Si no quieres que se vea la versión, compruébala por el puerto local y no la expongas en Nginx.
+- **Comprobar MongoDB tiene un coste:** si la base de datos cae, **todas** las instancias se declaran enfermas a la vez. Es lo que quieres para un despliegue. Para decidir reinicios automáticos puede ser excesivo: reiniciar la app no arregla MongoDB.
+
+</Callout>
+
+## Paso 3: dos instancias
+
+`compose.yaml` pasa de tener un servicio `app` a tener `blue` y `green`. `x-app` es un bloque reutilizable, para no repetir su configuración. Sustituye el archivo:
+
+```yaml
+# Archivo: compose.yaml
+# Dos instancias de la app, blue y green, y un MongoDB. Nginx envía el tráfico a una de las dos
+x-app: &app
+  init: true # un init como PID 1: reenvía SIGTERM a Node y docker stop tarda milisegundos, no 10 s
+  env_file: .env # BETTER_AUTH_SECRET y BETTER_AUTH_URL, de tu .env
+  environment:
+    # Dentro de un contenedor, 127.0.0.1 es el propio contenedor: MongoDB está en el servicio «mongo»
+    MONGODB_URI: mongodb://mongo:27017/?replicaSet=rs0
+    MONGODB_DB: entrenos
+  depends_on:
+    mongo:
+      condition: service_healthy # no arranca hasta que MongoDB sea el primario del replica set
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4321/api/health"]
+    interval: 5s
+    timeout: 4s
+    retries: 3
+    start_period: 20s
+    start_interval: 1s # mientras arranca, comprueba cada segundo
+
+services:
+  blue:
+    <<: *app
+    image: entrenos:${BLUE_VERSION:-sin-version}
+    ports:
+      - "127.0.0.1:4321:4321" # solo desde tu equipo; sin 127.0.0.1, desde toda tu red
+
+  green:
+    <<: *app
+    image: entrenos:${GREEN_VERSION:-sin-version}
+    ports:
+      - "127.0.0.1:4322:4321"
+
+  mongo:
+    image: mongo:8.2 # una versión fijada y probada (A4.2)
+    # Un replica set de un nodo: Better Auth usa transacciones, y un servidor suelto no las admite (I5.2)
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-datos:/data/db # los datos sobreviven a docker compose down
+    healthcheck:
+      # La primera vez, inicia el replica set; después, solo comprueba que responde y que es el primario
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "try { rs.status().ok } catch { rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] }).ok }; db.hello().isWritablePrimary || quit(1)"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    # Sin «ports»: MongoDB solo es accesible para los otros servicios de este compose
+
+volumes:
+  mongo-datos:
+```
+
+- **`x-app: &app` y `<<: *app`:** una plantilla de YAML. Las dos instancias son iguales salvo imagen y puerto.
+- **`healthcheck`:** Docker ejecuta `wget` dentro del contenedor (Alpine lo incluye) y lo marca `healthy` o `unhealthy`. `start_interval: 1s` comprueba cada segundo mientras arranca.
+- **`entrenos:${BLUE_VERSION:-sin-version}`:** la versión la pone el _script_. Si alguien ejecuta `docker compose up -d` a secas, falla sin tocar nada, porque esa imagen no existe:
+
+```text
+Error response from daemon: pull access denied for entrenos, repository does not exist or may require 'docker login'
+```
+
+Nginx necesita saber cuál de las dos recibe el tráfico. En `/etc/nginx/sites-available/entrenos`, cambia el `upstream` para que lea ese dato de un archivo aparte:
+
+```nginx
+upstream entrenos_app {
+  include /etc/nginx/entrenos-activo.conf; # lo escribe scripts/desplegar.sh
+  keepalive 16; # conexiones abiertas con Node: no abre una nueva por petición
+}
+```
+
+La primera puesta en marcha, una sola vez. Para el servicio antiguo, construye la primera versión y apunta Nginx a `blue`:
+
+```bash
+docker rm -f entrenos-app-app-1 # el contenedor de A4.4; su nombre lo da docker ps
+docker build -t entrenos:v1 --build-arg APP_VERSION=v1 --build-arg APP_HOSTNAME=academy.tudominio.com .
+docker compose up -d --remove-orphans mongo
+BLUE_VERSION=v1 docker compose up -d --wait --no-deps blue
+echo "server 127.0.0.1:4321;" | sudo tee /etc/nginx/entrenos-activo.conf
+sudo nginx -t && sudo systemctl reload nginx
+curl -s https://academy.tudominio.com/api/health
+```
+
+```text
+{"ok":true,"version":"v1"}
+```
+
+<Callout type="risk">
+
+- **El doble de memoria durante el despliegue:** las dos instancias conviven unos segundos, cada una con 100–170 MB (A4.1). En un servidor de 512 MB puede no caber, y el kernel mataría un proceso.
+- **`compose-prueba.sh` de A4.2 usa el servicio `app`:** ya no existe. Y órdenes como `docker compose run --rm app …` pasan a ser `docker compose exec blue …`, con la instancia activa.
+- **`docker compose down` borra las dos instancias,** también la que guardas para volver atrás. Usa `stop`, y `down` solo cuando quieras empezar de cero.
+
+</Callout>
+
+## Paso 4: desplegar sin cortes
+
+`scripts/desplegar.sh` hace lo que has visto en la analogía. Usa `publicar-estaticos.sh` de A4.3:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/desplegar.sh
+# Despliegue blue-green: levanta la versión nueva junto a la actual y cambia Nginx solo si está sana.
+# Uso, en el servidor, desde la carpeta del proyecto: bash scripts/desplegar.sh [versión]
+# Sin versión, usa el commit actual. Con una ya construida, la despliega de nuevo sin reconstruir
+set -euo pipefail
+
+VERSION="${1:-$(git rev-parse --short HEAD)}"
+ACTIVA=/etc/nginx/entrenos-activo.conf # upstream de Nginx: qué instancia recibe el tráfico
+ESPERA_DRENAJE=15 # segundos para que terminen las peticiones en curso de la versión anterior
+DOMINIO="$(grep '^APP_HOSTNAME=' .env | cut -d= -f2)"
+
+if grep -q ':4321;' "$ACTIVA"; then
+  ANTIGUA=blue NUEVA=green PUERTO=4322
+else
+  ANTIGUA=green NUEVA=blue PUERTO=4321
+fi
+
+salud() { curl -s -m 5 "$1" | grep -q "\"ok\":true,\"version\":\"$VERSION\""; }
+
+echo "== 1. Imagen entrenos:$VERSION"
+# Si ya existe, no se construye: desplegar una versión anterior es volver a ella
+docker image inspect "entrenos:$VERSION" >/dev/null 2>&1 || docker build -q -t "entrenos:$VERSION" \
+  --build-arg APP_VERSION="$VERSION" --build-arg APP_HOSTNAME="$DOMINIO" . >/dev/null
+
+echo "== 2. Levantar $NUEVA junto a $ANTIGUA, que sigue atendiendo"
+export "${NUEVA^^}_VERSION=$VERSION"
+if ! docker compose up -d --wait --wait-timeout 60 --no-deps "$NUEVA"; then
+  echo "✗ $NUEVA no está sana. $ANTIGUA sigue atendiendo: nadie ha notado nada"
+  docker compose logs --tail 15 "$NUEVA"
+  docker compose stop "$NUEVA"
+  exit 1
+fi
+salud "http://127.0.0.1:$PUERTO/api/health" || { echo "✗ $NUEVA no responde con la versión $VERSION"; docker compose stop "$NUEVA"; exit 1; }
+
+echo "== 3. Publicar los estáticos, antes de que un HTML nuevo los pida"
+bash scripts/publicar-estaticos.sh "entrenos:$VERSION"
+
+echo "== 4. Cambiar Nginx a $NUEVA"
+ANTERIOR="$(cat "$ACTIVA")"
+echo "server 127.0.0.1:$PUERTO;" | sudo tee "$ACTIVA" >/dev/null
+sudo nginx -t -q
+sudo systemctl reload nginx
+
+for _ in $(seq 1 20); do salud "https://$DOMINIO/api/health" && break; sleep 0.5; done
+if ! salud "https://$DOMINIO/api/health"; then
+  echo "✗ https://$DOMINIO no sirve $VERSION: vuelvo a $ANTIGUA"
+  echo "$ANTERIOR" | sudo tee "$ACTIVA" >/dev/null
+  sudo systemctl reload nginx
+  docker compose stop "$NUEVA"
+  exit 1
+fi
+
+echo "== 5. Drenar $ANTIGUA y dejarla parada para volver atrás"
+sleep "$ESPERA_DRENAJE"
+docker compose stop "$ANTIGUA"
+echo "✓ $VERSION en producción ($NUEVA). Para volver atrás: bash scripts/volver.sh"
+```
+
+- **Etapa 1:** la versión es el _commit_ (`git rev-parse --short HEAD`), así cada imagen se identifica con su código. Si la imagen ya existe, no se construye: desplegar una versión antigua es volver a ella.
+- **Etapa 2:** `--wait` no termina hasta que el contenedor está `healthy`, y falla si no lo consigue en 60 s. **Mientras tanto, la antigua sigue atendiendo: nada ha cambiado para nadie.** La comprobación extra confirma la versión: una instancia sana con la imagen equivocada también es un error.
+- **Etapa 3:** antes de cambiar el tráfico, para que ningún HTML pida un archivo que aún no existe.
+- **Etapa 4:** escribir un archivo y recargar Nginx. Después, comprueba por el dominio, por el mismo camino que tus usuarios; si falla, deshace el cambio.
+- **Etapa 5:** espera a las peticiones en curso y para la antigua, sin borrarla.
+
+Con la carga en marcha:
+
+```bash
+bash scripts/desplegar.sh v3
+```
+
+```text
+== 1. Imagen entrenos:v3
+== 2. Levantar blue junto a green, que sigue atendiendo
+== 3. Publicar los estáticos, antes de que un HTML nuevo los pida
+✓ 37 archivos en /var/www/entrenos/_astro (entrenos:v3)
+== 4. Cambiar Nginx a blue
+== 5. Drenar green y dejarla parada para volver atrás
+✓ v3 en producción (blue). Para volver atrás: bash scripts/volver.sh
+```
+
+```text
+778 peticiones, 0 fallos
+```
+
+**Cero fallos**, frente a los 18 del Paso 1, en 21 s. Y quien tenía una pestaña abierta sigue teniendo sus archivos, porque los estáticos antiguos no se borran:
+
+```text
+JS después: /_astro/FormEntrar.CzNe0svC.js
+JS antiguo, para pestañas abiertas -> 200
+JS nuevo -> 200
+```
+
+**¿Por qué esperar 15 s?** Al parar el contenedor, una petición en curso muere con él. Medido con una ruta de prueba que tarda 8 s, lanzada justo antes de cambiar:
+
+```text
+con drenaje de 15 s: GET /lento -> 200 en 7.923691s
+sin drenaje:         GET /lento -> 502 en 1.751706s
+```
+
+Pon una espera mayor que tu petición más lenta.
+
+<Callout type="risk">
+
+- **`sudo` sin contraseña:** el _script_ necesita `sudo`, y uno de CI no puede escribirla. Permite a `deploy` solo esas órdenes con un archivo en `/etc/sudoers.d/`, editado con `visudo`, en lugar de `NOPASSWD: ALL`.
+- **Dos versiones conviven unos segundos:** durante el cambio, unas peticiones las atiende la antigua y otras la nueva. Una versión que cambie el formato de los datos tiene que entender los dos (Paso 6).
+- **Limpia las imágenes y los estáticos de vez en cuando:** cada versión ocupa disco. `docker image ls entrenos` te dice cuántas hay; conserva las últimas para poder volver.
+- **`git rev-parse` exige que el servidor tenga el repositorio:** si despliegas desde CI, pasa la versión como argumento.
+
+</Callout>
+
+## Paso 5: una versión rota no llega a nadie
+
+Aquí está el valor real. Una versión que se cae al arrancar, con la carga en marcha:
+
+```bash
+bash scripts/desplegar.sh v4-rota
+```
+
+```text
+== 2. Levantar green junto a blue, que sigue atendiendo
+✗ green no está sana. blue sigue atendiendo: nadie ha notado nada
+green-1  | Error: fallo al arrancar
+green-1  |     at file:///app/scripts/arrancar.mjs:1:7
+…
+```
+
+```text
+1843 peticiones, 0 fallos
+{"ok":true,"version":"v3"} -> 200
+```
+
+**0 fallos**, frente a los 293 del Paso 1, y abortado en 4 s, con el error a la vista. La otra red de seguridad, la de la etapa 4, se comprobó sin querer: la verificación final no podía validar el certificado del laboratorio y el _script_ volvió solo a la versión anterior:
+
+```text
+✗ https://academy.entrenos.test no sirve v2: vuelvo a blue
+```
+
+```text
+969 peticiones, 0 fallos
+```
+
+<Callout type="risk">
+
+- **El _health check_ solo detecta lo que comprueba:** una versión que arranca, responde a `/api/health` y tiene un error en la página de estadísticas pasará el despliegue. Para eso están los tests (I7) antes de desplegar, y `volver.sh` después.
+- **Un error que aparece a los 10 minutos no lo detiene nada:** el despliegue ya terminó. Ahí es donde necesitas la monitorización de A4.6 y volver atrás.
+
+</Callout>
+
+## Paso 6: volver atrás
+
+La instancia anterior sigue parada con su imagen, así que volver es arrancarla y devolverle el tráfico:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/volver.sh
+# Rollback: arranca la instancia anterior, que sigue parada con su imagen, y le devuelve el tráfico.
+# Uso, en el servidor, desde la carpeta del proyecto: bash scripts/volver.sh
+set -euo pipefail
+
+ACTIVA=/etc/nginx/entrenos-activo.conf
+
+if grep -q ':4321;' "$ACTIVA"; then
+  ACTUAL=blue ANTERIOR=green PUERTO=4322
+else
+  ACTUAL=green ANTERIOR=blue PUERTO=4321
+fi
+
+CONTENEDOR="$(docker compose ps -a -q "$ANTERIOR")"
+[ -n "$CONTENEDOR" ] || { echo "✗ No hay instancia anterior a la que volver"; exit 1; }
+
+docker start "$CONTENEDOR" >/dev/null
+for _ in $(seq 1 60); do
+  [ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTENEDOR")" = healthy ] && break
+  sleep 1
+done
+[ "$(docker inspect -f '{{.State.Health.Status}}' "$CONTENEDOR")" = healthy ] || { echo "✗ $ANTERIOR no arranca sana"; exit 1; }
+
+echo "server 127.0.0.1:$PUERTO;" | sudo tee "$ACTIVA" >/dev/null
+sudo nginx -t -q
+sudo systemctl reload nginx
+echo "✓ Tráfico en $ANTERIOR: $(curl -s "http://127.0.0.1:$PUERTO/api/health")"
+sleep 15 # las peticiones en curso de la versión mala terminan
+docker compose stop "$ACTUAL"
+```
+
+```bash
+bash scripts/volver.sh
+```
+
+```text
+✓ Tráfico en green: {"ok":true,"version":"v2"}
+```
+
+```text
+582 peticiones, 0 fallos
+```
+
+Unos 2 s hasta cambiar el tráfico, y sin ningún error: volver atrás es **mucho más rápido** que arreglar el fallo con prisa.
+
+**Un límite que debes conocer.** Solo hay dos instancias, así que un despliegue fallido sobrescribe la que estaba parada, y `volver.sh` se niega a arrancarla:
+
+```text
+✗ green no arranca sana
+```
+
+El tráfico no se mueve: sigue en la versión buena. Y ninguna versión se pierde, porque las imágenes siguen ahí. Para volver a cualquier versión anterior, despliégala por su nombre, sin reconstruir:
+
+```bash
+docker image ls entrenos --format "{{.Tag}}"
+bash scripts/desplegar.sh v2
+```
+
+```text
+✓ v2 en producción (green). Para volver atrás: bash scripts/volver.sh
+```
+
+```text
+652 peticiones, 0 fallos
+```
+
+**La base de datos no vuelve atrás.** El código se cambia en segundos; los datos, no. Si la versión 3 renombra un campo en MongoDB, la versión 2 no lo encontrará. La regla es hacer los cambios en dos despliegues, que se llama **_expand and contract_**:
+
+1. **Expandir:** la versión nueva escribe el campo nuevo y también el antiguo, y lee los dos. La versión anterior sigue funcionando.
+2. **Migrar** los documentos existentes con un _script_ (como `migrar-sensacion.mjs` en I1.6).
+3. **Contraer:** en un despliegue posterior, cuando ya no quieras volver atrás, deja de usar el campo antiguo.
+
+<Callout type="risk">
+
+- **Volver atrás no deshace lo que escribió la versión mala:** si guardó datos mal, siguen ahí. Volver para el daño; arreglarlo es otro trabajo.
+- **Practica antes de necesitarlo:** el peor momento para descubrir que `volver.sh` no funciona es con la web caída. Ejecútalo en un momento tranquilo.
+- **No despliegues y te vayas:** quédate unos minutos mirando los registros. La mayoría de los fallos que el _health check_ no ve aparecen enseguida.
+
+</Callout>
+
+## Paso 7: sin contenedores
+
+Si no usas Docker, las ideas son las mismas con otras herramientas:
+
+- **`systemd` (I6.4):** `sudo systemctl restart entrenos` es un reinicio simple, con su corte. Para _blue-green_, dos servicios en puertos distintos (`entrenos@4321` y `entrenos@4322`, con una plantilla de `systemd`), y el mismo cambio de Nginx.
+- **PM2:** un gestor de procesos para Node, con `pm2 reload`, que promete sustituir las instancias de una en una en su modo _cluster_. Es una estrategia _rolling_ sin Nginx de por medio.
+
+<Callout type="note" title="PM2 no se ha medido">
+
+Se intentó medir PM2 7.1.2 con la compilación de A4.1 y la app no llegó a arrancar en dos intentos, ni en modo _cluster_ ni en _fork_, sin que se aclarara si la causa era PM2 o aquella copia. Por eso aquí no hay cifras ni configuración suya: si lo usas, mide con `carga.mjs` antes de fiarte de la promesa.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Pon en marcha `desplegar.sh` y `volver.sh` en tu servidor y despliega dos versiones con `carga.mjs` en marcha. Debe dar 0 fallos.
+2. Escribe `scripts/ensayar-fallo.sh`: que construya una imagen que se cae al arrancar y la despliegue con tráfico continuo. Pasa si el despliegue se aborta, nadie recibe un error y sigue la misma versión.
+3. Comprueba que el ensayo detecta un despliegue sin protección: quita del `desplegar.sh` el `--wait` y las comprobaciones de salud, y ejecútalo.
+
+</Callout>
+
+Solución. `carga.mjs` ya termina con código 1 si hubo fallos (`process.exitCode`), que es lo que aprovecha `scripts/ensayar-fallo.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/ensayar-fallo.sh
+# Ensayo general: despliega a propósito una versión que no arranca, con tráfico continuo.
+# Pasa si el despliegue se aborta, nadie recibe un error y sigue la misma versión.
+# Uso, en el servidor, desde la carpeta del proyecto: bash scripts/ensayar-fallo.sh
+set -uo pipefail
+
+DOMINIO="$(grep '^APP_HOSTNAME=' .env | cut -d= -f2)"
+BASE="https://$DOMINIO"
+version() { curl -s -m 5 "$BASE/api/health" | sed -E 's/.*"version":"([^"]+)".*/\1/'; }
+
+ANTES="$(version)"
+echo "En producción: $ANTES"
+[ -n "$ANTES" ] || { echo "✗ La app no responde: nada que ensayar"; exit 1; }
+
+# Una imagen que parte de la actual y se cae al arrancar
+printf 'FROM entrenos:%s\nCMD ["node", "-e", "process.exit(1)"]\n' "$ANTES" | docker build -q -t entrenos:ensayo-rota - >/dev/null
+
+node scripts/carga.mjs "$BASE/entrar" 15 &
+CARGA=$!
+sleep 2
+
+bash scripts/desplegar.sh ensayo-rota >/dev/null 2>&1
+DESPLIEGUE=$?
+wait "$CARGA"
+FALLOS=$?
+docker image rm -f entrenos:ensayo-rota >/dev/null
+
+DESPUES="$(version)"
+[ "$DESPLIEGUE" -ne 0 ] && echo "  ok    el despliegue se abortó" || { echo "  FALLO el despliegue no se abortó"; exit 1; }
+[ "$FALLOS" -eq 0 ] && echo "  ok    nadie recibió un error" || { echo "  FALLO hubo peticiones con error"; exit 1; }
+[ "$DESPUES" = "$ANTES" ] && echo "  ok    sigue $DESPUES" || { echo "  FALLO ahora responde $DESPUES"; exit 1; }
+echo "Ensayo superado"
+```
+
+```bash
+bash scripts/ensayar-fallo.sh
+```
+
+```text
+En producción: v2
+287 peticiones, 0 fallos
+  ok    el despliegue se abortó
+  ok    nadie recibió un error
+  ok    sigue v2
+Ensayo superado
+```
+
+Código de salida 0. Con un `desplegar.sh` que cambia Nginx sin comprobar nada:
+
+```text
+En producción: v2
+283 peticiones, 229 fallos
+  502: 229
+corte: 11.98 s (del segundo 2.9 al 14.9)
+  FALLO el despliegue no se abortó
+```
+
+Código de salida 1, y la web caída: hay que restaurar el _script_ y volver a apuntar Nginx a mano. Por eso este tercer punto se hace una vez, y en un momento tranquilo.
+
+- **`printf … | docker build -`:** construye una imagen con un `Dockerfile` que llega por la entrada estándar, sin contexto. Parte de la imagen actual y solo cambia el `CMD`.
+- **`set -uo pipefail`, sin `-e`:** el despliegue **debe** fallar aquí. Con `-e`, el _script_ terminaría justo en lo que quiere comprobar.
+- **`wait "$CARGA"`:** recoge el código de salida del proceso en segundo plano.
+
+<Callout type="risk">
+
+- **Tras el ensayo, `volver.sh` no sirve:** la instancia parada es la rota (Paso 6). Se arregla con tu siguiente despliegue.
+- **Ejecútalo después de cambiar `desplegar.sh`, `compose.yaml` o Nginx:** es la forma de saber que la protección sigue funcionando.
+
+</Callout>
+
+<Callout type="mastery">
+
+Un despliegue fallido no deja tu app caída. La versión nueva arranca junto a la actual, Nginx solo le pasa el tráfico cuando `/api/health` confirma que está sana y que es la versión correcta, y las peticiones en curso terminan antes de parar la anterior. Medido con tráfico continuo: 0 errores con una versión buena, 0 con una rota y 0 al volver atrás. Y sabes lo que esto no cubre: un fallo que el _health check_ no ve y los cambios en la base de datos, que se hacen en dos despliegues.
+
+</Callout>
+
+## Resumen
+
+- Mide con tráfico continuo. El despliegue simple dio **18 errores (0,87 s)**, y una versión rota, **293 (15 s, lo que tardes en reaccionar)**.
+- Estrategias: reinicio simple, _blue-green_ (dos entornos, cambio de golpe) y _rolling_ (varias instancias, de una en una).
+- `/api/health` comprueba MongoDB, con un límite de tiempo: sin `timeoutMS` tardaba más de 12 s con la base caída. Devuelve la versión para confirmar qué imagen responde, y es público en el _middleware_.
+- _Blue-green_ con Compose: servicios `blue` y `green`, y Nginx lee cuál está activo de `entrenos-activo.conf`.
+- `desplegar.sh`: construir, levantar con `--wait`, publicar estáticos, cambiar Nginx, comprobar por el dominio, drenar y parar. Resultado: **0 errores**, también con una versión rota, que se aborta en 4 s.
+- Sin drenaje, una petición en curso muere con 502.
+- `volver.sh` devuelve el tráfico en unos 2 s. Tras un despliegue fallido no hay instancia a la que volver, pero `desplegar.sh <versión>` reutiliza cualquier imagen anterior.
+- La base de datos no vuelve atrás: cambios en dos pasos, _expand and contract_.
