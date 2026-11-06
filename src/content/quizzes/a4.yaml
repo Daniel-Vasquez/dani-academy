@@ -1,0 +1,56 @@
+course: A4
+passingScore: 4
+questions:
+  - prompt: "¿Qué aporta un `Dockerfile` multi-stage?"
+    options:
+      - "Permite ejecutar varios contenedores a la vez a partir de un mismo archivo, sin necesidad de usar `docker compose`."
+      - "Compilar en una etapa con todas las herramientas y copiar a una imagen limpia solo lo necesario para ejecutar la app."
+      - "Cifra las capas de la imagen, de modo que los secretos copiados durante el build ya no se pueden leer."
+      - "Hace que la imagen funcione en cualquier arquitectura de procesador sin tener que construirla otra vez."
+    answer: 1
+    explanation: "En A4.2, el primer `Dockerfile` pesaba 1,24 GB, con compiladores, tests y código fuente; con tres etapas bajó a 562 MB, y dentro solo quedaron `dist`, `node_modules` de producción, `package.json` y `scripts`. No cifra nada: lo que entra en una capa de la imagen final se puede leer, y por eso `.dockerignore` deja fuera el `.env`. Tampoco cambia la arquitectura: una imagen arm64 no se ejecuta en un VPS amd64."
+
+  - prompt: "¿Para qué sirve poner Nginx como reverse proxy delante de Node?"
+    options:
+      - "Para que Node reciba directamente las conexiones de internet, ya que Nginx le abre el puerto 4321 en el firewall."
+      - "Para sustituir a Node: Nginx ejecuta las páginas SSR y los endpoints de Astro, y Node ya no hace falta."
+      - "Para que las cabeceras `Host` y `X-Forwarded-For` dejen de ser necesarias, porque Nginx resuelve solo el dominio de la app."
+      - "Para recibir a los visitantes en los puertos 80 y 443, con HTTPS, compresión y estáticos, y pasar a Node lo demás."
+    answer: 3
+    explanation: "Un usuario normal no puede abrir el puerto 80 (`EACCES`, A4.3), y ejecutar Node como `root` entregaría el servidor al primer fallo. Nginx abre el puerto como `root` y atiende con trabajadores `www-data`; además comprime, sirve un archivo 3 veces más rápido que Node y sigue en pie si la app se para. A cambio exige contarle a la app dónde está: solo con `proxy_pass`, el registro y los formularios daban 403. Y sin `X-Forwarded-For`, un atacante bloqueaba el inicio de sesión de todos."
+
+  - prompt: "¿Cómo se renueva un certificado de Let's Encrypt emitido con `certbot --nginx`?"
+    options:
+      - "Solo: `certbot.timer` ejecuta `certbot renew` dos veces al día, renueva cuando queda menos de un tercio de la vida del certificado y recarga Nginx."
+      - "A mano: Let's Encrypt envía un correo unos días antes de que caduque, y entonces hay que volver a ejecutar `certbot --nginx`."
+      - "Nginx lo pide por sí mismo a Let's Encrypt en cuanto lo necesita, y Certbot solo interviene la primera vez."
+      - "Reconstruyendo la imagen de Docker, porque el certificado viaja dentro de ella y caduca con cada versión."
+    answer: 0
+    explanation: "En A4.4, con certificados de 3 minutos, el servicio del temporizador renovó solo y Nginx pasó a servir el nuevo sin ninguna orden manual. `certbot renew --dry-run` lo ensaya tras cada cambio. El reto HTTP-01 necesita el puerto 80 abierto. Let's Encrypt dejó de enviar avisos de caducidad en junio de 2025, así que necesitas tu propia alarma, y los certificados pasan a 64 días en febrero de 2027: renovar a mano no es una opción."
+
+  - prompt: "¿Qué hace este health check, y para qué se usa en un despliegue?"
+    code: |
+      export const GET: APIRoute = async () => {
+        try {
+          await db.command({ ping: 1 }, { timeoutMS: 2_000 });
+          return Response.json({ ok: true });
+        } catch {
+          return Response.json({ ok: false }, { status: 503 });
+        }
+      };
+    options:
+      - "Mide el tiempo de respuesta de MongoDB y lo guarda, para que el monitor pueda dibujar una gráfica de rendimiento."
+      - "Reinicia MongoDB si no responde en 2 segundos, para que la app se recupere sola sin que nadie intervenga."
+      - "Dice si esta instancia puede atender peticiones, para pasarle el tráfico solo cuando responde 200 y dejar fuera una versión rota."
+      - "Comprueba que los datos de MongoDB están completos, de modo que un 200 garantiza que no se ha perdido ninguno."
+    answer: 2
+    explanation: "En A4.5, `desplegar.sh` levanta la versión nueva junto a la actual y solo cambia Nginx si está sana: una versión rota se abortó en 4 s con 0 errores, frente a 293 con el despliegue simple. `timeoutMS` importa: sin él, con MongoDB caído, tardaba más de 12 s. Y no comprueba los datos: en el simulacro de A4.6, con la base borrada, seguía respondiendo 200. Un monitor debe vigilarlo a él y no a la portada, que da 200 con MongoDB parado."
+
+  - prompt: "¿Cuál es una ventaja y un inconveniente reales de un VPS frente a Vercel?"
+    options:
+      - "Ventaja: HTTPS, CDN y previews vienen incluidos sin configurar nada. Inconveniente: las peticiones no pueden durar más de 300 s."
+      - "Ventaja: un proceso siempre en marcha, sin cold starts y sin los límites de las funciones. Inconveniente: certificados, actualizaciones, copias y caídas son cosa tuya."
+      - "Ventaja: nunca se cae, porque el proveedor reinicia la app sola. Inconveniente: no se puede usar un dominio propio."
+      - "Ventaja: siempre sale más barato que Vercel en cualquier situación. Inconveniente: Node no se puede ejecutar en modo SSR."
+    answer: 1
+    explanation: "En un VPS no hay límite de 300 s ni de 4,5 MB por petición, y el coste es más bajo y predecible con tráfico alto (A4.1). A cambio, todo lo que Vercel hacía sin que lo vieras lo montas y lo mantienes tú: es lo que ha ocupado este curso, de Docker a la operación diaria. El precio no incluye tu tiempo. La primera opción describe justo a Vercel, y nadie te reinicia un servidor que se ha caído si no lo has preparado."
