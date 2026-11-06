@@ -1,0 +1,467 @@
+---
+sectionId: "A6.2"
+course: "A6"
+title: "Optimización en el cliente"
+order: 2
+minutes: 75
+summary: "Mides cuánto JavaScript carga cada página y lo reduces un tercio sin perder funciones, optimizas imágenes y fuentes, y compruebas cuándo el prefetch de Astro ayuda y cuándo no sirve de nada."
+---
+
+En A6.1 aprendiste a medir. Ahora toca bajar los números, y aquí es fácil perder el tiempo: optimizar lo que no pesa, o aplicar un consejo que has leído y que en tu caso no cambia nada. Por eso esta sección sigue una regla: **mide, cambia una cosa y vuelve a medir**.
+
+Una analogía: preparar una mochila para una ruta. No empiezas quitando una moneda. Vacías la mochila, pesas lo que hay y sacas lo que no vas a usar. Lo que solo necesitas a mitad de camino, lo recoges allí. El JavaScript funciona igual: cada kilobyte debe justificar por qué viaja desde el principio.
+
+**Lo que tendrás al terminar:** un tercio menos de JavaScript en tus páginas con las mismas funciones, imágenes y fuentes que no penalizan, y _prefetch_ donde de verdad ayuda.
+
+**Requisitos:** la app con el recolector y el presupuesto de A6.1.
+
+## Paso 1: mira qué envías
+
+Primero, qué hay en la mochila. Los archivos que genera el _build_, con su tamaño comprimido:
+
+```bash
+npm run build
+cd dist/client/_astro
+for f in *.js; do printf "%7s %s\n" "$(gzip -c "$f" | wc -c)" "$f"; done | sort -rn | head -6
+```
+
+```text
+  65735 client.XI9U0KhD.js
+  25466 schemas.CaUk71cF.js
+  12378 CampoTexto.uoz2kuvv.js
+  11780 auth-client.DrxeVTVP.js
+   3412 _astro_actions.DBkyQHVi.js
+   3152 Vitales.astro_astro_type_script_index_0_lang.Ck8WY5Bw.js
+```
+
+`client` es React. ¿Y `schemas`? Para saber qué biblioteca hay dentro, busca una palabra suya:
+
+```bash
+grep -l ZodError *.js
+```
+
+Es Zod. Saber lo que existe no basta: hay que saber qué descarga **cada página**. `scripts/peso-js.mjs` lo saca de los informes de Lighthouse de A6.1:
+
+```js
+// Archivo: scripts/peso-js.mjs
+// JavaScript transferido por cada página, de informes JSON de Lighthouse.
+// Uso: node scripts/peso-js.mjs informes/*.json
+import { readFileSync } from "node:fs";
+
+for (const archivo of process.argv.slice(2)) {
+  const informe = JSON.parse(readFileSync(archivo, "utf8"));
+  const peticiones = informe.audits["network-requests"].details.items;
+  const js = peticiones
+    .filter((p) => p.resourceType === "Script")
+    .sort((a, b) => b.transferSize - a.transferSize);
+  const total = js.reduce((suma, p) => suma + p.transferSize, 0);
+
+  console.log(`${new URL(informe.finalDisplayedUrl).pathname.padEnd(16)} ${(total / 1024).toFixed(1).padStart(6)} KB en ${js.length} archivos`);
+  for (const p of js.slice(0, 4)) {
+    console.log(`  ${(p.transferSize / 1024).toFixed(1).padStart(6)} KB  ${new URL(p.url).pathname.split("/").pop()}`);
+  }
+}
+```
+
+Con una sesión iniciada, salvo `/entrar`:
+
+```text
+/                 100.3 KB en 10 archivos
+/entrar           109.9 KB en 10 archivos
+/estadisticas      75.1 KB en 7 archivos
+/notas            103.8 KB en 12 archivos
+```
+
+**Mira `/estadisticas`:** es una página pintada entera en el servidor, sin formularios, y descarga 75 KB de JavaScript. ¿Por qué? Solo para una cosa: el nombre del usuario y el botón «Salir» de la barra de navegación.
+
+## Paso 2: quita lo que no necesitas
+
+La isla `SesionActual` carga React y el cliente de Better Auth en **todas** las páginas. Pero el servidor ya sabe quién eres: lo guardó el _middleware_ en `Astro.locals`. Puede pintarlo él, con una isla de servidor (I3.1) para que las páginas estáticas sigan siéndolo.
+
+`src/components/SesionServidor.astro`:
+
+```astro
+---
+// Archivo: src/components/SesionServidor.astro
+// Quién ha iniciado sesión, pintado en el servidor: sin React ni el cliente de Better Auth
+const { usuario } = Astro.locals;
+---
+
+{
+  usuario ? (
+    <span id="sesion">
+      {usuario.nombre} · {usuario.zonaHoraria} <button type="button" data-salir>Salir</button>
+    </span>
+  ) : (
+    <span id="sesion">Sin sesión</span>
+  )
+}
+
+<script>
+  document.addEventListener("click", async (evento) => {
+    if (!(evento.target as Element).closest("[data-salir]")) return;
+    await fetch("/api/auth/sign-out", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    window.location.assign("/");
+  });
+</script>
+```
+
+En `src/layouts/Base.astro`, sustituye la isla de React:
+
+```astro
+<SesionServidor server:defer><span slot="fallback" id="sesion">…</span></SesionServidor>
+```
+
+Y borra `src/components/SesionActual.tsx`. Se comprobó en el navegador que muestra el nombre y que «Salir» cierra la sesión.
+
+```text
+/estadisticas: de 75,1 KB a 3,1 KB
+```
+
+Un 96 % menos. Lo único que queda es el recolector de A6.1. Quitar una isla vale más que cualquier truco de compresión.
+
+## Paso 3: carga más tarde lo que se usa poco
+
+La portada tiene un formulario, así que React se queda. Pero Zod solo hace falta **al enviarlo**; su otro uso era validar las respuestas de tu propia API. El plan: sacar Zod del arranque y descargarlo la primera vez que alguien pulsa «Guardar».
+
+**Primer intento, que salió mal.** Lo obvio es `await import("zod")`. La portada bajó a 67 KB. Pero `/notas`:
+
+```text
+/notas: de 92,3 KB a 141,2 KB   (zod.JDcFsRQu.js: 71,3 KB)
+```
+
+Subió. Al importar la biblioteca entera de forma dinámica, Zod deja de poder recortarse: 71 KB en vez de 22, y otro componente la seguía importando normal. Se ve solo si mides **todas** las páginas.
+
+Lo correcto es un módulo tuyo pequeño, que importe solo lo que usa. `src/lib/validar-entreno.ts`:
+
+```ts
+// Archivo: src/lib/validar-entreno.ts
+// Validación del formulario, en un módulo aparte para descargarlo solo al enviar.
+// Nunca import("zod"): trae la biblioteca entera, sin eliminar lo que no se usa
+import { z } from "zod";
+import { EntrenoSchema, type EntrenoFormulario } from "../schemas/entreno";
+
+export function validarEntreno(formulario: EntrenoFormulario) {
+  const local = EntrenoSchema.safeParse(formulario);
+  return local.success
+    ? { datos: local.data }
+    : { errores: z.flattenError(local.error).fieldErrors };
+}
+```
+
+La lista de tipos la necesita el `<select>` al pintar, y estaba en el archivo que importa Zod. Muévela a uno sin dependencias, `src/schemas/tipos.ts`:
+
+```ts
+// Archivo: src/schemas/tipos.ts
+// Sin Zod: el componente puede importarlo sin arrastrar la biblioteca al navegador
+export const TIPOS_ENTRENO = ["fuerza", "running", "movilidad"] as const;
+```
+
+En `src/schemas/entreno.ts`, en lugar de la constante:
+
+```ts
+export { TIPOS_ENTRENO } from "./tipos";
+import { TIPOS_ENTRENO } from "./tipos";
+```
+
+Y en `src/components/Entrenos.tsx`, los imports, una función para recuperar las fechas, y la validación al enviar:
+
+```tsx
+import type { EntrenoDTO, EntrenoFormulario } from "../schemas/entreno"; // import type: no llega al navegador
+import { TIPOS_ENTRENO } from "../schemas/tipos";
+
+type EntrenoJson = Omit<EntrenoDTO, "fecha" | "creado"> & { fecha: string; creado: string };
+
+/** La API es nuestra y ya valida: aquí solo se recuperan las fechas */
+const aDTO = (e: EntrenoJson): EntrenoDTO => ({ ...e, fecha: new Date(e.fecha), creado: new Date(e.creado) });
+```
+
+```tsx
+// Al cargar la lista
+setEntrenos((json as { entrenos: EntrenoJson[] }).entrenos.map(aDTO));
+
+// Al enviar: Zod se descarga aquí, la primera vez que se envía
+const { validarEntreno } = await import("../lib/validar-entreno");
+const local = validarEntreno(formulario);
+if (local.errores) {
+  setErrores(local.errores);
+  return;
+}
+// … y el fetch envía local.datos
+
+// Con la respuesta del servidor
+setErrores((json as { campos: Errores }).campos); // en el 422
+const nuevo = aDTO(json as EntrenoJson);          // en el 201
+```
+
+Comprobado en un navegador real: la portada no descarga Zod al cargar. Al enviar un entreno con 0 minutos se descargan `schemas` y `validar-entreno`, aparece «Mínimo 1 minuto» y, con 30 minutos, se guarda y sigue ahí al recargar.
+
+```text
+/                  66.9 KB en 8 archivos
+/estadisticas       3.1 KB en 1 archivos
+/notas             92.3 KB en 10 archivos
+```
+
+| Página          | Antes    | Después  | Cambio |
+| --------------- | -------- | -------- | ------ |
+| `/`             | 100,3 KB | 66,9 KB  | −33 %  |
+| `/estadisticas` | 75,1 KB  | 3,1 KB   | −96 %  |
+| `/notas`        | 103,8 KB | 69,4 KB  | −33 %  |
+| `/entrar`       | 109,9 KB | 106,9 KB | −3 %   |
+
+`/notas` es el ejercicio del final. `/entrar` apenas baja: usa React, _React Hook Form_, Zod y el cliente de Better Auth, y ahí sí se usan. Bajarla exigiría rehacer el formulario sin React. Por eso es una decisión, no un descuido.
+
+La nota de Lighthouse fue 100 antes y después, y el LCP siguió entre 0,8 y 0,9 s: estas páginas ya iban bien en ese móvil simulado. Lo que cambió es lo que paga cada usuario: la portada pasó de 107 a 77 KB.
+
+<Callout type="risk">
+
+- **Quitar la validación de respuestas es un intercambio:** en I3 validabas lo que devuelve la API, y aquí se sustituye por un _cast_. Si el servidor cambia el formato, el fallo aparecerá más adelante y será más confuso. Es razonable porque la API y el cliente se despliegan juntos, y en cambio **mantén la validación con APIs de terceros**.
+- **El servidor sigue validando siempre:** lo de aquí solo cambia cuándo se comprueba en el navegador. Nunca quites la validación del servidor por rendimiento.
+- **`import()` puede fallar:** si la descarga falla, el botón no hará nada. Con mala cobertura, envuelve la carga en un `try/catch` y envía igualmente: responderá el servidor.
+- **La primera pulsación tarda algo más:** tiene que descargar Zod. Por eso funciona con una acción ocasional, y no con algo que se usa al teclear.
+- **`server:defer` añade una petición:** el nombre aparece un instante después, tras un «…». A cambio, la página se puede guardar en caché, porque no lleva datos personales.
+- **Comprueba `import type`:** un `import` normal de un archivo con Zod se lo trae entero, aunque solo uses un tipo o una constante.
+
+</Callout>
+
+## Paso 4: la directiva adecuada
+
+Cuando una isla hace falta, la directiva decide cuándo se descarga. Con una isla al final de una página larga:
+
+```text
+               LCP      JS al cargar   JS tras bajar
+client:load    192 ms   61 KB          61 KB
+client:idle    192 ms   61 KB          61 KB
+client:visible 200 ms   1 KB           61 KB
+```
+
+- `client:load`: lo que debe funcionar ya, como el formulario principal.
+- `client:idle`: lo mismo, pero espera a que el navegador esté libre. Aquí descargó igual.
+- `client:visible`: lo que está más abajo. Quien no baja, no paga.
+- **Sin directiva:** solo HTML. Es la mejor opción si no hay interacción.
+
+El LCP no cambia: el contenido ya venía en el HTML. Lo que se ahorra son descargas y trabajo. Y ningún caso mejora tanto como el Paso 2, porque la mejor directiva es no necesitar ninguna.
+
+## Paso 5: imágenes
+
+Astro optimiza las imágenes que importas de `src/`. Para usarlo, instala `sharp`, y guarda la imagen en `src/assets/`, no en `public/`:
+
+```astro
+---
+import { Image, Picture } from "astro:assets";
+import portada from "../assets/portada.jpg";
+---
+
+<Image src={portada} alt="Portada" widths={[400, 800, 1200]} sizes="100vw" priority />
+
+<Picture src={portada} alt="Portada" formats={["avif", "webp"]} widths={[400, 800, 1200]} sizes="100vw" priority />
+```
+
+`widths` y `sizes` generan un `srcset`: el móvil elige un archivo a su medida. El HTML ya sale con `width` y `height`, así que no hay salto (A6.1). Con un JPG de 2400 × 1600 generado para la prueba, y el móvil lento de A6.1:
+
+```text
+                         LCP       Descarga
+<img> con el JPG         1788 ms   294 KB  jpg
+<Image>                  504 ms    29 KB   webp
+<Image priority>         492 ms    29 KB   webp
+<Picture> avif y webp    476 ms    27 KB   avif
+```
+
+El salto grande es el primero: pasar por Astro. `<Picture>` apenas añadió aquí. `priority` tampoco cambió mucho, porque la página solo tenía esa imagen, pero sin él sale con `loading="lazy"`, y con él, `loading="eager"`, `decoding="sync"` y `fetchpriority="high"`.
+
+<Callout type="risk">
+
+- **`priority` solo en la imagen principal:** si lo pones en todas, ninguna tiene prioridad.
+- **`loading="lazy"` en la imagen principal es un error clásico:** retrasa tu LCP. El resto de imágenes, sí con _lazy_, que es lo que Astro hace por defecto.
+- **`sizes` debe describir tu diseño:** si dices `100vw` y la imagen ocupa media pantalla, descargas el doble.
+- **Más formatos es más tiempo de _build_:** cada ancho y cada formato es un archivo. Aquí eran páginas estáticas, generadas en el _build_. En páginas de servidor se generan al pedirlas, y eso no se ha medido.
+- **Esta imagen comprime especialmente bien:** tus porcentajes serán otros.
+- **El texto alternativo sigue siendo tu trabajo:** optimizar no sustituye a un buen `alt`.
+
+</Callout>
+
+## Paso 6: fuentes
+
+Una fuente web es una descarga más. Con _Fontsource_ se aloja en tu servidor y viene **dividida por alfabetos** (_subsetting_):
+
+```bash
+npm install @fontsource-variable/source-serif-4
+```
+
+```astro
+---
+import "@fontsource-variable/source-serif-4";
+---
+
+<style is:global>
+  body {
+    font-family: "Source Serif 4 Variable", Arial, sans-serif;
+  }
+</style>
+```
+
+El _build_ generó 6 archivos, 188 KB en total, y el navegador descargó **uno**, de 50 KB: el del alfabeto latino. Esas fuentes usan `font-display: swap`: se pinta con Arial y se cambia cuando llega la fuente.
+
+```text
+                   Primer pintado   Descarga   La fuente aparece
+Fuente del sistema 192 ms           0 KB       —
+Web, con swap      196 ms           50 KB      a los 692 ms
+Web, con preload   296 ms           50 KB      a los 595 ms
+```
+
+**`preload` empeoró el primer pintado en 100 ms** para adelantar la fuente otros 100 ms. Repetido en dos páginas distintas, con el mismo resultado. Un consejo muy repetido, que en este caso hacía más lenta la página. Una fuente del sistema, además, cuesta 0 KB.
+
+Y el cambio de fuente apenas movió el texto: 0,004 de CLS en bruto, porque ocupaba las mismas líneas.
+
+<Callout type="risk">
+
+- **Un cambio de fuente puede mover mucho más:** esta fuente se parecía a Arial. Con una más ancha, el texto cambia de líneas y salta. Mídelo con la tuya, y elige un respaldo parecido.
+- **Chromium marcó ese salto como excluido:** por eso `web-vitals` informó de CLS 0. Mirando solo esa cifra, parecía que no había salto.
+- **`font-display: block` esconde el texto:** el usuario ve un hueco hasta que llega la fuente. Salvo para iconos, no lo uses.
+- **Cada peso cuenta:** una fuente variable lleva todos en un archivo. Si usas fuentes normales, carga solo los que uses.
+- **Aloja la fuente en tu servidor:** el `default-src 'self'` de A5 la permite, y una fuente de otro dominio quedaría bloqueada.
+
+</Callout>
+
+## Paso 7: prefetch y View Transitions
+
+El _prefetch_ descarga la página siguiente antes de que hagas clic. Se activa en `astro.config.mjs`:
+
+```js
+export default defineConfig({
+  prefetch: { prefetchAll: false, defaultStrategy: "hover" },
+  // …
+});
+```
+
+Y se pide en cada enlace:
+
+```html
+<a href="/estadisticas" data-astro-prefetch>Estadísticas</a>
+```
+
+Medido con un servidor que tarda 400 ms, desde el clic hasta ver la página:
+
+```text
+                         Sin prefetch   Con prefetch
+Cache-Control max-age=0  453 ms         460 ms
+Cache-Control max-age=60 455 ms         47 ms
+```
+
+**Sin caché, el _prefetch_ no sirve de nada.** El navegador descarga la página al pasar el ratón, gasta datos, y al hacer clic la vuelve a pedir. Con una caché corta, el clic baja a 47 ms. En una página con datos del usuario:
+
+```astro
+---
+Astro.response.headers.set("Cache-Control", "private, max-age=60");
+---
+```
+
+**View Transitions** convierte la navegación en una transición sin recargar la página:
+
+```astro
+---
+import { ClientRouter } from "astro:transitions";
+---
+
+<head>
+  <ClientRouter />
+</head>
+```
+
+Añadió 6,5 KB de JavaScript, y la navegación se hizo sin recarga. Pero fíjate en lo que registró la consola en dos páginas:
+
+```text
+script-una-vez
+page-load
+page-load
+```
+
+**Los `<script>` no se vuelven a ejecutar al navegar.** Se ejecutó una vez, y solo el evento `astro:page-load` se repitió. El recolector de A6.1 envía los datos al ocultar la pestaña, con la ruta de ese momento, así que todas las páginas de una visita quedarían en un solo registro, bajo la última ruta. En esta app no compensa, y no se añade: las páginas ya son rápidas y perderías las métricas por página.
+
+<Callout type="risk">
+
+- **Comprueba que tu prueba usa caché:** la primera medida del _prefetch_ dio el mismo tiempo en todos los casos, y parecía que no funcionaba. El fallo estaba en el laboratorio: Chromium no reutiliza la caché con `ignoreHTTPSErrors`. Con el certificado de confianza, apareció el resultado real. Si un dato no cuadra, busca la causa antes de escribirlo.
+- **`max-age` en páginas con datos:** usa `private`, para que ninguna caché compartida guarde datos de un usuario. Y acepta que pueden tener hasta 60 s de retraso. No lo pongas en una lista que acaba de cambiar.
+- **Solo enlaces seguros:** el _prefetch_ hace un GET. Un enlace que cambia algo, como un `/salir` por GET, se ejecutaría solo. Por eso cerrar sesión es un POST.
+- **En móvil no hay `hover`:** usa `tap` o `viewport`, sabiendo que `viewport` descarga más cosas que nadie pedirá.
+- **`prefetchAll` gasta datos de tus usuarios:** y carga tu servidor. Elige los enlaces probables.
+- **`ClientRouter` activa el _prefetch_:** lo dice su documentación, así que revisa qué se descarga si lo añades.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Reduce el JavaScript enviado en tu página más pesada al menos un 30 %, y mide el antes y el después.
+
+</Callout>
+
+Solución, con `/notas`. Tras el Paso 3 seguía en 92,3 KB. Para ver por qué, los archivos de esa página:
+
+```text
+/notas             92.3 KB en 10 archivos
+    55.8 KB  client.XI9U0KhD.js
+    22.5 KB  schemas.CaUk71cF.js
+     3.3 KB  _astro_actions.DBkyQHVi.js
+     3.1 KB  Vitales.astro_astro_type_script_index_0_lang.Ck
+```
+
+`schemas` es Zod. Lo traen dos componentes: `NuevaNota`, por la lista de categorías, y `NuevaNotaFetch`, por eso y por validar la respuesta de error. La misma receta. En `src/schemas/tipos.ts`, añade:
+
+```ts
+export const CATEGORIAS = ["trabajo", "personal", "salud", "estudio"] as const;
+```
+
+En `src/schemas/nota.ts`, en lugar de la constante:
+
+```ts
+export { CATEGORIAS } from "./tipos";
+import { CATEGORIAS } from "./tipos";
+```
+
+En `NuevaNota.tsx`, importa `CATEGORIAS` de `../schemas/tipos`. Y en `src/components/NuevaNotaFetch.tsx`, sin Zod:
+
+```tsx
+import { CATEGORIAS } from "../schemas/tipos";
+import type { NotaDTO } from "../schemas/nota";
+
+type RespuestaError = { error: string; campos?: Record<string, string[]> };
+
+// Dentro de guardar()
+const cuerpo = (await res.json().catch(() => null)) as RespuestaError | null;
+if (res.status === 422 && cuerpo) return setMensaje(`Revisa: ${Object.values(cuerpo.campos ?? {}).flat().join(", ")}`);
+setMensaje(res.status === 409 && cuerpo ? cuerpo.error : "No se pudo guardar");
+```
+
+```text
+/notas: de 103,8 KB a 69,4 KB, un 33 % menos
+```
+
+Comprobado en un navegador: el título vacío responde «Revisa: El título es obligatorio», y uno válido se guarda. Las `<select>` siguen con sus 4 opciones.
+
+- **`/entrar` era la más pesada, con 109,9 KB, y no llega al 30 %:** ahí todo tiene un uso. Sacar Zod ahorraría unos 21 KB más, por el tamaño de ese archivo: un 22 % en total, sin llegar. Pasar del 30 % exigiría rehacer el formulario sin React. Si tu página más pesada es así, puede que la decisión correcta sea anotarlo y dejarla.
+- **Añade el resultado a `docs/rendimiento.md`,** con la fecha, para que la próxima medida tenga con qué compararse.
+- **Vuelve a pasar `scripts/presupuesto.mjs`:** al bajar, puedes ajustar el límite para no perder lo ganado.
+
+<Callout type="mastery">
+
+Cada kilobyte de JavaScript de tus páginas tiene una justificación: sabes de dónde sale, qué página lo paga y por qué sigue ahí. Quitas islas antes de optimizarlas, cargas más tarde lo que se usa poco, y mides todas las páginas después de cada cambio. Sabes que `preload` puede empeorar el primer pintado, y que el _prefetch_ no hace nada sin caché.
+
+</Callout>
+
+## Resumen
+
+- **Mide antes:** `gzip` sobre los archivos del _build_ y `peso-js.mjs` por página.
+- **Quitar gana a optimizar:** pintar la sesión en el servidor bajó `/estadisticas` de 75 a 3 KB, un 96 %.
+- **Carga diferida:** un módulo tuyo, nunca `import("zod")`, que trajo 71 KB y subió otra página a 141 KB. Mide todas las páginas.
+- **`import type` y constantes aparte** evitan arrastrar una biblioteca por un valor.
+- **Directivas:** `client:visible` retrasó 60 KB hasta bajar, y `client:idle` no ahorró nada.
+- **Imágenes:** pasar por `<Image>` bajó el LCP de 1,8 s a 0,5 s, y de 294 a 29 KB. `priority` en la principal.
+- **Fuentes:** dividir por alfabetos descargó 50 de 188 KB. `preload` retrasó 100 ms el primer pintado.
+- **`prefetch`** bajó un clic de 455 a 47 ms, solo con `Cache-Control` que lo permita.
+- **`ClientRouter`** no vuelve a ejecutar los `<script>`: revisa tu recolector antes de añadirlo.
