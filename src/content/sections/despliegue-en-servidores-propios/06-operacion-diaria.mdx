@@ -1,0 +1,621 @@
+---
+sectionId: "A4.6"
+course: "A4"
+title: "Operación diaria"
+order: 6
+minutes: 90
+summary: "Conservas los registros entre despliegues, haces copias de MongoDB que restauras de verdad, automatizas las actualizaciones, vigilas la app desde dentro y desde fuera y escribes un runbook probado con averías reales."
+---
+
+Desplegar es un momento; operar es todos los días. Vercel te daba registros, avisos y parches sin que lo pidieras. En tu servidor, si nadie mira, un disco se llena en silencio, una copia deja de hacerse y la web se cae un sábado por la noche. Y lo sabrás por un usuario, o peor, no lo sabrás. El objetivo de esta sección es una sola frase: **enterarte de una caída antes que tus usuarios**, y saber qué hacer cuando ocurra.
+
+Una analogía: tener un servidor es como tener un coche. Conducir es lo divertido, pero hay un cuadro de mandos (la monitorización), revisiones periódicas (las actualizaciones), una rueda de repuesto que has comprobado que tiene aire (las copias) y un manual en la guantera para cuando se enciende una luz a medianoche (el _runbook_). Nada de eso importa hasta el día en que importa mucho.
+
+**Lo que tendrás al terminar:** registros que sobreviven a los despliegues, copias de MongoDB comprobadas cada noche, actualizaciones de seguridad automáticas, un vigilante interno, un monitor externo con avisos y un _runbook_ probado con averías reales.
+
+**Requisitos:** el montaje _blue-green_ de A4.5, en un servidor con dominio y HTTPS.
+
+<Callout type="note" title="Qué se ha ejecutado y qué no">
+
+Los registros, las copias, las actualizaciones, el vigilante y todas las averías se midieron en el servidor de pruebas. Dos cosas, no:
+
+- **Telegram:** los avisos se probaron contra un servidor local que imita su API, sin enviar ningún mensaje real.
+- **Uptime Kuma:** se comprobó que arranca y cuánto ocupa, pero no se configuró, porque exige crear una cuenta de administrador. Sus pasos del ejercicio salen de su documentación y de la de Telegram.
+
+</Callout>
+
+## Paso 1: registros que sobreviven
+
+Cada petición escribe una línea (el _middleware_ de I3.4), y Docker la guarda en un archivo JSON: **98 bytes por petición**, medido con 20 000. Se leen así:
+
+```bash
+docker compose logs --tail 100 blue
+docker compose logs --since 10m blue
+```
+
+Eso tiene un problema que no se ve hasta que lo necesitas. Medido en la instancia `blue`, antes y después de desplegar otra versión en ella:
+
+```text
+blue con registros:                     20000 líneas GET /entrar
+blue tras recrearse con otra versión:   0
+```
+
+**Cada despliegue borra los registros de esa instancia.** El contenedor se recrea, y su archivo se va con él. Justo cuando la versión nueva falla y quieres comparar con la anterior, no hay nada que comparar. Y en A4.2 viste la otra cara: mientras el contenedor vive, ese archivo no tiene límite de tamaño.
+
+La solución es sacarlos del contenedor. Docker puede enviarlos al **diario de `systemd`** (`journald`, I6.4), donde ya están los registros del resto del servidor. En `compose.yaml`, en el bloque `x-app`:
+
+```yaml
+  restart: unless-stopped
+  logging:
+    driver: journald # en el diario del servidor: sobreviven a cada despliegue (A4.6)
+    options:
+      tag: entrenos
+```
+
+Se aplica a cada instancia la próxima vez que se recree, en tu siguiente despliegue. Medido igual, tras recrear:
+
+```text
+tras recrear green, diario:   20000
+```
+
+Y ahora, además, las dos instancias están en un mismo sitio. `docker compose logs` sigue funcionando, y `journalctl` añade búsquedas:
+
+```bash
+sudo journalctl -t entrenos -n 50                          # las últimas 50 líneas
+sudo journalctl -t entrenos -f                             # en directo
+sudo journalctl -t entrenos --since "1 hour ago" | grep "→ 5"   # errores 5xx de la última hora
+```
+
+Esto tiene un precio: el diario guarda muchos metadatos con cada línea, **1258 bytes por petición** frente a 98. Por eso necesita un límite. Crea `/etc/systemd/journald.conf.d/limite.conf`:
+
+```ini
+[Journal]
+SystemMaxUse=500M
+MaxRetentionSec=30day
+```
+
+```bash
+sudo systemctl restart systemd-journald
+sudo journalctl --disk-usage
+```
+
+```text
+Archived and active journals take up 178.4M in the file system.
+```
+
+Con ese tamaño caben unos 400 000 registros de petición: si tienes mucho tráfico, durarán días, no un mes. Los de Nginx ya están resueltos: Ubuntu instala `/etc/logrotate.d/nginx`, que los rota cada día (`daily`), los comprime y conserva 14.
+
+<Callout type="risk">
+
+- **Los registros están en el servidor:** si el servidor muere, se van con él, y si alguien entra, puede borrarlos. Por eso existen los servicios de registros centralizados (Better Stack Logs, Grafana Loki), que los envían fuera. Para una app personal, `journald` basta; con usuarios reales, valora enviarlos fuera.
+- **`docker compose logs` solo lee lo que existe:** una instancia recreada empieza vacía para esa orden si no usas `journald`. Con el diario, usa `journalctl -t entrenos` para ver todo.
+- **Sin datos personales en los registros:** nunca escribas contraseñas, _tokens_ ni cuerpos de petición. Tu _middleware_ registra método, ruta y código, y eso es lo correcto. Cuidado con los parámetros de la URL.
+- **1258 bytes es lo que crece la carpeta del diario,** que reserva espacio por bloques: es una aproximación. Lo que importa es que el límite existe y que se cumple.
+
+</Callout>
+
+## Paso 2: copias que has restaurado
+
+En A4.2 quedó pendiente lo más importante. Tu MongoDB en Compose no tiene copias automáticas: si se borra el volumen, se acabó. (Si usas Atlas, tiene las suyas; I4.5.)
+
+`mongodump` crea una copia, y `mongorestore` la devuelve. Pero **una copia que nunca has restaurado no es una copia, es una esperanza**. `scripts/copia-mongo.sh` hace las dos cosas cada vez: guarda la copia, la restaura en una base aparte y compara los documentos.
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/copia-mongo.sh
+# Copia de MongoDB comprobada: la restaura en una base aparte y compara los documentos.
+# Uso, en el servidor, desde la carpeta del proyecto: bash scripts/copia-mongo.sh
+set -euo pipefail
+
+BASE=entrenos
+DESTINO=/var/backups/entrenos
+CONSERVAR_DIAS=14
+ARCHIVO="$DESTINO/$BASE-$(date +%Y%m%d-%H%M).archive.gz"
+
+mongo() { docker compose exec -T mongo "$@"; }
+contar() { # documentos por colección de una base, en orden
+  mongo mongosh --quiet "$1" --eval \
+    'db.getCollectionNames().sort().forEach((c) => print(c, db[c].countDocuments()))'
+}
+
+# Primero a .parcial: un corte a medias no debe parecer una copia buena
+mongo mongodump --quiet --archive --gzip --db "$BASE" > "$ARCHIVO.parcial"
+mv "$ARCHIVO.parcial" "$ARCHIVO"
+
+# Una copia que no se ha restaurado no es una copia
+mongo mongorestore --quiet --archive --gzip --drop \
+  --nsFrom "$BASE.*" --nsTo "verificacion.*" < "$ARCHIVO"
+ORIGINAL="$(contar "$BASE")"
+RESTAURADA="$(contar verificacion)"
+mongo mongosh --quiet verificacion --eval 'db.dropDatabase()' >/dev/null
+
+if [ "$ORIGINAL" != "$RESTAURADA" ]; then
+  echo "✗ La copia no coincide con la base de datos" >&2
+  diff <(echo "$ORIGINAL") <(echo "$RESTAURADA") >&2 || true
+  rm -f "$ARCHIVO"
+  exit 1
+fi
+
+find "$DESTINO" -name '*.archive.gz' -mtime +"$CONSERVAR_DIAS" -delete
+echo "✓ $ARCHIVO ($(du -h "$ARCHIVO" | cut -f1)), $(echo "$ORIGINAL" | wc -l | tr -d ' ') colecciones comprobadas"
+```
+
+```bash
+sudo install -d -o deploy -g deploy -m 700 /var/backups/entrenos
+bash scripts/copia-mongo.sh
+```
+
+```text
+✓ /var/backups/entrenos/entrenos-20261105-2131.archive.gz (8.0K), 5 colecciones comprobadas
+```
+
+- **`--archive --gzip`:** todo en un flujo comprimido, que sale del contenedor a un archivo del servidor.
+- **`.parcial`:** el nombre definitivo solo se pone al terminar. Un corte a medias nunca parece una copia buena.
+- **`--nsFrom` y `--nsTo`:** restauran `entrenos.*` como `verificacion.*`, sin tocar la base real.
+- **`-mtime +14`:** borra solo después de comprobar la nueva.
+
+**Hazlo de verdad una vez.** Simulacro: se guardó una copia, se borró la base de datos entera y se restauró:
+
+```bash
+docker compose exec -T mongo mongosh --quiet entrenos --eval "db.dropDatabase().ok"
+curl -s -b sesion.txt https://academy.tudominio.com/api/entrenos
+curl -s https://academy.tudominio.com/api/health
+```
+
+```text
+1
+{"entrenos":[]}
+{"ok":true,"version":"v2"}
+```
+
+Fíjate en la última línea. **Con todos los datos borrados, `/api/health` dice que todo va bien, y la app responde 200 con una lista vacía.** Ningún monitor te avisará de esto. Y la restauración:
+
+```bash
+docker compose exec -T mongo mongorestore --archive --gzip --drop < /var/backups/entrenos/entrenos-20261105-2131.archive.gz
+```
+
+```text
+48 document(s) restored successfully. 0 document(s) failed to restore.
+```
+
+El entreno volvió a aparecer, con la misma sesión.
+
+Para que se haga cada noche, un temporizador de `systemd` (I6.4), en dos archivos:
+
+```ini
+# Archivo: /etc/systemd/system/entrenos-copia.service
+[Unit]
+Description=Copia comprobada de MongoDB
+After=docker.service
+
+[Service]
+Type=oneshot
+User=deploy
+WorkingDirectory=/opt/entrenos
+ExecStart=/usr/bin/bash scripts/copia-mongo.sh
+```
+
+```ini
+# Archivo: /etc/systemd/system/entrenos-copia.timer
+[Unit]
+Description=Copia de MongoDB cada noche
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15m
+# Si el servidor estaba apagado a esa hora, se hace al arrancar
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now entrenos-copia.timer
+sudo systemctl start entrenos-copia.service   # pruébalo ya: no esperes a las 3:30
+systemctl list-timers "entrenos-*"
+```
+
+**`deploy`** debe estar en el grupo `docker` y ser dueño de `/var/backups/entrenos`. **`Persistent=true`** hace la copia al arrancar si el servidor estaba apagado a esa hora.
+
+<Callout type="risk">
+
+- **Una copia en el mismo servidor no te salva del servidor:** si falla el disco o te borran la máquina, se pierde con todo lo demás. Copia el archivo fuera cada día: a otro servidor con `scp`, o a un almacenamiento como Backblaze B2 o S3, con `rclone`. Es lo único de esta sección que no puede faltar.
+- **Las copias contienen hashes de contraseñas, sesiones y datos personales:** `chmod 700` en la carpeta, y cifradas si salen del servidor.
+- **`systemd` no admite comentarios al final de una línea:** `Persistent=true # …` se ignora con un aviso que nadie lee. La primera versión de este archivo lo tenía. Compruébalo con `systemd-analyze verify /etc/systemd/system/entrenos-copia.timer`, que aquí lo detectó.
+- **Restaurar con `--drop` borra lo que haya:** antes de un `mongorestore` real, guarda una copia del estado actual, aunque esté mal.
+
+</Callout>
+
+## Paso 3: actualizaciones de seguridad
+
+Ubuntu trae **`unattended-upgrades`** instalado y activo: cada día instala los parches de seguridad sin que hagas nada. Compruébalo, y mira qué instalaría:
+
+```bash
+cat /etc/apt/apt.conf.d/20auto-upgrades
+sudo unattended-upgrade --dry-run -d 2>&1 | grep -E "Allowed origins"
+```
+
+```text
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+Allowed origins are: o=Ubuntu,a=resolute, o=Ubuntu,a=resolute-security, o=UbuntuESM…
+```
+
+Lo importante es **lo que no cubre**. Había actualizaciones pendientes de Docker y del núcleo. El ensayo incluía `linux-image-virtual`, y ningún paquete de Docker:
+
+```text
+docker-ce/resolute 5:29.9.3-1~ubuntu.26.04~resolute arm64 [upgradable from: 5:29.9.2-1…
+linux-image-virtual/resolute-updates 7.0.0-43.43 arm64 [upgradable from: 7.0.0-38.38]
+```
+
+Solo actualiza lo que viene de Ubuntu. Lo que añadiste tú, no:
+
+| Componente                            | Quién lo actualiza                                 |
+| ------------------------------------- | -------------------------------------------------- |
+| Ubuntu, núcleo, Nginx, OpenSSL        | `unattended-upgrades`, solo                        |
+| Docker y Node (repositorios externos) | Tú: `sudo apt update && sudo apt upgrade` cada mes |
+| `node:26-alpine` dentro de tu imagen  | Tú: reconstruir sin caché (`docker build --pull`)  |
+| `mongo:8.2`                           | Tú: leer las notas de versión y probar (A4.2)      |
+| Dependencias de npm                   | Tú: `npm audit`, y desplegar                       |
+
+**El núcleo necesita un reinicio**, y Ubuntu no lo hace solo: `Automatic-Reboot` viene comentado en `/etc/apt/apt.conf.d/50unattended-upgrades`. Cuando hace falta, aparece el archivo `/var/run/reboot-required`, y el vigilante del Paso 4 te lo dirá. ¿Asusta reiniciar? Se midió: desde `sudo reboot`, en esta máquina virtual, `/api/health` volvió a responder 200 en **7,4 s**, sin tocar nada:
+
+```text
+t=5.1 s -> 000
+t=6.1 s -> 502
+t=7.4 s -> 200
+```
+
+```text
+blue entrenos:v1 Exited (143) 4 minutes ago
+green entrenos:v2 Up 4 seconds (healthy)
+mongo mongo:8.2 Up 4 seconds (health: starting)
+```
+
+Un VPS real tardará más, pero la secuencia será la misma. `restart: unless-stopped` levanta lo que estaba en marcha y respeta lo que estaba parado, así que `volver.sh` sigue teniendo su instancia. Y el diario conservó los registros del arranque anterior.
+
+<Callout type="risk">
+
+- **Un parche puede romper algo:** es raro, pero ocurre. Compara el riesgo con el de no parchear un servidor abierto a internet. Si algo deja de funcionar, `/var/log/unattended-upgrades/` dice qué se instaló.
+- **No actives `Automatic-Reboot` sin pensarlo:** un reinicio a las 2:00 no te corta mucho, pero un núcleo nuevo también puede cambiar cosas, como viste con MongoDB en A4.2. Mejor reiniciar tú, cuando puedas mirar.
+- **Tu imagen no se parchea sola:** Node y Alpine quedan congelados el día del _build_. Despliega al menos una vez al mes aunque no cambies nada.
+
+</Callout>
+
+## Paso 4: vigilar desde dentro
+
+Hay problemas que nadie ve desde fuera hasta que es tarde: el disco al 90 %, la copia que dejó de hacerse, el certificado sin renovar. `scripts/vigilar.sh` los comprueba cada 5 minutos y avisa por Telegram **solo cuando algo cambia**:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/vigilar.sh
+# Lo que un monitor externo no ve desde fuera. Avisa por Telegram solo cuando algo cambia.
+# Lo ejecuta un temporizador de systemd cada 5 minutos, con las variables de /etc/entrenos/avisos.env
+set -uo pipefail
+
+: "${DOMINIO:?}" "${TELEGRAM_TOKEN:?}" "${TELEGRAM_CHAT:?}"
+TELEGRAM_API="${TELEGRAM_API:-https://api.telegram.org}"
+COPIAS="${COPIAS:-/var/backups/entrenos}"
+ESTADO=/var/tmp/entrenos-vigilar.estado
+DISCO_MAX=85
+COPIA_MAX_HORAS=26
+CERT_MIN_DIAS=14
+
+problemas=()
+
+salud="$(curl -s -m 8 -o /dev/null -w '%{http_code}' "https://$DOMINIO/api/health")"
+[ "$salud" = 200 ] || problemas+=("La app no está sana: /api/health responde $salud")
+
+disco="$(df --output=pcent / | tail -n 1 | tr -dc 0-9)"
+[ "$disco" -lt "$DISCO_MAX" ] || problemas+=("Disco al $disco %")
+
+reciente="$(find "$COPIAS" -name '*.archive.gz' -mmin -$((COPIA_MAX_HORAS * 60)) | head -n 1)"
+[ -n "$reciente" ] || problemas+=("Ninguna copia de MongoDB en las últimas $COPIA_MAX_HORAS horas")
+
+if ! echo | openssl s_client -connect "$DOMINIO:443" -servername "$DOMINIO" 2>/dev/null |
+  openssl x509 -noout -checkend $((CERT_MIN_DIAS * 86400)) >/dev/null; then
+  problemas+=("El certificado caduca en menos de $CERT_MIN_DIAS días")
+fi
+
+[ -f /var/run/reboot-required ] && problemas+=("El servidor necesita reiniciarse (actualizaciones)")
+
+avisar() {
+  curl -s -m 10 -o /dev/null --fail "$TELEGRAM_API/bot$TELEGRAM_TOKEN/sendMessage" \
+    --data-urlencode "chat_id=$TELEGRAM_CHAT" --data-urlencode "text=$1"
+}
+
+actual="$(printf '%s\n' "${problemas[@]:-}")"
+anterior="$(cat "$ESTADO" 2>/dev/null || true)"
+[ "$actual" = "$anterior" ] && exit 0 # sin cambios: no repitas el aviso cada 5 minutos
+
+if [ -n "$actual" ]; then
+  avisar "⚠️ $DOMINIO
+$actual" || exit 1
+else
+  avisar "✅ $DOMINIO: todo resuelto" || exit 1
+fi
+echo "$actual" > "$ESTADO" # solo si el aviso ha salido: si falla, se reintenta en la próxima pasada
+```
+
+Las variables van en `/etc/entrenos/avisos.env`, con `chmod 600`, porque el _token_ es una contraseña:
+
+```bash
+DOMINIO=academy.tudominio.com
+TELEGRAM_TOKEN=123456:ABC-tu-token
+TELEGRAM_CHAT=tu-chat-id
+```
+
+Y su temporizador, igual que el de las copias:
+
+```ini
+# Archivo: /etc/systemd/system/entrenos-vigilar.service
+[Unit]
+Description=Comprobaciones internas del servidor
+
+[Service]
+Type=oneshot
+User=deploy
+EnvironmentFile=/etc/entrenos/avisos.env
+ExecStart=/usr/bin/bash /opt/entrenos/scripts/vigilar.sh
+```
+
+```ini
+# Archivo: /etc/systemd/system/entrenos-vigilar.timer
+[Unit]
+Description=Comprobaciones internas cada 5 minutos
+
+[Timer]
+OnBootSec=2m
+OnUnitActiveSec=5m
+
+[Install]
+WantedBy=timers.target
+```
+
+Probado escenario por escenario, contando los mensajes que recibiría Telegram:
+
+```text
+[todo bien]                     mensajes: 0
+[mongo parado]                  mensajes: 1
+[mongo parado, segunda pasada]  mensajes: 1
+[mongo de vuelta]               mensajes: 2
+[sin copia]                     mensajes: 3
+[reinicio pendiente]            mensajes: 4
+[resuelto]                      mensajes: 5
+```
+
+```text
+⚠️ academy.entrenos.test / La app no está sana: /api/health responde 503
+✅ academy.entrenos.test: todo resuelto
+⚠️ academy.entrenos.test / Ninguna copia de MongoDB en las últimas 26 horas
+⚠️ academy.entrenos.test / El servidor necesita reiniciarse (actualizaciones)
+✅ academy.entrenos.test: todo resuelto
+```
+
+Y con un archivo de 6 GB, para llenar el disco:
+
+```text
+⚠️ academy.entrenos.test / Disco al 88 %
+```
+
+- **Solo avisa si cambia:** la segunda pasada con MongoDB parado no repite el mensaje. Si un aviso se repite cada 5 minutos, acabarás silenciándolo, y entonces no sirve.
+- **`|| exit 1` antes de guardar el estado:** con Telegram inaccesible, el _script_ termina con error y no anota nada, así que lo reintenta en la siguiente pasada. Medido: `exit 1`, y sin archivo de estado.
+
+<Callout type="risk">
+
+- **Un vigilante en el servidor muere con el servidor:** si la máquina se apaga, no avisa de nada. Por eso hace falta también el Paso 5. Son complementarios.
+- **Lo que más llena el disco son las imágenes:** en este servidor, 9,3 GB, 7 GB de ellos recuperables (`docker system df`). `docker image prune -a --filter "until=720h"` borra las de hace más de 30 días que no use ningún contenedor. Deja las recientes, para poder volver atrás.
+- **Quién escribe en el estado:** si pruebas el _script_ a mano con `sudo`, el archivo de `/var/tmp` queda de `root`, y `deploy` no podrá actualizarlo. Pruébalo siempre con el mismo usuario.
+
+</Callout>
+
+## Paso 5: vigilar desde fuera
+
+Un monitor externo pregunta a tu web cada minuto desde otra máquina y te avisa si deja de responder. Hay dos caminos:
+
+- **Uptime Kuma:** autoalojado y de código abierto. Medido, su imagen `louislam/uptime-kuma:2` (versión 2.5.9) ocupa **2,56 GB** y el proceso, unos 126 MB de memoria. Arranca en 2 s y lleva a `/setup-database`, donde se crea la cuenta. Admite Telegram, y comprobar JSON o palabras clave.
+- **Better Stack:** un servicio. Su plan gratuito para proyectos personales incluye 10 monitores y avisos por correo y Slack; Telegram no aparece en esa lista.
+
+**¿Qué URL vigilar?** Esto se midió provocando cada avería:
+
+| Avería         | `/`          | `/entrar`    | `/api/health` |
+| -------------- | ------------ | ------------ | ------------- |
+| Todo bien      | 200          | 200          | 200           |
+| App parada     | 502          | 502          | 502           |
+| MongoDB parado | **200**      | **200**      | **503**       |
+| Nginx parado   | sin conexión | sin conexión | sin conexión  |
+
+**Con MongoDB caído, la portada y `/entrar` siguen en 200.** Un monitor sobre la portada estaría en verde con la app inservible. Vigila siempre `/api/health`, y comprueba que el cuerpo contiene `"ok":true`.
+
+<Callout type="risk">
+
+- **El monitor debe estar en otra máquina:** un Kuma en el mismo servidor cae con él, y no avisa cuando más lo necesitas. Ponlo en un VPS mínimo, en una Raspberry Pi o en un servicio externo. Un monitor gratuito externo es mejor que uno propio en el mismo servidor.
+- **Comprueba el aviso, no solo el monitor:** para la app a propósito una vez y mira si llega el mensaje. Un aviso sin probar es como un detector de humo sin pila.
+- **Da un margen:** 1 o 2 reintentos antes de avisar evitan falsas alarmas por un corte de red. Kuma 2 usa 0 reintentos por defecto en los monitores nuevos.
+- **Un monitor no ve los errores de lógica:** ni los datos borrados del Paso 2, ni una página concreta que falla. Comprueba lo que comprueba, y nada más.
+
+</Callout>
+
+## Paso 6: el _runbook_
+
+A las tres de la mañana no se piensa bien. Un **_runbook_** es lo que escribes hoy, con la cabeza despejada, para esa persona: tú mismo, nervioso, con el móvil en la mano. Cada orden de este se ejecutó provocando la avería correspondiente. Guárdalo en `docs/runbook.md`, en el repositorio:
+
+````markdown
+# Runbook · Dani Academy autoalojada
+
+Servidor: `ssh deploy@academy.tudominio.com` · Proyecto: `/opt/entrenos`
+
+## La web no responde
+
+1. Desde tu equipo, sin entrar al servidor:
+
+   ```bash
+   curl -s -m 8 -w " -> %{http_code}\n" https://academy.tudominio.com/api/health
+   ```
+
+2. Busca el síntoma en la tabla y ve a su sección.
+
+| `/api/health`            | Portada | Qué pasa              | Sección     |
+| ------------------------ | ------- | --------------------- | ----------- |
+| `{"ok":true,…}` 200      | 200     | La app está bien      | Otro fallo  |
+| `{"ok":false,…}` 503     | 200     | MongoDB               | MongoDB     |
+| 502                      | 502     | La app no responde    | La app      |
+| Sin conexión (`000`)     | Igual   | Nginx o el servidor   | Nginx       |
+
+## La app (502)
+
+```bash
+cd /opt/entrenos
+cat /etc/nginx/entrenos-activo.conf          # 4321 = blue, 4322 = green
+docker compose ps
+sudo tail -n 5 /var/log/nginx/error.log      # connect() failed: Node no escucha
+docker compose logs --tail 100 green         # o blue: la instancia activa
+docker compose start green                   # si está parada
+```
+
+Si empezó tras un despliegue, vuelve atrás: `bash scripts/volver.sh`
+
+## MongoDB (503)
+
+```bash
+docker compose ps mongo
+docker compose exec -T mongo mongosh --quiet --eval 'db.adminCommand({ ping: 1 }).ok'
+docker compose logs --tail 50 mongo
+docker compose start mongo
+```
+
+La portada y `/entrar` siguen dando 200: no te fíes de ellas.
+
+## Nginx o el servidor (sin conexión)
+
+```bash
+ssh deploy@academy.tudominio.com             # ¿No entra? Panel del proveedor: ¿servidor encendido?
+systemctl is-active nginx docker
+sudo nginx -t
+sudo systemctl start nginx
+sudo tail -n 20 /var/log/nginx/error.log
+```
+
+## Disco lleno
+
+```bash
+df -h /
+docker system df
+docker image ls entrenos                     # conserva las últimas versiones
+docker image prune -a --filter "until=720h"  # imágenes sin usar de hace más de 30 días
+sudo journalctl --disk-usage
+```
+
+## Datos borrados o dañados
+
+`/api/health` seguirá en 200: la app funciona, pero sin tus datos. Avisa antes de tocar nada.
+
+```bash
+ls -lt /var/backups/entrenos | head
+docker compose exec -T mongo mongorestore --archive --gzip --drop < /var/backups/entrenos/ARCHIVO
+```
+
+## Después de cada incidente
+
+Apunta aquí qué pasó, cómo lo notaste y qué vas a cambiar. Si este documento no te sirvió, corrígelo.
+````
+
+Lo más útil es la tabla inicial: el código de `/api/health` te dice dónde mirar antes de entrar al servidor. Y los mensajes que viste en los simulacros:
+
+```text
+App parada, /var/log/nginx/error.log:
+  connect() failed (111: Connection refused) while connecting to upstream
+
+MongoDB parado, docker compose logs:
+  GET /api/health → 503 (2009.0 ms)
+  docker compose exec … mongosh → service "mongo" is not running
+
+Nginx parado:
+  systemctl is-active nginx → inactive
+```
+
+<Callout type="risk">
+
+- **Un _runbook_ sin probar miente:** se queda viejo en cuanto cambias algo. Por eso ha de vivir en el repositorio, y por eso cada incidente termina corrigiéndolo.
+- **El ejemplo de `app` ya no vale:** con _blue-green_ son `blue` y `green`. Mira primero cuál está activa.
+- **Que no dependa de lo que se ha caído:** guarda una copia fuera del servidor. Si no puedes entrar, un archivo dentro no te sirve.
+- **Primero recupera, luego investiga:** con la web caída, `volver.sh` antes que entender el fallo. Los registros seguirán ahí, ahora que están en el diario.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Monta Uptime Kuma en Docker, en una máquina que no sea tu servidor, para que vigile `/api/health` y te avise por Telegram.
+2. Para la app a propósito y comprueba cuánto tardas en enterarte. Después, vuelve a arrancarla y comprueba que llega el aviso de recuperación.
+3. Haz un simulacro completo con tu _runbook_: pide a alguien que pare un servicio sin decirte cuál, o hazlo tú con un `sleep` aleatorio, y arréglalo siguiendo solo lo que está escrito. Corrige lo que te falte.
+
+</Callout>
+
+Solución. Estos pasos salen de la documentación oficial de Telegram y de Uptime Kuma, y no se han ejecutado aquí.
+
+**El _bot_ de Telegram.** Habla con `@BotFather`, envía `/newbot` y sigue los pasos: el nombre de usuario debe terminar en `bot`, y al final recibirás el _token_. Envía cualquier mensaje a tu _bot_ y consulta el identificador de tu chat, en `message.chat.id`:
+
+```bash
+curl -s "https://api.telegram.org/bot<token>/getUpdates"
+```
+
+Compruébalo antes de seguir:
+
+```bash
+curl -s "https://api.telegram.org/bot<token>/sendMessage" \
+  --data-urlencode "chat_id=<chat_id>" --data-urlencode "text=Prueba de aviso"
+```
+
+**Kuma**, en una máquina que no sea tu servidor:
+
+```bash
+docker run -d --restart=always -p 127.0.0.1:3001:3001 -v uptime-kuma:/app/data --name uptime-kuma louislam/uptime-kuma:2
+```
+
+El volumen `uptime-kuma` conserva sus datos. Con `127.0.0.1`, Docker no abre el puerto a internet (A4.2). Para entrar desde tu equipo, un túnel SSH (I6.3):
+
+```bash
+ssh -L 3001:127.0.0.1:3001 usuario@maquina-del-monitor
+```
+
+Abre `http://localhost:3001`, elige la base de datos y crea tu cuenta, con una contraseña larga. Después:
+
+1. _Settings_ → _Notifications_ → añade una de tipo **Telegram**, con tu _token_ y tu chat, y envía la prueba que ofrece.
+2. _Add New Monitor_ → tipo **HTTP(s) - Keyword**, URL `https://academy.tudominio.com/api/health`, palabra clave `"ok":true`, intervalo de 60 s y 1 o 2 reintentos. Marca la notificación.
+
+Los dos simulacros del punto 2, en tu servidor:
+
+```bash
+docker compose stop green     # o blue: la instancia activa
+docker compose start green
+```
+
+Con un intervalo de 60 s y un reintento, espera el aviso en un par de minutos. Mide el tuyo: ese número es el tiempo que tu web puede estar caída sin que lo sepas.
+
+<Callout type="risk">
+
+- **No publiques Kuma tal cual:** detrás de esa cuenta están tus avisos y tus _tokens_. Túnel SSH, o Nginx con HTTPS (A4.3 y A4.4).
+- **El _token_ del _bot_ es una contraseña:** quien lo tenga puede escribir en tu nombre. Fuera de Git; si se filtra, `@BotFather` te permite revocarlo.
+- **`getUpdates` puede devolver una lista vacía:** las actualizaciones se guardan solo 24 horas. Envía otro mensaje a tu _bot_ y repite.
+
+</Callout>
+
+<Callout type="mastery">
+
+Te enteras de una caída antes que tus usuarios: un monitor externo vigila `/api/health`, porque la portada puede dar 200 con MongoDB caído, y un vigilante interno te avisa del disco, las copias, el certificado y los reinicios pendientes. Tus registros sobreviven a los despliegues, tus copias se restauran de verdad cada noche y tu _runbook_ se ha probado con averías reales. Y sabes lo que ningún monitor te dirá: que los datos han desaparecido mientras todo sigue en verde.
+
+</Callout>
+
+## Resumen
+
+- **Registros:** con `json-file`, un despliegue dejó las 20 000 líneas en 0. Con `driver: journald` sobreviven. A cambio ocupan unas 13 veces más (1258 bytes frente a 98): pon `SystemMaxUse`.
+- **Copias:** `mongodump`, restaurar en otra base y comparar, cada noche, con un temporizador. Simulacro real: 48 documentos recuperados. Y una copia fuera del servidor.
+- **Con la base borrada, `/api/health` sigue en 200:** ningún monitor te lo dirá.
+- **Actualizaciones:** `unattended-upgrades` cubre Ubuntu, pero no Docker, ni Node, ni tu imagen, ni MongoDB. Reinicia tú: 7,4 s en esta máquina, y todo volvió solo.
+- **Vigilante interno:** disco, copia, certificado y reinicio pendiente, con aviso solo cuando algo cambia.
+- **Monitor externo,** en otra máquina y sobre `/api/health`: con MongoDB caído, la portada da 200.
+- **_Runbook_:** en el repositorio, probado con averías, y empieza por una tabla de síntomas. Primero recupera, luego investiga.
