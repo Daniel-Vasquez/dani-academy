@@ -1,0 +1,368 @@
+---
+sectionId: "A7.4"
+course: "A7"
+title: "Despliegue continuo"
+order: 4
+minutes: 85
+summary: "Haces que desplegar sea mezclar una PR: imagen por commit, clave SSH que solo puede desplegar, entornos y versiones. 423 sondas sin un fallo durante cuatro despliegues, y una versión rota que no llegó a nadie."
+---
+
+Hasta ahora, desplegar en tu servidor (A4) era entrar por SSH y lanzar un _script_. Funciona, pero depende de que te acuerdes, de que estés delante y de que lo hagas siempre igual. **Despliegue continuo** significa que lo que pasa el CI llega a producción solo. El objetivo es que desplegar deje de ser un evento: mezclas una PR, y ya está.
+
+Una analogía: un correo interno frente a llevar tú los paquetes. Si cada entrega exige que cojas el coche, entregas poco y en grandes cantidades, y cada viaje es arriesgado. Con un servicio que pasa cada hora, envías paquetes pequeños sin pensar. Si uno sale mal, sabes cuál fue. Y como el repartidor tiene una tarjeta que solo abre el buzón, no le das las llaves de toda la casa.
+
+**Lo que tendrás al terminar:** cada _merge_ a `main` desplegado solo, sin cortes, con una clave que solo sirve para eso, una forma de volver atrás y versiones con significado.
+
+**Requisitos:** el CI de A7.3 y el despliegue _blue-green_ de A4.
+
+## Paso 1: en Vercel ya lo tienes
+
+La plataforma de este curso se despliega así, y ahora puedes entender qué ocurre. Según la documentación de Vercel, en cuanto conectas tu repositorio:
+
+- **Cada PR o rama** crea un despliegue de **vista previa**, con su propia URL. Puedes probar el cambio antes de mezclarlo.
+- **Cada _merge_ a `main`** crea un despliegue de **producción**.
+
+No hay _workflow_ que escribir, y eso tiene una consecuencia que conviene ver: por defecto, Vercel despliega al recibir el cambio, sin esperar a tu CI. Si quieres que nada llegue a producción sin pasar los tests, necesitas la regla de protección de A7.2, para que `main` no reciba lo que no ha pasado. Esta parte no se ha medido aquí: no se ha tocado ningún despliegue real.
+
+Lo que sigue es para tu propio servidor, donde todo eso hay que construirlo.
+
+## Paso 2: una clave que solo puede desplegar
+
+Un CI necesita entrar en tu servidor. Si le das tu clave, y alguien compromete el CI, tiene tu servidor. La regla: **que la clave solo pueda hacer una cosa**.
+
+En el servidor, un usuario propio:
+
+```bash
+sudo useradd -m -s /bin/bash deploy
+sudo usermod -aG docker deploy
+ssh-keygen -t ed25519 -N '' -C 'ci-despliegue' -f deploy_ci # en tu equipo
+```
+
+Este _script_ es lo único que la clave podrá ejecutar. La orden llega como texto, así que se valida. `scripts/despliegue-remoto.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Archivo: scripts/despliegue-remoto.sh
+# Lo único que puede ejecutar la clave SSH del CI. La versión llega como texto: se valida
+set -euo pipefail
+
+VERSION="${SSH_ORIGINAL_COMMAND:-}"
+IMAGEN="${IMAGEN_REGISTRO:?Falta IMAGEN_REGISTRO}"
+
+if [[ ! "$VERSION" =~ ^[0-9a-f]{7,40}$ ]]; then
+  echo "✗ Versión no válida" >&2
+  exit 1
+fi
+
+cd /opt/lab/entrenos-app
+docker pull -q "$IMAGEN:$VERSION"
+docker tag "$IMAGEN:$VERSION" "entrenos:$VERSION" # con esta etiqueta, desplegar.sh no reconstruye
+bash scripts/desplegar.sh "$VERSION"
+```
+
+En `/home/deploy/.ssh/authorized_keys`, una línea con la clave pública, con la orden forzada y `restrict`:
+
+```text
+command="IMAGEN_REGISTRO=ghcr.io/tu-usuario/entrenos /opt/entrenos-app/scripts/despliegue-remoto.sh",restrict ssh-ed25519 AAAA… ci-despliegue
+```
+
+`desplegar.sh` usa `sudo` para cambiar Nginx. Solo le das eso, en `/etc/sudoers.d/deploy-entrenos`:
+
+```text
+deploy ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/entrenos-activo.conf, /usr/sbin/nginx -t -q, /usr/bin/systemctl reload nginx
+```
+
+Y una trampa: `publicar-estaticos.sh` usaba `sudo cp -r`. Permitirlo equivale a dar acceso de escritura a todo el disco. En su lugar, haz a `deploy` propietario de `/var/www/entrenos` y quita esos `sudo`.
+
+Se intentó abusar de la clave:
+
+```text
+cat /opt/lab/entrenos-app/.env       ✗ Versión no válida
+id                                   ✗ Versión no válida
+abc1234; id                          ✗ Versión no válida
+abc1234 && cat /etc/passwd           ✗ Versión no válida
+$(id)                                ✗ Versión no válida
+../../etc/passwd                     ✗ Versión no válida
+sesión sin orden                     ✗ Versión no válida
+reenvío de puerto a MongoDB          open failed: administratively prohibited
+```
+
+También hay que comprobar **a quién** te conectas. Guarda la huella del servidor y deja activa la comprobación:
+
+```bash
+ssh-keyscan -t ed25519 tu-servidor.com # compárala con la del propio servidor antes de confiar
+```
+
+Con una huella que no coincide, se cortó la conexión antes de enviar nada:
+
+```text
+WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!
+Host key verification failed.
+```
+
+<Callout type="risk">
+
+- **Estar en el grupo `docker` equivale casi a ser `root`:** quien pueda ejecutar `docker` puede montar todo el disco. Lo único que lo impide aquí es la orden forzada. Por eso es importante `restrict`, y por eso `deploy` no debe ser tu usuario.
+- **Nunca uses `StrictHostKeyChecking=no`:** lo verás en muchos ejemplos, para que funcione a la primera. Desactiva justo la protección que acabas de ver.
+- **Validar la versión no es opcional:** `SSH_ORIGINAL_COMMAND` lo escribe quien se conecta. La expresión regular es lo que convirtió `abc1234; id` en un rechazo. Y no uses `eval`.
+- **Rota la clave:** si dudas, genera otra y cambia el secreto. El CI es otro sitio donde vive esa clave.
+- **El puerto SSH queda abierto al mundo:** los _runners_ de GitHub no tienen una IP fija, así que no puedes limitarlo por IP sin más trabajo. Usa solo claves, sin contraseñas (A4).
+- **Para una nube, usa OIDC:** tokens de corta duración, válidos para un _job_, en lugar de claves permanentes. Para SSH a un VPS, esta configuración es lo razonable.
+
+</Callout>
+
+## Paso 3: el job de despliegue
+
+Se construye **una imagen por _commit_**, se publica en GHCR, y el servidor se limita a descargarla. Añade a `.github/workflows/ci.yml`:
+
+```yaml
+  desplegar:
+    needs: [verificar, e2e] # solo lo que ha pasado todo
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: produccion # de uno en uno, sin cancelar uno a medias
+    environment: produccion
+    permissions:
+      contents: read
+      packages: write # publicar la imagen en GHCR
+    env:
+      IMAGEN: ghcr.io/${{ github.repository_owner }}/entrenos
+      VERSION: ${{ github.sha }}
+      APP_HOSTNAME: ${{ vars.APP_HOSTNAME }}
+      VPS_HOST: ${{ vars.VPS_HOST }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Entrar en GHCR
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Construir y publicar la imagen
+        run: |
+          docker build -q -t "$IMAGEN:$VERSION" \
+            --build-arg APP_VERSION="$VERSION" --build-arg APP_HOSTNAME="$APP_HOSTNAME" .
+          docker push -q "$IMAGEN:$VERSION"
+      - name: Preparar SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$CLAVE" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$HUELLA" > ~/.ssh/known_hosts
+        env:
+          CLAVE: ${{ secrets.VPS_SSH_KEY }}
+          HUELLA: ${{ secrets.VPS_KNOWN_HOSTS }}
+      - name: Desplegar
+        run: ssh "deploy@$VPS_HOST" "$VERSION"
+```
+
+- **`needs`:** el corazón del asunto. Solo se despliega lo que pasó `verificar` y `e2e`.
+- **`if`:** solo en `push` a `main`. Se comprobó: en una rama de prueba y en una PR, el _job_ no se ejecutó.
+- **`$VERSION`, y no `latest`:** cada imagen lleva su _commit_. Sabes qué hay en producción, y puedes volver a cualquiera. Ya viste en A6.3 lo que hace una etiqueta reutilizada: desplegar una imagen vieja sin darte cuenta.
+- **`concurrency`:** dos _merges_ seguidos se despliegan en orden. No uses `cancel-in-progress`: cancelaría un despliegue a medias.
+- **Las variables van por `env`:** nunca `${{ }}` dentro de un `run`, porque ese texto se pega en el comando.
+
+En GitHub, crea los secretos `VPS_SSH_KEY` (la clave privada) y `VPS_KNOWN_HOSTS` (la huella), y las variables `VPS_HOST` y `APP_HOSTNAME`.
+
+**Esto rompió el _build_.** Al ejecutarlo por primera vez, `docker build` falló, y el culpable fue el `prepare` de A7.2:
+
+```text
+RUN npm ci --omit=dev
+process "/bin/sh -c npm ci --omit=dev" did not complete successfully: exit code: 127
+```
+
+`npm ci` ejecuta `prepare`, que llama a `lefthook`, una dependencia de desarrollo que `--omit=dev` no instala. Evitarlo con `--ignore-scripts` solo trasladó el fallo a la primera etapa, donde no hay `.git`. La solución es que el _hook_ sea opcional:
+
+```json
+"prepare": "lefthook install || true"
+```
+
+Con eso, el canal completo:
+
+```text
+✅  Success - Main Construir y publicar la imagen [29.1s]
+✅  Success - Main Preparar SSH [0.1s]
+== 1. Imagen entrenos:3de70a6cd0c47fb1eefa85544ba9eab3a427f1f3
+== 2. Levantar blue junto a green, que sigue atendiendo
+== 3. Publicar los estáticos, antes de que un HTML nuevo los pida
+✓ 39 archivos en /var/www/entrenos/_astro
+== 4. Cambiar Nginx a blue
+== 5. Drenar green y dejarla parada para volver atrás
+✓ 3de70a6… en producción (blue). Para volver atrás: bash scripts/volver.sh
+✅  Success - Main Desplegar [19.0s]
+🏁  Job succeeded
+```
+
+<Callout type="risk">
+
+- **Qué se ha probado y qué no:** todo se ejecutó con `act`, con un registro local en lugar de GHCR, y sin `docker login`. **El paso «Entrar en GHCR», `GITHUB_TOKEN` con `packages: write`, `environment` y `concurrency` no se han probado:** `act` ignora estos dos últimos.
+- **Tu servidor debe poder descargar la imagen:** si es privada, necesita su propio `docker login` en el servidor, con un token de solo lectura.
+- **Hay acciones oficiales de Docker:** `docker/login-action` y `docker/build-push-action` hacen lo mismo con más opciones, como caché entre ejecuciones. Aquí se usan comandos directos porque son los que se han podido probar.
+- **`docker build` en CI no tiene tu caché:** los 29 s son de esta VM, y con capas ya creadas. En un _runner_ limpio, cuenta con más.
+- **El registro crece:** una imagen por _commit_ se acumula. Fija una política de limpieza.
+- **Las migraciones de datos no se revierten solas:** durante el cambio conviven dos versiones. Un cambio de esquema debe ser compatible con ambas (A4).
+
+</Callout>
+
+## Paso 4: lo que importa, los fallos
+
+Una sonda consultó `/api/health` cada 0,2 s durante cuatro despliegues:
+
+```text
+Despliegue bueno      22 s   99 sondas    todas 200   a64h → 3de70a6…
+Despliegue roto       34 s   145 sondas   todas 200   siguió 3de70a6…
+Versión siguiente     21 s   94 sondas    todas 200   3de70a6… → 305652e…
+Vuelta atrás          19 s   85 sondas    todas 200   305652e… → 3de70a6…
+```
+
+**423 sondas, ninguna fallida.** Fíjate en la segunda fila. Con una versión cuyo `/api/health` respondía 503:
+
+```text
+== 2. Levantar green junto a blue, que sigue atendiendo
+✗ green no está sana. blue sigue atendiendo: nadie ha notado nada
+❌  Failure - Main Desplegar [32.9s]
+🏁  Job failed
+```
+
+La versión rota nunca recibió tráfico, y el CI se puso en rojo para avisarte. Es el trabajo de A4 dando su fruto.
+
+Hubo otra prueba, sin querer. En un intento, el usuario `deploy` no confiaba en el certificado del laboratorio, y la comprobación final por HTTPS falló **después** de cambiar Nginx:
+
+```text
+== 4. Cambiar Nginx a blue
+✗ https://academy.entrenos.test no sirve 3de70a6…: vuelvo a green
+```
+
+El _script_ volvió solo a la versión anterior, y las 189 sondas de ese intento dieron 200.
+
+**Volver atrás** es desplegar el _commit_ anterior:
+
+```bash
+ssh -i deploy_ci deploy@tu-servidor.com 3de70a6cd0c47fb1eefa85544ba9eab3a427f1f3
+```
+
+19,1 s, sin reconstruir nada, porque la imagen ya existe. También puedes revertir el _commit_ en Git para que el CI vuelva a desplegar, lo que deja `main` en su sitio. Si no lo haces, el siguiente _merge_ traerá de nuevo lo que retiraste.
+
+<Callout type="risk">
+
+- **Un `/api/health` que siempre responde 200 no protege nada:** la seguridad de todo esto depende de que compruebe algo real. El tuyo comprueba MongoDB.
+- **La salud comprueba poco:** una versión con un error en `/estadisticas` pasaría. Para eso están los E2E y las alertas de A6.4, que debes vigilar tras cada despliegue.
+- **Un `job` en rojo tras desplegar:** significa que quizá hubo un cambio. Mira qué versión está activa antes de actuar.
+- **15 de esos 19 s son espera:** el drenaje deja terminar las peticiones en curso. Si tu app tiene peticiones largas, necesitarás más.
+- **Practica la vuelta atrás antes de necesitarla:** el peor momento para descubrir que no funciona es durante un incidente.
+
+</Callout>
+
+## Paso 5: entornos y aprobaciones
+
+Un **entorno** es un destino con sus propias reglas. `environment: produccion` lo usa, y en **Settings → Environments** puedes configurarle:
+
+- **Revisores obligatorios:** el _job_ se detiene hasta que alguien lo aprueba, y hasta entonces no recibe los secretos del entorno.
+- **Temporizador:** una espera antes de seguir.
+- **Ramas permitidas:** por ejemplo, solo `main`.
+- **Secretos del entorno:** solo los ven los _jobs_ que lo referencian. La clave del servidor debería ir aquí.
+
+Según la documentación de GitHub, **depende del plan**: en el plan Free, los revisores obligatorios y los secretos de entorno solo funcionan en repositorios públicos. Compruébalo antes de contar con ello. Nada de esta parte se ha podido probar aquí.
+
+¿Conviene aprobar a mano? Para un equipo de una persona con buenos tests, casi nunca: añade espera, y al final se aprueba sin mirar. Tiene sentido en sistemas donde un error es muy caro.
+
+## Paso 6: versiones con significado
+
+Un _hash_ identifica, pero no comunica. El **versionado semántico** usa `MAYOR.MENOR.PARCHE`:
+
+| Cambio                       | Sube   | Ejemplo           |
+| ---------------------------- | ------ | ----------------- |
+| Corrige un error, compatible | PARCHE | `0.0.1` → `0.0.2` |
+| Añade algo, compatible       | MENOR  | `0.0.2` → `0.1.0` |
+| Rompe algo que funcionaba    | MAYOR  | `0.1.0` → `1.0.0` |
+
+Según la especificación, en `0.y.z` cualquier cosa puede cambiar: es desarrollo inicial. `1.0.0` es la promesa de estabilidad. Con npm:
+
+```bash
+npm version patch -m "version: %s"
+npm version minor -m "version: %s"
+```
+
+```text
+v0.0.2
+v0.1.0
+```
+
+Cada orden actualiza `package.json`, crea un _commit_ y añade la etiqueta.
+
+Para automatizarlo, tus _commits_ deben decir qué son. Es lo que definen los **Conventional Commits**:
+
+```text
+fix: los minutos negativos ya no se aceptan        → PARCHE
+feat: exportar entrenos a CSV                      → MENOR
+feat!: la API pasa a devolver fechas en UTC        → MAYOR
+docs: corregir el README                           → nada
+```
+
+**release-please** lee esos _commits_ y mantiene abierta una PR con la siguiente versión y el `CHANGELOG`. Al mezclarla, crea la etiqueta y la _release_. Según su documentación necesita `contents: write` y `pull-requests: write`, y usa `googleapis/release-please-action@v4`:
+
+```yaml
+- uses: googleapis/release-please-action@v4
+  with:
+    release-type: node
+```
+
+**No se ha podido probar**, porque necesita la API de GitHub. Y tiene una trampa documentada: lo que crea con `GITHUB_TOKEN` no dispara otros _workflows_. Si quieres que su PR pase por tu CI, hay que darle otro _token_.
+
+<Callout type="risk">
+
+- **Una app no siempre necesita versiones semánticas:** son una promesa a quien te usa. Si nadie depende de tu app, el _commit_ puede bastar, y `npm version` solo añade ruido.
+- **Automatizar exige disciplina:** si los _commits_ no siguen el formato, release-please no encontrará nada que publicar. `chore` y `docs` no cuentan como versión.
+- **`feat!` en `0.y.z`:** ten en cuenta que subir a `1.0.0` es una decisión. Configúralo o evita el `!` hasta entonces.
+- **Etiqueta inmutable:** una etiqueta publicada no se reescribe. Si te equivocas, publica la siguiente.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Automatiza el despliegue de A4 para que cada _merge_ a `main` despliegue en tu VPS tras pasar CI.
+
+</Callout>
+
+Solución, con los Pasos 2 y 3:
+
+1. Usuario `deploy`, `despliegue-remoto.sh`, `authorized_keys`, `sudoers`, y `publicar-estaticos.sh` sin `sudo`.
+2. `"prepare": "lefthook install || true"`.
+3. El _job_ `desplegar` en `ci.yml`.
+4. Los secretos y las variables en GitHub.
+5. Una PR con un cambio visible. Mézclala, y comprueba la versión:
+
+```bash
+curl -s https://academy.tudominio.com/api/health
+```
+
+```json
+{ "ok": true, "version": "3de70a6cd0c47fb1eefa85544ba9eab3a427f1f3" }
+```
+
+6. Prueba la clave: `ssh -i deploy_ci deploy@tu-servidor.com 'cat .env'` debe responder `✗ Versión no válida`.
+7. Provoca un fallo: una versión con `/api/health` en 503 debe poner el _job_ en rojo, sin que cambie la versión activa.
+
+- **El canal entero se ejecutó con `act`,** con 148 s para `verificar` y `e2e`, y unos 20 s de despliegue. El primer intento real en GitHub es parte del ejercicio: GHCR, `environment` y `concurrency` están sin probar.
+- **Empieza por un entorno que no sea importante,** si lo tienes.
+
+<Callout type="mastery">
+
+Desplegar es mezclar una PR, nada más: lo que pasa el CI llega solo, con una imagen por _commit_ y una clave que no sirve para otra cosa. Si la versión está rota, no recibe tráfico, y volver atrás son 19 s. Sabes qué decidir a mano y qué no, y qué significa cada número de una versión.
+
+</Callout>
+
+## Resumen
+
+- **Vercel** ya da vistas previas y producción desde `main`; por defecto no espera a tu CI: necesita la regla de A7.2.
+- **Clave restringida:** orden forzada, `restrict` y versión validada. `abc1234; id`, `cat .env` y el reenvío de puertos fallaron.
+- **`known_hosts`:** una huella falsa cortó la conexión. Nunca `StrictHostKeyChecking=no`.
+- **Imagen por _commit_, no `latest`**.
+- **`prepare: lefthook install || true`:** sin eso, `docker build` falló con el código 127.
+- **423 sondas sin un fallo** en cuatro despliegues.
+- **Una versión rota no recibió tráfico**, y el CI se puso en rojo.
+- **Volver atrás:** 19 s, sin reconstruir.
+- **Entornos:** revisores y secretos, según tu plan.
+- **`MAYOR.MENOR.PARCHE`**, Conventional Commits y release-please, este último sin probar.
