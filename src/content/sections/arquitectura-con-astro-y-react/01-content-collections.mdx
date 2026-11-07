@@ -1,0 +1,469 @@
+---
+sectionId: "A8.1"
+course: "A8"
+title: "Content Collections"
+order: 1
+minutes: 70
+summary: "Conviertes una carpeta de MDX en datos con tipos: esquemas Zod, páginas con getStaticPaths y React dentro del contenido. Un frontmatter mal escrito rompe el build, y cinco errores que lo pasan en verde tienen remedio."
+---
+
+Un sitio con contenido suele empezar con archivos sueltos y páginas que los leen como pueden. Funciona hasta que una sección tiene `orden: "2"` en vez de `orden: 2`, y lo descubres porque el índice sale desordenado en producción. Una **colección de contenido** trata esos archivos como una tabla: cada uno es una fila, y un esquema dice qué columnas debe tener y de qué tipo.
+
+Una analogía: un formulario de una biblioteca frente a notas en papeles sueltos. Con notas, cada persona escribe lo que quiere y el error aparece cuando alguien busca el libro. Con un formulario, la ficha mal rellena se rechaza en el mostrador, antes de entrar en el archivo.
+
+**Lo que tendrás al terminar:** un sitio de cursos escrito en MDX, con cada dato validado, páginas generadas y un `npm run verificar` que no deja pasar los errores de contenido.
+
+**Requisitos:** React intermedio (I2), Backend con Astro (I3) y TypeScript avanzado (A1).
+
+Todo se midió con Astro 7.4.7, `@astrojs/mdx` 8.1.3 y `@astrojs/react` 7.1.4, en un Mac con Node 26. Los tiempos dependen de la máquina.
+
+## Paso 1: el proyecto
+
+```bash
+mkdir contenido && cd contenido
+npm init -y
+npm pkg set type=module scripts.build="astro build" scripts.verificar="astro check && astro build"
+npm i astro @astrojs/mdx @astrojs/react react react-dom
+npm i -D @astrojs/check typescript @types/react
+```
+
+`astro.config.mjs`:
+
+```js
+import mdx from "@astrojs/mdx";
+import react from "@astrojs/react";
+import { defineConfig } from "astro/config";
+
+export default defineConfig({ integrations: [mdx(), react()] });
+```
+
+`tsconfig.json`:
+
+```json
+{ "extends": "astro/tsconfigs/strict", "compilerOptions": { "jsx": "react-jsx", "jsxImportSource": "react" } }
+```
+
+## Paso 2: el esquema
+
+El archivo vive en `src/content.config.ts`. Aquí está todo el contrato del contenido:
+
+```ts
+// Archivo: src/content.config.ts
+import { defineCollection, reference } from "astro:content";
+import { file, glob } from "astro/loaders";
+import { z } from "astro/zod";
+
+const cursos = defineCollection({
+  loader: file("src/content/cursos.json"),
+  schema: z.object({
+    titulo: z.string(),
+    nivel: z.enum(["basico", "intermedio", "avanzado"]),
+  }),
+});
+
+const secciones = defineCollection({
+  // Lo que empieza por "_", sea archivo o carpeta, es un borrador
+  loader: glob({
+    pattern: ["**/*.mdx", "!**/_*.mdx", "!**/_*/**"],
+    base: "./src/content/secciones",
+  }),
+  schema: z.object({
+    titulo: z.string().min(1),
+    curso: reference("cursos"),
+    orden: z.number().int().positive(),
+    minutos: z.number().int().positive().default(60),
+    resumen: z.string().max(120),
+  }),
+});
+
+export const collections = { cursos, secciones };
+```
+
+Qué hace cada pieza:
+
+- **`file()`** lee un solo archivo con muchas entradas. Cada una necesita un `id`.
+- **`glob()`** lee muchos archivos, y cada uno es una entrada. Su `id` sale de la ruta.
+- **`schema`** es Zod. Lo que no cumple, no entra.
+- **`.default(60)`** rellena `minutos` si falta, de modo que en tus páginas siempre es un número.
+- **`reference("cursos")`** dice que `curso` apunta a otra colección, como una clave foránea.
+
+<Callout type="risk">
+
+- **`z` se importa de `astro/zod`.** Muchos tutoriales usan `import { z } from "astro:content"`: sigue funcionando, pero está obsoleto. El build no dice nada, y `astro check` da 9 avisos de tipo _hint_ en este archivo.
+- **El archivo es `src/content.config.ts`,** no `src/content/config.ts`. Con el nombre antiguo, el build falla con `LegacyContentConfigError`, y el mensaje te dice dónde moverlo.
+- **`.max(120)` es una decisión de diseño.** Si `resumen` se muestra en una tarjeta, el esquema es el lugar donde hacer cumplir ese límite. Nadie tiene que acordarse de contar.
+
+</Callout>
+
+## Paso 3: el contenido
+
+`src/content/cursos.json`:
+
+```json
+[
+  { "id": "git", "titulo": "Git desde cero", "nivel": "basico" },
+  { "id": "docker", "titulo": "Docker", "nivel": "intermedio" }
+]
+```
+
+Un archivo por sección, en `src/content/secciones/git/02-commits.mdx`. Lo que va entre las líneas `---` es el _frontmatter_, los datos que valida el esquema:
+
+```mdx
+---
+titulo: "Commits"
+curso: git
+orden: 2
+resumen: "Una sección de prueba."
+---
+
+## Commits
+
+Texto de la sección 2.
+```
+
+Crea también `git/01-que-es.mdx`, `git/10-ramas.mdx` y `docker/01-imagenes.mdx`, con el mismo formato y sus valores de `orden`.
+
+## Paso 4: las páginas
+
+Dos rutas dinámicas, y `getStaticPaths` decide cuáles existen. El índice de un curso:
+
+```astro
+---
+// Archivo: src/pages/cursos/[curso]/index.astro
+import { getCollection } from "astro:content";
+
+export async function getStaticPaths() {
+  const cursos = await getCollection("cursos");
+  return cursos.map((curso) => ({ params: { curso: curso.id }, props: { curso } }));
+}
+
+const { curso } = Astro.props;
+const secciones = await getCollection("secciones", ({ data }) => data.curso.id === curso.id);
+secciones.sort((a, b) => a.data.orden - b.data.orden); // getCollection no garantiza el orden
+---
+
+<h1>{curso.data.titulo}</h1>
+<ol>
+  {
+    secciones.map((s) => (
+      <li>
+        <a href={`/cursos/${curso.id}/${s.id.split("/").pop()}`}>{s.data.titulo}</a>
+      </li>
+    ))
+  }
+</ol>
+```
+
+La página de cada sección:
+
+```astro
+---
+// Archivo: src/pages/cursos/[curso]/[seccion].astro
+import { getCollection, getEntry, render } from "astro:content";
+
+export async function getStaticPaths() {
+  const secciones = await getCollection("secciones");
+  return secciones.map((seccion) => ({
+    params: { curso: seccion.data.curso.id, seccion: seccion.id.split("/").pop() },
+    props: { seccion },
+  }));
+}
+
+const { seccion } = Astro.props;
+const curso = await getEntry(seccion.data.curso); // un reference se resuelve aquí
+if (!curso) throw new Error(`La sección ${seccion.id} apunta a un curso que no existe`);
+
+const { Content, headings } = await render(seccion);
+---
+
+<p>{curso.data.titulo} · {seccion.data.minutos} min</p>
+<h1>{seccion.data.titulo}</h1>
+<nav>{headings.map((h) => <a href={`#${h.slug}`}>{h.text}</a>)}</nav>
+<Content />
+```
+
+Estas tres funciones son casi todo lo que necesitas:
+
+| Función                              | Qué devuelve                         |
+| ------------------------------------ | ------------------------------------ |
+| `getCollection("secciones", filtro)` | Las entradas, todas o las filtradas  |
+| `getEntry("cursos", "git")`          | Una entrada, o `undefined` si no hay |
+| `render(entrada)`                    | `Content` y `headings`, entre otros  |
+
+Compila y comprueba:
+
+```bash
+npm run verificar
+```
+
+```text
+6 page(s) built
+cursos/docker/01-imagenes  cursos/docker  cursos/git/01-que-es
+cursos/git/02-commits  cursos/git/10-ramas  cursos/git
+```
+
+Son seis, y en un proyecto con esta forma puedes decir por qué: dos cursos más cuatro secciones. `headings` te da el índice de la página ya calculado, con la profundidad y el `slug` de cada título. En una sección con tres títulos:
+
+```json
+[[2, "qué-es-git"], [3, "un-detalle"], [2, "otra-idea"]]
+```
+
+<Callout type="risk">
+
+- **`getCollection` no garantiza el orden.** En esta prueba salió alfabético, pero la documentación dice que no es determinista: ordena siempre tú.
+- **Ordena números con comparador.** `[1, 2, 10].sort()` da `1 10 2`, porque por defecto compara texto, así que `10-ramas` iría antes que `02-commits`. Con `(a, b) => a - b` da `1 2 10`.
+- **El `id` incluye la carpeta:** `git/02-commits`. Por eso la página usa `.split("/").pop()`.
+- **El nombre del archivo se normaliza.** `Dos Palabras.mdx` dio el `id` `docker/dos-palabras`.
+- **`slug` en el _frontmatter_ reemplaza el `id` entero.** `slug: mis-commits` dio `mis-commits`, sin `git/`. Es un campo reservado, y el `.split` sigue funcionando por casualidad.
+
+</Callout>
+
+## Paso 5: que el build se rompa
+
+Esto es lo que has ganado. Quita `resumen` de `02-commits.mdx`:
+
+```bash
+npm run build
+```
+
+```text
+[InvalidContentEntryDataError] secciones → git/02-commits data does not match collection schema.
+  resumen: Required
+  Location:
+    src/content/secciones/git/02-commits.mdx:0:0
+```
+
+Código de salida 1, y no se genera ninguna página. El mensaje dice la colección, la entrada, el campo y el problema. Otros errores, uno cada vez, también con código 1:
+
+```text
+orden: "2"
+  orden: Expected type "number", received "string"
+
+resumen de 130 caracteres
+  resumen: Too big: expected string to have <=120 characters
+
+"nivel": "facil" en cursos.json
+  nivel: Invalid option: expected one of "basico"|"intermedio"|"avanzado"
+
+comilla sin cerrar en el frontmatter
+  Missing closing "quote at line 2, column 17
+```
+
+<Callout type="risk">
+
+- **El build se detiene en el primer error.** Con dos archivos mal, solo avisó de uno. Corrige y vuelve a compilar, hasta que no quede ninguno.
+- **La ubicación `0:0` no es un fallo tuyo.** Con los errores de esquema apunta al archivo, no a la línea. Busca por el nombre del campo. Con YAML roto sí dio la línea exacta, `2:16`.
+- **Un campo que no está en el esquema se descarta en silencio.** `autor: Dani` no estaba en `data`, y el build pasó. Usa `z.strictObject({ … })` si prefieres un error: `Unrecognized key: "autor"`.
+- **`astro dev` es menos estricto una vez arrancado.** Si rompes un archivo con el servidor en marcha, solo registra `Failed to reload`, y la página sigue respondiendo 200 con el título anterior. Parece que tu cambio no funciona. Si ya estaba roto al arrancar, el servidor no llega a iniciarse.
+
+</Callout>
+
+## Paso 6: lo que el build deja pasar
+
+Esta es la parte que no suele contarse. Estos cinco errores terminaron con **código 0**, es decir, con un despliegue en verde:
+
+| Error                                | Qué ocurrió                                                         |
+| ------------------------------------ | ------------------------------------------------------------------- |
+| `curso: gti`, un curso que no existe | Un `[ERROR]` en el registro, y la sección desapareció del índice    |
+| `seccion.data.titullo` en la página  | Publicó un `<h1></h1>` vacío en cada sección                        |
+| `getCollection("seciones")`          | Un `[WARN]`, y ninguna página de sección: solo quedaron los índices |
+| Dos archivos con el mismo `slug`     | Un `[WARN]`, y `01-que-es` perdió su contenido                      |
+| Una carpeta `_borradores/`           | Con el patrón `**/[^_]*.mdx`, se publicó el borrador `03-idea`      |
+
+El caso de `reference` sorprende: se valida, pero un fallo no detiene el build. Se publicó incluso una página en `/cursos/gti/02-commits`. Hay tres defensas, y dos ya están en tu código:
+
+**1. Comprueba el resultado de `getEntry`.** Es la línea con `throw` del Paso 4, y convierte ese error en un fallo real:
+
+```text
+Error: La sección git/02-commits apunta a un curso que no existe
+```
+
+Código 1. Sin esa línea, como se ha visto, código 0.
+
+**2. Excluye los borradores con varios patrones.** Es el `glob` del Paso 2: el patrón clásico solo mira el nombre del archivo, y con este la carpeta `_borradores/` y `_04-idea.mdx` quedaron fuera.
+
+**3. Pasa `astro check` antes del build.** Es lo que hace `npm run verificar`, y lo que debería ejecutar tu CI:
+
+```text
+src/pages/cursos/[curso]/[seccion].astro:21:19 - error ts(2551): Property 'titullo' does not exist
+```
+
+Con esa errata, `astro build` dio código 0 y `npm run verificar` dio código 1. `astro check` también detectó `"seciones"`, y genera solo los tipos: tras borrar `.astro/`, dio 0 errores sin ejecutar `astro sync`.
+
+<Callout type="risk">
+
+- **Lee los `[WARN]` y `[ERROR]` del build,** aunque termine en verde. Tres de los cinco casos solo se ven ahí.
+- **Dos `slug` iguales siguen sin detectarse.** `npm run verificar` dio código 0. Solo queda ese `[WARN]`, así que tampoco lo ve el `throw`.
+
+</Callout>
+
+## Paso 7: componentes dentro del contenido
+
+MDX es Markdown que admite componentes. `src/components/Contador.tsx`:
+
+```tsx
+// Archivo: src/components/Contador.tsx
+import { useState } from "react";
+
+export default function Contador({ inicio = 0 }: { inicio?: number }) {
+  const [n, setN] = useState(inicio);
+  return <button onClick={() => setN(n + 1)}>Pulsado {n} veces</button>;
+}
+```
+
+`src/components/Aviso.astro`:
+
+```astro
+---
+// Archivo: src/components/Aviso.astro
+const { tipo = "nota" } = Astro.props;
+---
+
+<aside data-tipo={tipo}><slot /></aside>
+```
+
+En la sección, se importan bajo el _frontmatter_, y se usan como etiquetas:
+
+```mdx
+import Contador from "../../../components/Contador.tsx";
+import Aviso from "../../../components/Aviso.astro";
+
+## Commits
+
+<Aviso tipo="riesgo">Texto con **negrita** dentro.</Aviso>
+
+<Contador inicio={3} client:load />
+```
+
+El Markdown de dentro de `Aviso` se convierte: salió `<strong>negrita</strong>`. Y la directiva decide cuánto JavaScript pagas:
+
+| `Contador`        | Página con el contador       | Resto de páginas |
+| ----------------- | ---------------------------- | ---------------- |
+| Sin directiva     | 0 KB, y el botón no responde | 0 KB             |
+| Con `client:load` | 3 archivos, 69 KB con gzip   | 0 KB             |
+
+Casi todo ese peso es React, unos 66 KB. El componente solo ocupa 0,4 KB. Sin directiva también se genera el HTML del botón, por eso parece que funciona hasta que lo pulsas.
+
+Si un componente aparece en muchas secciones, puedes pasarlo desde la página y no importarlo en cada archivo:
+
+```astro
+<Content components={{ Aviso, h2: Aviso }} />
+```
+
+Con esto, `<Aviso>` funcionó sin importar, y cada `## título` se dibujó con `Aviso`. La plataforma donde lees esto lo hace así: los bloques de riesgo son un componente que ninguna sección importa.
+
+<Callout type="risk">
+
+- **`client:load` no funciona con un componente pasado por `components`.** El build falló con `Expected a matching import for component "Contador"`. Una isla debe importarse en el propio MDX. Sin directiva, sí funcionó, como HTML estático.
+- **Un componente sin importar rompe el build:** `Expected component "Contador" to be defined`. Es un buen error.
+- **`<` y `{` tienen significado en MDX.** `a <b` dio `Unexpected character after "<"`, con la línea exacta, y `{clave: 1}` dio `Could not parse expression`. Y `{2 + 2}` no falló, sino que publicó un `4`. Mételos en código con comillas invertidas, donde se quedan como texto.
+- **El `.mdx` puede ejecutar código.** Trátalo como código fuente, y no aceptes MDX escrito por personas desconocidas sin revisarlo.
+
+</Callout>
+
+## Paso 8: cuántos archivos aguanta
+
+Se generaron 500 secciones de seis apartados, sin caché:
+
+| Ajuste              | Tres builds            |
+| ------------------- | ---------------------- |
+| Normal              | 2,59 s, 2,09 s, 2,05 s |
+| `deferRender: true` | 2,21 s, 1,94 s, 2,03 s |
+
+Unos 2 segundos para 506 páginas. Con este tamaño no hace falta optimizar nada: `deferRender`, una opción del `glob`, está dentro del ruido. Pruébala solo si tu build tarda de verdad, y midiendo varias veces.
+
+Estas colecciones se resuelven en el build, y cambiar el contenido exige compilar otra vez. Si los datos cambian a cada momento, como en un CMS o un inventario, Astro tiene colecciones _live_ en `src/live.config.ts`. No se han probado aquí, y según la documentación no admiten MDX.
+
+## Paso 9: un ejemplo real
+
+La plataforma donde lees esto se construye así, y su [`src/content.config.ts`](https://github.com/Daniel-Vasquez/dani-academy/blob/main/src/content.config.ts) es público. Esta lección es un archivo de la colección `sections`, y su esquema es casi el tuyo:
+
+```ts
+const sections = defineCollection({
+  // Ignora archivos que empiecen por "_" (borradores)
+  loader: glob({ pattern: "**/[^_]*.mdx", base: "./src/content/sections" }),
+  schema: z.object({
+    sectionId: z.string().regex(SECTION_ID_REGEX),
+    course: reference("courses"),
+    title: z.string(),
+    order: z.number().int().positive(),
+    minutes: z.number().int().positive().default(60),
+    summary: z.string().max(220),
+  }),
+});
+```
+
+Las evaluaciones son otra colección, en YAML: `glob` no se limita a MDX. Su esquema exige un número exacto de preguntas con `.length()`, y cuatro opciones por pregunta. Una evaluación incompleta no puede llegar a publicarse. Es el mismo patrón que las secciones, y sin ninguna tabla en una base de datos.
+
+Su patrón es el simple, el que el Paso 6 mostró que deja pasar las carpetas con `_`. Aquí no importa: no hay ninguna carpeta así.
+
+<Callout type="exercise">
+
+Migra el contenido de un curso de este temario a MDX con Content Collections y genera sus páginas con `getStaticPaths`.
+
+</Callout>
+
+Solución, sobre el proyecto de esta lección:
+
+1. Añade el curso a `src/content/cursos.json`:
+
+```json
+{ "id": "linux", "titulo": "Linux desde cero", "nivel": "basico" }
+```
+
+2. Crea un archivo por sección en `src/content/secciones/linux/`, con su contenido en Markdown:
+
+```mdx
+---
+titulo: "La terminal"
+curso: linux
+orden: 1
+minutos: 45
+resumen: "Una sección de prueba."
+---
+
+## La terminal
+
+Texto.
+```
+
+3. Compila:
+
+```bash
+npm run verificar
+```
+
+```text
+10 page(s) built
+cursos/linux/01-la-terminal  cursos/linux/02-archivos  cursos/linux/03-procesos  cursos/linux
+```
+
+Con tres secciones, pasó de 6 a 10 páginas **sin tocar ningún archivo de `src/pages/`**. Esa es la recompensa: un curso nuevo es contenido, no código.
+
+4. Rómpelo a propósito con `orden: "2"` en `02-archivos.mdx`:
+
+```text
+[InvalidContentEntryDataError] secciones → linux/02-archivos data does not match collection schema.
+  orden: Expected type "number", received "string"
+```
+
+- **Si `resumen` falla al migrar,** es el límite de 120 caracteres haciendo su trabajo.
+- **Si ves `{` o `<` en tu texto,** repasa el Paso 7.
+
+<Callout type="mastery">
+
+Tu contenido tiene un esquema, y un error en el _frontmatter_ rompe el build con un mensaje que dice el archivo, el campo y el problema. También sabes qué errores no lo rompen, y `npm run verificar` junto al `throw` de `getEntry` cubren los que puedes cubrir. Añadir un curso es añadir archivos.
+
+</Callout>
+
+## Resumen
+
+- **`src/content.config.ts`:** `file()` para un archivo con muchas entradas, `glob()` para muchos archivos, y un esquema Zod.
+- **`z` viene de `astro/zod`,** no de `astro:content`.
+- **Rompen el build:** falta un campo, tipo incorrecto, longitud, enumeración y YAML roto, de uno en uno.
+- **`getCollection`, `getEntry` y `render`** cubren casi todo. Ordena siempre tú, con comparador.
+- **No rompen el build:** un `reference` a nada, una errata en `data`, una colección mal escrita, un `slug` repetido y una carpeta `_`.
+- **Las defensas:** `throw` si `getEntry` da `undefined`, patrones de exclusión y `astro check` antes del build.
+- **React en MDX:** importado y con `client:load`, 69 KB solo en esa página. Sin directiva es HTML sin vida.
+- **`components`** evita importar, pero no admite `client:load`.
+- **500 secciones:** unos 2 s, y `deferRender` sin efecto claro.
