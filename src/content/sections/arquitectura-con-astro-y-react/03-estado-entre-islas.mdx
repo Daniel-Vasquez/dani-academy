@@ -1,0 +1,560 @@
+---
+sectionId: "A8.3"
+course: "A8"
+title: "Estado entre islas y sincronización"
+order: 3
+minutes: 80
+summary: "Sincronizas islas y pestañas con Nanostores, BroadcastChannel y el servidor como fuente de verdad. Provocas lo que falla: carreras, un bucle de 43 mensajes por segundo y un store que filtró datos de otra persona."
+---
+
+Marcas una sección como leída. El botón cambia, pero el contador de arriba sigue diciendo 0, y el índice lateral tampoco se entera. Cada isla de React vive aparte, así que cada una cree lo que recuerda. El problema se multiplica con una segunda pestaña, con un fallo de red y con otro dispositivo. Ninguna pantalla debería contradecir a otra.
+
+Una analogía: varias oficinas con copias de un mismo registro. Si cada una apunta los cambios en su copia, pronto no coinciden. La solución es que haya un **registro central**: cada oficina tiene un tablón para trabajar rápido, pero lo que vale es el registro. Cuando cambia, se avisa a las demás oficinas, y cada una lo vuelve a consultar. El registro es tu servidor, el tablón es el _store_ y el aviso es `BroadcastChannel`.
+
+**Lo que tendrás al terminar:** un botón, un índice y un contador que nunca se contradicen, en una o varias pestañas, también cuando el servidor falla.
+
+**Requisitos:** Nanostores básico (B6.7), actualizaciones optimistas (I2.5), _View Transitions_ (A6) y A8.2.
+
+Se midió en Chromium con dos pestañas reales, con Astro 7.4.7, `nanostores` 1.5.5 y `@nanostores/react` 2.0.1. El servidor está en el mismo Mac, y la base de datos es **simulada**, un `Map` con esperas fijas. Solo se ha probado Chromium.
+
+## Paso 1: el problema
+
+```bash
+mkdir estado && cd estado
+npm init -y
+npm pkg set type=module scripts.build="astro build" scripts.start="node ./dist/server/entry.mjs"
+npm i astro @astrojs/node @astrojs/react react react-dom nanostores @nanostores/react
+npm i -D @astrojs/check typescript @types/react
+```
+
+`astro.config.mjs`:
+
+```js
+import node from "@astrojs/node";
+import react from "@astrojs/react";
+import { defineConfig } from "astro/config";
+
+export default defineConfig({
+  output: "server",
+  integrations: [react()],
+  adapter: node({ mode: "standalone" }),
+});
+```
+
+Dos islas, cada una con su `useState`. Tras pulsar el botón, esto es lo que mostraba la página:
+
+```text
+0 de 3 leídas | ✓ Leída
+```
+
+Las dos tienen razón según lo que saben. Por eso el dato debe vivir fuera de las islas.
+
+## Paso 2: el _store_
+
+Empieza por lo esencial, los tres tipos de Nanostores, en `src/stores/progreso.ts`:
+
+```ts
+import { atom, computed, map } from "nanostores";
+
+export const $leidas = map<Record<string, boolean>>({});
+export const $totalLeidas = computed($leidas, (l) => Object.values(l).filter(Boolean).length);
+export const $aviso = atom("");
+```
+
+- **`atom`** guarda un valor. Se cambia con `.set()`.
+- **`map`** guarda un objeto. Con `.setKey()` cambias una clave.
+- **`computed`** deriva un valor de otro _store_. Este es el importante: **el total no se guarda, se calcula**, y dos números que no existen por separado no pueden contradecirse.
+
+Todo esto, junto con `@nanostores/react`, ocupa 1,5 KB con gzip.
+
+La lista de secciones y la "base de datos", que hará de registro central:
+
+```ts
+// Archivo: src/lib/secciones.ts
+export const secciones = [
+  { id: "B1-1", titulo: "Qué es TypeScript" },
+  { id: "B1-2", titulo: "Tipos básicos" },
+  { id: "B1-3", titulo: "Funciones" },
+];
+```
+
+```ts
+// Archivo: src/lib/datos.ts
+// Simula una base de datos: es la fuente de verdad, y vive en el servidor
+export const ajustes = { lectura: 20, escrituraPut: 20, escrituraDelete: 20, fallo: false };
+
+const espera = (ms: number) => new Promise((resuelve) => setTimeout(resuelve, ms));
+const leidas = new Map<string, Set<string>>();
+
+export async function leerProgreso(usuario: string) {
+  await espera(ajustes.lectura);
+  return Object.fromEntries([...(leidas.get(usuario) ?? [])].map((id) => [id, true]));
+}
+
+export async function guardar(usuario: string, seccionId: string, leida: boolean) {
+  await espera(leida ? ajustes.escrituraPut : ajustes.escrituraDelete);
+  if (ajustes.fallo) throw new Error("No se pudo guardar");
+  const conjunto = leidas.get(usuario) ?? new Set<string>();
+  if (leida) conjunto.add(seccionId);
+  else conjunto.delete(seccionId);
+  leidas.set(usuario, conjunto);
+}
+```
+
+La API, en dos archivos. `src/pages/api/progreso/index.ts`:
+
+```ts
+// Archivo: src/pages/api/progreso/index.ts
+import type { APIRoute } from "astro";
+import { leerProgreso } from "../../../lib/datos";
+
+export const GET: APIRoute = async ({ cookies }) => {
+  const usuario = cookies.get("sesion")?.value;
+  if (!usuario) return new Response(null, { status: 401 });
+  const cabeceras = { "Content-Type": "application/json", "Cache-Control": "private, no-store" };
+  return new Response(JSON.stringify(await leerProgreso(usuario)), { headers: cabeceras });
+};
+```
+
+`src/pages/api/progreso/[id].ts`:
+
+```ts
+// Archivo: src/pages/api/progreso/[id].ts
+import type { APIRoute } from "astro";
+import { guardar } from "../../../lib/datos";
+
+const cambiar =
+  (leida: boolean): APIRoute =>
+  async ({ params, cookies }) => {
+    const usuario = cookies.get("sesion")?.value;
+    if (!usuario) return new Response(null, { status: 401 });
+    try {
+      await guardar(usuario, params.id!, leida);
+      return new Response(null, { status: 204 });
+    } catch {
+      return new Response(null, { status: 503 });
+    }
+  };
+
+export const PUT = cambiar(true);
+export const DELETE = cambiar(false);
+```
+
+## Paso 3: el primer render
+
+Las islas se renderizan primero en el servidor, donde el _store_ está vacío. Sin más cuidado, con una sección ya leída:
+
+```text
+HTML:       0 de 3 leídas
+navegador:  1 de 3 leídas
+consola:    Minified React error #418
+```
+
+Es un error de hidratación: el HTML dice una cosa y React otra. Por tanto, cada isla recibe del servidor su valor inicial, y `useStore` lo usa con la opción `ssr`. El botón importa `cambiar`, que escribirás en el Paso 4, así que aún no compilará. Las islas:
+
+```tsx
+// Archivo: src/components/ContadorLeidas.tsx
+import { useStore } from "@nanostores/react";
+import { $totalLeidas } from "../stores/progreso";
+
+export default function ContadorLeidas({ inicial, total }: { inicial: number; total: number }) {
+  const leidas = useStore($totalLeidas, { ssr: () => inicial });
+  return (
+    <p id="contador">
+      {leidas} de {total} leídas
+    </p>
+  );
+}
+```
+
+```tsx
+// Archivo: src/components/IndiceLateral.tsx
+import { useStore } from "@nanostores/react";
+import { $leidas, type Leidas } from "../stores/progreso";
+
+interface Props {
+  secciones: { id: string; titulo: string }[];
+  inicial: Leidas;
+}
+
+export default function IndiceLateral({ secciones, inicial }: Props) {
+  const leidas = useStore($leidas, { ssr: () => inicial });
+
+  return (
+    <ol id="indice">
+      {secciones.map((s) => (
+        <li key={s.id}>
+          <a href={`/curso/${s.id}`}>
+            {leidas[s.id] ? "✓ " : ""}
+            {s.titulo}
+          </a>
+        </li>
+      ))}
+    </ol>
+  );
+}
+```
+
+```tsx
+// Archivo: src/components/BotonLeida.tsx
+import { useStore } from "@nanostores/react";
+import { $aviso, $leidas, cambiar, type Leidas } from "../stores/progreso";
+
+interface Props {
+  seccionId: string;
+  inicial: Leidas;
+}
+
+export default function BotonLeida({ seccionId, inicial }: Props) {
+  const leidas = useStore($leidas, { ssr: () => inicial });
+  const aviso = useStore($aviso);
+
+  return (
+    <>
+      <button id="boton" type="button" onClick={() => cambiar(seccionId, !leidas[seccionId])}>
+        {leidas[seccionId] ? "✓ Leída" : "Marcar como leída"}
+      </button>
+      {aviso && <p role="alert">{aviso}</p>}
+    </>
+  );
+}
+```
+
+La página consulta el servidor, se lo pasa a las islas y deja una copia para el _store_ del navegador:
+
+```astro
+---
+// Archivo: src/pages/curso/[id].astro
+import BotonLeida from "../../components/BotonLeida";
+import ContadorLeidas from "../../components/ContadorLeidas";
+import IndiceLateral from "../../components/IndiceLateral";
+import NotaRapida from "../../components/NotaRapida";
+import Curso from "../../layouts/Curso.astro";
+import { leerProgreso } from "../../lib/datos";
+import { secciones } from "../../lib/secciones";
+
+const seccion = secciones.find((s) => s.id === Astro.params.id);
+if (!seccion) return Astro.rewrite("/404");
+
+const usuario = Astro.cookies.get("sesion")?.value ?? "invitado";
+const leidas = await leerProgreso(usuario); // la fuente de verdad, en cada carga
+const total = Object.values(leidas).filter(Boolean).length;
+---
+
+<Curso titulo={seccion.titulo}>
+  <!-- El mismo dato, para el navegador -->
+  <script id="leidas-iniciales" type="application/json" set:html={JSON.stringify(leidas)} />
+  <header>
+    <ContadorLeidas client:load inicial={total} total={secciones.length} />
+    <NotaRapida id="con" client:load transition:persist="nota" />
+    <NotaRapida id="sin" client:load />
+  </header>
+  <aside><IndiceLateral client:load secciones={secciones} inicial={leidas} /></aside>
+  <h1>{seccion.titulo}</h1>
+  <div style="height: 150vh">Contenido largo de la sección.</div>
+  <BotonLeida client:visible seccionId={seccion.id} inicial={leidas} />
+</Curso>
+```
+
+`NotaRapida` se usa en el Paso 7, y `src/layouts/Curso.astro` añade `<ClientRouter />`:
+
+```tsx
+// Archivo: src/components/NotaRapida.tsx
+import { useState } from "react";
+
+export default function NotaRapida({ id }: { id: string }) {
+  const [texto, setTexto] = useState("");
+  return (
+    <input id={id} value={texto} aria-label="Nota" onChange={(e) => setTexto(e.target.value)} />
+  );
+}
+```
+
+```astro
+---
+// Archivo: src/layouts/Curso.astro
+import { ClientRouter } from "astro:transitions";
+const { titulo } = Astro.props;
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo}</title>
+    <ClientRouter />
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>
+```
+
+El resultado, con una sección ya leída:
+
+```text
+contador: 1 de 3 leídas        (un solo valor, sin parpadeos)
+errores en la consola: 0
+sin JavaScript: 1 de 3 leídas · ✓ Tipos básicos
+```
+
+<Callout type="risk">
+
+- **Nunca escribas en un _store_ desde el servidor.** Es un módulo, y lo comparten todas las peticiones. Con `$leidas.set(leidas)` en la página, en serie todo parecía correcto. Con dos peticiones casi a la vez, **Bob recibió el contador de Ana en 3 de 20 intentos**. Un error así no se ve al probar a solas. Pasa los datos por _props_.
+- **Un `<script type="application/json">` con `set:html` no se escapa.** Aquí solo hay claves propias y booleanos. Si hubiese texto escrito por usuarios, un `</script>` podría romper la página: sustituye `<` por `<` antes de escribirlo. Esto no se ha medido aquí.
+- **`BroadcastChannel` también existe en Node.** Sin la comprobación `enNavegador`, se crearía uno en el servidor.
+
+</Callout>
+
+## Paso 4: el servidor manda
+
+Este es el _store_ completo. Sustituye `src/stores/progreso.ts`:
+
+```ts
+// Archivo: src/stores/progreso.ts
+import { atom, computed, map } from "nanostores";
+
+export type Leidas = Record<string, boolean>;
+
+export const $leidas = map<Leidas>({});
+export const $totalLeidas = computed($leidas, (l) => Object.values(l).filter(Boolean).length);
+export const $aviso = atom("");
+
+// Este módulo también se carga en el servidor, donde no hay pestañas ni documento
+const enNavegador = typeof document !== "undefined";
+const canal = enNavegador ? new BroadcastChannel("progreso") : null;
+
+let confirmado: Leidas = {}; // lo último que ha dicho el servidor
+let pendientes = 0;
+let cola: Promise<unknown> = Promise.resolve();
+
+/** Trae la verdad del servidor, y solo la pinta si no quedan cambios por confirmar */
+export async function recargar() {
+  try {
+    const r = await fetch("/api/progreso");
+    if (r.ok) confirmado = await r.json();
+  } catch {
+    // Sin red: se conserva lo último confirmado
+  }
+  if (pendientes === 0) $leidas.set(confirmado);
+}
+
+/** Copia en el store el estado que el servidor puso en el HTML de esta página */
+function sembrar() {
+  const nodo = document.getElementById("leidas-iniciales");
+  if (!nodo?.textContent) return;
+  confirmado = JSON.parse(nodo.textContent);
+  $leidas.set(confirmado);
+}
+
+export function cambiar(seccionId: string, leida: boolean) {
+  $aviso.set("");
+  $leidas.setKey(seccionId, leida); // se pinta ya
+  pendientes += 1;
+  // Uno detrás de otro: si no, un DELETE rápido puede adelantar a un PUT lento
+  cola = cola.then(async () => {
+    const metodo = leida ? "PUT" : "DELETE";
+    const r = await fetch(`/api/progreso/${seccionId}`, { method: metodo }).catch(() => null);
+    pendientes -= 1;
+    if (!r?.ok) $aviso.set("No se pudo guardar");
+    await recargar(); // si ha fallado, esto deshace el cambio
+    if (r?.ok) canal?.postMessage("cambio"); // nunca se avisa de algo sin confirmar
+  });
+  return cola;
+}
+
+if (enNavegador) {
+  sembrar();
+  canal?.addEventListener("message", recargar);
+  document.addEventListener("astro:after-swap", sembrar);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") recargar();
+  });
+}
+```
+
+El flujo de un cambio tiene cuatro pasos: pintar, enviar, volver a preguntar y avisar. La pantalla responde al momento, pero lo que queda es lo que dice el servidor. Con la base de datos fallando, el botón pasó por:
+
+```text
+✓ Leída  →  Marcar como leída  +  "No se pudo guardar"
+```
+
+Sin red, igual: se deshizo y mostró el aviso. La siguiente pulsación, ya con red, se guardó con normalidad.
+
+**La cola no es un adorno.** Con un `PUT` lento de 600 ms y un `DELETE` rápido de 10 ms, se pulsó dos veces seguidas, es decir, "marcar" y "desmarcar". El `DELETE` adelantó al `PUT`:
+
+| Versión                 | Pantalla | Servidor | Resultado                    |
+| ----------------------- | -------- | -------- | ---------------------------- |
+| Sin cola y sin recargar | Sin leer | Leída    | ✗ Se contradicen             |
+| Sin cola, con recargar  | Leída    | Leída    | ✗ Coinciden, pero no era eso |
+| Con cola                | Sin leer | Sin leer | ✓                            |
+
+La segunda fila enseña algo: volver a preguntar arregla la contradicción, no el dato. Solo la cola respeta lo que pediste. Con cinco clics seguidos, el botón alternó `10101`, y pantalla y servidor acabaron iguales.
+
+<Callout type="risk">
+
+- **`pendientes` evita un parpadeo.** Si un cambio está en camino, la respuesta de `recargar` aún no lo refleja, y pisaría lo que el usuario acaba de pulsar.
+- **Un `catch` dentro de la cola es obligatorio.** Si una promesa de la cadena falla, `cola.then` ya no ejecuta nada más, y ningún clic posterior llegaría al servidor. Por eso `fetch` lleva `.catch` y `recargar` tiene `try`.
+- **Cada cambio cuesta una petición más,** el `GET` de `recargar`. Con un solo campo podrías usar la respuesta del propio `PUT`.
+
+</Callout>
+
+## Paso 5: otra pestaña
+
+`BroadcastChannel` envía mensajes entre pestañas del mismo origen. Es lo que hacen estas dos líneas de `progreso.ts`:
+
+```ts
+canal?.postMessage("cambio"); // en la pestaña que cambia
+canal?.addEventListener("message", recargar); // en las demás
+```
+
+El mensaje no lleva el dato, solo avisa: cada pestaña lo pregunta al servidor. Con dos pestañas abiertas, la segunda se actualizó a los 71 ms del clic, con una sola petición, un `GET`. Ese tiempo es casi todo `PUT` y `GET`. El canal en sí tardó 1 ms.
+
+La alternativa clásica es el evento `storage`:
+
+|                                 | `BroadcastChannel` | Evento `storage` |
+| ------------------------------- | ------------------ | ---------------- |
+| Latencia medida                 | 1 ms o menos       | 1 ms o menos     |
+| Llega a la propia pestaña       | No                 | No               |
+| Mismo valor dos veces           | Se reciben las dos | Solo la primera  |
+| Puede enviar objetos            | Sí                 | Solo texto       |
+| Deja algo guardado              | No                 | Sí               |
+| Llega a otro perfil o navegador | No                 | No               |
+
+Usa `BroadcastChannel` para avisar, y `storage` solo si lo que quieres es guardar un valor. En esta lección, el dato está en el servidor, y no hay nada que guardar.
+
+Dos errores que se provocaron a propósito:
+
+**Avisar antes de confirmar.** Con el mensaje enviado antes del `PUT`, llevando el dato, y el servidor fallando:
+
+```text
+pestaña A: 0 de 3 leídas
+pestaña B: 1 de 3 leídas    ← se quedó con algo que nunca ocurrió
+servidor:  {}
+```
+
+Por eso, en el código final, el aviso va tras el `if (r?.ok)`.
+
+**Avisar cada vez que cambia el _store_.** Parece lo natural:
+
+```ts
+$leidas.listen(() => canal?.postMessage("cambio")); // NO
+```
+
+Un aviso provoca `recargar`, `recargar` cambia el _store_, y el _store_ vuelve a avisar: **43 mensajes por segundo**, cada uno con su petición, y sin final. Y la pantalla se veía bien. Solo se descubre mirando la pestaña Network.
+
+<Callout type="risk">
+
+- **El canal no llega a las pestañas cerradas ni a otros dispositivos.** Las pestañas nuevas leen del servidor, y por eso no hace falta guardar nada.
+- **Mismo origen significa mismo protocolo, dominio y puerto.** `www.` y el dominio sin `www` son canales distintos.
+- **Una isla con `client:visible` sin hidratar muestra su HTML antiguo.** Nadie la ve, porque está fuera de la pantalla. Al llegar a ella, salió correcta.
+
+</Callout>
+
+## Paso 6: otro dispositivo
+
+Si cambias algo desde el móvil, ningún canal te avisa en el portátil. La solución barata es preguntar al volver:
+
+```ts
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") recargar();
+});
+```
+
+Se simuló un cambio desde fuera y, después, ese evento:
+
+```text
+al abrir:           0 de 3 leídas
+tras el cambio:     0 de 3 leídas    ← aún sin enterarse
+al volver a la pestaña: 1 de 3 leídas
+```
+
+El evento se disparó a mano: en este navegador automatizado no se cambió de pestaña de verdad. Sin _WebSockets_ hay un intervalo en el que una pantalla va por detrás, y es aceptable: lo que no debe pasar es que se quede así.
+
+## Paso 7: con _View Transitions_
+
+Con `<ClientRouter />`, navegar no recarga la página, y eso cambia las reglas: **el módulo del _store_ no vuelve a ejecutarse.** La ventana fue la misma tras navegar, y el _store_ siguió vivo. Es una ventaja, pero tiene una trampa.
+
+El servidor envía datos nuevos en cada página, pero `sembrar()` solo se ejecutaría al inicio. Sin `astro:after-swap`, y con un cambio hecho desde fuera:
+
+```text
+tras navegar: 0 de 3 leídas    ← HTML nuevo, store antiguo
+al recargar:  1 de 3 leídas
+```
+
+Con este listener, el valor fue correcto desde la navegación:
+
+```ts
+document.addEventListener("astro:after-swap", sembrar);
+```
+
+`transition:persist` conserva una isla entre páginas, con su estado interno:
+
+| Isla                                            | Tras navegar                        |
+| ----------------------------------------------- | ----------------------------------- |
+| `<NotaRapida client:load />`                    | Texto perdido                       |
+| `<NotaRapida client:load transition:persist />` | Conserva `hola`                     |
+| `<BotonLeida transition:persist />`             | Correcto: recibe las _props_ nuevas |
+| `<BotonLeida … transition:persist-props />`     | ✗ Sigue siendo el de la sección 1   |
+
+La última fila es una contradicción real. En la sección 2, el botón decía `✓ Leída` y, al pulsarlo, **desmarcó la sección 1**. `persist-props` conserva las _props_ antiguas: úsalo solo en lo que no dependa de la página, como un reproductor.
+
+## Paso 8: la plataforma donde lees esto
+
+Comparte estado con otra técnica, sin Nanostores: `MarkAsReadButton` lanza un evento `da:section-read` en `document`, y un `<script>` del índice lateral lo escucha. Es una buena solución para un solo aviso: no añade dependencias, y el índice no necesita React.
+
+Pero un `CustomEvent` no sale de la pestaña. Se probó en local con dos pestañas en la misma sección:
+
+```text
+tras marcar en A:  A: Leído, 1/2    B: Marcar como leído, 0/2
+```
+
+La pestaña B queda atrás hasta que navegas o recargas. No se rompe: pulsar otra vez repite un `PUT` que no cambia nada, y acabó en `Leído, 1/2`. Es una contradicción consciente: dos pestañas en la misma sección es un caso poco habitual. Si importase, bastaría con añadir un `BroadcastChannel` a ese evento.
+
+<Callout type="exercise">
+
+Sincroniza el progreso entre el índice lateral, el botón de cada sección y una segunda pestaña abierta.
+
+</Callout>
+
+Solución: es el proyecto de esta lección. Compila y abre dos pestañas en la misma sección, con la _cookie_ `sesion`:
+
+```bash
+npm run build && npm start
+```
+
+Después repite esta lista de comprobación, que es la que se ejecutó:
+
+| Prueba                     | Debe ocurrir                                |
+| -------------------------- | ------------------------------------------- |
+| Clic en el botón           | Botón, índice y contador cambian a la vez   |
+| Segunda pestaña            | Se actualiza sola, con un `GET`             |
+| Servidor con error         | Se deshace y avisa, y B no cambia           |
+| Sin red                    | Igual, y el siguiente clic funciona         |
+| Dos clics con `PUT` lento  | Pantalla y servidor dicen lo último pulsado |
+| Navegar con `ClientRouter` | El contador sigue correcto                  |
+| Recargar                   | Lo mismo que antes de recargar              |
+
+- **Mira la pestaña Network** durante un minuto sin tocar nada: no debería haber peticiones.
+- **Para simular el fallo,** pon `ajustes.fallo = true` en `datos.ts`, y sube `escrituraPut` para la carrera.
+- **Con otro navegador,** compruébalo tú: aquí solo se ha usado Chromium.
+
+<Callout type="mastery">
+
+Dos islas nunca muestran estados contradictorios, porque ninguna guarda su propia versión del dato: todas leen un _store_, y el _store_ obedece al servidor. Sabes qué ocurre con un fallo, con dos clics, con otra pestaña y tras navegar, porque lo has provocado.
+
+</Callout>
+
+## Resumen
+
+- **`atom`, `map` y `computed`:** lo derivado se calcula, no se guarda.
+- **`useStore` con `ssr`:** evita el error de hidratación #418.
+- **Nunca `.set()` en el servidor:** Bob vio el dato de Ana en 3 de 20 intentos.
+- **Cuatro pasos:** pintar, enviar, volver a preguntar y avisar.
+- **Cola de escrituras:** sin ella, un `DELETE` adelantó a un `PUT`.
+- **`BroadcastChannel`** avisa, y el dato se pide al servidor.
+- **Avisa solo lo confirmado,** y nunca desde `.listen()`: 43 mensajes por segundo.
+- **`visibilitychange`** cubre los cambios desde otro dispositivo.
+- **`ClientRouter`:** el módulo sigue vivo, así que hay que volver a sembrar en `astro:after-swap`.
+- **`transition:persist` sí, `persist-props` con cuidado:** desmarcó la sección equivocada.
