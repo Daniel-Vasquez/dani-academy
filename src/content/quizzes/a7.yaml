@@ -1,0 +1,54 @@
+course: A7
+passingScore: 4
+questions:
+  - prompt: "¿Cuál es la diferencia entre CI y CD?"
+    options:
+      - "CI se ejecuta en tu equipo antes de cada commit, y CD se ejecuta en GitHub después de cada push."
+      - "CI comprueba cada cambio en una máquina limpia; CD lleva a producción lo que ha pasado esa comprobación."
+      - "CI es para aplicaciones con servidor propio, y CD es para las que se despliegan en una plataforma como Vercel."
+      - "Son dos nombres para lo mismo: uno es el término de GitHub y el otro el de GitLab y otras herramientas."
+    answer: 1
+    explanation: "Primero uno y luego el otro: desplegar sin comprobar es automatizar los errores. En A7.1, la primera ejecución del CI encontró 3 errores de tipos que el `docker build` no veía, y en A7.4 solo se despliega lo que pasa `verificar` y `e2e`."
+
+  - prompt: "En un workflow de GitHub Actions, ¿qué diferencia a un job de un step?"
+    options:
+      - "Un job es un archivo YAML dentro de `.github/workflows/`, y un step es cada uno de los eventos que lo disparan."
+      - "Un job se ejecuta en tu equipo con `act`, y un step es lo mismo, pero en un runner alojado por GitHub."
+      - "Un job solo puede contener acciones de otros autores, y un step solo puede contener comandos propios."
+      - "Un job agrupa pasos en una máquina limpia; un step es uno de esos pasos, y van en orden dentro del job."
+    answer: 3
+    explanation: "Los jobs van en paralelo y en máquinas distintas, salvo que `needs` diga otra cosa. Los steps van en orden, y si uno falla los siguientes no se ejecutan: en A7.1, la PR con un error de tipos falló en `npm run check` y no llegó a los tests."
+
+  - prompt: "¿Cuál es la forma correcta de usar aquí la clave del servidor?"
+    code: |
+      - name: Preparar SSH
+        run: printf '%s\n' "$CLAVE" > ~/.ssh/id_ed25519
+    options:
+      - "Guardarla en GitHub como secreto y pasarla al paso con `env`, como `CLAVE: ${{ secrets.VPS_SSH_KEY }}`."
+      - "Escribirla en el campo `env` del archivo YAML, porque GitHub enmascara ese valor en todos los registros."
+      - "Subirla cifrada en base64 junto al código, porque así el enmascarado de GitHub ya no hace falta."
+      - "Definirla como variable con `vars.VPS_SSH_KEY`, que es el contexto pensado para guardar datos sensibles."
+    answer: 0
+    explanation: "Un secreto en el YAML queda en el historial para siempre, y `vars` es para valores que no son secretos. El enmascarado tampoco es una red completa: en A7.3 tapó el valor directo con `***`, pero el mismo secreto en base64 salió en claro."
+
+  - prompt: "¿Para qué sirve una regla de protección de rama que exige la comprobación `verificar`?"
+    options:
+      - "Para que el workflow se ejecute más rápido, porque GitHub prioriza las ramas protegidas frente a las demás."
+      - "Para que `git commit --no-verify` deje de funcionar en los equipos de todas las personas del proyecto."
+      - "Para impedir que una PR se fusione en `main` si no ha pasado: sin esa regla, el CI solo informa."
+      - "Para ejecutar automáticamente el hook de pre-commit en el servidor, antes de aceptar cada push."
+    answer: 2
+    explanation: "El hook vive en tu equipo y se salta con `--no-verify`, como se midió en A7.2. Un CI en rojo no impide nada por sí solo; lo que garantiza que no entre código sin pasar es la regla en el servidor. Esa parte se debe comprobar en GitHub con una PR real."
+
+  - prompt: "¿Qué hace `needs` en este job?"
+    code: |
+      desplegar:
+        needs: [verificar, e2e]
+        runs-on: ubuntu-latest
+    options:
+      - "Instala en el runner las herramientas `verificar` y `e2e` antes de ejecutar los pasos del job."
+      - "Hace que `desplegar` espere a esos jobs y solo se ejecute si han terminado bien."
+      - "Ejecuta los tres jobs a la vez en una misma máquina, para que compartan sus archivos."
+      - "Vuelve a lanzar `verificar` y `e2e` si `desplegar` falla, como un reintento automático."
+    answer: 1
+    explanation: "Sin `needs`, los jobs irían en paralelo y podría desplegarse algo que todavía no ha pasado los tests. Los jobs tampoco comparten archivos: cada uno empieza en una máquina limpia. Por eso en A7.4 solo llega a producción lo que supera `verificar` y `e2e`."
