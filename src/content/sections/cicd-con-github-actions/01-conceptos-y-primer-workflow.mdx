@@ -1,0 +1,300 @@
+---
+sectionId: "A7.1"
+course: "A7"
+title: "Conceptos y primer workflow"
+order: 1
+minutes: 70
+summary: "Escribes tu primer workflow de GitHub Actions, lo ejecutas con act y ves cómo encuentra errores reales que nadie había visto. Y aprendes las trampas que dejan un CI en verde sin comprobar nada."
+---
+
+«En mi equipo funciona» es la frase más cara de este oficio. Quizá olvidaste ejecutar los tests. Quizá los ejecutaste, pero sin el último cambio. Quizá tu equipo tiene algo instalado que el servidor no tiene. **Integración continua** significa que una máquina limpia comprueba cada cambio, siempre igual, sin depender de tu memoria.
+
+Una analogía: el control de calidad de una fábrica. No confías en que cada operario revise su pieza. Hay un punto en la línea por el que pasa todo, con las mismas pruebas, y lo que no las supera se queda ahí. Y como no se cansa, encuentra lo que ya dejaste de mirar.
+
+**Lo que tendrás al terminar:** un _workflow_ que comprueba tipos, tests y _build_ en cada PR, y sabrás probarlo sin subir nada.
+
+**Requisitos:** Git (B2) y los tests de tu app (I8).
+
+## Paso 1: las piezas
+
+**CI** (_integración continua_) comprueba cada cambio. **CD** (_entrega o despliegue continuo_) lleva a producción el que ha pasado. Primero uno y luego el otro: desplegar automáticamente sin comprobar es automatizar los errores. En esta sección, solo CI.
+
+| Pieza      | Qué es                                    | En nuestro archivo         |
+| ---------- | ----------------------------------------- | -------------------------- |
+| _Workflow_ | Un proceso automático, en un archivo YAML | `.github/workflows/ci.yml` |
+| Evento     | Lo que lo dispara                         | `pull_request`, `push`     |
+| _Job_      | Un grupo de pasos en una máquina limpia   | `verificar`                |
+| _Step_     | Un comando o una acción                   | `npm run check`            |
+| _Runner_   | La máquina que lo ejecuta                 | `ubuntu-latest`            |
+| Acción     | Un paso reutilizable, escrito por otros   | `actions/checkout@v7`      |
+
+Los _jobs_ van en paralelo y en máquinas distintas, salvo que digas lo contrario con `needs`. Los pasos de un _job_ van en orden, y si uno falla, los siguientes no se ejecutan.
+
+## Paso 2: tu primer workflow
+
+`.github/workflows/ci.yml`:
+
+```yaml
+# Archivo: .github/workflows/ci.yml
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read # este workflow solo lee el código
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Valores de relleno: el build los exige, pero no los usa ni los guarda
+    env:
+      MONGODB_URI: mongodb://relleno-del-ci.invalid
+      BETTER_AUTH_SECRET: relleno-del-ci-no-es-un-secreto-real
+      BETTER_AUTH_URL: http://localhost:4321
+      OBJETIVO_SEMANAL_MINUTOS: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:run
+      - run: npm run build
+```
+
+Línea a línea:
+
+- **`on`:** en cada PR, y en cada `push` a `main`, por si algo llega sin PR.
+- **`permissions`:** el permiso mínimo. Si tu _workflow_ se ve comprometido, no podrá escribir en tu repositorio.
+- **`timeout-minutes`:** sin él, según la documentación de GitHub, un _job_ colgado puede estar 6 horas consumiendo minutos.
+- **`env`:** el _build_ exige variables que aquí no se usan. Son valores de relleno, como en el `Dockerfile` de A4. **Nunca pongas un secreto real en este archivo:** el repositorio lo guarda para siempre.
+- **`actions/checkout`:** el _runner_ empieza vacío. Este paso baja tu código.
+- **`setup-node`:** instala Node. Usa la misma versión que tu `Dockerfile`, para que CI y producción coincidan.
+- **`npm ci`:** instala exactamente lo que dice `package-lock.json`, a diferencia de `npm install`, que puede cambiarlo.
+
+Tu app todavía no tiene `lint` ni `format`: llegan en A7.2.
+
+<Callout type="risk">
+
+- **El YAML es sensible a los espacios:** con `runs-on` dos espacios a la izquierda, se obtuvo `yaml: line 15: mapping values are not allowed in this context`, y nada se ejecutó. Usa espacios, nunca tabuladores.
+- **El archivo debe estar exactamente en `.github/workflows/`:** en otra carpeta, GitHub no lo ve y tampoco avisa.
+- **Comprueba que las versiones existen:** en muchos ejemplos verás `actions/checkout@v4`. Al escribir esto, la última es la 7. Las antiguas dejan de funcionar con el tiempo.
+- **Una acción es código de otra persona con acceso a tu repositorio:** `@v7` es una etiqueta, y puede cambiar. La documentación de GitHub recomienda fijar el SHA completo del _commit_. Las acciones oficiales de `actions/` son el caso de menos riesgo.
+- **Nunca uses `pull_request_target` sin saber qué hace:** GitHub lo llama privilegiado, y puede dar acceso de escritura y a secretos, incluso con código de una PR ajena.
+
+</Callout>
+
+## Paso 3: lo que encontró la primera vez
+
+Antes de subirlo, lo ideal es ejecutarlo en local. **`act`** interpreta tu _workflow_ en contenedores de Docker. Descárgalo de su repositorio oficial, `nektos/act`, comprobando la suma de verificación:
+
+```bash
+act push -W .github/workflows/ci.yml -P ubuntu-latest=catthehacker/ubuntu:act-latest
+```
+
+La imagen ocupa 2,26 GB. Se usó la app tal como quedó tras A6.4, con todos sus tests y despliegues aparentemente en orden. Este fue el resultado de la primera ejecución:
+
+```text
+✅  Success - Main npm ci [23.4s]
+❌  Failure - Main npm run check [5.1s]
+🏁  Job failed
+```
+
+```text
+tests/entrenos.service.test.ts:43:44 - error ts(2345): Argument of type '{ entrenos: Pick<…
+tests/entrenos.service.test.ts:48:44 - error ts(2345): Argument of type '{ entrenos: Pick<…
+tests/entrenos.service.test.ts:55:44 - error ts(2345): Argument of type '{ entrenos: Pick<…
+- 3 errors
+```
+
+**Tres errores de tipos reales.** En A5.4, `crearServicioEntrenos` pasó a necesitar `limites`, y estos tests no se actualizaron. Nadie lo había visto, porque el `Dockerfile` ejecuta `astro build`, y `astro build` no comprueba los tipos de los tests. En `tests/entrenos.service.test.ts`:
+
+```ts
+/** Estos tests no prueban el límite de A5.4: siempre deja pasar */
+const sinLimites = { contar: async () => ({ permitido: true, reintentarEn: 0 }) };
+
+const servicio = crearServicioEntrenos({ entrenos: repoEnMemoria([running]), limites: sinLimites });
+```
+
+Con eso, el siguiente paso falló, y encontró dos cosas más:
+
+```text
+FAIL  tests/unit/reloj.test.ts > con el reloj falso completo, la espera no termina sola
+FAIL  tests/unit/api-resumen.test.ts > GET /api/resumen > un fallo inesperado del servicio es un 500 que no cuenta el detalle
+```
+
+- **`reloj.test.ts`:** era la demostración de I8.2, un test que falla a propósito. Si lo conservas, bórralo.
+- **`api-resumen.test.ts`:** esperaba el `console.error` que A6.4 sustituyó por `log.error`. Un cambio en una lección rompió un test de otra, justo lo que un CI debe detectar. La solución está en A6.4.
+
+Y la última, del laboratorio y no de la app: los 71 tests pasaban, pero el _job_ fallaba al cerrar la base de datos de prueba, con `EACCES` al enviar una señal. El registro del sistema lo aclaró:
+
+```text
+apparmor="DENIED" operation="signal" profile="docker-default"
+```
+
+La política de Docker de esa VM impedía a Vitest parar a `mongod`, y no tiene relación con GitHub. Se resolvió con `--container-options "--security-opt apparmor=unconfined"`. **Verde al fin:**
+
+```text
+✅  Success - Main actions/setup-node@v7 [0.6s]
+✅  Success - Main npm ci [23.5s]
+✅  Success - Main npm run check [5.4s]
+✅  Success - Main npm run test:run [7.8s]
+✅  Success - Main npm run build [1.5s]
+🏁  Job succeeded
+```
+
+<Callout type="risk">
+
+- **`act` no es GitHub:** sirve para no depender de hacer `push` para cada prueba. Según su documentación, ignora `concurrency`, `permissions`, `timeout-minutes` y `job.continue-on-error`. El resultado definitivo es el de GitHub. **Toda esta sección se midió con `act`, en ARM, no en un _runner_ de GitHub**, así que tus tiempos serán otros.
+- **Si te quedas sin memoria, el proceso muere:** en una VM de 2 GB con la app en marcha, el primer intento terminó con el código 137. Para al menos otro servicio, o añade _swap_.
+- **Un verde muy rápido merece una mirada:** un _build_ de 1,5 s pareció sospechoso. Al leer su salida, había compilado y generado las páginas. Lee la salida, no solo el color.
+- **Un test que falla a propósito estropea el CI:** si hace falta conservarlo, usa `it.fails`, que documenta que debe fallar.
+
+</Callout>
+
+## Paso 4: caché de dependencias
+
+Cada _job_ empieza en una máquina vacía, así que `npm ci` descarga todo de nuevo. `cache: npm` guarda los paquetes descargados entre ejecuciones. Dos ejecuciones seguidas:
+
+```text
+                 Caché vacía    Caché llena
+npm ci           23,5 s         17,5 s
+Total del job    41 s           34 s
+```
+
+```text
+Cache Size: ~80 MB (83384656 B)
+Cache restored successfully
+Cache restored from key: node-cache-linux-arm64-npm-0407d64b…
+```
+
+Ahorró un 26 % de `npm ci`. Es menos de lo que suele prometerse, y hay un motivo. Según el README de `setup-node`, **no guarda `node_modules`**, sino la caché global de npm: los paquetes no se descargan, pero `npm ci` sigue instalándolos.
+
+La clave incluye un _hash_ de `package-lock.json`. Si cambia una dependencia, la clave cambia y la caché se reconstruye sola. Por eso se guarda con datos correctos: no tienes que invalidarla tú (A6.3).
+
+<Callout type="risk">
+
+- **La caché es una optimización:** un CI debe funcionar igual sin ella. Si falla al vaciarla, tenías un problema escondido.
+- **No guardes `node_modules` a mano:** puede traer paquetes compilados para otro sistema.
+- **Dura poco y se comparte:** según GitHub, se borra lo que no se usa en 7 días, con un límite de 10 GB por repositorio. Una PR puede leer la caché de su rama y la de la rama base.
+- **Nunca guardes secretos en la caché:** quien pueda leerla, los verá.
+
+</Callout>
+
+## Paso 5: las trampas que dejan un verde falso
+
+Un CI en rojo es útil. Lo peligroso es un **verde que no significa nada**. Tres casos medidos.
+
+**Una tubería oculta el fallo.** Es habitual guardar la salida de un comando con `tee`. Con el mismo comando y una sola línea de diferencia:
+
+```yaml
+- run: false | tee salida.txt # sin shell
+
+- run: false | tee salida.txt
+  shell: bash
+```
+
+```text
+Sin shell:    ✅ Success · 🏁 Job succeeded
+shell: bash:  ❌ Failure · 🏁 Job failed
+```
+
+Sin `shell`, según la documentación de GitHub, se ejecuta `bash -e`. Con `shell: bash`, se añade `-o pipefail`. Sin eso, una tubería devuelve el resultado de su **último** comando: `tee` funcionó, así que el paso sale verde aunque tus tests hayan fallado. Si usas una tubería, pon siempre `shell: bash`.
+
+**Una etiqueta flotante cambia sola.** Un _workflow_ con `docker run mongo:8` puede funcionar durante meses y fallar un día sin que nadie toque el código, porque `8` significa «la última 8.x». Se comprobó en el kernel 7.0 de la VM:
+
+```text
+mongo:8    8.3.13   exited    MongoDB cannot start: Linux kernel versions 6.19 and newer has a known incompatibility…
+mongo:8.0  8.0.34   exited    (el mismo mensaje)
+mongo:8.2  8.2.12   running
+mongo:7.0  7.0.45   running
+```
+
+Fija las versiones de lo que uses en CI, igual que en `compose.yaml` (A4.2). El _runner_ tampoco es fijo: `ubuntu-latest` cambia con el tiempo.
+
+**Si nadie mira el rojo, es como si no existiera.** Un CI puede estar fallando semanas sin que nadie lo note si no bloquea nada. Lo arreglarás en A7.2, haciendo que sea obligatorio.
+
+`npm ci` sí protege de otra forma: con `package.json` cambiado y sin actualizar el _lockfile_, falló en 0,6 s:
+
+```text
+npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync
+npm error Missing: left-pad@1.3.0 from lock file
+```
+
+<Callout type="risk">
+
+- **`continue-on-error: true` convierte un fallo en verde:** se usa para pruebas opcionales. En un paso obligatorio, anula el CI.
+- **`|| true` hace lo mismo:** búscalo en los _workflows_ que heredes.
+- **Sin tests, todo pasa:** un paso `test` verde con cero tests no comprueba nada. Mira cuántos se ejecutan: aquí, 71.
+- **`push` no comprueba tu rama:** este _workflow_ solo reacciona a `push` en `main`. Por eso se usa `pull_request` para el resto.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Añade este _workflow_ a tu app de entrenamiento y abre una PR con un error de tipos a propósito para verlo fallar.
+
+</Callout>
+
+Solución:
+
+```bash
+git switch -c prueba/error-de-tipos
+echo 'export const minutosPorDefecto: number = "treinta"; // ERROR A PROPÓSITO' >> src/lib/ritmo.ts
+git add -A
+git commit -m "prueba: error de tipos a propósito"
+git push -u origin prueba/error-de-tipos
+```
+
+Abre la PR en GitHub y mira la pestaña **Checks**. Para probarlo antes en local, crea `evento.json`:
+
+```json
+{ "pull_request": { "number": 7, "head": { "ref": "prueba/error-de-tipos" }, "base": { "ref": "main" } } }
+```
+
+```bash
+act pull_request -e evento.json -W .github/workflows/ci.yml -P ubuntu-latest=catthehacker/ubuntu:act-latest
+```
+
+```text
+✅  Success - Main npm ci [23.0s]
+❌  Failure - Main npm run check [4.8s]
+🏁  Job failed
+```
+
+```text
+src/lib/ritmo.ts:14:14 - error ts(2322): Type 'string' is not assignable to type 'number'.
+- 1 error
+```
+
+Falló en 32 s, y ni los tests ni el _build_ llegaron a ejecutarse. Después, borra el error y haz otro _commit_ en la misma rama: el _workflow_ se repite.
+
+- **Esta prueba se hizo con `act`, sin abrir una PR real:** el resultado en la página de la PR debes comprobarlo tú.
+- **La PR en rojo todavía se puede fusionar:** el CI informa, pero no impide. Bloquearlo exige una regla de protección de rama, en A7.2.
+- **Coste:** según GitHub, los _runners_ estándar son gratuitos en repositorios públicos. En privados, el plan Free incluye 12 USD mensuales de cómputo, y Linux cuesta 0,006 USD por minuto.
+
+<Callout type="mastery">
+
+Sabes distinguir CI de CD, y leer un _workflow_ por sus piezas. Tu app ya tiene una máquina limpia que comprueba tipos, tests y _build_ en cada PR, y que encontró errores que tus despliegues no veían. Sabes que un verde puede ser falso, y por qué. Falta el último paso: que ninguna PR con errores pueda mezclarse, en A7.2.
+
+</Callout>
+
+## Resumen
+
+- **CI** comprueba cada cambio en una máquina limpia; **CD** lleva lo aprobado a producción.
+- **Piezas:** _workflow_, evento, _job_, _step_, _runner_ y acción.
+- La primera ejecución encontró **3 errores de tipos** que el _build_ no veía, y 2 tests rotos.
+- **`act`** ejecuta tu _workflow_ en local, pero no es GitHub: ignora `permissions` o `timeout-minutes`.
+- **`cache: npm`** bajó `npm ci` de 23,5 a 17,5 s. Guarda la caché de npm, no `node_modules`.
+- **`false | tee` sale en verde** sin `shell: bash`.
+- **Fija versiones:** `mongo:8` y `mongo:8.0` se negaron a arrancar en un kernel 7.0; `mongo:8.2` sí arrancó.
+- **Una PR con error de tipos falló en 32 s**, sin llegar a los tests.
+- Un CI que no bloquea solo informa: en A7.2 será obligatorio.
