@@ -1,0 +1,663 @@
+---
+sectionId: "A8.2"
+course: "A8"
+title: "Servidor vs cliente: dónde vive cada cosa"
+order: 2
+minutes: 85
+summary: "Mides la misma página de cuatro formas y decides qué renderiza el servidor, qué renderiza el cliente y qué se cachea. La server island bajó el LCP de 176 a 16 ms, y una caché mal puesta mostró los datos de otra persona."
+---
+
+Casi todas las páginas mezclan dos cosas: lo que es igual para todo el mundo, como el texto de una lección, y lo que es de una persona, como si ya la ha leído. Si tratas la página como un solo bloque, pagas por lo peor de cada lado: el texto espera a la base de datos, o el dato espera a que se descargue React. Decidir dónde vive cada trozo es buena parte de la arquitectura de un proyecto con Astro.
+
+Una analogía: un periódico con una nota personal. La edición se imprime una vez para todos, y por eso sale barata y llega rápido. Nadie reimprime el periódico porque quiera añadir tu nombre: se le pega una nota en la portada. El periódico es la página estática, y la nota es la _server island_.
+
+**Lo que tendrás al terminar:** una sección con el contenido en caché y el estado "leído" servido aparte, y un criterio para justificar cada isla de tu proyecto.
+
+**Requisitos:** _server islands_ (I3.1), directivas de cliente (B6.7), cabeceras de caché (A6) y Nginx (A4).
+
+Se midió en un navegador real, con Astro 7.4.7, `@astrojs/node` 11 y Nginx 1.28 en la VM de A4. La base de datos está **simulada**: un `Map` en memoria con una espera fija. El Nginx está en la red local, así que no hay ninguna CDN real ni latencia de internet en estas cifras.
+
+## Paso 1: el proyecto
+
+```bash
+mkdir servidor && cd servidor
+npm init -y
+npm pkg set type=module scripts.build="astro build" scripts.start="node ./dist/server/entry.mjs"
+npm i astro @astrojs/node @astrojs/react react react-dom
+npm i -D @astrojs/check typescript @types/react
+```
+
+`astro.config.mjs`. Las _server islands_ necesitan un adaptador, y `allowedDomains` se explica en el Paso 6:
+
+```js
+import node from "@astrojs/node";
+import react from "@astrojs/react";
+import { defineConfig } from "astro/config";
+
+export default defineConfig({
+  integrations: [react()],
+  adapter: node({ mode: "standalone" }),
+  security: {
+    allowedDomains: [{ hostname: "academy.tudominio.com", protocol: "https" }],
+  },
+});
+```
+
+La "base de datos":
+
+```ts
+// Archivo: src/lib/datos.ts
+// Simula una base de datos: guarda en memoria y tarda 150 ms en responder
+export const ajustes = { retardo: 150, fallo: false };
+
+const leidas = new Map<string, Set<string>>();
+
+async function consulta() {
+  await new Promise((resuelve) => setTimeout(resuelve, ajustes.retardo));
+  if (ajustes.fallo) throw new Error("La base de datos no responde");
+}
+
+export async function estaLeida(usuario: string, seccionId: string) {
+  await consulta();
+  return leidas.get(usuario)?.has(seccionId) ?? false;
+}
+
+export async function marcar(usuario: string, seccionId: string, leida: boolean) {
+  await consulta();
+  const conjunto = leidas.get(usuario) ?? new Set<string>();
+  if (leida) conjunto.add(seccionId);
+  else conjunto.delete(seccionId);
+  leidas.set(usuario, conjunto);
+}
+```
+
+Las secciones, y una página base con el contenido común:
+
+```ts
+// Archivo: src/lib/secciones.ts
+export const secciones = [
+  { id: "B1.1", titulo: "Qué es TypeScript" },
+  { id: "B1.2", titulo: "Tipos básicos" },
+  { id: "B1.3", titulo: "Funciones" },
+];
+
+export const seccionPorId = (id: string | undefined) => secciones.find((s) => s.id === id);
+
+export const rutasEstaticas = () =>
+  secciones.map((seccion) => ({ params: { id: seccion.id }, props: { seccion } }));
+```
+
+```astro
+---
+// Archivo: src/layouts/Pagina.astro
+const { titulo } = Astro.props;
+const parrafos = Array.from({ length: 12 }, (_, i) => i + 1);
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <title>{titulo}</title>
+  </head>
+  <body style="margin: 0 auto; max-width: 40rem; font: 18px/1.6 system-ui">
+    <h1>{titulo}</h1>
+    <slot name="estado" />
+    <article>
+      {
+        parrafos.map((n) => (
+          <p>
+            Párrafo {n} del contenido. Es igual para todo el mundo, y por eso puede generarse una
+            sola vez y guardarse en una caché. El contenido no cambia entre visitas.
+          </p>
+        ))
+      }
+    </article>
+    <slot />
+  </body>
+</html>
+```
+
+Para esta práctica, la sesión es una _cookie_ `sesion` con tu nombre. **No es autenticación**: solo sirve para distinguir a `ana` de `bob`.
+
+## Paso 2: todo en el servidor
+
+La opción directa: renderizar toda la página en cada petición.
+
+```astro
+---
+// Archivo: src/pages/ssr/[id].astro
+// Toda la página se renderiza en cada petición
+import Pagina from "../../layouts/Pagina.astro";
+import { estaLeida } from "../../lib/datos";
+import { seccionPorId } from "../../lib/secciones";
+
+export const prerender = false;
+
+const seccion = seccionPorId(Astro.params.id);
+if (!seccion) return Astro.rewrite("/404");
+const usuario = Astro.cookies.get("sesion")?.value;
+const leida = usuario ? await estaLeida(usuario, seccion.id) : false;
+---
+
+<Pagina titulo={seccion.titulo}>
+  <p id="estado" slot="estado">
+    {usuario ? (leida ? `✓ Leída por ${usuario}` : `Sin leer por ${usuario}`) : "Entra"}
+  </p>
+</Pagina>
+```
+
+Es simple y no necesita JavaScript. Pero el texto, que es igual para todos, espera a la consulta. Y si esa consulta falla, se cae todo:
+
+```text
+base de datos caída: 500, y ningún párrafo en la respuesta
+```
+
+## Paso 3: todo en el cliente
+
+La opción contraria: página estática, y una isla que pide el dato al cargar. La API:
+
+```ts
+// Archivo: src/pages/api/progreso/[id].ts
+import type { APIRoute } from "astro";
+import { estaLeida, marcar } from "../../../lib/datos";
+
+export const prerender = false;
+
+const sinCache = { "Content-Type": "application/json", "Cache-Control": "private, no-store" };
+
+export const GET: APIRoute = async ({ params, cookies }) => {
+  const usuario = cookies.get("sesion")?.value;
+  if (!usuario) return new Response(null, { status: 401 });
+  const leida = await estaLeida(usuario, params.id!);
+  return new Response(JSON.stringify({ usuario, leida }), { headers: sinCache });
+};
+
+export const PUT: APIRoute = async ({ params, cookies }) => {
+  const usuario = cookies.get("sesion")?.value;
+  if (!usuario) return new Response(null, { status: 401 });
+  await marcar(usuario, params.id!, true);
+  return new Response(null, { status: 204 });
+};
+
+export const DELETE: APIRoute = async ({ params, cookies }) => {
+  const usuario = cookies.get("sesion")?.value;
+  if (!usuario) return new Response(null, { status: 401 });
+  await marcar(usuario, params.id!, false);
+  return new Response(null, { status: 204 });
+};
+
+// Un <form> sin JavaScript: guarda y vuelve a la página de origen
+export const POST: APIRoute = async ({ params, cookies, request, redirect }) => {
+  const usuario = cookies.get("sesion")?.value;
+  if (!usuario) return new Response(null, { status: 401 });
+  const datos = await request.formData();
+  await marcar(usuario, params.id!, datos.get("leida") === "1");
+  return redirect(request.headers.get("referer") ?? "/", 303);
+};
+```
+
+La isla, con el _spinner_ de siempre:
+
+```tsx
+// Archivo: src/components/EstadoCliente.tsx
+import { useEffect, useState } from "react";
+
+export default function EstadoCliente({ seccionId }: { seccionId: string }) {
+  const [texto, setTexto] = useState("Cargando…");
+  useEffect(() => {
+    fetch(`/api/progreso/${seccionId}`)
+      .then((r) => r.json())
+      .then((d) => setTexto(d.leida ? `✓ Leída por ${d.usuario}` : `Sin leer por ${d.usuario}`))
+      .catch(() => setTexto("Progreso no disponible"));
+  }, [seccionId]);
+  return <p id="estado">{texto}</p>;
+}
+```
+
+```astro
+---
+// Archivo: src/pages/spinner/[id].astro
+// Página estática; la isla pide el dato al cargar
+import EstadoCliente from "../../components/EstadoCliente";
+import Pagina from "../../layouts/Pagina.astro";
+import { rutasEstaticas } from "../../lib/secciones";
+
+export const getStaticPaths = rutasEstaticas;
+const { seccion } = Astro.props;
+---
+
+<Pagina titulo={seccion.titulo}>
+  <EstadoCliente slot="estado" client:load seccionId={seccion.id} />
+</Pagina>
+```
+
+La página llega enseguida, pero para mostrar una frase has descargado React.
+
+## Paso 4: la server island
+
+Es el ejemplo del principio: el periódico y la nota. Un componente de servidor normal, que lee la _cookie_ y consulta:
+
+```astro
+---
+// Archivo: src/components/ProgresoUsuario.astro
+import { estaLeida } from "../lib/datos";
+
+const { seccionId } = Astro.props;
+Astro.response.headers.set("Cache-Control", "private, no-store"); // lo que sigue es de una persona
+const usuario = Astro.cookies.get("sesion")?.value;
+
+let leida = false;
+let fallo = false;
+if (usuario) {
+  try {
+    leida = await estaLeida(usuario, seccionId);
+  } catch {
+    fallo = true;
+  }
+}
+---
+
+<p id="estado" style="min-height: 2rem">
+  {
+    !usuario
+      ? "Entra para guardar tu progreso"
+      : fallo
+        ? "Progreso no disponible"
+        : leida
+          ? `✓ Leída por ${usuario}`
+          : `Sin leer por ${usuario}`
+  }
+</p>
+```
+
+Y la página, estática, con `server:defer`:
+
+```astro
+---
+// Archivo: src/pages/defer/[id].astro
+// Página estática; solo el progreso se pide al servidor
+import ProgresoUsuario from "../../components/ProgresoUsuario.astro";
+import Pagina from "../../layouts/Pagina.astro";
+import { rutasEstaticas } from "../../lib/secciones";
+
+export const getStaticPaths = rutasEstaticas;
+const { seccion } = Astro.props;
+---
+
+<Pagina titulo={seccion.titulo}>
+  <ProgresoUsuario slot="estado" server:defer seccionId={seccion.id}>
+    <p slot="fallback" style="min-height: 2rem">Cargando progreso…</p>
+  </ProgresoUsuario>
+</Pagina>
+```
+
+El HTML generado lleva el `fallback` y un pequeño _script_ que pide `/_server-islands/ProgresoUsuario`. Las cuatro formas, con una base de datos de 150 ms y la mediana de cinco cargas:
+
+| Forma                  | TTFB   | LCP    | Dato visible | JS (gzip) |
+| ---------------------- | ------ | ------ | ------------ | --------- |
+| Todo en el servidor    | 154 ms | 176 ms | 160 ms       | 0         |
+| Isla con dato (Paso 7) | 154 ms | 180 ms | 162 ms       | 70 KB     |
+| Isla con _spinner_     | 1 ms   | 16 ms  | 181 ms       | 70 KB     |
+| _Server island_        | 1 ms   | 16 ms  | 158 ms       | 0         |
+
+Con una consulta lenta, de 800 ms:
+
+| Forma               | LCP    | Dato visible |
+| ------------------- | ------ | ------------ |
+| Todo en el servidor | 824 ms | 804 ms       |
+| Isla con _spinner_  | 16 ms  | 822 ms       |
+| _Server island_     | 16 ms  | 800 ms       |
+
+Míralo con calma, porque no es que una opción gane en todo:
+
+- **El dato tarda lo mismo en casi todas,** porque depende de la consulta. Lo que cambia es qué hace la persona mientras tanto.
+- **La página en caché no espera a la base de datos.** El LCP no se movió de 16 ms, aunque la consulta fuese cinco veces más lenta.
+- **La _server island_ no envía JavaScript de framework,** y el _spinner_ añade 7 peticiones frente a 2.
+
+Y si la base de datos cae, la página sigue en pie: el texto llega con un 200, y la isla responde `Progreso no disponible`, gracias al `try/catch` del componente.
+
+<Callout type="risk">
+
+- **Dale al `fallback` la altura final.** Con `min-height`, el CLS fue 0. Sin `fallback`, fue 0,017. Es un valor bajo porque la isla es una línea: cuanto más alta sea, más se moverá el texto.
+- **Si no pasas `fallback`, no se ve nada hasta que llega la isla.** Con un dato poco importante, puede ser lo que quieres.
+- **Sin JavaScript, la isla no llega nunca.** Se queda en `Cargando progreso…`, porque un _script_ es quien la pide. La versión del Paso 2 sí funcionó sin JavaScript. Si ese dato es imprescindible, renderízalo en el servidor.
+
+</Callout>
+
+## Paso 5: la caché, y lo que puede salir mal
+
+Hasta aquí, el TTFB de 1 ms venía de un Nginx en caché. Es lo que hace valer la pena todo esto, y también lo más peligroso. Separa lo cacheable de lo demás:
+
+```nginx
+proxy_cache_path /var/cache/nginx/app keys_zone=app:1m max_size=50m inactive=5m use_temp_path=off;
+
+server {
+  # listen, server_name y TLS como en A4
+
+  # Solo las páginas sin datos de nadie
+  location ~ ^/defer/ {
+    proxy_pass http://127.0.0.1:4390;
+    proxy_cache app;
+    proxy_cache_valid 200 1m;
+    proxy_ignore_headers Cache-Control;
+    proxy_set_header Host $http_host;
+    add_header X-Cache $upstream_cache_status always;
+  }
+
+  # Todo lo demás, sin caché
+  location / {
+    proxy_pass http://127.0.0.1:4390;
+    proxy_set_header Host $http_host;
+  }
+}
+```
+
+El `proxy_ignore_headers` está porque Astro sirve las páginas estáticas con `Cache-Control: public, max-age=0`, y Nginx no las guardaría. Por eso solo debe aplicarse a esta ruta.
+
+Dos personas entran a la misma URL, primero `ana`, que ya la ha leído, y después `bob`, que no. Esto es lo que recibe `bob` en cada configuración:
+
+| Configuración                                | Lo que ve `bob`      |
+| -------------------------------------------- | -------------------- |
+| Separando rutas: página con `X-Cache: HIT`   | `Sin leer por bob` ✓ |
+| Página SSR con `Cache-Control: public`       | `✓ Leída por ana` ✗  |
+| Microcaché global, ignorando `Cache-Control` | `✓ Leída por ana` ✗  |
+| Lo mismo, pero en la propia _server island_  | `✓ Leída por ana` ✗  |
+
+La tercera y la cuarta filas son el mismo error, y la cuarta sorprende: **la _server island_ tampoco está a salvo.** Su URL es igual para todo el mundo, y por defecto la respuesta no lleva ninguna cabecera de caché: solo `content-type: text/html`. Por eso `ProgresoUsuario.astro` declara la suya:
+
+```astro
+Astro.response.headers.set("Cache-Control", "private, no-store"); // lo que sigue es de una persona
+```
+
+Esa cabecera avisa a cualquier caché que la respete. Y la línea importante sigue siendo la del `location`: una regla que ignora `Cache-Control` no debe alcanzar nada personal.
+
+<Callout type="risk">
+
+- **Una caché compartida no conoce a tus usuarios.** Con la URL como clave, Bob recibe lo que se guardó para Ana. Aquí fue un texto inofensivo, pero podría ser su correo o sus facturas.
+- **Comprueba con dos usuarios reales,** no con uno. Con uno solo, todo parece correcto.
+- **Vacía la caché tras un cambio.** Nginx la conserva hasta que caduca.
+
+</Callout>
+
+## Paso 6: los límites de una server island
+
+**Cada build usa otra clave.** Las _props_ van cifradas, y la clave cambia en cada `astro build`. Una página en caché de la versión anterior pide su isla al servidor nuevo, y este no la puede descifrar:
+
+```text
+misma build:                 200
+build nueva, página antigua: 400
+misma fuente, otra build:    400
+```
+
+En el navegador, se queda en `Cargando progreso…` para siempre, con el error `400` solo en la consola. Ocurrirá en cada despliegue, justo en las páginas que has cacheado. La solución es fijar la clave:
+
+```bash
+npx astro create-key    # guarda el resultado como secreto
+ASTRO_KEY=<tu-clave> npm run build
+```
+
+Con la misma `ASTRO_KEY` en dos _builds_, la página antigua dio 200. Bastó con tenerla durante el build. Si la cambias, vuelve el 400: trátala como un cambio que exige vaciar la caché.
+
+**No redirijas desde una isla.** Ya se ha enviado la página, así que no hay nada que redirigir. `Astro.redirect` dentro de la isla dio un 200 con este texto, **pintado en mitad de tu página**:
+
+```text
+Internal server error
+```
+
+Es lo que evita el `!usuario` de `ProgresoUsuario.astro`: muestra un aviso, o un enlace para entrar.
+
+**`Astro.url` no es la página.** Dentro de la isla vale `/_server-islands/ProgresoUsuario`. Si necesitas saber la página, pásala como _prop_, o lee la cabecera `Referer`.
+
+<Callout type="risk">
+
+- **Las _props_ van cifradas, y están protegidas.** Una _prop_ de texto no apareció en claro en el HTML, y al manipularla el servidor respondió 400. Aun así, cualquiera puede repetir esa URL: un `seccionId` es un dato público. El usuario sale siempre de la sesión, nunca de una _prop_.
+- **Con _props_ grandes, la petición pasa a ser `POST`.** Con 5.000 caracteres, las _props_ fueron dentro del HTML, que subió de 3,9 a 10,2 KB, y un `POST` no se cachea.
+- **Detrás de un proxy, comprueba `PUT` y `POST`.** Sin `allowedDomains`, la API respondió `403 Cross-site PUT form submissions are forbidden`, pese a que la petición venía de la misma web. Astro no se fía de la cabecera `Host`, y pensaba que era otro origen. Con `GET` no se notaba nada. Se midió con HTTP en la red local: con TLS, envía también `X-Forwarded-Proto` y repite la prueba, porque ese caso no se ha probado aquí.
+
+</Callout>
+
+## Paso 7: datos iniciales, sin _spinner_
+
+A veces necesitas una isla de verdad, como un botón que responde al momento. Eso no obliga al _spinner_: el servidor ya puede tener el dato y pasarlo como _prop_.
+
+```tsx
+// Archivo: src/components/BotonLeida.tsx
+import { useState } from "react";
+
+interface Props {
+  seccionId: string;
+  usuario: string;
+  inicial: boolean;
+}
+
+export default function BotonLeida({ seccionId, usuario, inicial }: Props) {
+  const [leida, setLeida] = useState(inicial);
+
+  async function cambiar() {
+    const siguiente = !leida;
+    setLeida(siguiente); // se pinta ya, y se deshace si el servidor falla
+    const r = await fetch(`/api/progreso/${seccionId}`, { method: siguiente ? "PUT" : "DELETE" });
+    if (!r.ok) setLeida(!siguiente);
+  }
+
+  return (
+    <button id="estado" type="button" onClick={cambiar}>
+      {leida ? `✓ Leída por ${usuario}` : `Marcar como leída (${usuario})`}
+    </button>
+  );
+}
+```
+
+```astro
+---
+// Archivo: src/pages/inicial/[id].astro
+// El servidor consulta y la isla nace con el dato: sin spinner y sin petición extra
+import BotonLeida from "../../components/BotonLeida";
+import Pagina from "../../layouts/Pagina.astro";
+import { estaLeida } from "../../lib/datos";
+import { seccionPorId } from "../../lib/secciones";
+
+export const prerender = false;
+
+const seccion = seccionPorId(Astro.params.id);
+if (!seccion) return Astro.rewrite("/404");
+const usuario = Astro.cookies.get("sesion")?.value ?? "invitado";
+const leida = await estaLeida(usuario, seccion.id);
+---
+
+<Pagina titulo={seccion.titulo}>
+  <BotonLeida slot="estado" client:load seccionId={seccion.id} usuario={usuario} inicial={leida} />
+</Pagina>
+```
+
+El dato viene en el HTML, de modo que no hay ninguna petición extra ni pantalla de carga: aparece a los 162 ms, y sin JavaScript también se ve. Es la segunda fila de la tabla del Paso 4. El precio es que la página ya no se puede cachear.
+
+Y se puede combinar todo: una isla de React **dentro** de una _server island_. La página sigue en caché, el servidor consulta y el botón nace con su dato. Se comprobó con un clic, `PUT 204`, y el estado siguió ahí al recargar. Es la solución del ejercicio.
+
+## Paso 8: cuando React sobra
+
+Un índice plegable, tres veces en la misma página, escrito con React y con un `<script>` nativo:
+
+```astro
+---
+// Archivo: src/components/IndiceNativo.astro
+const { titulo } = Astro.props;
+---
+
+<div>
+  <button type="button" data-alternar aria-expanded="true">{titulo}</button>
+  <ul data-panel>
+    <li>Primer apartado</li>
+    <li>Segundo apartado</li>
+  </ul>
+</div>
+
+<script>
+  document.querySelectorAll("[data-alternar]").forEach((boton) => {
+    boton.addEventListener("click", () => {
+      const abierto = boton.getAttribute("aria-expanded") === "true";
+      boton.setAttribute("aria-expanded", String(!abierto));
+      const panel = boton.nextElementSibling as HTMLElement;
+      panel.hidden = abierto;
+    });
+  });
+</script>
+```
+
+| Versión    | Archivos JS | Peso                      | Funciona |
+| ---------- | ----------- | ------------------------- | -------- |
+| `<script>` | 0           | 221 bytes dentro del HTML | Sí       |
+| React      | 5           | 214 KB, unos 70 KB gzip   | Sí       |
+
+Astro incluyó el `<script>` **una sola vez**, aunque el componente aparezca tres veces. Un `<script>` de componente también se ejecutó dentro de una _server island_.
+
+Para guardar un cambio tampoco siempre hace falta React. Un formulario, que además vuelve solo a la página:
+
+```astro
+---
+// Archivo: src/components/ProgresoNativo.astro
+import { estaLeida } from "../lib/datos";
+
+const { seccionId } = Astro.props;
+const usuario = Astro.cookies.get("sesion")?.value;
+const leida = usuario ? await estaLeida(usuario, seccionId) : false;
+---
+
+{
+  usuario && (
+    <form method="post" action={`/api/progreso/${seccionId}`}>
+      <input type="hidden" name="leida" value={leida ? "0" : "1"} />
+      <button id="estado">{leida ? `✓ Leída por ${usuario}` : "Marcar como leída"}</button>
+    </form>
+  )
+}
+```
+
+El `POST` respondió 303 y el estado se actualizó al volver. Eso sí, esta isla también la pide un _script_: dentro de una _server island_, el formulario tampoco funciona sin JavaScript.
+
+Una isla de React compensa cuando hay **estado que cambia a menudo**, como un editor, una evaluación con varios pasos o una actualización optimista. No compensa para abrir y cerrar cosas, y para algunas de estas ni siquiera hace falta un _script_: `<details>` ya lo hace solo.
+
+<Callout type="risk">
+
+- **El coste de React se paga una vez por página.** Si ya hay una isla, otra pequeña apenas pesa 0,3 KB. Con ninguna, la primera cuesta 70 KB. La pregunta útil es si la página puede quedarse sin React.
+- **Con _View Transitions_ (A6), un `<script>` no se repite en cada navegación.** Según la documentación, debes escuchar `astro:page-load`. No se ha probado en este laboratorio.
+
+</Callout>
+
+## Paso 9: decidir
+
+| El dato es…                                | Dónde vive                      |
+| ------------------------------------------ | ------------------------------- |
+| Igual para todos                           | HTML estático, en caché         |
+| Personal, y la página es pública           | _Server island_                 |
+| Personal e imprescindible                  | Servidor, sin caché             |
+| Personal, e interactivo                    | Isla con dato inicial           |
+| Solo del navegador, como un `localStorage` | `<script>` o isla, sin servidor |
+
+Ahora una auditoría real. La plataforma donde lees esto tiene `output: "server"` y **no usa ninguna _server island_**, porque toda sección exige sesión: la comprobación pasa por el servidor en cada petición, y no hay ninguna página estática que proteger. Una _server island_ no ahorraría nada. Por eso las secciones se renderizan en el servidor, y las islas nacen con su dato.
+
+- **`LoginForm` y `RegisterForm`, con `client:load`:** validación y errores, que son el fin de la página.
+- **`Quiz`, con `client:load`:** estado de varios pasos.
+- **`MarkAsReadButton`, con `client:visible`:** optimista, y al final de la página.
+- **`NotesIsland`, con `client:idle`:** editor con autoguardado, que no es urgente.
+- **`SidebarToggle`, con `client:load`:** discutible.
+
+`SidebarToggle` solo abre y cierra un panel, y podría ser un `<script>`. Se sostiene porque esas páginas ya cargan React para otras islas, así que apenas añade peso. El resto de piezas no llevan React: el tema, el índice lateral y el seguimiento de estudio son `<script>` nativos.
+
+Estas cifras son del laboratorio. No se ha medido la plataforma en producción.
+
+<Callout type="exercise">
+
+Rediseña la página de una sección para que el contenido sea cacheable y el estado "leído" llegue con una _server island_.
+
+</Callout>
+
+Solución, con un botón de verdad. La _server island_ consulta, y la isla de React nace con el dato:
+
+```astro
+---
+// Archivo: src/components/ProgresoInteractivo.astro
+import { estaLeida } from "../lib/datos";
+import BotonLeida from "./BotonLeida";
+
+const { seccionId } = Astro.props;
+Astro.response.headers.set("Cache-Control", "private, no-store");
+const usuario = Astro.cookies.get("sesion")?.value;
+
+let leida: boolean | undefined;
+if (usuario) {
+  try {
+    leida = await estaLeida(usuario, seccionId);
+  } catch {
+    leida = undefined; // sin dato, no se ofrece el botón
+  }
+}
+---
+
+<div style="min-height: 2rem">
+  {!usuario && <a href="/entrar">Entra para guardar tu progreso</a>}
+  {usuario && leida === undefined && <p>Progreso no disponible</p>}
+  {
+    usuario && leida !== undefined && (
+      <BotonLeida client:load seccionId={seccionId} usuario={usuario} inicial={leida} />
+    )
+  }
+</div>
+```
+
+```astro
+---
+// Archivo: src/pages/ejercicio/[id].astro
+import ProgresoInteractivo from "../../components/ProgresoInteractivo.astro";
+import Pagina from "../../layouts/Pagina.astro";
+import { rutasEstaticas } from "../../lib/secciones";
+
+export const getStaticPaths = rutasEstaticas;
+const { seccion } = Astro.props;
+---
+
+<Pagina titulo={seccion.titulo}>
+  <ProgresoInteractivo slot="estado" server:defer seccionId={seccion.id}>
+    <p slot="fallback" style="min-height: 2rem">Cargando progreso…</p>
+  </ProgresoInteractivo>
+</Pagina>
+```
+
+Añade `ejercicio` al `location` de la caché, fija `ASTRO_KEY` y comprueba con varias personas:
+
+```text
+zoe         MISS  Marcar como leída (zoe)
+zoe, clic         ✓ Leída por zoe
+zoe vuelve  HIT   ✓ Leída por zoe
+leo         HIT   Marcar como leída (leo)
+sin sesión  HIT   Entra para guardar tu progreso
+BD caída    HIT   Progreso no disponible
+```
+
+Todas las filas son la misma página en caché, con su propia nota.
+
+- **`/entrar` no existe en este proyecto:** pon ahí la ruta de tu inicio de sesión.
+- **En Vercel u otra CDN,** la lógica es la misma, pero no se ha probado aquí.
+- **Si tu página exige sesión,** repasa el Paso 9: quizá no te aporte nada.
+
+<Callout type="mastery">
+
+Puedes señalar cualquier trozo de una página y decir dónde vive y por qué, con el coste de esa decisión en milisegundos y kilobytes. Justificas cada isla de cliente de tu proyecto, o la quitas. Y sabes que lo personal no pasa por una caché compartida.
+
+</Callout>
+
+## Resumen
+
+- **La página se reparte en trozos:** lo común se cachea y lo personal llega aparte.
+- **`server:defer`:** LCP de 176 a 16 ms, sin JavaScript de framework. Con 800 ms de consulta, sigue en 16 ms.
+- **El dato no llega antes:** tarda lo que tarda la consulta. Lo que mejora es la espera.
+- **Si la base de datos cae:** SSR da 500; con la _server island_ el texto sigue ahí.
+- **`Cache-Control: private, no-store`** en cada isla personal, y `location` separados: si no, Bob vio los datos de Ana.
+- **`ASTRO_KEY` fija,** o cada despliegue deja las páginas en caché cargando para siempre.
+- **Sin `Astro.redirect` en una isla,** y sin datos de usuario en sus _props_.
+- **Sin JavaScript, una _server island_ no llega.**
+- **Datos iniciales:** el servidor los pasa como _prop_, sin _spinner_.
+- **`<script>` nativo:** 221 bytes frente a 70 KB para plegar un índice.
+- **Sin página pública, no hay nada que ganar** con una _server island_.
