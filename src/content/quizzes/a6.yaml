@@ -1,0 +1,51 @@
+course: A6
+passingScore: 4
+questions:
+  - prompt: "¿Qué mide el LCP?"
+    options:
+      - "El tiempo desde que el usuario hace clic o pulsa una tecla hasta que la pantalla cambia tras esa acción."
+      - "Cuánto se mueve el contenido de la página sin que el usuario haya hecho nada."
+      - "Cuándo se pinta el elemento más grande de la pantalla, sea una imagen o un bloque de texto."
+      - "Cuánto tarda el servidor en enviar el primer byte de la respuesta al navegador."
+    answer: 2
+    explanation: "Lo bueno es hasta 2,5 s, en el percentil 75. En A6.1, una imagen de 1,8 MB dio 9,4 s y la misma con 54 KB, 0,2 s. `preload` no ayudó, porque el problema era el peso. El primer byte es TTFB, que forma parte del LCP pero no es lo mismo."
+
+  - prompt: "Una página con un clic que bloquea 400 ms saca un 100 en Lighthouse, aunque su INP real es de 416 ms. ¿Por qué?"
+    options:
+      - "Lighthouse carga la página y nadie pulsa el botón; los datos reales vienen de visitas de usuarios."
+      - "Lighthouse redondea hacia arriba: cualquier valor por debajo de 500 ms cuenta como un resultado perfecto."
+      - "El INP solo se puede medir en escritorio, y Lighthouse usa por defecto la emulación de un móvil."
+      - "La medida de 416 ms es de laboratorio y la de Lighthouse es real, así que la que vale es esta última."
+    answer: 0
+    explanation: "Medido en A6.1: nota 100 con TBT 0 ms, porque ese código nunca se ejecutó. El laboratorio es una carga controlada; los datos reales, una distribución de dispositivos y redes. Se miran en el percentil 75: en las 30 visitas simuladas, la media dio 190 ms, un número que no vivió nadie."
+
+  - prompt: "¿Qué hace `stale-while-revalidate=600` en esta respuesta?"
+    code: |
+      Cache-Control: public, s-maxage=60, stale-while-revalidate=600
+    options:
+      - "Obliga a la CDN a esperar la versión nueva durante 600 s antes de responder, para no servir nunca datos antiguos."
+      - "Hace que el navegador guarde la página durante 600 s, sin volver a preguntar a la CDN en ese tiempo."
+      - "Borra la copia de la CDN a los 600 s de crearla, aunque nadie la haya pedido durante ese tiempo."
+      - "Pasados los 60 s, la CDN sigue sirviendo la copia antigua al instante mientras trae una nueva detrás."
+    answer: 3
+    explanation: "Medido en A6.3: a los 12 s de una caché de 10 s llegó `STALE` en 7 ms, y un segundo después `HIT` con el HTML nuevo. El usuario no espera, a cambio de ver datos con algo de retraso. Por eso solo sirve para datos que lo toleran."
+
+  - prompt: "¿Por qué no se debe guardar una respuesta privada en la CDN?"
+    options:
+      - "Porque las CDN rechazan por seguridad cualquier respuesta cuyo HTML contenga datos personales de un usuario."
+      - "Porque la clave de la caché es la URL: la copia de uno le llega a otro, incluso sin sesión."
+      - "Porque el middleware de la app detecta la copia guardada y responde con un 401 a todos los usuarios."
+      - "Porque ralentiza la página: las respuestas con cookies tardan más en salir de la CDN que de tu servidor."
+    answer: 1
+    explanation: "Reproducido en A6.3: con `public` en `/estadisticas`, otra usuaria y alguien sin sesión vieron los datos de la primera, porque el middleware que protege la ruta ni se ejecutó. La defensa es que todo sea `private, no-store` salvo lo que se declare público."
+
+  - prompt: "Un usuario te da el código de un error. ¿Qué ventaja te dan aquí los logs estructurados frente a texto libre?"
+    code: |
+      {"nivel":"error","requestId":"8804af67…","userId":"6aee8210…","ruta":"/estadisticas","status":500,"err":{"type":"TypeError"}}
+    options:
+      - "Ocupan menos espacio, y por eso los datos personales que contienen dejan de ser un problema."
+      - "Sustituyen a Sentry y a las métricas, porque cada línea se envía sola a un panel de errores."
+      - "Cada campo se puede filtrar y contar: buscas por `requestId` y calculas errores por ruta."
+      - "Son la única forma de escribir en la salida de un contenedor; un texto normal no se guardaría."
+    answer: 2
+    explanation: "En A6.4, con ese código se encontró el fallo en Nginx y en Node sin reproducirlo, y `metricas.sh` calculó errores y p95 con `jq` sobre las mismas líneas. Sentry convirtió 6 errores iguales en 1 evento: para contar, los logs. Siguen siendo datos personales, así que se eligen los campos."
