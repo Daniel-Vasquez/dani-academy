@@ -1,0 +1,343 @@
+---
+sectionId: "A7.3"
+course: "A7"
+title: "Tests E2E y servicios en CI"
+order: 3
+minutes: 80
+summary: "Añades un job con Playwright y MongoDB como servicio, guardas informes para investigar fallos y descubres cuatro formas de tener un CI en verde o en rojo por el motivo equivocado."
+---
+
+Los tests unitarios comprueban piezas. Los **E2E** comprueban lo que hace un usuario: abrir un navegador, registrarse, guardar un entreno y verlo al recargar (I8). Son los que más se parecen a la realidad, y también los más caros y delicados, porque necesitan un navegador, un servidor y una base de datos a la vez.
+
+Una analogía: un ensayo general de teatro. Ensayar cada escena por separado no te dice si el decorado llega a tiempo. Para eso hay que montarlo todo, con luces, actores y público de prueba. Es caro, así que se hace después de que las escenas funcionen. Y si sale mal, conviene tenerlo grabado, porque nadie recordará qué pasó exactamente. Esa grabación es la **traza**.
+
+**Lo que tendrás al terminar:** un _job_ E2E con MongoDB real, un informe para investigar los fallos, secretos bien usados y una matriz con dos versiones de Node.
+
+**Requisitos:** el CI de A7.2 y los tests E2E de I8.
+
+## Paso 1: MongoDB como servicio
+
+Un **servicio** es un contenedor que GitHub arranca junto a tu _job_ y destruye al terminar. Tu app necesita un _replica set_ porque Better Auth usa transacciones, y eso exige dos cosas: arrancar `mongod` con `--replSet`, e iniciarlo después.
+
+`scripts/esperar-mongo.mjs` hace lo segundo, y no continúa hasta que acepte escrituras:
+
+```js
+// Archivo: scripts/esperar-mongo.mjs
+// Convierte el MongoDB del CI en un replica set de un nodo y espera a que acepte escrituras.
+// Better Auth usa transacciones, y un servidor suelto no las admite
+import { MongoClient } from "mongodb";
+
+const URI = "mongodb://127.0.0.1:27017/?directConnection=true";
+const LIMITE_SEGUNDOS = 60;
+
+for (let segundos = 1; segundos <= LIMITE_SEGUNDOS; segundos++) {
+  const cliente = new MongoClient(URI, { serverSelectionTimeoutMS: 1_000 });
+  try {
+    const admin = cliente.db("admin");
+    await admin
+      .command({ replSetInitiate: { _id: "rs0", members: [{ _id: 0, host: "127.0.0.1:27017" }] } })
+      .catch(() => {}); // ya iniciado: da error y no importa
+
+    const { isWritablePrimary } = await admin.command({ hello: 1 });
+    if (isWritablePrimary) {
+      console.log(`MongoDB listo como primario tras ${segundos} s`);
+      process.exit(0);
+    }
+  } catch {
+    // Todavía no acepta conexiones: se reintenta
+  } finally {
+    await cliente.close();
+  }
+  await new Promise((resolver) => setTimeout(resolver, 1_000));
+}
+
+console.error(`MongoDB no llegó a primario en ${LIMITE_SEGUNDOS} s`);
+process.exit(1);
+```
+
+Añade este _job_ a `.github/workflows/ci.yml`, debajo de `verificar`:
+
+```yaml
+  e2e:
+    needs: verificar # sin tipos ni tests correctos, no merece la pena abrir un navegador
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mongo:
+        image: mongo:8.2 # una versión fijada: mongo:8 no arranca en kernels recientes
+        ports:
+          - 27017:27017
+        command: --replSet rs0 --bind_ip_all
+    env:
+      MONGODB_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+      MONGODB_DB: entrenos_ci
+      BETTER_AUTH_SECRET: ${{ secrets.BETTER_AUTH_SECRET_E2E }}
+      BETTER_AUTH_URL: http://localhost:4330
+      OBJETIVO_SEMANAL_MINUTOS: 150
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: node scripts/esperar-mongo.mjs
+      - run: node scripts/crear-indices.mjs
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v7
+        if: failure() # solo hace falta para investigar un fallo
+        with:
+          name: informe-playwright
+          path: |
+            playwright-report
+            test-results
+          retention-days: 7
+```
+
+- **`needs: verificar`:** se ejecuta solo si el anterior pasa. No tiene sentido gastar un navegador si no compilan los tipos.
+- **`image: mongo:8.2`:** una versión exacta (A7.1).
+- **`command`:** los argumentos para `mongod`.
+- **`ports`:** como el _job_ corre en el _runner_ y no en un contenedor, llega a MongoDB por `127.0.0.1`.
+- **`directConnection=true`:** habla con ese nodo directamente, sin descubrir el resto del _replica set_.
+
+En `playwright.config.ts`, un informe que se pueda abrir después:
+
+```ts
+reporter: [["list"], ["html", { open: "never" }]],
+forbidOnly: !!process.env.CI, // un test.only olvidado no pasa en CI
+failOnFlakyTests: !!process.env.CI, // un test inestable no pasa como bueno
+```
+
+Añade `playwright-report` y `test-results` a `.gitignore`. El resultado:
+
+```text
+✅  Success - Main npm ci [21.0s]
+MongoDB listo como primario tras 2 s
+✅  Success - Main node scripts/esperar-mongo.mjs [1.6s]
+✅  Success - Main node scripts/crear-indices.mjs [0.2s]
+✅  Success - Main npx playwright install --with-deps chromium [55.9s]
+4 passed (6.8s)
+✅  Success - Main npx playwright test [7.4s]
+🏁  Job succeeded
+```
+
+Los dos _jobs_ tardaron 148 s en total, y `needs` hizo correr primero a `verificar`. Instalar el navegador costó **casi ocho veces más** que los propios tests.
+
+<Callout type="risk">
+
+- **Esto no se ha ejecutado exactamente así:** `act` rechaza `command` dentro de `services` con `Unknown Property command`, aunque está en la documentación de GitHub. En la prueba se usó una imagen derivada de `mongo:8.2` con ese comando incorporado. Comprueba la clave `command` en tu primera ejecución real.
+- **El _replica set_ debe iniciarse:** sin ese paso, el _job_ falló en 24 s con `MongoServerError: not primary`. Un `mongod` con `--replSet` arranca, pero no acepta escrituras.
+- **Un servicio tarda en estar listo:** arrancado no significa preparado. Por eso el _script_ reintenta durante 60 s.
+- **Los datos de CI son desechables:** el contenedor se destruye. Por eso `playwright.config.ts` rechaza cualquier URI que no sea local: nunca ejecutes E2E contra una base real.
+- **Solo funciona en _runners_ Linux:** según GitHub, los servicios no están disponibles en Windows ni macOS.
+
+</Callout>
+
+## Paso 2: investigar un fallo que no ves
+
+En un CI no puedes abrir el navegador para mirar. Lo que no guardes, se pierde al destruirse la máquina. Por eso el último paso sube un **artefacto**, solo si algo falla, y el `playwright.config.ts` de I8 ya guarda la traza con `trace: "retain-on-failure"`.
+
+Con un fallo provocado, la salida ya dice mucho:
+
+```text
+Error: fallo a propósito
+Expected: 3
+Received: 2
+> 6 |   expect(1 + 1, "fallo a propósito").toBe(3);
+```
+
+Y esto es lo que quedó en el disco del _runner_:
+
+```text
+2.0M  playwright-report
+40K   test-results
+playwright-report/index.html
+playwright-report/data/….zip    ← la traza
+playwright-report/data/….md     ← el contexto del error
+playwright-report/trace/…
+```
+
+Con el artefacto descargado en la pestaña de la ejecución:
+
+```bash
+npx playwright show-report playwright-report
+```
+
+El informe permite ver la traza paso a paso: capturas, red y consola en cada momento. Si solo tienes el archivo:
+
+```bash
+npx playwright show-trace trace.zip
+```
+
+<Callout type="risk">
+
+- **La subida del artefacto no se ha comprobado:** los archivos se generaron y `upload-artifact` los encontró, pero con `act` falló al subirlos (`Unexpected end of JSON input`), también usando otra dirección. No se ha podido determinar la causa. Verifica en tu primer fallo real que el artefacto aparece.
+- **Ese intento fallido costó 80 s:** reintenta cinco veces. Un paso de limpieza también puede alargar un fallo.
+- **Las trazas pueden contener datos:** incluyen capturas, peticiones y respuestas. Con tests que usan datos ficticios no hay problema, pero en un repositorio público conviene saber quién puede descargarlas. Por eso `retention-days: 7`, en lugar de los 90 por defecto.
+- **`if: failure()` no se ejecuta si se cancela:** para subir siempre, usa `if: ${{ !cancelled() }}`.
+- **Con una matriz, cada artefacto necesita un nombre propio:** según su README, no se puede subir al mismo artefacto desde varios _jobs_.
+
+</Callout>
+
+## Paso 3: secretos y variables
+
+`BETTER_AUTH_SECRET` no debe estar en el archivo. Se crea en **Settings → Secrets and variables → Actions → New repository secret**, y se usa como en el _job_: `${{ secrets.BETTER_AUTH_SECRET_E2E }}`. Las **variables** (`${{ vars.ENTORNO }}`) van en la pestaña de al lado, y son para valores que no son secretos.
+
+Usa un valor solo para pruebas, nunca el de producción: este solo protege una base que se destruye en minutos. También podrías generarlo en cada ejecución, sin guardarlo (no medido):
+
+```yaml
+- run: echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+```
+
+¿Qué ocurre con un secreto en los registros? Con un valor de prueba:
+
+```yaml
+- run: echo "directo $SECRETO"
+- run: echo "en base64 $(printf %s "$SECRETO" | base64)"
+- run: echo "invertido $(printf %s "$SECRETO" | rev)"
+```
+
+```text
+directo ***
+en base64 c2VjcmV0by1kZS1wcnVlYmEtMTIz
+invertido 321-abeurp-ed-oterces
+```
+
+**El enmascarado solo busca el texto exacto.** Cualquier transformación lo deja al descubierto. Un `console.log` de depuración, una URL con el secreto codificado o un error que lo incluya bastan para filtrarlo.
+
+Y si el secreto no existe, no hay aviso: se convierte en texto vacío.
+
+```text
+[WebServer] - BETTER_AUTH_SECRET is missing
+Error: Timed out waiting 120000ms from config.webServer.
+```
+
+El servidor no arrancó, y el _job_ estuvo **2 minutos** esperándolo.
+
+<Callout type="risk">
+
+- **Las PR de un _fork_ no reciben secretos:** según GitHub, salvo `GITHUB_TOKEN`. En un proyecto público, un _job_ que dependa de un secreto falla para cualquier colaborador externo. Es otro motivo para generarlo en cada ejecución.
+- **Dependabot tampoco los recibe:** tiene su propio almacén de secretos.
+- **Si un secreto se filtra, cámbialo:** borrar el registro no basta. Quizá ya lo copió alguien (A5.5).
+- **Nunca uses `pull_request_target` para dar secretos a una PR ajena:** ejecutarías código ajeno con acceso a ellos.
+- **Pásalos por `env`:** según GitHub, es la forma recomendada, en lugar de escribirlos dentro del comando.
+
+</Callout>
+
+## Paso 4: matrices
+
+Una **matriz** repite un _job_ con distintos valores. Sirve para comprobar que tu app funciona en la versión de Node de hoy y en la siguiente, antes de actualizar:
+
+```yaml
+verificar:
+  strategy:
+    fail-fast: false
+    matrix:
+      node: [24, 26]
+  steps:
+    - uses: actions/setup-node@v7
+      with:
+        node-version: ${{ matrix.node }}
+        cache: npm
+```
+
+```text
+probar-1: v24.22.2 · Tests 71 passed (71) · Job succeeded
+probar-2: v26.13.0 · Tests 71 passed (71) · Job succeeded
+```
+
+Los dos en paralelo, en 56 s. `fail-fast: false` hace que uno no cancele al otro: por defecto, según GitHub, un fallo cancela el resto, y entonces no sabes si fallan los dos.
+
+<Callout type="risk">
+
+- **Una matriz multiplica el coste:** dos versiones son dos _jobs_. No la uses para E2E, que ya son caros. Con una sola versión de producción, no la necesitas.
+- **El `Dockerfile` manda:** la versión que importa es la que despliegas. Una matriz solo sirve si necesitas varias o preparas un cambio.
+- **Una comprobación obligatoria cambia de nombre:** el _job_ se llamará distinto para cada valor. Revisa lo que exiges en el _ruleset_ de A7.2 tras añadir una matriz, porque no se ha podido comprobar en GitHub.
+- **Dos _jobs_ en la misma VM compiten:** ya viste en A7.1 lo que hace la memoria. Un _runner_ de GitHub es una máquina para cada _job_.
+
+</Callout>
+
+## Paso 5: cuatro resultados engañosos
+
+Un _job_ de E2E puede mentir en las dos direcciones.
+
+**Verde sin comprobar:** un `test.only` olvidado.
+
+```text
+Sin forbidOnly:  2 passed, en lugar de 4 · Job succeeded
+Con forbidOnly:  Error: item focused with '.only' is not allowed · Job failed
+```
+
+Sin esa opción, nadie se entera de que la mitad de los tests no se ejecutaron. Fíjate en el número, no solo en el color.
+
+**Verde con un fallo:** un test inestable. `retries: 1` reintenta lo que falla, y si pasa a la segunda:
+
+```text
+Sin failOnFlakyTests:  1 flaky · 3 passed · Job succeeded
+Con failOnFlakyTests:  1 flaky · 3 passed · Failure · Job failed
+```
+
+Un test inestable es un error que aún no entiendes: una carrera real, que tus usuarios también pueden sufrir. Los reintentos esconden eso. La opción convierte el aviso en un fallo. Es estricta, y puede ser molesta: otra opción es dejarla apagada y revisar los `flaky` cada semana. Lo que no vale es no mirarlos.
+
+**Rojo por una razón que no es tuya:** la imagen `mongo:8` del ejemplo habitual. En un kernel 7.0, `mongo:8` (8.3.13) terminó con `MongoDB cannot start`. Si tu código no cambió y el _job_ empezó a fallar, mira qué cambió alrededor. Por eso aquí es `mongo:8.2`.
+
+**Rojo por el secreto:** los 2 minutos del Paso 3. Mira siempre el primer error del registro, no el último.
+
+<Callout type="risk">
+
+- **Aumentar `retries` no arregla nada:** convierte un fallo intermitente en lentitud.
+- **`workers: 1` en CI:** la documentación de Playwright lo recomienda por estabilidad. Si tienes muchos tests, reparte con `--shard=1/4` en una matriz.
+- **`astro dev` no es producción:** estos tests corren contra el servidor de desarrollo. Son útiles, pero no prueban tu _build_ final.
+- **Pon un límite:** `timeout-minutes` evita que un `job` colgado siga consumiendo minutos.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+Añade el _job_ E2E a tu CI con MongoDB como servicio.
+
+</Callout>
+
+Solución, con el Paso 1:
+
+1. `scripts/esperar-mongo.mjs`.
+2. El _job_ `e2e` en `ci.yml`.
+3. `forbidOnly`, `failOnFlakyTests` y el _reporter_ HTML en `playwright.config.ts`.
+4. El secreto `BETTER_AUTH_SECRET_E2E` en GitHub.
+5. Una PR, y comprueba estas tres cosas, que aquí **no se han podido medir**: que el servicio arranca con `command`, que el _job_ pasa en un _runner_ real, y que un test que falla deja el artefacto.
+
+Para esa última, añade esto a un test en una rama de prueba:
+
+```ts
+expect(1 + 1, "fallo a propósito").toBe(3);
+```
+
+Descarga el artefacto, abre el informe y borra la línea. Después añade `e2e` a las comprobaciones obligatorias del _ruleset_ de A7.2.
+
+En este laboratorio, con `act`:
+
+```text
+Verde:             verificar y e2e, 148 s, 4 tests en Chromium
+Fallo provocado:   1 failed, 3 passed · informe de 2 MB con su traza
+```
+
+<Callout type="mastery">
+
+Tu CI monta una base de datos y un navegador reales para comprobar lo que hace un usuario. Si falla, tienes un informe que investigar. Sabes que el enmascarado solo busca el texto exacto, que un secreto ausente es texto vacío, y que `test.only` y los reintentos pueden dejar un verde falso. Lees el número de tests, no solo el color.
+
+</Callout>
+
+## Resumen
+
+- **`services`** arranca MongoDB junto al _job_, con versión fijada.
+- **Replica set:** `--replSet` y un _script_ que lo inicia y espera; sin él, `not primary` en 24 s.
+- **`needs`:** E2E solo tras pasar `verificar`. Instalar Chromium costó 56 s, y los tests, 7.
+- **Artefactos solo si falla:** un informe de 2 MB con la traza. Su subida no se ha podido probar con `act`.
+- **Secretos:** `***` solo tapa el texto exacto; en base64 salió en claro. Si falta, es vacío: 2 minutos de espera.
+- **Forks y Dependabot** no reciben secretos.
+- **Matriz:** Node 24 y 26 en paralelo, 71 tests en cada una. `fail-fast: false` para ver todos los fallos.
+- **`forbidOnly`:** un `test.only` dejó 2 tests en lugar de 4, en verde.
+- **`failOnFlakyTests`:** un test inestable también salía en verde.
