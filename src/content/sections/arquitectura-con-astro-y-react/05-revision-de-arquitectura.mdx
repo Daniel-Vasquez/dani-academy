@@ -1,0 +1,466 @@
+---
+sectionId: "A8.5"
+course: "A8"
+title: "Revisión de arquitectura"
+order: 5
+minutes: 75
+summary: "Revisas una app real con datos, no con opiniones: un script sin dependencias, cinco miradas y una lista de deuda priorizada. Tres de las alarmas que saltaron eran falsas, y aprendes a distinguirlas."
+---
+
+Después de meses, un proyecto funciona, pero ya no sabes por qué es como es. Algunas partes dan miedo, otras no sabes si se usan, y cada mejora parece urgente. Una **revisión de arquitectura** es sentarse a mirar el conjunto con método: qué está bien, qué estorba y qué merece arreglarse primero. Sin método, acaba en una lista de gustos personales.
+
+Una analogía: una revisión médica. Nadie empieza por operar. Primero se miden cosas, y después alguien interpreta: una cifra alta puede ser normal en ti, y otra que parece buena puede esconder algo. Al final no sales con todo arreglado, sino con un diagnóstico y un orden.
+
+**Lo que tendrás al terminar:** un _script_ de revisión, una lista de deuda ordenada y tus decisiones por escrito.
+
+**Requisitos:** todo este curso, además de rendimiento (A6), seguridad (A5) y CI (A7).
+
+Se revisó la plataforma donde lees esto: 94 archivos y 4.700 líneas en `src/`, y 114 _commits_ en cinco semanas. Es un proyecto personal y joven, así que sus cifras sirven de ejemplo, no de referencia.
+
+## Paso 1: el método
+
+Una revisión responde a tres preguntas, en este orden:
+
+1. **¿Qué va a cambiar?** Revisar lo que nadie va a tocar es un entretenimiento.
+2. **¿Qué dicen los datos?** Cada hallazgo necesita algo que se pueda señalar.
+3. **¿Qué significa?** Un número es una pregunta, no una conclusión.
+
+Y cinco miradas: acoplamiento, duplicación, límites, rendimiento y seguridad. Ponle un tiempo fijo, por ejemplo dos horas. Si tarda más, dejará de hacerse.
+
+## Paso 2: un _script_ que mide
+
+No hace falta instalar nada para empezar. `scripts/revisar.mjs` lee `src/` y el historial de Git:
+
+```js
+// Archivo: scripts/revisar.mjs
+// Revisión rápida de src/: dependencias, ciclos, duplicación y puntos calientes, sin instalar nada.
+// Uso, desde la raíz del proyecto: node scripts/revisar.mjs
+import { execSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { dirname, join, normalize, relative } from "node:path";
+
+const RAIZ = "src";
+const EXTENSIONES = [".ts", ".tsx", ".astro", ".js", ".mjs"];
+const IMPORT = /(?:from\s+|import\s+|import\(\s*)["']([^"']+)["']/g;
+const VENTANA = 8; // líneas seguidas iguales para contar como duplicado
+
+function archivos(carpeta) {
+  return readdirSync(carpeta).flatMap((nombre) => {
+    const ruta = join(carpeta, nombre);
+    if (statSync(ruta).isDirectory()) return nombre === "content" ? [] : archivos(ruta);
+    return EXTENSIONES.some((e) => ruta.endsWith(e)) ? [ruta] : [];
+  });
+}
+
+function resolver(desde, destino) {
+  const base = destino.startsWith("@/")
+    ? join(RAIZ, destino.slice(2))
+    : destino.startsWith(".")
+      ? normalize(join(dirname(desde), destino))
+      : null;
+  if (!base) return null; // una dependencia de npm
+  const candidatos = ["", ...EXTENSIONES, ...EXTENSIONES.map((e) => `/index${e}`)];
+  return candidatos.map((e) => base + e).find((r) => existsSync(r) && statSync(r).isFile()) ?? null;
+}
+
+const lista = archivos(RAIZ);
+const codigo = new Map(lista.map((a) => [a, readFileSync(a, "utf8")]));
+const ver = (ruta) => relative(RAIZ, ruta);
+const top = (filas, n = 8) => filas.sort((a, b) => b[1] - a[1]).slice(0, n);
+const imprimir = (filas) => {
+  for (const [nombre, valor] of filas) console.log(`  ${String(valor).padStart(4)}  ${nombre}`);
+};
+
+// 1. Quién importa a quién
+const grafo = new Map();
+for (const [archivo, texto] of codigo) {
+  const destinos = [...texto.matchAll(IMPORT)].map((m) => resolver(archivo, m[1]));
+  grafo.set(archivo, new Set(destinos.filter(Boolean)));
+}
+const entrantes = new Map(lista.map((a) => [a, 0]));
+for (const destinos of grafo.values()) {
+  for (const d of destinos) entrantes.set(d, (entrantes.get(d) ?? 0) + 1);
+}
+
+console.log(`${lista.length} archivos, ${[...codigo.values()].join("").split("\n").length} líneas`);
+console.log("\nMás importados: si cambian, afectan a más sitios");
+imprimir(top([...entrantes].map(([a, n]) => [ver(a), n])));
+console.log("\nImportan más cosas: saben demasiado");
+imprimir(top([...grafo].map(([a, d]) => [ver(a), d.size])));
+
+// 2. Ciclos: recorrido en profundidad guardando el camino actual
+const ciclos = new Set();
+const visto = new Set();
+function visitar(archivo, camino) {
+  const i = camino.indexOf(archivo);
+  if (i >= 0) return void ciclos.add(camino.slice(i).map(ver).join(" → "));
+  if (visto.has(archivo)) return;
+  visto.add(archivo);
+  for (const d of grafo.get(archivo) ?? []) visitar(d, [...camino, archivo]);
+}
+for (const archivo of lista) visitar(archivo, []);
+console.log(`\nCiclos: ${ciclos.size}`);
+for (const ciclo of ciclos) console.log(`  ${ciclo}`);
+
+// 3. Duplicación: bloques de VENTANA líneas iguales, sin contar espacios ni líneas triviales
+const bloques = new Map();
+for (const [archivo, texto] of codigo) {
+  const lineas = texto.split("\n").map((l) => l.trim());
+  for (let i = 0; i + VENTANA <= lineas.length; i++) {
+    const bloque = lineas.slice(i, i + VENTANA);
+    if (bloque.filter((l) => l.length > 8).length < VENTANA - 2) continue;
+    const clave = bloque.join("\n");
+    bloques.set(clave, [...(bloques.get(clave) ?? []), `${ver(archivo)}:${i + 1}`]);
+  }
+}
+const repetidos = [...bloques.values()].filter((sitios) => sitios.length > 1);
+console.log(`\nBloques de ${VENTANA} líneas repetidos: ${repetidos.length}`);
+for (const sitios of repetidos.slice(0, 6)) console.log(`  ${sitios.slice(0, 3).join("  =  ")}`);
+
+// 4. Puntos calientes: lo que más cambia y además es grande
+const historial = execSync("git log --name-only --format=", { encoding: "utf8" }).split("\n");
+const cambios = new Map();
+for (const ruta of historial) {
+  if (codigo.has(ruta)) cambios.set(ruta, (cambios.get(ruta) ?? 0) + 1);
+}
+console.log("\nPuntos calientes: cambios × líneas");
+imprimir(
+  top(
+    [...cambios].map(([a, n]) => {
+      const lineas = codigo.get(a).split("\n").length;
+      return [`${ver(a)} (${n} cambios, ${lineas} líneas)`, n * lineas];
+    }),
+  ),
+);
+```
+
+```bash
+node scripts/revisar.mjs
+```
+
+```text
+94 archivos, 4700 líneas
+
+Más importados: si cambian, afectan a más sitios
+    20  lib/constants.ts
+    10  lib/content.ts
+    10  server/repositories/index.ts
+     9  lib/errors.ts
+
+Importan más cosas: saben demasiado
+    14  pages/cursos/[course]/[section].astro
+    10  pages/cursos/[course]/evaluacion.astro
+     9  pages/progreso.astro
+
+Ciclos: 0
+
+Bloques de 8 líneas repetidos: 5
+  components/auth/LoginForm.tsx:34  =  components/auth/RegisterForm.tsx:40
+  components/progress/QuizHistoryTable.astro:47  =  pages/cursos/[course]/evaluacion.astro:102
+
+Puntos calientes: cambios × líneas
+   828  pages/cursos/[course]/index.astro (4 cambios, 207 líneas)
+   756  pages/cursos/[course]/[section].astro (7 cambios, 108 líneas)
+   532  components/quiz/Quiz.tsx (2 cambios, 266 líneas)
+```
+
+Es una herramienta tosca, y conviene saberlo:
+
+<Callout type="risk">
+
+- **Comprueba tu detector.** Un "0 ciclos" solo vale si sabe encontrar uno. Se creó un ciclo a propósito en otra app, y lo encontró. Lo mismo con cualquier herramienta: provoca el fallo una vez.
+- **Lee el código con expresiones regulares,** no como un compilador. No ve las rutas construidas en tiempo de ejecución, cuenta también los `import type` y encuentra al menos un ciclo de cada grupo, no todos.
+- **La duplicación es literal.** Dos bloques iguales con otros nombres de variables no cuentan.
+- **Para un proyecto grande,** existen `madge`, `jscpd` y `knip`. No se han usado en esta lección.
+
+</Callout>
+
+## Paso 3: acoplamiento y límites
+
+**Lo más importado no es malo por serlo.** `lib/constants.ts` lo usan 20 archivos, pero son 44 líneas de constantes que casi no cambian. Es un cimiento. Lo peligroso es un archivo muy importado **y** que cambie a menudo.
+
+**Lo que más importa suele ser una página.** `[section].astro` importa 14 archivos. Es lógico: es el punto donde todo se une. Sería un problema en un servicio.
+
+**Los puntos calientes indican dónde invertir.** La portada de un curso tiene 207 líneas y ha cambiado 4 veces. En A8.4 dijimos que las páginas deben ser delgadas, y esta no lo es. Es un hallazgo real.
+
+Los límites se comprueban buscando lo que no debería ocurrir:
+
+```bash
+grep -rlE 'from "@/server/repositories' src/pages | wc -l    # páginas que saltan los servicios
+grep -rlE 'from "@/server/' src/components | wc -l           # componentes que tocan el servidor
+```
+
+```text
+3
+7
+```
+
+Siete componentes tocando el servidor suena grave. Aquí está la primera falsa alarma:
+
+```text
+import type { CourseOverview } from "@/server/services/overview.service";
+import type { PublicQuestion, SubmitQuizResult } from "@/server/services/quiz.service";
+```
+
+Todos eran `import type`, que desaparece al compilar. No llega nada al navegador. Sí es un olor menor, porque el componente conoce un archivo del servidor, pero no es un fallo.
+
+Los otros 3 sí son reales. La portada de un curso, el temario y la evaluación llaman a `repos.…` sin pasar por un servicio. Para leer un dato es un atajo razonable, pero rompe la regla D6 del proyecto: ruta, servicio y repositorio.
+
+## Paso 4: duplicación
+
+Cinco bloques suena a mucho, pero cuatro son el mismo: bloques solapados de un único fragmento. En realidad hay **dos** casos. Uno es el del formulario:
+
+```tsx
+<TextField
+  label="Correo"
+  type="email"
+  autoComplete="email"
+  inputMode="email"
+  error={errors.email?.message}
+  {...register("email")}
+/>
+```
+
+Está en `LoginForm` y en `RegisterForm`. ¿Hay que unirlos? **No.** Es código parecido, no el mismo conocimiento: los dos formularios cambian por motivos distintos, como `autoComplete` en la contraseña, y ya se apoyan en un `TextField` común. Sacar una abstracción aquí costaría más que las 8 líneas repetidas.
+
+Una regla útil: la duplicación importa cuando una corrección debe hacerse en varios sitios **y es fácil olvidar uno**. El otro caso, la tabla de intentos de `QuizHistoryTable` y `evaluacion.astro`, sí cumple esto en parte. Es candidato, pero menor.
+
+## Paso 5: rendimiento
+
+Sin medir en producción, el _build_ ya da pistas:
+
+```bash
+npm run build
+for f in dist/client/_astro/*.js; do echo "$(gzip -c "$f" | wc -c) $(basename "$f")"; done | sort -rn | head -4
+```
+
+```text
+102417 NotesEditor.BVhQSCeV.js
+ 64983 client.Dda4loRL.js
+ 33726 TextField.WhAAFl1S.js
+ 11179 auth-client.B90wgs1i.js
+```
+
+102 KB para un editor de notas, en una app que muestra lecciones. Parece el primer objetivo, y es la segunda falsa alarma. El propio código lo explica:
+
+```tsx
+// TipTap y ProseMirror (unos 100 KB gzip) van en un trozo aparte que solo se pide si hace falta
+const NotesEditor = lazy(() => import("./NotesEditor"));
+```
+
+Un archivo grande en `dist/` no es lo que descarga cada visita. La pregunta correcta es **cuándo se carga**, y eso se comprueba con la pestaña Network, como en A6. Estas cifras no dicen nada de eso.
+
+## Paso 6: pruebas
+
+```bash
+npx vitest run --coverage
+```
+
+```text
+Líneas 51 %  ·  Ramas 41 %  ·  Funciones 40 %
+
+src/server/services        0 de 90 líneas      0 %
+src/server/repositories   62 de 66 líneas     94 %
+src/lib/domain            44 de 44 líneas    100 %
+```
+
+¡Ni una línea de los servicios probada! Es la tercera falsa alarma, o casi. Vitest solo mide sus propios tests, y esos servicios los recorren los 64 E2E de Playwright, que aquí no cuentan. Con todo, un E2E no prueba cada rama de una regla: esta cifra no indica un desastre, pero tampoco garantiza nada.
+
+Lo que sí es buena señal: lo más delicado, las reglas puras de `lib/domain`, está al 100 %.
+
+## Paso 7: seguridad
+
+Esta mirada no se mide con un _script_ sino con la lista de A5:
+
+- ¿Las dependencias tienen fallos conocidos? `npm audit --omit=dev`.
+- ¿Hay secretos en el historial o en el cliente?
+- ¿Cada ruta comprueba la sesión y **a quién pertenece** el dato?
+- ¿Las entradas se validan en el servidor?
+- ¿Hay límites en lo que se puede abusar?
+- ¿Las cabeceras son las de A5?
+
+Esta lección **no incluye resultados de esta parte**, y es a propósito: un informe de seguridad de un sistema en producción no se deja en una lección pública. Guárdalo en un sitio privado. Se puede publicar que la revisión existe, no sus hallazgos, hasta que estén resueltos.
+
+## Paso 8: la deuda técnica
+
+Deuda técnica es lo que te frena al cambiar el código, igual que un préstamo cobra intereses. **Código feo que nadie toca no es deuda:** no cobra nada. Y lo que has decidido a conciencia tampoco.
+
+Tras separar las alarmas falsas, esta es la lista, en `docs/deuda.md`:
+
+| Hallazgo                               | Impacto | Esfuerzo | Decisión    |
+| -------------------------------------- | ------- | -------- | ----------- |
+| E2E de CI en rojo desde octubre        | Alto    | Bajo     | Ya          |
+| `README` y `AGENTS.md` de plantilla    | Medio   | Bajo     | Ya          |
+| Portada de curso: 207 líneas           | Medio   | Medio    | Al tocarla  |
+| 3 páginas sin capa de servicio         | Bajo    | Bajo     | Al tocarlas |
+| Estructura por tipo, no por _features_ | Medio   | Alto     | Proyecto A8 |
+| Tabla de intentos repetida             | Bajo    | Bajo     | Al tocarla  |
+
+Fuera de la lista quedan, con su motivo, los campos repetidos de los formularios, el `import type` de los componentes y la pestaña que no se sincroniza en A8.3, que es una decisión consciente.
+
+La primera fila merece una explicación. Cuando se comprobó en A7, el CI fallaba desde octubre en el paso de MongoDB, y se siguió publicando, porque la comprobación que frena un `push` es un _hook_ local. Es la deuda que más cobra sin hacer ruido: **una alarma que siempre está roja ya no avisa de nada.** Y arreglarla es poco: en A7 se reprodujo, y fijar `mongo:8.2` debería bastar. Ese cambio sigue sin aplicarse, así que no está probado en el propio CI.
+
+Para ordenar, tres reglas:
+
+1. **Alto impacto y poco esfuerzo, ya.** Lo que quita fricción a todo lo demás.
+2. **Lo demás, al pasar por allí.** Refactoriza la portada cuando vayas a cambiarla, en una PR propia antes de la funcionalidad. No pares todo para limpiar.
+3. **Lo grande, con fecha o nunca.** Si una reorganización no tiene hueco, escribe por qué y déjala. Una lista eterna tampoco ayuda.
+
+<Callout type="risk">
+
+- **Revisar y no decidir no sirve de nada.** Cada fila termina con una decisión, aunque sea "no lo haremos".
+- **El impacto es una estimación.** Esta tabla es criterio, no medida. Escríbelo para que otra persona pueda discutirlo.
+- **Vuelve a medir.** Repite el _script_ dentro de unos meses: lo interesante es la tendencia. En la app de A8.4, tras la migración, lo más importado es `features/auth/server.ts`, con 14: una puerta de entrada, justo lo que se buscaba.
+
+</Callout>
+
+## Paso 9: decisiones para tu yo futuro, y para una IA
+
+La plataforma no tiene una carpeta `docs/adr/`, pero sí algo parecido: una tabla con 11 decisiones en `planificacion.md`, cada una con su motivo. Por eso esta revisión pudo decir que tres páginas rompen la "regla D6". Sin eso, habría sido solo una opinión. **Una decisión escrita convierte una preferencia en algo que se puede comprobar.**
+
+Lo que le falta son las alternativas descartadas, que es lo primero que se olvida. Con el formato de A8.4 es fácil añadirlas.
+
+Una IA que trabaje en tu código tiene el mismo problema que tú dentro de un año: lee qué se hizo, no por qué. `AGENTS.md` es el archivo que ese tipo de herramientas lee al empezar, y en esta plataforma solo contiene las instrucciones genéricas de Astro. Debería contar lo que no se deduce del código:
+
+```markdown
+# Dani Academy
+
+Plataforma personal de cursos: Astro + React + MongoDB, en Vercel.
+
+## Comprobar
+
+npm run lint && npm run check && npm run test:run
+
+## Reglas
+
+- Capas: ruta → servicio → repositorio. La lógica pura va en `src/lib/domain/`.
+- El contenido vive en `src/content`, nunca en MongoDB (ver planificacion.md, D1).
+- Las respuestas de las evaluaciones nunca llegan al cliente (D9).
+- Se trabaja directamente en `main`.
+
+## No hacer
+
+- No imprimir el contenido de `.env`.
+- No renombrar los IDs de curso ni de sección: son claves del progreso (D3).
+```
+
+Pequeño y concreto. No se ha medido cuánto ayuda: es una recomendación, no un resultado. Lo que sí es seguro es que `README`, ADR y `AGENTS.md` envejecen, así que incluye "revisar la documentación" en cada revisión.
+
+<Callout type="exercise">
+
+Haz una revisión de arquitectura de tu Planificador 2026 y escribe los 3 ADR más importantes.
+
+</Callout>
+
+Solución. La revisión la haces tú con los Pasos 1 a 8 sobre tu Planificador: el resultado es tu lista de deuda. Como ejemplo, estos son los 3 ADR de la plataforma, sacados de sus decisiones reales.
+
+`docs/adr/0001-contenido-en-el-repositorio.md`:
+
+```markdown
+# ADR-0001 · El contenido vive en el repositorio
+
+Estado: aceptado
+
+## Contexto
+
+El temario son más de cien lecciones que cambian con cada revisión. Debe
+poder revisarse como el código, y un error no debe llegar a publicarse.
+
+## Decisión
+
+Las lecciones son MDX en Content Collections, validadas con Zod en el build.
+MongoDB guarda solo lo que pertenece a cada persona.
+
+## Alternativas
+
+- CMS o MongoDB: edición sin desplegar, pero sin validación en el build, sin
+  historial en Git y con un servicio más que mantener.
+
+## Consecuencias
+
+- Publicar exige un despliegue.
+- Un frontmatter mal escrito rompe el build, que es lo que se busca.
+```
+
+`docs/adr/0002-progreso-una-fila-por-seccion.md`:
+
+```markdown
+# ADR-0002 · El progreso es una fila por sección leída
+
+Estado: aceptado
+
+## Contexto
+
+La consulta más frecuente es "secciones leídas de este curso". Marcar dos
+veces, o desde dos pestañas, no debe duplicar nada.
+
+## Decisión
+
+Colección `section_progress` con un documento por sección, e índice único
+`{ userId, sectionId }`. `markRead` hace `upsert` con `$setOnInsert`.
+
+## Alternativas
+
+- Un documento por curso con un array `seccionesLeidas`: lectura en una
+  consulta y tamaño acotado, pero se pierde la fecha de cada sección
+  (`readAt`), que usa "continuar donde lo dejaste".
+
+## Consecuencias
+
+- Marcar es idempotente, también con dos peticiones a la vez.
+- Leer un curso devuelve varias filas: se cubre con un índice `{ userId, courseId }`.
+```
+
+`docs/adr/0003-trabajar-en-main.md`:
+
+```markdown
+# ADR-0003 · Trabajo directo en `main`, con un hook local
+
+Estado: en revisión
+
+## Contexto
+
+Hay una sola persona, así que nadie más revisaría una PR.
+
+## Decisión
+
+Commits directos a `main`. Un hook `pre-push` en `.githooks/` ejecuta las
+comprobaciones antes de subir, y Vercel despliega desde `main`.
+
+## Alternativas
+
+- PR y regla de protección (A7): garantía en el servidor, a cambio de un
+  paso más en cada cambio.
+
+## Consecuencias
+
+- Publicar es muy rápido.
+- Nada obliga a que el CI esté en verde: el E2E lleva roto desde octubre
+  sin frenar ninguna publicación. Por eso este ADR está en revisión.
+```
+
+Fíjate en el tercero. Escribir sus consecuencias sacó a la luz un problema que la decisión original no contaba. Ese es el valor del ejercicio.
+
+- **Elige las tres decisiones más caras de cambiar,** no las más interesantes.
+- **Si no recuerdas el motivo,** escríbelo también: "no consta" es información útil.
+- **El Planificador no se ha revisado aquí:** el resultado depende de tu código.
+
+<Callout type="mastery">
+
+Puedes explicar el porqué de cada decisión estructural de tus proyectos y señalar dónde está escrito. Sabes medir, descartar las falsas alarmas y ordenar lo que queda. Y una revisión tuya termina con decisiones, no con una lista de quejas.
+
+</Callout>
+
+## Resumen
+
+- **Una revisión:** qué va a cambiar, qué dicen los datos y qué significan.
+- **Cinco miradas:** acoplamiento, duplicación, límites, rendimiento y seguridad.
+- **Prueba tu detector:** un "0 ciclos" solo vale si sabe encontrar uno.
+- **Falsas alarmas reales:** 7 `import type`, un editor de 102 KB con carga diferida y 0 % en servicios que cubre el E2E.
+- **Muy importado no es malo:** lo es si además cambia a menudo.
+- **Código parecido no es el mismo conocimiento:** 8 líneas repetidas pueden quedarse.
+- **La seguridad se revisa, pero sus hallazgos no se publican.**
+- **Deuda es lo que te frena:** lo que nadie toca no cobra intereses.
+- **Prioriza:** lo urgente y fácil ya, lo demás al pasar, y lo grande con fecha o nunca.
+- **Una alarma siempre en rojo no avisa de nada.**
+- **ADR y `AGENTS.md`:** lo que el código no cuenta, sobre todo lo que se descartó.
