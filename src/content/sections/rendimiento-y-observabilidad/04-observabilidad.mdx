@@ -79,6 +79,17 @@ Cambia también los `console.error` que queden, como el de `aRespuesta` en `src/
 log.error({ err: e }, "error no controlado en la API");
 ```
 
+Ese cambio rompe un test: `tests/unit/api-resumen.test.ts` espiaba `console.error`. En A7.1 lo detectó el CI. Actualízalo para que espíe el log:
+
+```ts
+import { log } from "../../src/lib/log";
+
+const registro = vi.spyOn(log, "error").mockImplementation(() => {}); // espiarlo y silenciarlo
+// …
+expect(registro).toHaveBeenCalledWith({ err: expect.any(Error) }, "error no controlado en la API");
+registro.mockRestore();
+```
+
 Cuesta muy poco: 4,6 µs por línea, medido con el contexto y `redact` activos. Y `redact` se probó con datos falsos:
 
 ```text
@@ -266,7 +277,7 @@ npm install @sentry/astro
 Crea un proyecto en sentry.io y añade su DSN a tu `.env` como `SENTRY_DSN`. En `astro.config.mjs`:
 
 ```js
-import sentry from "@sentry/astro";
+import sentry from "@sentry/astro/integration";
 
 export default defineConfig({
   integrations: [sentry({ sourcemaps: { disable: true }, telemetry: false })], // los source maps, en el Paso 5
