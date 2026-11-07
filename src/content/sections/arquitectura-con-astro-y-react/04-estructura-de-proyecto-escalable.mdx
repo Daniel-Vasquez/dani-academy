@@ -1,0 +1,629 @@
+---
+sectionId: "A8.4"
+course: "A8"
+title: "Estructura de proyecto escalable"
+order: 4
+minutes: 90
+summary: "Reorganizas una app real por features: 29 archivos movidos y 71 tests en verde. Añades reglas de límites, ADR y mides los barrel files: uno metió MongoDB en el navegador, de 126 a 343 KB, con el build en verde."
+---
+
+Un proyecto pequeño se organiza solo: `components/`, `services/`, `schemas/`. Funciona hasta que añadir algo tan simple como "mis marcas" te obliga a abrir siete carpetas y a editar archivos de otras funcionalidades. Lo que pertenece a la misma idea está repartido por tipo de archivo, y lo que no tiene nada que ver está junto.
+
+Una analogía: un almacén frente a una cocina. En un almacén ordenas por tipo, todos los cuchillos juntos y todas las sartenes juntas. Pero nadie cocina así: en una cocina, cada puesto tiene a mano lo que necesita para su plato. Organizar por **_features_** es montar puestos: lo que cambia junto, vive junto.
+
+**Lo que tendrás al terminar:** una app reorganizada por _features_, una regla que impide saltarse sus límites y un registro escrito de por qué.
+
+**Requisitos:** capas (I3.5), ESLint (A7.2) y las lecciones anteriores de este curso.
+
+Todo se midió sobre la app de entrenamiento del curso, real, con 60 archivos en `src/` y 71 tests de Vitest, en un Mac con Node 26. El monorepo es una maqueta aparte.
+
+## Paso 1: el síntoma
+
+Se añadió la misma funcionalidad a la app, "Mis marcas", con la estructura por tipo. Son 10 archivos en 7 carpetas:
+
+```text
+A  src/components/TablaMarcas.astro
+A  src/pages/api/marcas.ts
+A  src/pages/marcas.astro
+M  src/repositories/index.ts       ← ajeno
+A  src/repositories/marcas.repo.ts
+A  src/schemas/marca.ts
+M  src/services/index.ts           ← ajeno
+A  src/services/marcas.service.ts
+A  tests/unit/marcas.test.ts
+M  tests/unit/servicios.test.ts    ← ajeno
+```
+
+Lo preocupante son las tres `M`: **para añadir algo nuevo has editado archivos que ya existían.** Dos personas que añadan una funcionalidad cada una chocarán ahí.
+
+Se ve igual en la plataforma donde lees esto, organizada por tipo. Las notas están en 5 carpetas de `src/`, y un _commit_ típico de esa funcionalidad toca 6 carpetas. Uno de progreso, 10. Son pocos _commits_, 4 de cada una, así que tómalo como una pista y no como una estadística.
+
+## Paso 2: la estructura
+
+```text
+src/
+├── features/
+│   ├── auth/
+│   ├── entrenos/
+│   ├── marcas/
+│   │   ├── components/TablaMarcas.astro
+│   │   ├── marca.schema.ts
+│   │   ├── marcas.repo.ts
+│   │   ├── marcas.service.ts
+│   │   └── server.ts          ← lo que ofrece al resto
+│   ├── notas/
+│   └── resumen/
+├── components/ui/             ← sin lógica de negocio
+├── lib/                       ← mongo, log, errores: lo usan varias
+├── layouts/
+├── actions/
+└── pages/                     ← solo rutas: delgadas
+```
+
+Tres preguntas deciden dónde va cada archivo:
+
+1. **¿Pertenece a una funcionalidad?** Va a su _feature_.
+2. **¿Lo usan varias, y no sabe nada del negocio?** Va a `lib/` o a `components/ui/`.
+3. **¿Es una URL?** Va a `pages/`, porque Astro enruta por archivos. Ahí solo llamas a la _feature_.
+
+No muevas algo a `lib/` para no decidir. Un archivo `tipos.ts` tenía dos listas, una de entrenos y otra de notas. En `lib/` sería un cajón de sastre, así que se partió en dos, y cada lista se fue a su _feature_.
+
+## Paso 3: una _feature_ completa
+
+Las capas de I3.5 siguen ahí, pero dentro de la carpeta. El contrato:
+
+```ts
+// Archivo: src/features/marcas/marca.schema.ts
+export interface MarcaDTO {
+  tipo: string;
+  minutos: number;
+  entrenos: number;
+}
+```
+
+El repositorio:
+
+```ts
+// Archivo: src/features/marcas/marcas.repo.ts
+import type { Db } from "mongodb";
+import type { MarcaDTO } from "./marca.schema";
+
+export function crearMarcasRepo(db: Db) {
+  const col = db.collection("entrenos");
+
+  return {
+    async porTipo(userId: string): Promise<MarcaDTO[]> {
+      return col
+        .aggregate<MarcaDTO>([
+          { $match: { userId } },
+          { $group: { _id: "$tipo", minutos: { $max: "$minutos" }, entrenos: { $sum: 1 } } },
+          { $project: { _id: 0, tipo: "$_id", minutos: 1, entrenos: 1 } },
+        ])
+        .toArray();
+    },
+  };
+}
+
+export type MarcasRepo = ReturnType<typeof crearMarcasRepo>;
+```
+
+El servicio:
+
+```ts
+// Archivo: src/features/marcas/marcas.service.ts
+import type { MarcasRepo } from "./marcas.repo";
+
+export function crearServicioMarcas(repo: Pick<MarcasRepo, "porTipo">) {
+  return {
+    async listar(userId: string) {
+      const marcas = await repo.porTipo(userId);
+      return marcas.sort((a, b) => b.minutos - a.minutos);
+    },
+  };
+}
+```
+
+La pieza nueva es `server.ts`. Conecta la _feature_ con la base de datos real y es su puerta de entrada. Antes, eso lo hacía un `services/index.ts` común a todas, y por eso había que editarlo cada vez:
+
+```ts
+// Archivo: src/features/marcas/server.ts
+import { db } from "@/lib/mongo";
+import { crearMarcasRepo } from "./marcas.repo";
+import { crearServicioMarcas } from "./marcas.service";
+
+export const servicioMarcas = crearServicioMarcas(crearMarcasRepo(db));
+```
+
+El componente:
+
+```astro
+---
+// Archivo: src/features/marcas/components/TablaMarcas.astro
+import type { MarcaDTO } from "../marca.schema";
+
+const { marcas } = Astro.props as { marcas: MarcaDTO[] };
+---
+
+<ul>
+  {marcas.map((m) => (
+    <li>
+      {m.tipo}: {m.minutos} min en {m.entrenos} entrenos
+    </li>
+  ))}
+</ul>
+```
+
+Las rutas, delgadas:
+
+```ts
+// Archivo: src/pages/api/marcas.ts
+import type { APIRoute } from "astro";
+import { usuarioDe } from "@/features/auth/server";
+import { servicioMarcas } from "@/features/marcas/server";
+import { aRespuesta } from "@/lib/errores";
+
+export const prerender = false;
+
+export const GET: APIRoute = async ({ locals }) => {
+  try {
+    return Response.json({ marcas: await servicioMarcas.listar(usuarioDe(locals).id) });
+  } catch (e) {
+    return aRespuesta(e);
+  }
+};
+```
+
+```astro
+---
+// Archivo: src/pages/marcas.astro
+import TablaMarcas from "@/features/marcas/components/TablaMarcas.astro";
+import { usuarioDe } from "@/features/auth/server";
+import { servicioMarcas } from "@/features/marcas/server";
+import Base from "@/layouts/Base.astro";
+
+export const prerender = false;
+
+const marcas = await servicioMarcas.listar(usuarioDe(Astro.locals).id);
+---
+
+<Base titulo="Mis marcas">
+  <h1>Mis marcas</h1>
+  <TablaMarcas marcas={marcas} />
+</Base>
+```
+
+Y su test:
+
+```ts
+// Archivo: tests/unit/marcas.test.ts
+import { describe, expect, it } from "vitest";
+import { crearServicioMarcas } from "@/features/marcas/marcas.service";
+
+describe("marcas", () => {
+  it("ordena de mayor a menor", async () => {
+    const porTipo = async () => [
+      { tipo: "fuerza", minutos: 30, entrenos: 2 },
+      { tipo: "running", minutos: 60, entrenos: 1 },
+    ];
+    const marcas = await crearServicioMarcas({ porTipo }).listar("ana");
+    expect(marcas.map((m) => m.tipo)).toEqual(["running", "fuerza"]);
+  });
+});
+```
+
+## Paso 4: la medida
+
+La misma funcionalidad, en las dos estructuras. En ambas, `astro check` dio 0 errores, y el build y los 72 tests pasaron:
+
+|                          | Por tipo | Por _features_ |
+| ------------------------ | -------- | -------------- |
+| Archivos                 | 10       | 8              |
+| Carpetas                 | 7        | 5              |
+| Archivos ajenos editados | 3        | **0**          |
+
+La diferencia de carpetas es modesta, y tres de ellas siguen ahí por necesidad: `pages/`, `pages/api/` y `tests/`. Lo que cambia de verdad es esa última fila. Y se nota al quitar la funcionalidad:
+
+```text
+Por features: borrar la carpeta, las 2 rutas y el test  →  build y 71 tests en verde
+Por tipo:     borrar los 7 archivos nuevos              →  build 1
+  Could not resolve './marcas.service' in src/services/index.ts
+```
+
+Por tipo, además tienes que recordar qué tres archivos editaste. **Si puedes borrar una funcionalidad borrando una carpeta, sus límites son reales.** Es una prueba difícil de engañar.
+
+<Callout type="risk">
+
+- **Una _feature_ no significa "sin dependencias".** `resumen` usa los entrenos de `entrenos`, y eso está bien. En esta app es la única dependencia entre _features_. Mientras vaya en una dirección y pase por `server.ts`, no hay problema.
+- **La carpeta `features/` no se paga sola.** En un proyecto con unas pocas páginas, ordenar por tipo es más simple. Plantéatelo cuando una funcionalidad empiece a tocar muchas carpetas.
+
+</Callout>
+
+## Paso 5: que los límites se cumplan
+
+Sin una regla, una carpeta es solo una costumbre. Añade esto a `eslint.config.js`, antes de `prettier`:
+
+```js
+{
+  // Una feature solo ofrece lo público: server.ts, sus esquemas y sus componentes
+  files: ["src/**/*.{ts,tsx,astro}"],
+  rules: {
+    "no-restricted-imports": [
+      "error",
+      {
+        patterns: [
+          {
+            group: [
+              "@/features/*/*",
+              "!@/features/*/server",
+              "!@/features/*/*.schema",
+              "!@/features/*/components",
+              "!@/features/*/components/*",
+              "../*/*",
+              "!../components/*",
+              "../../*/*",
+            ],
+            message: "Eso es interno de la feature: usa server.ts, su esquema o sus componentes.",
+          },
+        ],
+      },
+    ],
+  },
+},
+```
+
+Al activarla sobre la app recién migrada, encontró **15 importaciones en 13 archivos** que entraban por la puerta de atrás, como `@/features/auth/sesion`. Se resolvieron ampliando el `server.ts` de cada _feature_. Y ahora un atajo no pasa:
+
+```text
+'@/features/entrenos/entrenos.repo' import is restricted from being used by a pattern.
+Eso es interno de la feature: usa server.ts, su esquema o sus componentes.
+```
+
+Los patrones `../*/*` están ahí por una razón. Con solo los de `@/`, una ruta relativa como `../entrenos/entrenos.repo` se saltaba la regla: dio código 0. Con ellos, dio código 1.
+
+<Callout type="risk">
+
+- **Una regla solo protege si se ejecuta.** Ponla en tu CI (A7), o seguirá siendo una costumbre.
+- **Los tests quedan fuera a propósito** (`files: ["src/**"]`): un test sí puede importar un servicio interno para probarlo.
+- **Si lo necesitas más estricto,** existen herramientas dedicadas a las dependencias, como `dependency-cruiser`. No se han probado aquí: esta regla cubrió lo que hacía falta.
+
+</Callout>
+
+## Paso 6: _barrel files_, con cuidado
+
+Un _barrel_ es un `index.ts` que reexporta una carpeta. Es cómodo:
+
+```ts
+// src/features/entrenos/index.ts
+export * from "./entreno.schema";
+export * from "./entrenos.repo";
+export * from "./entrenos.service";
+export * from "./ritmo";
+export * from "./server";
+export * from "./tipos";
+```
+
+Se probó importando una sola constante, `TIPOS_ENTRENO`, desde una isla de React:
+
+| El _barrel_ incluye       | Build | JS del cliente (gzip) | MongoDB en el cliente |
+| ------------------------- | ----- | --------------------- | --------------------- |
+| Sin _barrel_              | 0     | 126 KB                | No                    |
+| Todo, con `server.ts`     | 1     | —                     | —                     |
+| Todo, sin `server.ts`     | **0** | **343 KB**            | **Sí**                |
+| Esquema y funciones puras | 0     | 126 KB                | No                    |
+
+Lee la tercera fila dos veces. **El build pasó en verde con el controlador de MongoDB en el navegador,** por una línea que parecía inofensiva. Es el caso más peligroso: nada avisa, salvo que vigiles el tamaño (A6).
+
+La segunda fila falló gracias a `astro:env`, no por casualidad:
+
+```text
+[ServerOnlyModule] The "astro:env/server" module is only available server-side.
+```
+
+Hay otros dos problemas:
+
+**El servidor de desarrollo no descarta nada.** Una carpeta de 300 módulos con _barrel_, usando uno solo:
+
+```text
+              peticiones en dev   de esa carpeta   build final
+con barrel    331                 301              134 bytes
+directo       31                  1                134 bytes
+```
+
+En producción, el resultado fue idéntico. En desarrollo, 300 peticiones más. En un Mac tardó entre 625 y 846 ms, frente a 572 y 639 ms: se nota poco aquí, pero crece con el proyecto.
+
+**Los ciclos.** Si un archivo importa desde el _barrel_ de su propia carpeta:
+
+```ts
+// a.mjs
+import { LIMITE } from "./index.mjs"; // su propio barrel, que reexporta a.mjs y b.mjs
+export const DOBLE = LIMITE * 2;
+```
+
+```text
+ReferenceError: Cannot access 'LIMITE' before initialization
+```
+
+Importando desde `./b.mjs`, dio `20`.
+
+Por eso, este proyecto sigue tres reglas:
+
+- **`server.ts` nombra lo que exporta,** sin `export *`. Se lee como una lista de lo público. Por ejemplo, `export { crearNota, listarNotas } from "./notas.server"`.
+- **Nada que use el servidor en un archivo que importe el cliente.** `server.ts` no lo importa ninguna isla.
+- **Dentro de una _feature_, rutas relativas directas.** Nunca a través de su propia puerta.
+
+## Paso 7: nombres y documentación
+
+**Los nombres son una decisión de equipo, y lo importante es que sean coherentes.** En esta app: componentes en `PascalCase`, y el resto en minúsculas con guiones y un sufijo que dice qué es: `marcas.repo.ts`, `marcas.service.ts` y `marca.schema.ts`. Un sufijo permite buscar y escribir reglas, como la del Paso 5.
+
+Y cuidado con las mayúsculas. Se escribió `Ritmo` en lugar de `ritmo` en un `import`:
+
+```text
+Mac (sistema sin distinguir mayúsculas):  build 0
+Linux, como tu CI y tu servidor:          build 1
+  Could not resolve '../lib/Ritmo'
+astro check, en el Mac:                   error ts(1149)
+```
+
+Funciona en tu equipo y se rompe al desplegar. `astro check` lo detecta en local: otra razón para tenerlo en tu CI.
+
+**`README`: cómo se usa.** Debe responder a qué es esto, cómo se arranca, cómo se prueba y dónde está cada cosa. Es la puerta de entrada para ti, dentro de seis meses, y para cualquier IA que trabaje en tu código. El de la plataforma donde lees esto sigue siendo el de la plantilla de Astro, y no explica nada del proyecto. Es deuda real, y A8.5 trata de cómo verla y priorizarla.
+
+**ADR: por qué es así.** Un _Architecture Decision Record_ es un archivo corto que guarda una decisión y su motivo, en `docs/adr/`. El código te dice qué se hizo, pero no qué se descartó. Esta es una plantilla:
+
+```markdown
+# ADR-0001 · Título en forma de decisión
+
+Estado: aceptado · Fecha: AAAA-MM-DD
+
+## Contexto
+
+Qué problema había y qué limitaciones existen.
+
+## Decisión
+
+Qué se hace, en una o dos frases.
+
+## Alternativas
+
+Qué se descartó, y por qué.
+
+## Consecuencias
+
+Qué mejora, qué empeora y qué hay que vigilar.
+```
+
+No se edita un ADR aceptado. Si cambias de idea, escribes otro que lo sustituye: el historial de decisiones es lo valioso.
+
+## Paso 8: monorepo, solo cuando hace falta
+
+Un monorepo con **pnpm workspaces** guarda varios paquetes en un repositorio. Se montó uno con dos apps de Astro que comparten un paquete de esquemas:
+
+```text
+apps/web/  apps/panel/  packages/esquemas/  pnpm-workspace.yaml
+```
+
+`pnpm-workspace.yaml`:
+
+```yaml
+packages:
+  - "apps/*"
+  - "packages/*"
+```
+
+El paquete se exporta sin compilar, con `"exports": "./src/index.ts"`, y las apps lo declaran con `"@entrenos/esquemas": "workspace:*"`. Funcionó a la primera:
+
+```bash
+pnpm --filter web build    # una app
+pnpm -r build              # todas
+```
+
+La diferencia clara con npm es esta. `web` importó `zod` sin declararlo, una **dependencia fantasma**:
+
+```text
+pnpm:  código 1 · failed to resolve import "zod"
+npm:   código 0 · funciona por casualidad
+```
+
+Con npm, `zod` estaba disponible por ser dependencia de otro paquete. Si ese paquete la quita, tu app se rompe sin haber cambiado. pnpm lo detecta a tiempo.
+
+**¿Cuándo?** Cuando tengas dos cosas que se despliegan por separado y comparten código. Con una sola app, los paquetes solo añaden ceremonia: las _features_ dan casi toda la organización sin coste. Para esta app de entrenamiento, no hace falta.
+
+No se ha probado un monorepo con Docker ni en Vercel, que es donde está buena parte de su coste.
+
+<Callout type="exercise">
+
+Reorganiza tu app de entrenamiento por _features_ y escribe un ADR explicando la estructura.
+
+</Callout>
+
+Solución. Antes de nada, comprueba que todo está en verde y haz un _commit_: los tests son tu red. Haz la migración en una PR aparte, sin cambiar ningún comportamiento.
+
+Mover 29 archivos y reescribir sus importaciones a mano es buscar errores. Este _script_ lo hace con `git mv`, y reescribe todas las importaciones. Guárdalo fuera de `src`, ajusta la tabla `M` a tu app y ejecútalo desde la raíz:
+
+```python
+import os,re,subprocess,sys,json
+M={
+"components/BorrarEntreno.tsx":"features/entrenos/components/BorrarEntreno.tsx",
+"components/Entrenos.tsx":"features/entrenos/components/Entrenos.tsx",
+"components/Objetivo.tsx":"features/resumen/components/Objetivo.tsx",
+"components/UltimoEntreno.astro":"features/entrenos/components/UltimoEntreno.astro",
+"components/NuevaNota.tsx":"features/notas/components/NuevaNota.tsx",
+"components/NuevaNotaFetch.tsx":"features/notas/components/NuevaNotaFetch.tsx",
+"components/FormEntrar.tsx":"features/auth/components/FormEntrar.tsx",
+"components/FormRegistro.tsx":"features/auth/components/FormRegistro.tsx",
+"components/SesionActual.tsx":"features/auth/components/SesionActual.tsx",
+"components/SesionServidor.astro":"features/auth/components/SesionServidor.astro",
+"components/CampoTexto.tsx":"components/ui/CampoTexto.tsx",
+"components/Vitales.astro":"components/ui/Vitales.astro",
+"lib/auth-client.ts":"features/auth/auth-client.ts",
+"lib/auth.ts":"features/auth/auth.ts",
+"lib/sesion.ts":"features/auth/sesion.ts",
+"lib/redireccion.ts":"features/auth/redireccion.ts",
+"lib/validar-entreno.ts":"features/entrenos/validar-entreno.ts",
+"lib/ritmo.ts":"features/entrenos/ritmo.ts",
+"repositories/entrenos.repo.ts":"features/entrenos/entrenos.repo.ts",
+"repositories/limites.repo.ts":"lib/limites.repo.ts",
+"repositories/index.ts":"composicion/repos.ts",
+"services/index.ts":"composicion/servicios.ts",
+"services/entrenos.service.ts":"features/entrenos/entrenos.service.ts",
+"services/resumen.service.ts":"features/resumen/resumen.service.ts",
+"schemas/auth.ts":"features/auth/auth.schema.ts",
+"schemas/entreno.ts":"features/entrenos/entreno.schema.ts",
+"schemas/nota.ts":"features/notas/nota.schema.ts",
+"schemas/tipos.ts":"lib/tipos.ts",
+"server/notas.ts":"features/notas/notas.server.ts",
+}
+EXT=["",".ts",".tsx",".astro","/index.ts"]
+archivos=[]
+for raiz in ("src","tests"):
+    for d,_,fs in os.walk(raiz):
+        if "content" in d.split(os.sep): continue
+        for f in fs:
+            if f.endswith((".ts",".tsx",".astro",".mjs")): archivos.append(os.path.join(d,f))
+RE=re.compile(r'''((?:from\s+|import\s+|import\(\s*|vi\.mock\(\s*|importActual(?:<[^>]*>)?\(\s*)["'])(\.\.?/[^"']+)(["'])''')
+def nuevo(p):
+    r=os.path.relpath(p,"src")
+    return os.path.join("src",M.get(r,r)) if p.startswith("src/") else p
+def feat(p):
+    m=re.match(r"src/features/([^/]+)/",p); return m and m.group(1)
+cambios=0; total=0
+planes={}
+for a in archivos:
+    s=open(a,encoding="utf-8").read()
+    na=nuevo(a)
+    def rep(m):
+        global cambios,total
+        pre,spec,post=m.groups(); total+=1
+        base=os.path.normpath(os.path.join(os.path.dirname(a),spec))
+        dest=None
+        for e in EXT:
+            if os.path.isfile(base+e): dest=base+e; break
+        if dest is None or not dest.startswith("src/"): return m.group(0)
+        nd=nuevo(dest)
+        if feat(na) and feat(na)==feat(nd):
+            r=os.path.relpath(nd,os.path.dirname(na))
+            if not r.startswith("."): r="./"+r
+        elif a.startswith("tests/") or os.path.dirname(na)!=os.path.dirname(nd):
+            r="@/"+os.path.relpath(nd,"src")
+        else:
+            r="./"+os.path.basename(nd)
+        if not spec.endswith((".ts",".tsx",".astro")):
+            r=re.sub(r"(/index)?\.tsx?$","",r)
+        if r==spec: return m.group(0)
+        cambios+=1
+        return pre+r+post
+    n=RE.sub(rep,s)
+    planes[a]=n
+for a,n in planes.items(): open(a,"w",encoding="utf-8").write(n)
+for v,w in M.items():
+    v="src/"+v; w="src/"+w
+    os.makedirs(os.path.dirname(w),exist_ok=True)
+    subprocess.check_call(["git","mv",v,w])
+p="tsconfig.json"; s=open(p).read()
+s=s.replace('"compilerOptions": {','"compilerOptions": {\n    "paths": { "@/*": ["./src/*"] },'); open(p,"w").write(s)
+print("imports revisados",total,"cambiados",cambios,"archivos movidos",len(M))
+```
+
+```bash
+python3 migrar.py
+```
+
+```text
+imports revisados 152 cambiados 141 archivos movidos 29
+```
+
+Git detectó los 29 como renombrados, y **los 71 tests pasaron** a la primera. Pero no todo estaba bien, y solo `astro check` lo vio:
+
+```text
+scripts/i5/03-redireccion.ts:3:31 - error ts(2307): Cannot find module '../../src/lib/redireccion.ts'
+```
+
+El _script_ no miraba `scripts/`, y ni los tests ni el build usan esa carpeta. Ejecuta **todas** las comprobaciones, no solo una.
+
+Después, a mano:
+
+1. Divide `lib/tipos.ts` en `entrenos/tipos.ts` y `notas/categorias.ts`.
+2. Crea un `server.ts` por _feature_, como este, y borra `src/composicion/`. Sus usos cambian: `servicios.entrenos` pasa a ser `servicioEntrenos`.
+
+```ts
+// Archivo: src/features/entrenos/server.ts
+// Lo que esta feature ofrece al resto de la app en el servidor, conectado a la base de datos real
+import { cacheDatos } from "@/lib/cache-memoria";
+import { repoLimites } from "@/lib/limites";
+import { db } from "@/lib/mongo";
+import { crearEntrenosRepo } from "./entrenos.repo";
+import { crearServicioEntrenos } from "./entrenos.service";
+
+export type { EntrenosRepo } from "./entrenos.repo";
+
+export const repoEntrenos = crearEntrenosRepo(db);
+
+export const servicioEntrenos = crearServicioEntrenos({
+  entrenos: repoEntrenos,
+  limites: repoLimites,
+  alCambiar: () => cacheDatos.borrar("comunidad"), // todos los cambios pasan por aquí
+});
+```
+
+3. Saca el límite compartido a `src/lib/limites.ts`, y en el test de la API cambia el `vi.mock` a `@/features/resumen/server`.
+4. Activa la regla del Paso 5, y amplía cada `server.ts` hasta que no quede ningún error.
+5. Corrige las cabeceras `// Archivo:`, que siguen con la ruta antigua.
+6. Escribe `docs/adr/0001-organizar-por-features.md`:
+
+```markdown
+# ADR-0001 · Organizar `src` por features
+
+Estado: aceptado · Fecha: 2026-11-07
+
+## Contexto
+
+Añadir "Mis marcas" tocó 10 archivos en 7 carpetas, y 3 eran de otras
+funcionalidades. Las conexiones comunes (`services/index.ts`) se editaban
+en cada cambio. No había nada que impidiera saltarse las capas.
+
+## Decisión
+
+Cada funcionalidad vive en `src/features/<nombre>/`. Fuera de ella solo se
+usan `server.ts`, sus esquemas y sus componentes. Lo impide ESLint
+(`no-restricted-imports`). `pages/` solo contiene rutas.
+
+## Alternativas
+
+- Seguir por tipo: simple, pero cada funcionalidad nueva edita archivos ajenos.
+- Monorepo con paquetes: solo hay una app que desplegar; no compensa.
+- Un `index.ts` con `export *` por feature: metió MongoDB en el navegador,
+  con el build en verde (126 → 343 KB). Descartado.
+
+## Consecuencias
+
+- Mis marcas pasa a 8 archivos, y ninguno ajeno. Borrar una funcionalidad
+  es borrar su carpeta, sus rutas y sus tests.
+- Cada `server.ts` debe mantenerse a mano.
+- Las rutas de `pages/` y los tests siguen fuera de la carpeta.
+- Vigilar: que `lib/` no se convierta en un cajón de sastre.
+```
+
+Al terminar: `astro check`, ESLint, el build y los tests, todos en verde.
+
+- **Los E2E no se ejecutaron en esta migración,** ni se probó en un servidor. Hazlo tú antes de desplegar.
+- **Si tu app es distinta,** cambia la tabla `M`: es lo único específico.
+- **Lo que sigue es tu criterio.** `CampoTexto` fue a `components/ui/`, y `limites` a `lib/`. Otra persona podría defender otra cosa, y para eso está el ADR.
+
+<Callout type="mastery">
+
+Una funcionalidad nueva cabe en una carpeta, más sus rutas y sus tests, sin tocar nada ajeno. Puedes demostrarlo borrándola. Una regla de ESLint protege los límites, y un ADR explica por qué existen.
+
+</Callout>
+
+## Resumen
+
+- **Por _features_:** lo que cambia junto, vive junto.
+- **Mis marcas:** de 10 archivos a 8, y de 3 archivos ajenos editados a 0.
+- **La prueba:** borrar una carpeta y que todo siga en verde.
+- **`server.ts`** es la puerta de cada _feature_ y conecta sus piezas.
+- **`no-restricted-imports`** encontró 15 atajos, y también debe cubrir las rutas relativas.
+- **_Barrels_:** con `export *`, MongoDB llegó al navegador con el build en verde. Y 331 peticiones en dev frente a 31.
+- **Mayúsculas:** Mac 0, Linux 1. `astro check` lo detecta.
+- **`README`** dice cómo se usa, y un **ADR** dice por qué es así.
+- **Monorepo:** para dos cosas que se despliegan por separado. pnpm detecta dependencias fantasma.
+- **Migrar con _script_, en una PR aparte,** y con todas las comprobaciones: los tests no vieron el error en `scripts/`.
