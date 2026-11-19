@@ -7,15 +7,13 @@ minutes: 60
 summary: "Diseñas mobile-first con breakpoints y container queries, estilizas hover, focus-visible, disabled, group, peer y atributos aria/data midiendo cada estado en Chrome, y adaptas al móvil la página de curso."
 ---
 
-Una misma página tiene que funcionar en un móvil de 360 px y en un monitor de 1440, y tiene que responder a lo que hace el usuario: pasar el ratón por encima, moverse con el teclado, pulsar un botón que todavía no está disponible. En Tailwind todo eso se resuelve con **variantes**, prefijos que aplican una utilidad solo bajo una condición: `sm:p-8` ("a partir de 640 px"), `hover:bg-accent` ("con el ratón encima"), `disabled:opacity-50` ("si está desactivado"). En esta sección vas a construir cada patrón, lo vas a **medir en Chrome** a distintos anchos y en distintos estados, y vas a terminar adaptando al móvil la página de curso de B7.3, con la misma técnica que usa esta plataforma.
-
-**Lo que tendrás al terminar:** las páginas `/responsive` y `/estados` y una página de curso que funciona igual de bien a 360 px que a 1280 px.
+Una página tiene que funcionar de 360 a 1440 px y responder al usuario: ratón encima, teclado, botones aún no disponibles. Tailwind lo resuelve con **variantes**, prefijos que aplican una utilidad bajo una condición: `sm:p-8`, `hover:bg-accent`, `disabled:opacity-50`. Aquí mides cada patrón y adaptas al móvil la página de curso de B7.3.
 
 **Requisitos:** el proyecto `tw-lab` de B7.3.
 
 ## Paso 1: mobile-first con breakpoints
 
-Las utilidades **sin prefijo** se aplican en todas las pantallas. Un prefijo de _breakpoint_ aplica la utilidad **a partir de** ese ancho:
+**Qué es:** las utilidades **sin prefijo** se aplican en todas las pantallas; con un prefijo de _breakpoint_, **a partir de** ese ancho. Escribes primero el móvil y **añades** cambios hacia arriba: _mobile-first_.
 
 | Prefijo   | Desde           |
 | --------- | --------------- |
@@ -26,7 +24,7 @@ Las utilidades **sin prefijo** se aplican en todas las pantallas. Un prefijo de 
 | `xl:`     | 80rem (1280 px) |
 | `2xl:`    | 96rem (1536 px) |
 
-Crea `src/pages/responsive.astro`:
+**Cómo se usa:** crea `src/pages/responsive.astro`.
 
 ```astro
 ---
@@ -79,7 +77,7 @@ const CURSOS = ["TypeScript desde cero", "Git y flujo de trabajo", "Cómo funcio
 </Layout>
 ```
 
-La rejilla se lee de menor a mayor: `grid gap-4` (una columna, para todos), `sm:grid-cols-2` (dos desde 640 px) y `lg:grid-cols-3` (tres desde 1024 px). Por eso se llama _mobile-first_: escribes primero el estilo del móvil, sin prefijos, y vas **añadiendo** cambios para pantallas mayores. Medido en Chrome a cuatro anchos:
+Medido en Chrome a cuatro anchos (para probarlo, el modo dispositivo de DevTools, `Cmd+Shift+M` / `Ctrl+Shift+M`):
 
 ```text
 ventana 360px → rejilla 1 col · marca "DA" · tarjeta estrecha 328px → 1 col · tarjeta ancha 328px → 1 col · scroll horizontal: false
@@ -88,40 +86,44 @@ ventana 700px → rejilla 2 col · marca "Dani Academy" · tarjeta estrecha 636p
 ventana 1100px → rejilla 3 col · marca "Dani Academy" · tarjeta estrecha 256px → 1 col · tarjeta ancha 764px → 2 col · scroll horizontal: false
 ```
 
-- **La rejilla** pasa de 1 a 2 y a 3 columnas en los puntos previstos.
-- **La marca** usa un _breakpoint_ a medida, `min-[380px]:`: por debajo de 380 px se muestra "DA" y a partir de ahí, "Dani Academy". Es exactamente lo que hace la cabecera de esta plataforma, donde el nombre completo no dejaba sitio a la navegación en los móviles más estrechos.
-- **El relleno** cambia con el ancho: `p-4 sm:p-8` (16 px en el móvil, 32 desde 640 px), y la navegación separa más sus enlaces con `gap-1 sm:gap-4`.
-- **Ningún ancho tiene _scroll_ horizontal**, la comprobación más importante de una página _responsive_.
-
-Para probarlo tú, abre DevTools y activa el **modo dispositivo** (el icono del móvil y la tableta, o `Cmd+Shift+M` / `Ctrl+Shift+M`); puedes arrastrar el borde para ver cada cambio.
+- **La rejilla:** `grid gap-4` (una columna), `sm:grid-cols-2` y `lg:grid-cols-3`.
+- **`min-[380px]:`** es un _breakpoint_ a medida: "DA" por debajo, "Dani Academy" por encima, como la cabecera de esta plataforma en los móviles más estrechos.
+- **`p-4 sm:p-8` y `gap-1 sm:gap-4`** ajustan el espacio. **Ningún ancho tiene _scroll_ horizontal**, la comprobación más importante.
 
 <Callout type="risk">
 
-- **`sm:` no significa "en el móvil":** significa "a partir de 640 px". `sm:hidden` oculta algo en las pantallas **grandes**, no en las pequeñas. Para algo que solo se vea en el móvil: sin prefijo, y anulado después (`block lg:hidden`).
-- **Diseñar primero para escritorio sale caro:** si escribes `grid-cols-3` y luego intentas "arreglar" el móvil, acabas con `max-sm:grid-cols-1`, `max-md:…` y excepciones por todas partes. Empieza siempre por el móvil.
-- **El _scroll_ horizontal casi siempre lo causa un solo elemento:** una imagen sin `max-w-full`, un bloque de código o una palabra larga. Para encontrarlo, en la consola de DevTools: `[...document.querySelectorAll("*")].filter((e) => e.scrollWidth > innerWidth)`.
+- **`sm:` no significa "en el móvil":** significa "a partir de 640 px". `sm:hidden` oculta en pantallas **grandes**. Para solo móvil: `block lg:hidden`.
+- **Empezar por el escritorio sale caro:** acabas con `max-sm:`, `max-md:` y excepciones por todas partes.
+- **El _scroll_ horizontal suele ser un solo elemento:** una imagen, un bloque de código, una palabra larga. Búscalo con `[...document.querySelectorAll("*")].filter((e) => e.scrollWidth > innerWidth)`.
 
 </Callout>
 
 ## Paso 2: container queries
 
-Los _breakpoints_ miran el ancho de la **pantalla**. Pero un componente reutilizable no sabe dónde lo pondrán: la misma tarjeta puede ir en una barra lateral de 256 px o en el contenido principal. Las **_container queries_** miran el ancho del **contenedor**:
+**Qué es:** los _breakpoints_ miran la **pantalla**; un componente reutilizable no sabe dónde lo pondrán. Las **_container queries_** miran el **contenedor**: **`@container`** lo marca, y **`@md:`** aplica la utilidad cuando mide al menos 28rem (448 px). En v4 vienen incluidas.
 
-- **`@container`** marca un elemento como contenedor.
-- **`@md:`** aplica la utilidad cuando **ese contenedor** mide al menos 28rem (448 px), esté donde esté.
-
-En la página de muestras, la misma tarjeta (imagen y texto) aparece en dos huecos, `#estrecho` y `#ancho`. Fíjate en la última línea de la medición: con la ventana a 1100 px, la tarjeta del hueco estrecho (256 px) muestra **una columna** y la del ancho (764 px), **dos**. Con _breakpoints_ eso es imposible, porque las dos están en la misma pantalla. En Tailwind v4, las _container queries_ vienen incluidas, sin _plugins_.
+**Cómo se usa:** en `/responsive`, la misma tarjeta aparece en `#estrecho` y `#ancho`. En la última línea de la medición, a 1100 px, la del hueco de 256 px muestra **una columna** y la de 764 px, **dos**: imposible con _breakpoints_, porque están en la misma pantalla.
 
 <Callout type="risk">
 
-- **`@container` va en el padre, `@md:` en los hijos:** un elemento no puede responder a su propio ancho. Si pones `@container` y `@md:` en el mismo elemento, la variante no se aplica nunca.
-- **El tamaño del contenedor no puede depender de su contenido:** `@container` activa `container-type: inline-size`, y el contenedor pasa a ignorar el ancho de sus hijos al calcular el suyo. En un contenedor sin ancho propio (por ejemplo, un hijo de _flex_ sin `flex-1`), puede quedarse en 0 px.
+- **`@container` va en el padre y `@md:` en los hijos:** un elemento no responde a su propio ancho.
+- **El contenedor ignora el ancho de sus hijos** (`container-type: inline-size`): sin ancho propio, como un hijo de _flex_ sin `flex-1`, puede quedarse en 0 px.
 
 </Callout>
 
 ## Paso 3: estados de un botón
 
-Crea `src/pages/estados.astro`. Contiene todos los ejemplos de los Pasos 3 a 5:
+**Qué es:** variantes que se aplican según el estado del elemento.
+
+| Variante         | Se aplica cuando…                                                                            |
+| ---------------- | -------------------------------------------------------------------------------------------- |
+| `hover:`         | El ratón está encima                                                                         |
+| `active:`        | Se está pulsando                                                                             |
+| `focus:`         | Tiene el foco (por cualquier medio)                                                          |
+| `focus-visible:` | Tiene el foco **y** el navegador considera que hay que mostrarlo (al navegar con el teclado) |
+| `disabled:`      | Tiene el atributo `disabled`                                                                 |
+
+**Cómo se usa:** crea `src/pages/estados.astro`, con los ejemplos de los pasos 3 a 5. Los dos botones comparten la constante `BOTON`.
 
 ```astro
 ---
@@ -186,17 +188,7 @@ const BOTON =
 </script>
 ```
 
-Los dos botones comparten la cadena `BOTON`, guardada en una constante. Cada variante se aplica en una situación:
-
-| Variante         | Se aplica cuando…                                                                            |
-| ---------------- | -------------------------------------------------------------------------------------------- |
-| `hover:`         | El ratón está encima                                                                         |
-| `active:`        | Se está pulsando                                                                             |
-| `focus:`         | Tiene el foco (por cualquier medio)                                                          |
-| `focus-visible:` | Tiene el foco **y** el navegador considera que hay que mostrarlo (al navegar con el teclado) |
-| `disabled:`      | Tiene el atributo `disabled`                                                                 |
-
-Medido en Chrome, simulando ratón y teclado:
+Simulando ratón y teclado:
 
 ```text
 botón en reposo: fondo rgb(15, 118, 110) · opacidad 1 · cursor default · contorno none 3px
@@ -207,50 +199,52 @@ con Tab (teclado): activo fondo rgb(15, 118, 110) · opacidad 1 · cursor defaul
 segundo Tab va a: tarjeta (el desactivado se salta)
 ```
 
-- **`hover:bg-accent`** cambia el fondo de `accent-strong` (15, 118, 110) a `accent` (13, 148, 136).
-- **`disabled:opacity-50 disabled:cursor-not-allowed`**: medio transparente y con el cursor de "prohibido".
-- **`focus-visible:`** es la clave: después de un **clic** con el ratón, el botón tiene el foco pero **no** muestra el contorno (`none`); al llegar con **Tab**, sí (`solid 2px`). Así, quien navega con el teclado sabe siempre dónde está, y a quien usa el ratón no le aparece un recuadro al hacer clic.
-- **El botón desactivado se salta al tabular:** el segundo Tab va directamente a la tarjeta.
+- **`hover:bg-accent`** pasa de `accent-strong` a `accent`; **`disabled:opacity-50 disabled:cursor-not-allowed`** lo atenúa con el cursor de "prohibido".
+- **`focus-visible:` es la clave:** tras un **clic**, el foco no se dibuja (`none`); con **Tab**, sí (`solid 2px`). El botón desactivado se salta al tabular.
 
 <Callout type="risk">
 
-- **Nunca quites el contorno de foco sin poner otro:** `outline-none` sin un `focus-visible:` que lo sustituya deja a quien usa el teclado sin saber dónde está. Esta plataforma define un contorno de foco global en su CSS (`:focus-visible` con `outline: 2px solid var(--accent-strong)`), para que ningún elemento se quede sin él.
-- **`hover:` no existe en las pantallas táctiles:** en un móvil, el estilo de _hover_ se queda "pegado" tras tocar, o no aparece. No pongas información **solo** en un _hover_ (un menú que solo se abre al pasar el ratón no funciona en un móvil). Tailwind v4 ya aplica `hover:` solo en dispositivos que admiten _hover_, lo que evita el estilo pegado, pero no la información perdida.
-- **`disabled` mientras se guarda:** desactivar un botón durante una petición evita los envíos dobles de quien pulsa dos veces. Pero un botón desactivado no da explicaciones: si el usuario no entiende por qué no puede pulsar, muestra un texto cerca ("Guardando…", "Completa el correo").
+- **Nunca quites el contorno de foco sin otro:** `outline-none` sin `focus-visible:` deja perdido a quien usa el teclado. Esta plataforma define uno global (`:focus-visible` con `outline: 2px solid var(--accent-strong)`).
+- **No pongas información solo en un `hover:`:** en táctil no existe. v4 aplica `hover:` solo donde hay _hover_, lo que evita el estilo pegado, no la información perdida.
+- **Un `disabled` mientras se guarda** evita envíos dobles, pero no explica nada: muestra "Guardando…" o lo que falte.
 
 </Callout>
 
 ## Paso 4: grupos y hermanos (`group` y `peer`)
 
-`group` en un elemento permite que **sus hijos** reaccionen al estado del padre, con `group-hover:`, `group-focus-visible:`…:
+**Qué es:** **`group`** en un padre permite que sus hijos reaccionen a su estado (`group-hover:`, `group-focus-visible:`). **`peer`** hace lo mismo con un **hermano anterior**.
+
+**Cómo se usa:** la tarjeta con `group`:
 
 ```text
 tarjeta en reposo: h3 subrayado: none · enlace: oklch(0.554 0.046 257.417)
 tarjeta con hover: h3 subrayado: underline · enlace: rgb(15, 118, 110)
 ```
 
-Con el ratón en **cualquier punto** de la tarjeta, el título se subraya y "Continuar →" pasa al color de acento. Sin `group`, el título solo reaccionaría con el ratón justo encima de sus letras.
+- **Con el ratón en cualquier punto de la tarjeta,** el título se subraya y "Continuar →" toma el acento. Sin `group`, solo encima de las letras.
 
-`peer` hace lo mismo con un **hermano anterior**. El interruptor es un `<input type="checkbox">` real, oculto con `sr-only` (invisible, pero accesible para el teclado y los lectores de pantalla); el `<span>` siguiente se pinta según su estado con `peer-checked:` y `peer-focus-visible:`:
+El interruptor es un `<input type="checkbox">` real oculto con `sr-only`, y el `<span>` siguiente usa `peer-checked:` y `peer-focus-visible:`:
 
 ```text
 interruptor: oklch(0.869 0.022 252.894)
 interruptor tras clic: rgb(13, 148, 136) · checked: true
 ```
 
-Como el `<input>` es real, el interruptor funciona con el teclado (Tab y espacio) y envía su valor en un formulario sin una línea de JavaScript.
+- **Al ser un `<input>` real,** funciona con Tab y espacio y envía su valor en un formulario, sin JavaScript.
 
 <Callout type="risk">
 
-- **`peer` solo mira hacia atrás:** el elemento con `peer` debe ir **antes** que el que reacciona, porque CSS solo puede seleccionar hermanos posteriores. Si pones el `<input>` después del `<span>`, `peer-checked:` no hace nada.
-- **`sr-only`, no `hidden`:** `hidden` (`display: none`) saca el `<input>` del teclado y de los lectores de pantalla, y el interruptor deja de ser accesible. `sr-only` lo oculta solo a la vista.
-- **Grupos anidados:** si una tarjeta con `group` contiene otra con `group`, `group-hover:` reacciona al más cercano. Para distinguirlos, se les da nombre: `group/tarjeta` y `group-hover/tarjeta:underline`.
+- **`peer` solo mira hacia atrás:** el `<input>` debe ir **antes** del `<span>`; CSS solo selecciona hermanos posteriores.
+- **`sr-only`, no `hidden`:** `display: none` saca el `<input>` del teclado y de los lectores de pantalla.
+- **Con grupos anidados, `group-hover:` reacciona al más cercano.** Para distinguirlos: `group/tarjeta` y `group-hover/tarjeta:underline`.
 
 </Callout>
 
 ## Paso 5: el estado en atributos (`aria-*` y `data-*`)
 
-En lugar de añadir y quitar clases con JavaScript, puedes guardar el estado en un **atributo** del HTML y estilizarlo con una variante:
+**Qué es:** en lugar de añadir y quitar clases con JavaScript, el estado vive en un **atributo** del HTML y una variante lo estiliza.
+
+**Cómo se usa:** la navegación y la lista de `estados.astro`:
 
 ```text
 nav: Tipos primitivos: 400 rgba(0, 0, 0, 0) | Uniones y narrowing: 500 oklch(0.929 0.013 255.508)
@@ -258,21 +252,21 @@ lista: ✓ Qué es TypeScript (data-read=true) | 2 Tipos primitivos e inferencia
 tras el botón: ✓ Qué es TypeScript (data-read=true) | ✓ Tipos primitivos e inferencia (data-read=true)
 ```
 
-- **`aria-current="page"`** marca el enlace de la página actual, y `aria-[current=page]:font-medium` lo resalta. Lo mejor: ese mismo atributo es el que un lector de pantalla anuncia como "página actual". Un solo atributo sirve para la accesibilidad **y** para el estilo.
-- **`data-read="true"`** en cada `<li>` (con `group`), y los hijos usan `group-data-[read=true]:` para mostrar ✓ en lugar del número. El `<script>` solo cambia el atributo con `setAttribute("data-read", "true")`, y **Tailwind se encarga del resto**: el círculo se rellena y el número se cambia por ✓.
-
-El índice de esta plataforma funciona exactamente así: al marcar una sección como leída, el script cambia `data-read` y las variantes `group-data-[read=true]:` del índice muestran el icono.
+- **`aria-current="page"`** con `aria-[current=page]:font-medium`: el mismo atributo que el lector de pantalla anuncia como "página actual" sirve para el estilo.
+- **`data-read="true"`** en cada `<li>` con `group`, y `group-data-[read=true]:` en los hijos: el `<script>` solo hace `setAttribute("data-read", "true")` y Tailwind pinta el ✓. Es como funciona el índice de esta plataforma.
 
 <Callout type="risk">
 
-- **Los valores de atributo son texto:** `data-[read=true]:` compara con el texto `"true"`. Astro convierte `data-read={true}` en `data-read="true"` y `{false}` en `"false"` (comprobado al compilar); la plataforma escribe `String(isRead)` para dejarlo explícito. Pero si el atributo vale otra cosa (`"1"`, `"sí"`), la variante no coincide y no se aplica, sin ningún error.
-- **Usa los atributos ARIA para lo que significan:** `aria-current`, `aria-expanded`, `aria-selected` o `aria-invalid` tienen un significado para los lectores de pantalla. No inventes valores ni los uses solo como "ganchos" de estilo; para eso están los `data-*`.
+- **Los valores son texto:** `data-[read=true]:` compara con `"true"`. Astro convierte `{true}` en `"true"`, y la plataforma escribe `String(isRead)` para dejarlo explícito. Con `"1"` o `"sí"`, no coincide, sin error.
+- **Los atributos ARIA tienen significado** para los lectores de pantalla: no los uses solo como ganchos de estilo. Para eso, `data-*`.
 
 </Callout>
 
 ## Paso 6: modo oscuro
 
-La variante `dark:` aplica estilos en el modo oscuro. Crea `src/pages/oscuro.astro`:
+**Qué es:** la variante `dark:` aplica estilos en modo oscuro. Por defecto sigue la preferencia del sistema (`prefers-color-scheme`).
+
+**Cómo se usa:** crea `src/pages/oscuro.astro`.
 
 ```astro
 ---
@@ -289,25 +283,25 @@ import Layout from "../layouts/Layout.astro";
 </Layout>
 ```
 
-Por defecto, `dark:` sigue la preferencia del sistema operativo (`prefers-color-scheme`). Medido en Chrome emulando las dos preferencias (en DevTools: _Rendering_ → _Emulate CSS media feature prefers-color-scheme_):
+Emulando las dos preferencias (DevTools → _Rendering_ → _Emulate CSS media feature prefers-color-scheme_):
 
 ```text
 sistema en light: fondo rgb(255, 255, 255) · texto oklch(0.208 0.042 265.755)
 sistema en dark: fondo oklch(0.208 0.042 265.755) · texto oklch(0.968 0.007 247.896)
 ```
 
-Para controlarlo con un botón (claro / oscuro / sistema), se redefine la variante en el CSS. Esta plataforma lo hace en su `global.css`:
+Para un botón claro / oscuro / sistema, esta plataforma redefine la variante en su `global.css`:
 
 ```css
 @custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 ```
 
-Así, `dark:` se aplica cuando el `<html>` tiene `data-theme="dark"`, un atributo que pone un pequeño script según lo que elija el usuario. Lo verás a fondo en el curso I7, junto con una técnica mejor: colores del tema que cambian solos, sin repetir `dark:` en cada elemento.
+- **`dark:` se aplica con `data-theme="dark"` en el `<html>`,** que pone un pequeño script según la elección del usuario (I7).
 
 <Callout type="risk">
 
-- **`dark:` en cada elemento no escala:** con veinte componentes, son cientos de pares `bg-white dark:bg-slate-900` que hay que mantener sincronizados. Esta plataforma define variables (`--fg`, `--surface`…) que cambian con el tema, y sus clases (`bg-surface`, `text-fg`) no necesitan `dark:`.
-- **El parpadeo del tema:** si el script que pone `data-theme` se ejecuta tarde, la página se pinta un instante en claro y luego salta a oscuro. Ese script debe ir **en línea** en el `<head>`, antes de que se pinte nada (I7).
+- **`dark:` en cada elemento no escala:** cientos de pares `bg-white dark:bg-slate-900`. Esta plataforma usa variables (`--fg`, `--surface`…) que cambian con el tema, y `bg-surface` no necesita `dark:`.
+- **El parpadeo del tema:** si el script de `data-theme` llega tarde, la página se pinta en claro y salta. Va **en línea** en el `<head>` (I7).
 
 </Callout>
 
@@ -424,7 +418,7 @@ const leidas = SECCIONES.filter((s) => s.leida).length;
 </Layout>
 ```
 
-Medido a tres anchos, desplegando el índice en el móvil y bajando 800 px en el escritorio:
+A tres anchos, desplegando el índice en el móvil y bajando 800 px en el escritorio:
 
 ```text
 ventana 360px → índice móvil x=0 y=56 w=360 · índice escritorio oculto · artículo x=16 y=141 w=328 · scroll horizontal false
@@ -434,19 +428,15 @@ ventana 1280px → índice móvil oculto · índice escritorio x=24 y=56 w=256 �
   tras scroll de 800px → lista del índice: x=24 y=56 w=256
 ```
 
-Las decisiones:
-
-- **Un solo _breakpoint_, `lg:`:** por debajo de 1024 px, todo es una columna; desde ahí, `lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]`. `minmax(0,1fr)` es la versión de _grid_ de `min-w-0`: la columna del contenido puede encogerse aunque contenga un bloque de código ancho.
-- **`<details>` con `lg:hidden` y `<aside>` con `hidden lg:block`:** el índice existe dos veces en el HTML y cada ancho muestra uno. `<details>` es un desplegable **nativo**: se abre con el ratón, el dedo o el teclado sin una línea de JavaScript.
-- **El _sticky_ va en un `<div>` dentro del `<aside>`:** el `<aside>` se estira a toda la altura de la fila (como en B7.3) y el `<div>` interior se pega dentro de él. Es la otra forma de resolver el problema de `self-start`, y la que usa esta plataforma.
-- **`100dvh`** en lugar de `100vh`: la altura visible real, sin la zona que tapa la barra del navegador en el móvil.
-- **Detalles por ancho:** marca abreviada por debajo de 380 px, título `text-3xl sm:text-4xl` y la navegación anterior/siguiente apilada en el móvil (`flex-col sm:flex-row`).
+- **Un solo _breakpoint_, `lg:`:** una columna por debajo; `lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]` por encima. `minmax(0,1fr)` es el `min-w-0` de _grid_.
+- **`<details>` con `lg:hidden` y `<aside>` con `hidden lg:block`:** cada ancho muestra una copia. `<details>` es un desplegable **nativo**, sin JavaScript.
+- **El _sticky_ va en un `<div>` dentro del `<aside>`,** que se estira a toda la fila: la otra solución al problema de `self-start` (B7.3), la de esta plataforma. Con **`100dvh`**, la altura visible real; y marca abreviada, `text-3xl sm:text-4xl` y navegación apilada (`flex-col sm:flex-row`) en el móvil.
 
 <Callout type="risk">
 
-- **El índice está dos veces en el HTML:** a los lectores de pantalla no les afecta (el elemento con `display: none` no se lee), pero si el índice tuviera _ids_ fijos, se duplicarían. Por eso el componente no usa ninguno; si los necesitaras, pásale un prefijo como _prop_.
-- **El script que actualiza `data-read` debe tocar las dos copias:** el de esta plataforma busca **todos** los elementos `[data-section-id]` de la página, no solo el primero. Con `querySelector` (singular), el índice del escritorio se actualizaría y el del móvil no.
-- **Prueba en un móvil de verdad antes de publicar:** el modo dispositivo de DevTools simula el ancho, pero no el tacto, la barra del navegador ni el teclado virtual que tapa media pantalla al escribir en un formulario.
+- **El índice está dos veces en el HTML:** a los lectores no les afecta (`display: none` no se lee), pero los _ids_ fijos se duplicarían. Si los necesitas, pasa un prefijo como _prop_.
+- **El script de `data-read` debe tocar las dos copias:** el de esta plataforma busca **todos** los `[data-section-id]`. Con `querySelector`, el móvil no se actualizaría.
+- **Prueba en un móvil de verdad:** DevTools simula el ancho, no el tacto, la barra del navegador ni el teclado virtual.
 
 </Callout>
 
@@ -458,8 +448,8 @@ Escribes primero el estilo del móvil y añades _breakpoints_ hacia arriba, usas
 
 ## Resumen
 
-- Sin prefijo = todas las pantallas; `sm:`, `md:`, `lg:`… = **a partir de** ese ancho; `min-[380px]:` para un ancho a medida.
-- _Container queries_: `@container` en el padre y `@md:` en los hijos, que responden al ancho del contenedor.
-- `hover:`, `active:`, `focus-visible:` y `disabled:` estilizan estados; nunca quites el foco sin sustituirlo.
-- `group`/`group-hover:` reaccionan al padre; `peer`/`peer-checked:`, a un hermano anterior.
-- `aria-[current=page]:` y `group-data-[read=true]:` estilizan según atributos que cambia el script; `dark:` sigue el tema.
+- Sin prefijo, todas las pantallas; `sm:`, `md:`, `lg:`, **a partir de** ese ancho.
+- `@container` en el padre y `@md:` en los hijos responden al contenedor.
+- `hover:`, `active:`, `focus-visible:` y `disabled:`; nunca quites el foco sin sustituirlo.
+- `group-hover:` reacciona al padre; `peer-checked:`, a un hermano anterior.
+- `aria-[current=page]:` y `group-data-[read=true]:` según atributos; `dark:` sigue el tema.

@@ -7,25 +7,25 @@ minutes: 60
 summary: "Mides en el navegador cuándo se descarga cada isla con client:load, idle, visible, media y only, compartes estado entre dos islas con nanostores y montas una página de lección con tres islas bien elegidas."
 ---
 
-Todo el curso B6 ha girado en torno a una idea que ahora vas a dominar: en Astro, la página es **HTML estático** y solo algunas partes, las **islas**, cargan React para ser interactivas. Cada isla decide **cuándo** descarga su JavaScript con una directiva `client:*`, y elegir bien es la diferencia entre una página que carga al instante en el móvil y una que descarga 100 KB antes de poder usarse. En esta sección no vas a fiarte de la documentación: vas a **medir** en el navegador en qué momento se descarga y activa cada isla según su directiva, vas a compartir estado entre dos islas separadas y vas a montar una página de lección con tres islas, cada una con la directiva que le corresponde.
-
-**Lo que tendrás al terminar:** una página de pruebas con las cinco directivas, dos islas que comparten estado con _nanostores_ y una página de lección con islas bien elegidas.
+En Astro, la página es **HTML estático** y solo las **islas** cargan React. Cada una decide **cuándo** descarga su JavaScript con una directiva `client:*`, y elegir bien decide si la página carga al instante en el móvil. Aquí mides cada directiva en el navegador, compartes estado entre islas y montas una lección con tres.
 
 **Requisitos:** el proyecto `react-lab` de B6.6.
 
 ## Paso 1: la arquitectura de islas
 
-En una aplicación de React clásica (una SPA, B3.1), **toda** la página es React: el navegador descarga React y todo el código de la app antes de mostrar nada útil. Astro le da la vuelta:
+**Qué es:** en una SPA (B3.1), **toda** la página es React, y hay que descargarlo todo antes de ver nada útil. Astro le da la vuelta:
 
-1. **Toda la página se genera como HTML** en el servidor, incluidos tus componentes de React (B6.1).
-2. **Solo los componentes con una directiva `client:*` se "hidratan"** en el navegador: se descarga su JavaScript, React se conecta al HTML que ya existe y el componente pasa a responder a clics.
-3. **Cada isla es independiente:** se hidrata por su cuenta, cuando le toca, sin esperar a las demás.
+- **Toda la página se genera como HTML** en el servidor, incluidos tus componentes de React (B6.1).
+- **Solo los componentes con `client:*` se hidratan:** se descarga su JavaScript, React se conecta al HTML existente y el componente responde a clics.
+- **Cada isla es independiente** y se hidrata cuando le toca, sin esperar a las demás.
 
-Esta plataforma es un ejemplo: el texto de cada lección es HTML puro; el botón "Marcar como leído" es una isla con `client:visible`; y el formulario de login y la evaluación, islas con `client:load`.
+**Cómo se usa:** esta plataforma es un ejemplo. El texto de cada lección es HTML puro; "Marcar como leído" es una isla `client:visible`; el login y la evaluación, `client:load`.
 
 ## Paso 2: las cinco directivas, medidas
 
-Crea una isla de prueba por directiva. Todas iguales: un efecto (que solo se ejecuta en el navegador, B6.6) que demuestra que la isla está hidratada. Crea `src/components/islas/IslaLoad.tsx`:
+**Qué es:** cinco islas iguales, una por directiva, con un efecto (que solo se ejecuta en el navegador, B6.6) que delata cuándo se hidratan.
+
+**Cómo se usa:** crea `src/components/islas/IslaLoad.tsx`.
 
 ```tsx
 // Archivo: src/components/islas/IslaLoad.tsx
@@ -41,7 +41,7 @@ export function IslaLoad() {
 }
 ```
 
-Crea `IslaIdle.tsx`, `IslaVisible.tsx` e `IslaMedia.tsx` en la misma carpeta, con el mismo código cambiando `Load` por `Idle`, `Visible` y `Media` (en el nombre de la función, en `data-isla`, en el texto y en el mensaje de la consola). Por ejemplo, `IslaIdle.tsx`:
+Crea igual `IslaIdle.tsx`, `IslaVisible.tsx` e `IslaMedia.tsx`, cambiando `Load` en el nombre, `data-isla`, el texto y la consola. Por ejemplo, `IslaIdle.tsx`:
 
 ```tsx
 // Archivo: src/components/islas/IslaIdle.tsx
@@ -57,7 +57,7 @@ export function IslaIdle() {
 }
 ```
 
-La quinta usa `window` **al renderizar**, algo que no existe en el servidor. Crea `src/components/islas/IslaOnly.tsx`:
+La quinta usa `window` **al renderizar**, que no existe en el servidor. `src/components/islas/IslaOnly.tsx`:
 
 ```tsx
 // Archivo: src/components/islas/IslaOnly.tsx
@@ -72,7 +72,7 @@ export function IslaOnly() {
 }
 ```
 
-Y la página `src/pages/islas.astro`, con un bloque alto en medio para que la última isla quede fuera de la pantalla:
+La página `src/pages/islas.astro`, con un bloque alto para dejar la última isla fuera de pantalla:
 
 ```astro
 ---
@@ -100,7 +100,7 @@ import { IslaOnly } from "../components/islas/IslaOnly";
 </Base>
 ```
 
-Abre `http://localhost:4321/islas` con DevTools en la pestaña _Network_ (filtra por `Isla`) y la consola abierta. Espera unos segundos, baja hasta el final de la página y después estrecha la ventana por debajo de 600 px (o activa el modo móvil de DevTools con `Cmd` + `Shift` + `M`). Medido con una ventana inicial de 1280 px:
+Abre `http://localhost:4321/islas` con _Network_ filtrado por `Isla` y la consola. Espera, baja al final y estrecha la ventana por debajo de 600 px (`Cmd` + `Shift` + `M`). Con 1280 px iniciales, en el servidor de desarrollo (los milisegundos variarán; el orden, no):
 
 ```text
    53 ms · evento load
@@ -119,10 +119,6 @@ Abre `http://localhost:4321/islas` con DevTools en la pestaña _Network_ (filtra
  5594 ms · en pantalla: Isla Load: interactiva ✓ | Isla Idle: interactiva ✓ | Isla Media: interactiva ✓ | Isla Only: la ventana mide 1280 px | Isla Visible: interactiva ✓
 ```
 
-(Medido en el servidor de desarrollo; los milisegundos variarán, el orden no).
-
-Lo que dice cada línea:
-
 | Directiva             | Cuándo se descarga y se hidrata                         | En la medición                                                             | Úsala para                                                                                 |
 | --------------------- | ------------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `client:load`         | En cuanto carga la página                               | A los 57 ms                                                                | Lo que el usuario usa nada más llegar: un formulario de login, un buscador arriba del todo |
@@ -131,7 +127,7 @@ Lo que dice cada línea:
 | `client:media="…"`    | Cuando se cumple la _media query_                       | Solo al estrechar a 500 px, a los 4090 ms                                  | Lo que solo existe en ciertos tamaños: un menú móvil                                       |
 | `client:only="react"` | Al cargar, y **sin renderizar en el servidor**          | A los 60 ms; el HTML inicial solo tiene el texto alternativo               | Componentes que no pueden ejecutarse en el servidor (usan `window`, `localStorage`…)       |
 
-Y el HTML que envía el servidor, antes de cualquier JavaScript:
+El HTML del servidor, antes de cualquier JavaScript:
 
 ```text
 <p class="isla" data-isla="Load">Isla Load: <!-- -->solo HTML</p>
@@ -141,26 +137,27 @@ Calculando el ancho…
 <p class="isla" data-isla="Visible">Isla Visible: <!-- -->solo HTML</p>
 ```
 
-Todas las islas tienen su HTML desde el principio, **salvo `client:only`**, que muestra el contenido de `slot="fallback"` ("Calculando el ancho…") hasta que se ejecuta en el navegador. Es lo que la hace distinta: no hay HTML del servidor, así que el usuario ve un hueco o un texto provisional mientras carga.
+- **Todas tienen HTML desde el principio, salvo `client:only`,** que muestra el `slot="fallback"` ("Calculando el ancho…") hasta ejecutarse en el navegador.
 
 <Callout type="risk">
 
-- **`window` con `client:load` rompe la página entera.** Prueba a cambiar `client:only="react"` por `client:load` en `IslaOnly`: el servidor intenta renderizarla, encuentra `window` y falla con `ReferenceError: window is not defined`. En desarrollo verás la pantalla de error de Astro en lugar de la página. Las dos soluciones: `client:only="react"` (sin HTML del servidor), o mover el acceso a `window` a un `useEffect` (B6.6), que solo se ejecuta en el navegador y conserva el HTML inicial.
-- **`client:only` empeora la carga visual:** como no hay HTML inicial, el contenido "salta" al aparecer y los buscadores no lo ven. Úsala solo cuando no haya alternativa, y da un `fallback` del mismo tamaño que el contenido final.
-- **`client:visible` en algo que se ve al cargar** no ahorra nada: si la isla está en la parte visible de la pantalla, se hidrata enseguida. Su ventaja es para lo que está más abajo.
-- **`client:media` no oculta nada:** la isla de la medición se ve en todas las anchuras; solo cambia cuándo se vuelve interactiva. Si un menú solo debe **verse** en el móvil, ocúltalo también con CSS.
+- **`window` con `client:load` rompe la página:** el servidor la renderiza y falla con `ReferenceError: window is not defined`. Soluciones: `client:only="react"`, o mover `window` a un `useEffect` (B6.6), que conserva el HTML inicial.
+- **`client:only` hace saltar el contenido** y los buscadores no lo ven. Solo sin alternativa, con un `fallback` del tamaño final.
+- **`client:visible` en lo que se ve al cargar no ahorra nada,** y **`client:media` no oculta nada**: solo cambia cuándo se activa. Para ocultar, CSS.
 
 </Callout>
 
 ## Paso 3: compartir estado entre islas
 
-Cada isla es un árbol de React independiente: el estado de una (`useState`) **no** es visible para las demás, aunque estén en la misma página. Si un botón del contenido debe actualizar un contador de la cabecera, hace falta un estado que viva **fuera** de React. La librería recomendada por Astro es **nanostores**, que pesa menos de 1 KB:
+**Qué es:** cada isla es un árbol de React independiente: su `useState` **no** lo ven las demás. Para que un botón del contenido actualice un contador de la cabecera, el estado tiene que vivir **fuera** de React. Astro recomienda **nanostores**, de menos de 1 KB.
+
+**Cómo se usa:**
 
 ```bash
 npm install nanostores @nanostores/react
 ```
 
-Crea el estado compartido, `src/stores/agua.ts`:
+El estado compartido, `src/stores/agua.ts`:
 
 ```ts
 // Archivo: src/stores/agua.ts
@@ -189,7 +186,7 @@ export function BotonVaso() {
 }
 ```
 
-Y otra que lo muestra, `src/components/islas/MarcadorAgua.tsx`:
+Otra que lo muestra, `src/components/islas/MarcadorAgua.tsx`:
 
 ```tsx
 // Archivo: src/components/islas/MarcadorAgua.tsx
@@ -202,7 +199,7 @@ export function MarcadorAgua() {
 }
 ```
 
-Colócalas en sitios distintos de la página, `src/pages/compartido.astro`:
+En sitios distintos de `src/pages/compartido.astro`:
 
 ```astro
 ---
@@ -232,15 +229,14 @@ inicio: Llevas 0 vasos hoy
 tras 3 clics en la otra isla: Llevas 3 vasos hoy
 ```
 
-- **`atom(0)`** crea un valor observable que vive en el módulo `agua.ts`. Como el navegador carga ese módulo una sola vez, **las dos islas comparten la misma instancia**.
-- **`useStore($vasos)`** (de `@nanostores/react`) suscribe el componente: cada vez que el _store_ cambia, la isla se vuelve a renderizar con el valor nuevo.
-- **`anadirVaso`** cambia el _store_ desde cualquier sitio, incluso fuera de React.
+- **`atom(0)`** vive en el módulo `agua.ts`, que el navegador carga una vez: **las dos islas comparten la instancia**.
+- **`useStore($vasos)`** suscribe el componente y lo renderiza con cada cambio. **`anadirVaso`** cambia el _store_ desde cualquier sitio, incluso fuera de React.
 
 <Callout type="risk">
 
-- **No compartas estado entre islas si puedes evitarlo:** si dos partes de la interfaz están tan relacionadas que comparten estado, a menudo es mejor que sean **una sola isla** más grande. Nanostores es para casos de verdad separados (una cabecera y un botón dentro del contenido).
-- **En el servidor, el _store_ es compartido por todas las peticiones:** el módulo se carga una vez en el proceso del servidor. Si en el servidor lo rellenaras con datos de un usuario, esos datos podrían aparecer en la página de **otro** usuario. Usa los _stores_ solo en el navegador, y pasa los datos iniciales de cada usuario como props.
-- **El estado compartido tampoco sobrevive a una recarga:** como `useState`, vive en la memoria de la pestaña. Para persistirlo, guárdalo en el servidor.
+- **Evita compartir estado si puedes:** dos partes tan relacionadas suelen ser **una sola isla**. Nanostores es para partes de verdad separadas.
+- **En el servidor, el _store_ lo comparten todas las peticiones:** rellenarlo con datos de un usuario podría mostrarlos a **otro**. Úsalo solo en el navegador y pasa los datos iniciales como props.
+- **Tampoco sobrevive a una recarga:** vive en la memoria de la pestaña.
 
 </Callout>
 
@@ -344,7 +340,7 @@ import { MenuMovil } from "../components/leccion/MenuMovil";
 </Base>
 ```
 
-Medido en el navegador con una ventana de 1280 px, bajando al final y estrechando después a 400 px:
+Con 1280 px, bajando al final y estrechando a 400 px (en desarrollo, Vite puede pedir un módulo dos veces; compilado, una):
 
 ```text
    29 ms · evento load
@@ -359,19 +355,14 @@ Medido en el navegador con una ventana de 1280 px, bajando al final y estrechand
  4002 ms · menú: 3 secciones visibles
 ```
 
-(En el servidor de desarrollo, Vite puede pedir el mismo módulo dos veces, como aquí `TemporizadorEstudio.tsx`; en la versión compilada se descarga una vez).
-
-La justificación de cada directiva:
-
-- **`MenuMovil` → `client:media="(max-width: 640px)"`:** en un ordenador, su JavaScript **nunca se descarga**. Solo al estrechar la ventana.
-- **`TemporizadorEstudio` → `client:idle`:** debe empezar a contar pronto, pero no compite con lo primero que necesita la página. Una alternativa razonable es `client:load` si el tiempo exacto importa desde el primer segundo.
-- **`BotonLeido` → `client:visible`:** está al final de una lección larga; su JavaScript se descarga solo si el lector llega hasta él. Es exactamente lo que hace esta plataforma con su botón "Marcar como leído".
-- **El texto de la lección → sin isla:** HTML estático, cero JavaScript.
+- **`MenuMovil` → `client:media="(max-width: 640px)"`:** en un ordenador, su JavaScript **nunca se descarga**.
+- **`TemporizadorEstudio` → `client:idle`:** pronto, sin competir con lo primero. `client:load` si el tiempo exacto importa desde el primer segundo.
+- **`BotonLeido` → `client:visible`:** solo se descarga si el lector llega al final, como en esta plataforma. El texto, sin isla: cero JavaScript.
 
 <Callout type="risk">
 
-- **Un botón `client:visible` muy al final puede no estar listo al primer clic** si el usuario baja muy rápido con una conexión lenta: el HTML está, pero el JavaScript aún se descarga. Si el JavaScript todavía no ha llegado, el clic simplemente se pierde: el botón aún es HTML sin ningún manejador. Si un clic temprano importa, `client:idle` o `client:load`.
-- **Cuenta el peso total, no solo el de tu componente:** la primera isla de React de una página arrastra los ~68 KB comprimidos de React (B6.1); las siguientes, solo su propio código. Una página con una sola isla diminuta paga igualmente el precio de React. Para algo muy simple (un botón que alterna una clase), un `<script>` de Astro sin React puede ser más ligero.
+- **Un botón `client:visible` puede no estar listo al primer clic** si el usuario baja rápido con mala conexión: el clic se pierde sobre HTML sin manejador. Si importa, `client:idle` o `client:load`.
+- **La primera isla de React arrastra los ~68 KB comprimidos de React** (B6.1); las siguientes, solo su código. Para algo muy simple, un `<script>` de Astro puede pesar menos.
 
 </Callout>
 
@@ -383,8 +374,8 @@ Eliges la directiva `client:*` adecuada para cada componente: ninguna para lo qu
 
 ## Resumen
 
-- En Astro, la página es HTML y solo las islas con `client:*` se hidratan, cada una por su cuenta.
-- `client:load` al cargar; `client:idle` cuando el navegador está libre; `client:visible` al entrar en pantalla; `client:media` al cumplirse la _media query_; `client:only` sin HTML del servidor.
-- El código que usa `window` al renderizar necesita `client:only` o moverse a un `useEffect`; con `client:load` rompe la página.
-- Cada isla tiene su propio estado; para compartirlo entre islas separadas, nanostores (`atom` + `useStore`), solo en el navegador.
-- La primera isla de React carga React (~68 KB comprimidos); cada directiva bien elegida retrasa o evita esa descarga.
+- La página es HTML; solo las islas con `client:*` se hidratan, cada una por su cuenta.
+- `load` al cargar, `idle` con el navegador libre, `visible` en pantalla, `media` con la _media query_, `only` sin HTML del servidor.
+- `window` al renderizar necesita `client:only` o un `useEffect`.
+- Estado entre islas separadas: nanostores, solo en el navegador.
+- La primera isla carga React (~68 KB comprimidos); cada directiva bien elegida lo retrasa o lo evita.

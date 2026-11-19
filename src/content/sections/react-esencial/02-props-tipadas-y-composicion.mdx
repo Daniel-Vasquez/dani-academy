@@ -7,15 +7,15 @@ minutes: 60
 summary: "Construyes Badge, Button y Card con props tipadas, valores por defecto y children, los compones en un catálogo de cursos con callbacks y descubres por qué una función pasada desde Astro llega como null."
 ---
 
-Un componente que siempre muestra lo mismo sirve de poco. Las **props** son sus parámetros: los datos que recibe de quien lo usa, igual que los atributos de una etiqueta HTML o los argumentos de una función. En esta sección vas a construir tres componentes reutilizables con sus props tipadas (`Badge`, `Button` y `Card`), vas a aprender a **componerlos** pasando contenido con `children` en lugar de multiplicar props, y vas a hacer que una tarjeta avise a su padre cuando se pulsa un botón, con una prop de tipo función. Por el camino descubrirás un error de Astro que no da ningún aviso.
+Un componente que siempre muestra lo mismo sirve de poco. Aquí construyes `Badge`, `Button` y `Card` con sus **props** tipadas, los compones con `children` y descubres un error de Astro que no da ningún aviso.
 
-**Lo que tendrás al terminar:** una pequeña librería de interfaz en `src/components/ui/` y un catálogo de cursos construido componiendo sus piezas.
-
-**Requisitos:** el proyecto `react-lab` de B6.1 y lo visto en B1.4 (interfaces) y B1.5 (funciones como tipos).
+**Requisitos:** el proyecto `react-lab` de B6.1, B1.4 (interfaces) y B1.5 (funciones como tipos).
 
 ## Paso 1: props tipadas y valores por defecto
 
-Empieza por el componente más pequeño, una etiqueta de estado. Crea `src/components/ui/Badge.tsx`:
+**Qué es:** las **props** son los parámetros de un componente. React lo llama con **un único objeto** con todas: `<Badge tono="exito">Completado</Badge>` es `Badge({ tono: "exito", children: "Completado" })`.
+
+**Cómo se usa:** crea `src/components/ui/Badge.tsx`.
 
 ```tsx
 // Archivo: src/components/ui/Badge.tsx
@@ -44,23 +44,22 @@ export function Badge({ tono = "neutro", children }: BadgeProps) {
 }
 ```
 
-Cómo funcionan las props:
-
-1. **React llama a tu componente con un único argumento**: un objeto con todas las props. `<Badge tono="exito">Completado</Badge>` se convierte en `Badge({ tono: "exito", children: "Completado" })` (recuerda el `jsx(tipo, props)` de B6.1).
-2. **`interface BadgeProps`** describe ese objeto. TypeScript comprobará cada uso: `<Badge tono="peligro">` dará error, porque `"peligro"` no es un `Tono`.
-3. **La desestructuración con valor por defecto** (`{ tono = "neutro", children }`) aplica `"neutro"` cuando no se pasa `tono`. Por eso `tono` es opcional en la interfaz (`tono?:`).
-4. **`Record<Tono, …>`** (B1.4) obliga a tener colores para cada tono: si añades uno nuevo a `Tono`, TypeScript te avisará de que falta en `COLORES`.
+- **`interface BadgeProps`** tipa ese objeto: `<Badge tono="peligro">` da error.
+- **`{ tono = "neutro", children }`** aplica un valor por defecto, y por eso `tono?:` es opcional.
+- **`Record<Tono, …>`** (B1.4) obliga a un color por tono: añadir uno sin color da error.
 
 <Callout type="risk">
 
-- **Las props son de solo lectura:** un componente nunca debe modificar sus props (`props.tono = "exito"`). Son del padre. Si un componente necesita cambiar un valor, ese valor es **estado** (B6.3).
-- **`?` y valor por defecto van juntos:** si declaras `tono?: Tono` pero no le das valor por defecto, dentro del componente `tono` puede ser `undefined`, y `COLORES[tono]` fallaría. TypeScript te avisa con `noUncheckedIndexedAccess`; sin esa opción, el error aparece en ejecución.
+- **Las props son de solo lectura:** son del padre. Si un componente necesita cambiar un valor, es **estado** (B6.3).
+- **`?` sin valor por defecto** deja `tono` en `undefined`, y `COLORES[tono]` fallaría. `noUncheckedIndexedAccess` lo avisa; sin él, falla en ejecución.
 
 </Callout>
 
 ## Paso 2: `children`, el contenido entre etiquetas
 
-`children` es una prop especial: lo que escribes **entre** la etiqueta de apertura y la de cierre. Su tipo es **`ReactNode`**, que admite texto, números, elementos JSX, listas de elementos, `null` o `undefined`. Crea `src/components/ui/Card.tsx`:
+**Qué es:** `children` es lo que escribes **entre** las etiquetas. Su tipo es **`ReactNode`**: texto, números, JSX, listas, `null` o `undefined`. La idea central de React es la **composición**: componentes pequeños con huecos donde el padre pone otros.
+
+**Cómo se usa:** crea `src/components/ui/Card.tsx`.
 
 ```tsx
 // Archivo: src/components/ui/Card.tsx
@@ -84,20 +83,20 @@ export function Card({ titulo, nivel = "basico", acciones, children }: CardProps
 }
 ```
 
-`Card` no sabe qué va a contener: un párrafo, una lista o un formulario. Solo pone el marco (borde, título y una zona de acciones). Además de `children`, recibe **`acciones`**, otra prop de tipo `ReactNode`: un segundo "hueco" donde el padre puede poner lo que quiera (en el Paso 4, un botón). Si no se pasa, el `<footer>` no se pinta (`{acciones && …}`).
-
-Esta es la idea central de React: **composición**. En lugar de un componente con veinte props (`mostrarBoton`, `textoBoton`, `colorBoton`, `mostrarInsignia`…), un componente pequeño con huecos donde el padre pone otros componentes.
+- **`Card` no sabe qué contiene:** solo pone el marco. **`acciones`** es otro hueco `ReactNode`; sin él, el `<footer>` no se pinta.
 
 <Callout type="risk">
 
-- **Composición frente a configuración:** si te encuentras añadiendo props del tipo `mostrarX`, `textoX` o `colorX`, probablemente ese "X" debería ser un hueco (`children` o una prop `ReactNode`) donde el padre pone su propio componente. Las props de configuración crecen sin límite; los huecos, no.
-- **`{acciones && …}` con valores falsos:** funciona bien con `ReactNode`, porque si no se pasa es `undefined`. Pero con números es una trampa clásica: `{cantidad && <p>…</p>}` pinta un `0` en pantalla cuando la cantidad es 0. Lo verás en B6.4.
+- **Si añades props como `mostrarX`, `textoX` o `colorX`,** ese "X" debería ser un hueco. Las props de configuración crecen sin límite; los huecos, no.
+- **`{cantidad && <p>…</p>}` pinta un `0`** cuando la cantidad es 0. Con `ReactNode` no pasa, porque falta como `undefined` (B6.4).
 
 </Callout>
 
 ## Paso 3: heredar las props de una etiqueta HTML
 
-Un botón necesita **todas** las props de un `<button>` normal: `onClick`, `disabled`, `type`, `aria-label`… No las vas a declarar una a una. Crea `src/components/ui/Button.tsx`:
+**Qué es:** un botón necesita **todas** las props de un `<button>`: `onClick`, `disabled`, `type`, `aria-label`. Se heredan, no se declaran una a una.
+
+**Cómo se usa:** crea `src/components/ui/Button.tsx`.
 
 ```tsx
 // Archivo: src/components/ui/Button.tsx
@@ -123,21 +122,22 @@ export function Button({ variante = "secundario", type = "button", style, ...res
 }
 ```
 
-- **`extends ButtonHTMLAttributes<HTMLButtonElement>`**: `ButtonProps` hereda todas las props de un `<button>` de HTML (con sus tipos, incluido el del evento de `onClick`), y añade la suya, `variante`.
-- **`...resto`** recoge todas las props que no has desestructurado (`onClick`, `disabled`, `children`, `aria-label`…) y **`{...resto}`** las pasa tal cual al `<button>`. El componente añade estilo sin perder ninguna capacidad del botón original.
-- **`type = "button"`** por defecto (Paso 6 explica por qué).
-- **`...style`** al final del objeto permite que quien usa el botón añada o sobrescriba estilos.
+- **`extends ButtonHTMLAttributes<HTMLButtonElement>`** hereda las props nativas con sus tipos y añade `variante`.
+- **`...resto`** recoge lo que no desestructuras, y **`{...resto}`** lo pasa al `<button>`: estilo sin perder capacidades.
+- **`type = "button"`** por defecto (Paso 6), y **`...style`** al final deja al padre añadir o sobrescribir estilos.
 
 <Callout type="risk">
 
-- **El orden de `{...resto}` importa:** si lo pones **antes** de una prop (`<button {...resto} type={type}>`), tu valor gana; si lo pones **después**, gana el de quien usa el componente. Aquí va al final para que el padre pueda personalizarlo todo, salvo lo que se calcula antes (`style` se combina a mano).
-- **No pases props propias al DOM:** si desestructuras mal y `variante` acaba dentro de `resto`, React la pinta en el HTML como un atributo más, `<button variante="principal">`, sin ningún aviso. Es un atributo inválido que ensucia el HTML. Saca siempre de `resto` las props propias del componente.
+- **El orden de `{...resto}` importa:** antes de una prop, gana tu valor; después, gana el del padre.
+- **Una prop propia dentro de `resto` acaba en el HTML** como `<button variante="principal">`, sin aviso. Sácalas siempre de `resto`.
 
 </Callout>
 
 ## Paso 4: componer las piezas y pasar funciones como props
 
-Ahora usa las tres piezas juntas. Crea `src/components/CatalogoCursos.tsx`, una lista de tarjetas de curso:
+**Qué es:** una prop de tipo función, como `(cursoId: string) => void` (B1.5), permite al hijo **avisar** al padre. El padre decide qué hacer. Por convención, empiezan por `on`.
+
+**Cómo se usa:** crea `src/components/CatalogoCursos.tsx`.
 
 ```tsx
 // Archivo: src/components/CatalogoCursos.tsx
@@ -188,7 +188,7 @@ export function CatalogoCursos({ cursos, onEmpezar }: CatalogoCursosProps) {
 }
 ```
 
-Y la isla que lo usa, `src/components/CatalogoInteractivo.tsx`:
+La isla que lo usa, `src/components/CatalogoInteractivo.tsx`:
 
 ```tsx
 // Archivo: src/components/CatalogoInteractivo.tsx
@@ -213,9 +213,7 @@ export function CatalogoInteractivo() {
 }
 ```
 
-Fíjate en la prop **`onEmpezar`**: su tipo es una función, `(cursoId: string) => void` (B1.5). `CatalogoCursos` no sabe qué hacer cuando se pulsa un botón (¿navegar?, ¿guardar?, ¿abrir un diálogo?): eso lo decide **el padre**, que le pasa la función. Es la forma en que un componente hijo **avisa** a su padre. Por convención, estas props empiezan por `on`.
-
-Úsalo en `src/pages/props.astro`:
+En `src/pages/props.astro`:
 
 ```astro
 ---
@@ -230,7 +228,7 @@ import { CatalogoInteractivo } from "../components/CatalogoInteractivo";
 </Base>
 ```
 
-Abre `http://localhost:4321/props` con la consola del navegador abierta. Verás tres tarjetas:
+Abre `http://localhost:4321/props` con la consola del navegador:
 
 ```text
 B1 · TypeScript desde cero · 8 de 8 secciones Completado · Repasar
@@ -246,18 +244,20 @@ Ir al curso B2
 Ir al curso B6
 ```
 
-Cada pieza decide una sola cosa: `Badge`, el color según el tono; `Button`, el estilo según la variante; `Card`, el marco; y `CatalogoCursos`, qué texto y qué tono corresponden a cada curso. Fíjate también en el `key={curso.id}` del `.map()`: lo explicaré en B6.4.
+- **Cada pieza decide una cosa:** `Badge`, el color; `Button`, el estilo; `Card`, el marco; `CatalogoCursos`, el texto y el tono de cada curso. El `key={curso.id}` del `.map()` se explica en B6.4.
 
 <Callout type="risk">
 
-- **`onEmpezar?.()` con `?.`:** como `onEmpezar` es opcional, puede ser `undefined`, y llamarlo sin comprobar lanzaría `TypeError: onEmpezar is not a function`. El encadenamiento opcional (B1.3) lo llama solo si existe.
-- **Una función nueva en cada render:** `onClick={() => onEmpezar?.(curso.id)}` crea una función nueva cada vez que se pinta la tarjeta. Es completamente normal y no es un problema de rendimiento en la inmensa mayoría de casos. No la "optimices" hasta que una medición te diga que hace falta.
+- **`onEmpezar?.()`:** opcional significa que puede ser `undefined`, y llamarla sin `?.` lanzaría `TypeError: onEmpezar is not a function`.
+- **Una función nueva en cada render** (`() => onEmpezar?.(curso.id)`) es normal y casi nunca un problema. No la optimices sin una medición.
 
 </Callout>
 
 ## Paso 5: la trampa de las funciones desde Astro
 
-¿Y si pasas la función **desde la página `.astro`** directamente a la isla? Crea temporalmente `src/pages/funcion.astro`:
+**Qué es:** para que una isla funcione en el navegador, Astro **serializa sus props como texto** en el HTML. Los datos se pueden convertir en texto; **una función, no**: llega como `null`, sin aviso.
+
+**Cómo se usa:** crea temporalmente `src/pages/funcion.astro`, que pasa la función desde la página.
 
 ```astro
 ---
@@ -274,27 +274,26 @@ const cursos = [{ id: "B1", titulo: "TypeScript desde cero", nivel: "basico" as 
 </Base>
 ```
 
-Abre `http://localhost:4321/funcion` y pulsa "Empezar": **no ocurre nada**. Ni el `console.log`, ni un error. Mira el código fuente de la página (`Cmd` + `Option` + `U`) y busca `props=` en la etiqueta `<astro-island>` del catálogo. Descodificado, contiene:
+En `http://localhost:4321/funcion`, "Empezar" **no hace nada**, sin error. En el código fuente (`Cmd` + `Option` + `U`), el `props=` de la `<astro-island>`, descodificado:
 
 ```json
 {"cursos":[1,[[0,{"id":[0,"B1"],"titulo":[0,"TypeScript desde cero"],"nivel":[0,"basico"],"leidas":[0,0],"total":[0,8]}]]],"onEmpezar":[0,null]}
 ```
 
-**`"onEmpezar":[0,null]`**. Para que la isla funcione en el navegador, Astro tiene que **enviarle las props como texto** dentro del HTML (serializarlas). Los datos (textos, números, arrays, objetos, fechas) se pueden convertir en texto; **una función, no**: Astro la sustituye por `null` sin avisar. La segunda isla, en cambio, sí muestra "Este párrafo viene de Astro.": los `children` que escribes en Astro se envían como HTML ya renderizado.
-
-La regla: **de Astro a una isla, solo datos**. Las funciones se definen **dentro** de la isla, como hace `CatalogoInteractivo`. Borra `src/pages/funcion.astro` al terminar.
+- **`"onEmpezar":[0,null]`:** la función se perdió. En cambio, "Este párrafo viene de Astro." sí aparece: los `children` llegan como HTML renderizado.
+- **La regla: de Astro a una isla, solo datos.** Las funciones se definen **dentro** de la isla, como en `CatalogoInteractivo`. Borra `funcion.astro`.
 
 <Callout type="risk">
 
-- **El fallo silencioso depende de cómo llames a la función:** con `onEmpezar?.()` no pasa nada; con `onEmpezar()` (sin `?.`), el clic lanza `TypeError: onEmpezar is not a function` en el navegador. En ninguno de los dos casos hay un aviso al compilar ni en `npm run check`.
-- **Tampoco se serializan:** instancias de clases propias, `Map`/`Set` con valores complejos, símbolos ni referencias circulares. Astro admite tipos de JavaScript como `Date`, `Map`, `Set`, `URL` o `BigInt`, pero lo más seguro es pasar objetos simples y convertir en la isla lo que haga falta.
-- **Todo lo que pasas a una isla es visible en el HTML:** las props quedan escritas en el código fuente de la página. Nunca pases a una isla datos que el usuario no deba ver (el documento entero de la base de datos, con campos internos). Es el mismo principio que los DTO de B5.5.
+- **El fallo es silencioso:** con `?.` no pasa nada; sin él, `TypeError` en el navegador. Ni el _build_ ni `npm run check` avisan.
+- **Tampoco se serializan** instancias de clases propias ni referencias circulares. Astro admite `Date`, `Map`, `Set`, `URL` o `BigInt`, pero lo seguro son objetos simples.
+- **Las props de una isla son visibles en el HTML:** nunca pases datos que el usuario no deba ver. Es el principio de los DTO de B5.5.
 
 </Callout>
 
 ## Paso 6: el `type="button"` que evita envíos fantasma
 
-Un último detalle del `Button`: el valor por defecto `type = "button"`. En HTML, un `<button>` dentro de un `<form>` es de tipo **`submit` por defecto**. Sin ese valor, cualquier botón que pongas en un formulario (un "Mostrar contraseña", un "Añadir otro campo") **enviaría el formulario** al pulsarlo. Con `type="button"` por defecto, el envío solo ocurre si lo pides expresamente: `<Button type="submit">Guardar</Button>`.
+**Qué es:** dentro de un `<form>`, un `<button>` es **`submit` por defecto**. Sin `type = "button"` en `Button`, un "Mostrar contraseña" o un "Añadir otro campo" **enviaría el formulario**. Así, el envío solo ocurre si lo pides: `<Button type="submit">Guardar</Button>`.
 
 ## Ejercicio práctico
 
@@ -398,17 +397,14 @@ Eliminar e2
 Eliminar e3
 ```
 
-Los detalles que importan:
-
-- **`export interface Entreno`** en `TarjetaEntreno.tsx`, importado con `type` en la lista (B1.7): el tipo vive junto al componente que lo usa.
-- **`entreno.km !== undefined`** en lugar de `entreno.km &&`: si un entreno tuviera `km: 0`, la segunda opción pintaría un `0` suelto (B6.4).
-- **`Entreno["tipo"]`** (B1.4) reutiliza la unión de tipos sin repetirla en `ETIQUETAS`.
-- **`aria-label`** pasa por `...resto` hasta el `<button>`: tres botones con el mismo texto "Eliminar" se distinguen para un lector de pantalla.
+- **`export interface Entreno`** vive junto al componente, y la lista lo importa con `type` (B1.7). **`Entreno["tipo"]`** (B1.4) reutiliza la unión en `ETIQUETAS`.
+- **`entreno.km !== undefined`, no `entreno.km &&`:** con `km: 0`, la segunda pintaría un `0` suelto (B6.4).
+- **`aria-label`** llega al `<button>` por `...resto`: tres "Eliminar" se distinguen con un lector de pantalla.
 
 <Callout type="risk">
 
-- **Este "eliminar" todavía no elimina:** solo avisa al padre. Para que la tarjeta desaparezca, el padre tiene que guardar la lista en **estado** y quitarla de ahí. Es exactamente lo que harás en B6.3 y B6.4.
-- **No uses el índice como `id` del entreno:** los identificadores (`e1`, `e2`…) son estables y únicos. Si usaras la posición en la lista, al eliminar uno cambiarían los de todos los siguientes.
+- **Este "eliminar" todavía no elimina:** solo avisa. Para que desaparezca, el padre guarda la lista en **estado** (B6.3 y B6.4).
+- **Nunca el índice como `id`:** al eliminar uno, cambiarían los de todos los siguientes.
 
 </Callout>
 
@@ -420,8 +416,8 @@ Usas `children` (y props de tipo `ReactNode`) en lugar de multiplicar props: tip
 
 ## Resumen
 
-- Las props llegan como un único objeto; se tipan con una `interface` y se desestructuran con valores por defecto. Son de solo lectura.
-- `children: ReactNode` (y otras props `ReactNode`) crean huecos: composición en lugar de configuración.
-- `extends ButtonHTMLAttributes<HTMLButtonElement>` + `{...resto}` heredan todas las props nativas de un `<button>`.
-- Una prop de función (`onEmpezar`) permite al hijo avisar al padre; se llama con `?.` si es opcional.
-- De `.astro` a una isla, las funciones llegan como `null` sin aviso; `children` sí llega, como HTML. Botones con `type="button"` por defecto.
+- Las props llegan como un objeto tipado, con valores por defecto, y son de solo lectura.
+- `children: ReactNode` y otros huecos: composición en lugar de configuración.
+- `extends ButtonHTMLAttributes<…>` + `{...resto}` heredan las props nativas.
+- Una prop `on…` avisa al padre; con `?.` si es opcional.
+- De `.astro` a una isla, las funciones llegan como `null`. Botones con `type="button"`.
