@@ -60,9 +60,11 @@ def revisar(ruta, ref):
         errores.append("Callout sin línea en blanco tras la apertura o antes del cierre")
     if aperturas.count("exercise") != 1 or aperturas.count("mastery") != 1:
         errores.append("debe haber un exercise y un mastery")
-    for bloque in re.split(r"^## ", cuerpo, flags=re.M)[1:]:
+    # Los ## dentro de un bloque de código (un README de ejemplo) no son pasos
+    marcado = FENCE.sub("⟦CÓDIGO⟧", cuerpo)
+    for bloque in re.split(r"^## ", marcado, flags=re.M)[1:]:
         titulo = bloque.splitlines()[0]
-        if titulo.startswith("Paso") and FENCE.search(bloque) and 'type="risk"' not in bloque:
+        if titulo.startswith("Paso") and "⟦CÓDIGO⟧" in bloque and 'type="risk"' not in bloque:
             errores.append(f"«{titulo[:40]}» tiene código y no tiene risk")
     for risk in re.findall(r'<Callout type="risk">([\s\S]*?)</Callout>', cuerpo):
         vinetas = re.findall(r"^- ", risk, re.M)

@@ -7,23 +7,21 @@ minutes: 60
 summary: "Provocas un conflicto real y lo resuelves paso a paso, y practicas cada forma de deshacer (restore, amend, revert, reset, stash) hasta recuperar con reflog un commit que habías dado por perdido."
 ---
 
-Los conflictos y los "¿cómo deshago esto?" son lo que más miedo da de Git. Ese miedo viene de no saber qué hace cada comando ni qué se puede recuperar. En esta sección vas a perderlo **provocando a propósito** las situaciones: un conflicto entre dos ramas, cambios que quieres descartar, un commit con el mensaje mal escrito, un commit ya subido que hay que deshacer, un `reset --hard` "por error"… y en cada caso sabrás exactamente qué comando usar y qué riesgo tiene. Al final recuperarás un commit "borrado", y comprobarás que en Git casi nada se pierde de verdad.
-
-**Lo que tendrás al terminar:** una tabla mental de "qué quiero deshacer → qué comando uso", practicada en `planificador`, y la tranquilidad de saber que `git reflog` es tu red de seguridad.
+Los conflictos y los "¿cómo deshago esto?" dan miedo cuando no sabes qué hace cada comando ni qué se puede recuperar. Aquí provocas cada situación a propósito en `planificador` y terminas recuperando un _commit_ "borrado".
 
 **Requisitos:** el repositorio `planificador` de B2.2, en `main` y con `git status` limpio.
 
 ## Paso 1: provocar un conflicto
 
-Un conflicto aparece cuando **dos ramas cambian las mismas líneas** de un archivo de forma distinta. Git sabe mezclar cambios en líneas diferentes, pero si las dos tocan la misma, no puede adivinar cuál es la buena y te lo pregunta a ti.
+**Qué es:** un conflicto aparece cuando **dos ramas cambian las mismas líneas** de forma distinta. Git mezcla solo las líneas distintas; si chocan, te pregunta.
 
-Imagina dos ideas sobre el objetivo de agua: la nutrióloga recomienda 2,5 L, y en verano querrías 3 L. Cada idea, en su rama:
+**Cómo se usa:** dos ideas sobre el objetivo de agua, cada una en su rama.
 
 ```bash
 git switch -c feat/objetivo-nutriologa
 ```
 
-En `src/agua.js`, cambia la línea `const OBJETIVO_ML = 2000;` por:
+En `src/agua.js`, cambia `const OBJETIVO_ML = 2000;` por:
 
 ```js
 const OBJETIVO_ML = 2500; // recomendación de la nutrióloga
@@ -35,7 +33,7 @@ git switch main
 git switch -c feat/objetivo-verano
 ```
 
-Ahora, en esta otra rama, cambia **la misma línea** por:
+En esta otra rama, cambia **la misma línea** por:
 
 ```js
 const OBJETIVO_ML = 3000; // en verano se suda más
@@ -48,7 +46,7 @@ git merge feat/objetivo-nutriologa
 git merge feat/objetivo-verano
 ```
 
-El primer merge es un _fast-forward_. El segundo se detiene:
+El primer _merge_ es un _fast-forward_. El segundo se detiene:
 
 ```text
 Auto-merging src/agua.js
@@ -58,15 +56,17 @@ Automatic merge failed; fix conflicts and then commit the result.
 
 <Callout type="risk">
 
-- **Un conflicto no es un error ni rompe nada:** el merge está **en pausa**, esperando tu decisión. Tu historial sigue intacto y puedes cancelar en cualquier momento (Paso 2).
-- **Los conflictos son proporcionales al tiempo que vive una rama:** cuanto más tarda en mezclarse, más ha cambiado `main` y más probable es que choquen. Ramas cortas = pocos conflictos.
-- **Los formateadores provocan conflictos falsos:** si una rama reformatea un archivo entero (Prettier con otra configuración, otra indentación), chocará con cualquier cambio en ese archivo. Formatea siempre con la misma configuración en todo el equipo.
+- **Un conflicto no rompe nada:** el _merge_ está **en pausa**, esperando tu decisión, y puedes cancelarlo (Paso 2).
+- **Cuanto más vive una rama, más conflictos:** `main` cambia mientras tanto. Ramas cortas.
+- **Los formateadores provocan conflictos falsos:** una rama que reformatea un archivo entero choca con cualquier cambio en él. Misma configuración de Prettier en todo el equipo.
 
 </Callout>
 
 ## Paso 2: leer el conflicto
 
-Mira el estado:
+**Qué es:** Git escribe **las dos versiones** en el archivo, entre marcadores. Lo que queda fuera de ellos ya se mezcló.
+
+**Cómo se usa:** mira el estado y abre el archivo.
 
 ```bash
 git status
@@ -83,8 +83,6 @@ Unmerged paths:
 	both modified:   src/agua.js
 ```
 
-**`both modified`**: las dos ramas cambiaron ese archivo. Ábrelo:
-
 ```text
 // Registro de hidratación: vasos de 250 ml
 const ML_POR_VASO = 250;
@@ -97,26 +95,21 @@ const OBJETIVO_ML = 3000; // en verano se suda más
 function progresoAgua(vasos) {
 ```
 
-Git ha escrito **las dos versiones** en el archivo, separadas por marcadores:
+- **`both modified`:** las dos ramas cambiaron el archivo.
+- **Entre `<<<<<<< HEAD` y `=======`:** tu versión, la de la rama actual (_Current Change_ en VS Code). **Entre `=======` y `>>>>>>>`:** la de la rama que mezclas (_Incoming Change_).
 
-- **Entre `<<<<<<< HEAD` y `=======`**: tu versión, la de la rama en la que estás (`main`, que ya incluye la de la nutrióloga). VS Code la llama _Current Change_.
-- **Entre `=======` y `>>>>>>> feat/objetivo-verano`**: la versión de la rama que estás mezclando. VS Code la llama _Incoming Change_.
-- **Todo lo demás** (las líneas fuera de los marcadores) se mezcló sin problema.
-
-Si quieres echarte atrás, ahora mismo o en cualquier momento antes del commit:
+Para echarte atrás, en cualquier momento antes del _commit_:
 
 ```bash
 git merge --abort
 ```
 
-Todo vuelve al estado anterior al merge. Hazlo para practicar y, antes de repetir el merge, activa una configuración muy recomendable:
+Hazlo, activa esta configuración y repite el _merge_:
 
 ```bash
 git config --global merge.conflictStyle zdiff3
 git merge feat/objetivo-verano
 ```
-
-Ahora el conflicto muestra **también la versión original**, la de antes de que ninguna rama la cambiara:
 
 ```text
 <<<<<<< HEAD
@@ -128,18 +121,20 @@ const OBJETIVO_ML = 3000; // en verano se suda más
 >>>>>>> feat/objetivo-verano
 ```
 
-La sección `|||||||` es oro: ves que el original era `2000` y que **cada rama lo cambió por un motivo distinto**. Muchas veces, la resolución correcta no es elegir una, sino **combinar las dos intenciones**.
+- **La sección `|||||||` muestra el original,** `2000`: cada rama lo cambió por un motivo. A menudo, la solución es **combinar las dos intenciones**, no elegir una.
 
 <Callout type="risk">
 
-- **Leer solo un lado lleva a perder trabajo:** si aceptas una versión sin entender por qué existía la otra, descartas en silencio el cambio de alguien (o el tuyo de hace dos días). Pregúntate siempre qué quería conseguir cada rama.
-- **Un archivo puede tener varios bloques de conflicto:** busca `<<<<<<<` en todo el archivo, no te quedes en el primero.
+- **Aceptar un lado sin entender el otro** descarta en silencio el trabajo de alguien, o el tuyo de hace dos días. Pregúntate qué quería cada rama.
+- **Un archivo puede tener varios conflictos:** busca `<<<<<<<` en todo el archivo.
 
 </Callout>
 
 ## Paso 3: resolver el conflicto
 
-Resolver es **editar el archivo hasta dejarlo como debe quedar**, sin marcadores. Aquí, las dos intenciones son compatibles: 2,5 L de base y un extra en verano. Sustituye `src/agua.js` completo por:
+**Qué es:** resolver es **editar el archivo hasta dejarlo como debe quedar**, sin marcadores. Después, `git add` lo marca como resuelto y `git commit` termina el _merge_.
+
+**Cómo se usa:** aquí las dos ideas son compatibles: 2,5 L de base y un extra en verano. Sustituye `src/agua.js`:
 
 ```js
 // Registro de hidratación: vasos de 250 ml
@@ -157,8 +152,6 @@ function progresoAgua(vasos, esVerano = false) {
 console.log(`Hoy: ${progresoAgua(5)}`);
 console.log(`Hoy en verano: ${progresoAgua(5, true)}`);
 ```
-
-Comprueba que funciona, marca el archivo como resuelto con `git add` y termina el merge con `git commit`:
 
 ```bash
 node src/agua.js
@@ -179,26 +172,28 @@ Hoy en verano: 1250 ml de 3000 ml (42 %)
 |/
 ```
 
-**En VS Code** es más cómodo. Al abrir un archivo con conflictos, encima de cada bloque aparecen unos enlaces: _Accept Current Change_ (tu versión), _Accept Incoming Change_ (la otra), _Accept Both Changes_ (las dos, una debajo de otra) y _Compare Changes_. Para casos complicados, el botón _Resolve in Merge Editor_ abre un editor de tres paneles con las dos versiones arriba y el resultado abajo. En el panel _Source Control_, los archivos con conflictos aparecen bajo _Merge Changes_; al guardar uno resuelto, pulsa `+` (equivale a `git add`) y después _Commit_.
+- **En VS Code,** cada bloque tiene _Accept Current Change_, _Accept Incoming Change_, _Accept Both Changes_ y _Compare Changes_. _Resolve in Merge Editor_ abre un editor de tres paneles. Al guardar, `+` en _Source Control_ equivale a `git add`.
 
 <Callout type="risk">
 
-- **Git no impide confirmar con los marcadores dentro.** `git add` acepta el archivo tal cual, y puedes acabar con `<<<<<<<` en producción (un `SyntaxError` en JavaScript, o un texto roto en un `.md`). Antes de confirmar, comprueba:
+- **Git deja confirmar con los marcadores dentro:** acabarían en producción como un `SyntaxError`. Antes del _commit_:
 
   ```bash
-  git diff --cached --check
+    git diff --cached --check
   ```
 
-  Si quedan marcadores, verás `src/agua.js:3: leftover conflict marker` y el comando terminará con error.
+  Si quedan marcadores, verás `src/agua.js:3: leftover conflict marker` y un código de error.
 
-- **"Accept Both Changes" casi nunca es la respuesta:** aquí habría dejado dos `const OBJETIVO_ML`, que es un `SyntaxError`. Úsalo solo con cosas como listas, donde las dos líneas pueden convivir.
-- **Ejecuta el proyecto después de resolver:** un archivo sin marcadores puede seguir estando mal. Aquí, `node src/agua.js` lo confirma; en un proyecto Astro, `npm run check` y `npm run build`.
+- **"Accept Both Changes" casi nunca es la respuesta:** aquí dejaría dos `const OBJETIVO_ML`, un `SyntaxError`. Sirve en listas, donde las dos líneas conviven.
+- **Sin marcadores no significa correcto:** ejecuta el proyecto. En Astro, `npm run check` y `npm run build`.
 
 </Callout>
 
-## Paso 4: descartar cambios que no has confirmado (`restore`)
+## Paso 4: descartar cambios sin confirmar (`restore`)
 
-Ahora, las formas de deshacer, de la más suave a la más drástica. Empieza con los cambios que aún **no** son commits. Simula una prueba que no quieres conservar:
+**Qué es:** `git restore archivo` devuelve el archivo a como estaba en _staging_ o en el último _commit_. `git restore --staged archivo` lo saca de _staging_ sin perder el cambio.
+
+**Cómo se usa:** una prueba que no quieres conservar.
 
 ```bash
 echo 'console.log("prueba que no quiero");' >> src/tareas.js
@@ -211,7 +206,7 @@ git status --short
  M src/tareas.js
 ```
 
-La segunda vez, `git status --short` no muestra nada: **`git restore archivo`** devuelve el archivo de tu mesa a como estaba en _staging_ (o en el último commit). Si añadiste algo a _staging_ por error y quieres sacarlo **sin perder** el cambio:
+La segunda vez, `git status --short` no muestra nada. Ahora, algo añadido a _staging_ por error:
 
 ```bash
 echo "## Notas" >> README.md
@@ -227,19 +222,21 @@ M  README.md
  M README.md
 ```
 
-Fíjate en la columna de la `M`: primero a la izquierda (en _staging_) y, tras `restore --staged`, a la derecha (solo en tu mesa). El último `git restore` descarta el cambio del todo.
+- **La `M` cambia de columna:** a la izquierda está en _staging_; tras `restore --staged`, a la derecha. El último `git restore` lo descarta del todo.
 
 <Callout type="risk">
 
-- **`git restore archivo` no se puede deshacer.** El cambio nunca fue un commit, así que **no está en ningún sitio**: ni `reflog` lo recupera. Antes de descartar, mira el diff (`git diff archivo`). El historial local de VS Code (_Timeline_, en el explorador) a veces salva el día.
-- **`git restore .`** descarta los cambios de **todos** los archivos. Muy útil y muy peligroso: úsalo solo tras revisar `git status`.
-- **`restore` no borra archivos nuevos** (_untracked_). Para eso existe `git clean -n` (muestra qué se borraría) y `git clean -f` (los borra). Ejecuta siempre `-n` antes.
+- **`git restore archivo` no tiene vuelta atrás:** el cambio nunca fue un _commit_, y ni `reflog` lo recupera. Mira antes `git diff archivo`; el _Timeline_ de VS Code a veces lo salva.
+- **`git restore .`** descarta **todos** los archivos. Solo tras revisar `git status`.
+- **Los archivos nuevos no se tocan:** para borrarlos, `git clean -n` (muestra qué borraría) y después `git clean -f`.
 
 </Callout>
 
-## Paso 5: corregir el último commit (`commit --amend`)
+## Paso 5: corregir el último _commit_ (`commit --amend`)
 
-Hiciste un commit con una errata en el mensaje. Crea `src/semana.js`:
+**Qué es:** `--amend` **sustituye** el último _commit_ por uno nuevo, para corregir el mensaje o añadir algo olvidado.
+
+**Cómo se usa:** un _commit_ con erratas. Crea `src/semana.js`:
 
 ```js
 // Días de la semana en orden, empezando en lunes
@@ -266,7 +263,7 @@ b411f4b feat: lista los días de la semana
 dab9f79 Merge branch 'feat/objetivo-verano'
 ```
 
-`--amend` **sustituye** el último commit por uno nuevo. También sirve para añadir algo que olvidaste. Por ejemplo, documentar el archivo en el README. Añade esto al final de `README.md`:
+Añade algo olvidado: documenta el archivo al final de `README.md`.
 
 ```markdown
 
@@ -292,20 +289,20 @@ eaaa7ed feat: lista los días de la semana
  2 files changed, 8 insertions(+)
 ```
 
-`--no-edit` conserva el mensaje. Ahora el commit incluye los dos archivos, como si lo hubieras hecho bien a la primera.
+- **`--no-edit`** conserva el mensaje. El _commit_ incluye los dos archivos, como si lo hubieras hecho bien a la primera.
 
 <Callout type="risk">
 
-- **Mira los identificadores:** `cf82712` → `b411f4b` → `eaaa7ed`. `--amend` no modifica el commit, crea **otro** y descarta el anterior. Si el commit original ya estaba en GitHub, tu historial y el remoto ya no coinciden, y `git push` será rechazado. **Solo usa `--amend` con commits que no has subido.**
-- **Solo afecta al último commit.** Para corregir uno anterior hacen falta herramientas más avanzadas (`git rebase -i`); para un commit ya compartido, la respuesta es `revert` (Paso 6).
+- **`--amend` crea otro _commit_:** `cf82712` → `b411f4b` → `eaaa7ed`. Si el original ya estaba en GitHub, `git push` se rechaza. **Solo con _commits_ que no has subido.**
+- **Solo afecta al último _commit_.** Para uno anterior, `git rebase -i`; para uno compartido, `revert` (Paso 6).
 
 </Callout>
 
-## Paso 6: deshacer un commit ya compartido (`revert`)
+## Paso 6: deshacer un _commit_ ya compartido (`revert`)
 
-Imagina que los colores de categoría (`feat/colores`, en B2.2) causan un problema en producción y hay que quitarlos. Ese commit ya está en `main` y, en la vida real, en GitHub. **No puedes borrarlo del historial** sin perjudicar a quien ya lo tiene. La solución es `git revert`: crea un commit **nuevo** que hace lo contrario.
+**Qué es:** `git revert` crea un _commit_ **nuevo** que hace lo contrario de otro. El historial solo crece, así que es la forma segura de deshacer en ramas compartidas.
 
-Busca el commit por su mensaje (aquí ayuda haber escrito buenos mensajes) y reviértelo con el identificador que te salga:
+**Cómo se usa:** quita los colores de B2.2. Búscalos por su mensaje y revierte el identificador que te salga:
 
 ```bash
 git log --oneline --grep "color"
@@ -323,9 +320,9 @@ git show --stat HEAD
 eaaa7ed feat: lista los días de la semana
 ```
 
-El historial **solo crece**: el commit original sigue ahí, y el nuevo deja constancia de que se deshizo (y de cuál deshizo, en el mensaje: `This reverts commit 6b539d0…`). Por eso `revert` es la forma segura de deshacer en ramas compartidas.
+- **El original sigue ahí,** y el mensaje nuevo dice cuál deshizo (`This reverts commit 6b539d0…`).
 
-Para deshacer una **funcionalidad entera** que entró con un merge commit (la racha, que mezclaste con `--no-ff` en B2.2), revierte el merge. Pero un merge tiene dos padres y Git necesita saber cuál era la línea principal:
+Para deshacer una funcionalidad entera, revierte su _merge commit_ (la racha, mezclada con `--no-ff`). Pero tiene dos padres:
 
 ```bash
 git revert --no-edit eaf25e7
@@ -351,18 +348,26 @@ tareas.js
 tema.js
 ```
 
-**`-m 1`** significa "el padre 1 es la línea principal" (`main`, donde estabas al hacer el merge); se deshace todo lo que aportó el padre 2 (la rama). Casi siempre es `-m 1`.
+- **`-m 1`:** el padre 1 es la línea principal (`main`), y se deshace lo que aportó la rama. Casi siempre es `-m 1`.
 
 <Callout type="risk">
 
-- **Revertir un merge tiene una trampa:** Git recuerda que esos commits ya se mezclaron. Si más adelante arreglas la rama y la vuelves a mezclar, Git solo traerá los commits **nuevos**, no los revertidos. Para volver a introducir la funcionalidad, primero hay que revertir el revert (`git revert <id-del-revert>`).
-- **Un revert también puede tener conflictos**, si commits posteriores tocaron las mismas líneas. Se resuelven igual que en el Paso 3; para cancelar, `git revert --abort`.
+- **Revertir un _merge_ tiene trampa:** Git recuerda que esos _commits_ ya se mezclaron, y volver a mezclar la rama solo trae lo nuevo. Para reintroducirla, revierte el _revert_.
+- **Un _revert_ también puede dar conflictos,** si _commits_ posteriores tocaron las mismas líneas. Se resuelven como en el Paso 3, o se cancela con `git revert --abort`.
 
 </Callout>
 
 ## Paso 7: mover la rama hacia atrás (`reset`)
 
-`git reset` mueve el puntero de la rama actual a otro commit. Los tres modos se diferencian en **qué pasa con los cambios de los commits que "deshaces"**. Créate un commit para practicar, con `src/peso.js`:
+**Qué es:** `git reset` mueve el puntero de la rama actual a otro _commit_. Sus tres modos deciden qué pasa con los cambios de los _commits_ que quitas. `HEAD~1` es "el _commit_ anterior a `HEAD`".
+
+| Modo      | El commit           | Los cambios quedan en             |
+| --------- | ------------------- | --------------------------------- |
+| `--soft`  | Se quita de la rama | _Staging_                         |
+| `--mixed` | Se quita de la rama | Tu mesa (_working directory_)     |
+| `--hard`  | Se quita de la rama | **En ningún sitio** (descartados) |
+
+**Cómo se usa:** practica con `src/peso.js`.
 
 ```js
 // Registro de peso semanal (kg)
@@ -383,7 +388,7 @@ git status --short
 A  src/peso.js
 ```
 
-**`--soft`**: el commit desaparece, pero sus cambios quedan **en _staging_**, listos para volver a confirmar (útil para rehacer el mensaje o juntar varios commits en uno). `HEAD~1` significa "el commit anterior a `HEAD`".
+- **`--soft`:** los cambios quedan en _staging_. Sirve para rehacer el mensaje o juntar varios _commits_.
 
 ```bash
 git commit -m "feat: registro de peso semanal"
@@ -395,7 +400,7 @@ git status --short
 ?? src/peso.js
 ```
 
-**`--mixed`** (el modo por defecto, sin opción): el commit desaparece y los cambios quedan **en tu mesa**, fuera de _staging_. Útil para rehacer el commit de otra forma (por ejemplo, dividirlo con `git add -p`).
+- **`--mixed`** (el modo por defecto): los cambios quedan en el _working directory_. Sirve para dividir el _commit_ con `git add -p`.
 
 ```bash
 git add src/peso.js
@@ -412,33 +417,27 @@ tareas.js
 tema.js
 ```
 
-**`--hard`**: el commit desaparece **y sus cambios también**. `peso.js` ya no está en tu carpeta. Parece perdido para siempre… pero no lo está (Paso 9).
-
-| Modo      | El commit           | Los cambios quedan en             |
-| --------- | ------------------- | --------------------------------- |
-| `--soft`  | Se quita de la rama | _Staging_                         |
-| `--mixed` | Se quita de la rama | Tu mesa (_working directory_)     |
-| `--hard`  | Se quita de la rama | **En ningún sitio** (descartados) |
+- **`--hard`:** el _commit_ y sus cambios desaparecen. `peso.js` ya no está, pero no está perdido (Paso 9).
 
 <Callout type="risk">
 
-- **`reset` reescribe el historial**, igual que `--amend`. Con commits ya subidos, tu rama y la del remoto divergen, y para subir tendrías que forzar (`git push --force`), borrando el trabajo que otros hayan basado en esos commits. Regla de oro: **`revert` para lo compartido, `reset` solo para lo local.**
-- **`reset --hard` también destruye los cambios sin confirmar** que tuvieras en ese momento, y esos no los recupera nada. Antes de un `--hard`, ejecuta `git status`: si hay cambios que quieres conservar, haz commit o `stash` primero.
+- **`reset` reescribe el historial,** como `--amend`. Con _commits_ subidos, tendrías que forzar el _push_ y borrar el trabajo de otros. **`revert` para lo compartido, `reset` solo para lo local.**
+- **`reset --hard` destruye también los cambios sin confirmar,** y esos no los recupera nada. Antes, `git status`, y _commit_ o `stash` si hay algo que conservar.
 
 </Callout>
 
 ## Paso 8: guardar trabajo a medias (`stash`)
 
-La situación típica: estás a mitad de una funcionalidad en una rama, con cambios sin terminar, y llega un arreglo urgente para `main`. No quieres hacer un commit de algo roto, y Git no te deja cambiar de rama si los cambios chocan (B2.2). **`git stash`** guarda tus cambios en un cajón aparte y deja la mesa limpia.
+**Qué es:** `git stash` guarda tus cambios sin confirmar en un cajón aparte y deja el _working directory_ limpio. Sirve cuando llega algo urgente a mitad de una funcionalidad.
 
-Simúlalo. Recupera primero `peso.js` con `git reset --hard HEAD@{1}` (lo entenderás en el Paso 9) y crea una rama de trabajo:
+**Cómo se usa:** recupera `peso.js` (lo entenderás en el Paso 9) y crea una rama de trabajo.
 
 ```bash
 git reset --hard HEAD@{1}
 git switch -c feat/peso-objetivo
 ```
 
-En `src/peso.js`, añade la línea `const OBJETIVO_KG = 75;` justo antes de `const cambio`, y crea un archivo nuevo con unas notas:
+En `src/peso.js`, añade `const OBJETIVO_KG = 75;` justo antes de `const cambio`, y crea unas notas:
 
 ```bash
 printf '// Notas sueltas, sin terminar\n' > src/notas.js
@@ -450,7 +449,7 @@ git status --short
 ?? src/notas.js
 ```
 
-Guarda todo, **incluidos los archivos nuevos** (`-u`), con un nombre descriptivo:
+Guárdalo todo, **incluidos los archivos nuevos** (`-u`), con un nombre:
 
 ```bash
 git stash push -u -m "peso objetivo a medias"
@@ -463,14 +462,14 @@ Saved working directory and index state On feat/peso-objetivo: peso objetivo a m
 stash@{0}: On feat/peso-objetivo: peso objetivo a medias
 ```
 
-La mesa está limpia. Haz el arreglo urgente en su propia rama desde `main`:
+Haz el arreglo urgente en su rama desde `main`:
 
 ```bash
 git switch main
 git switch -c fix/semana-domingo
 ```
 
-Sustituye `src/semana.js` por:
+Sustituye `src/semana.js`:
 
 ```js
 // Días de la semana en orden, empezando en lunes
@@ -504,19 +503,21 @@ git status --short
 ?? src/notas.js
 ```
 
-Todo está como lo dejaste. `pop` aplica el último _stash_ y lo borra del cajón (`Dropped refs/stash@{0}`).
+- **`pop` aplica el último _stash_ y lo borra** del cajón (`Dropped refs/stash@{0}`).
 
 <Callout type="risk">
 
-- **Sin `-u`, los archivos nuevos se quedan fuera del _stash_:** `notas.js` habría seguido en tu mesa y "viajado" a la otra rama. Usa `git stash push -u` por costumbre.
-- **El cajón no es un archivo:** los _stash_ olvidados se acumulan (`stash@{0}`, `stash@{1}`…) y, sin nombre, es imposible saber qué contiene cada uno. Pon siempre `-m` y vacía el cajón pronto. Si un cambio va a vivir más de un día, mejor un commit en su rama.
-- **`stash pop` puede dar conflictos** si mientras tanto cambiaste las mismas líneas. Se resuelven como en el Paso 3; si el _pop_ falla, el _stash_ **no** se borra del cajón, así que no pierdes nada.
+- **Sin `-u`, los archivos nuevos no entran** y viajan a la otra rama. Usa `git stash push -u` siempre.
+- **Los _stash_ olvidados se acumulan** y, sin nombre, no sabes qué contienen. Usa `-m`, y si el cambio va a vivir más de un día, mejor un _commit_ en su rama.
+- **`stash pop` puede dar conflictos:** se resuelven como en el Paso 3, y si falla, el _stash_ **no** se borra.
 
 </Callout>
 
 ## Paso 9: tu red de seguridad, `git reflog`
 
-Volvamos al `reset --hard` del Paso 7, el que "borró" `peso.js`. En el Paso 8 lo recuperaste con `git reset --hard HEAD@{1}`. ¿De dónde salió eso? Git guarda un diario de **cada sitio por el que ha pasado `HEAD`**: commits, cambios de rama, resets, merges… Ese diario es el **reflog**. Así se veía justo después del `reset --hard`:
+**Qué es:** un diario local de **cada sitio por el que ha pasado `HEAD`**: _commits_, cambios de rama, _resets_, _merges_. Un _commit_ "borrado" sigue existiendo; solo ninguna rama apunta a él.
+
+**Cómo se usa:** así se veía justo después del `reset --hard` del Paso 7.
 
 ```bash
 git reflog -6
@@ -531,7 +532,7 @@ e11b414 HEAD@{4}: reset: moving to HEAD~1
 7a445d6 HEAD@{5}: commit: feat: registro de peso semanal
 ```
 
-Se lee de arriba (lo más reciente) abajo. `HEAD@{0}` es ahora, y `HEAD@{1}` es "donde estaba `HEAD` un movimiento antes": justo el commit que acababas de deshacer. Cada uno de los tres commits de práctica del Paso 7 tiene su línea, con su propio identificador. El commit **sigue existiendo**; solo ninguna rama apuntaba a él. Para recuperarlo, mueve la rama de vuelta:
+- **`HEAD@{0}` es ahora; `HEAD@{1}`, un movimiento antes:** el _commit_ que acababas de quitar. Para recuperarlo, mueve la rama de vuelta:
 
 ```bash
 git reset --hard HEAD@{1}
@@ -543,13 +544,13 @@ HEAD is now at 8ca64f9 feat: registro de peso semanal
 Cambio en 4 semanas: -1.6 kg
 ```
 
-Lo mismo sirve para una rama borrada con `-D`, un `--amend` del que te arrepientes o un merge que salió mal: busca en `git reflog` el último momento bueno y vuelve a él con `git reset --hard <id>` (o crea una rama ahí: `git branch rescate <id>`).
+- **Sirve para todo lo reciente:** una rama borrada con `-D`, un `--amend` o un _merge_ que salió mal. Busca el último momento bueno y vuelve con `git reset --hard <id>`, o crea una rama ahí: `git branch rescate <id>`.
 
 <Callout type="risk">
 
-- **El reflog es local y caduca:** vive solo en tu `.git` (no se sube a GitHub, y un repositorio recién clonado lo tiene vacío) y Git limpia las entradas sin rama tras unos 30 días (90 si siguen siendo alcanzables). Es una red de seguridad para errores recientes, no un archivo.
-- **No recupera lo que nunca fue commit:** cambios descartados con `restore`, con `reset --hard` sin confirmar, o un _stash_ borrado con `drop` (este último, solo con técnicas avanzadas). Haz commits pequeños y frecuentes: **un commit es un punto de guardado**.
-- **`HEAD@{n}` cambia con cada movimiento:** tras otro commit, lo que era `HEAD@{1}` pasa a ser `HEAD@{2}`. Antes de un `reset --hard HEAD@{n}`, vuelve a mirar el reflog, o usa el identificador del commit, que no cambia.
+- **El reflog es local y caduca:** no se sube a GitHub, un clon lo tiene vacío y Git limpia las entradas sin rama tras unos 30 días.
+- **No recupera lo que nunca fue _commit_:** lo descartado con `restore` o con un `reset --hard` sin confirmar. **Un _commit_ es un punto de guardado.**
+- **`HEAD@{n}` cambia con cada movimiento:** lo que era `HEAD@{1}` pasa a `HEAD@{2}`. Mira el reflog de nuevo o usa el identificador, que no cambia.
 
 </Callout>
 
@@ -578,7 +579,7 @@ Lo mismo sirve para una rama borrada con `-D`, un `--amend` del que te arrepient
 
 </Callout>
 
-Solución. Primero, guarda o descarta el trabajo a medias de `feat/peso-objetivo` y vuelve a `main`:
+Solución. Primero, aparca el trabajo de `feat/peso-objetivo` y vuelve a `main`:
 
 ```bash
 git switch feat/peso-objetivo
@@ -587,7 +588,7 @@ git commit -m "wip: peso objetivo"
 git switch main
 ```
 
-Las dos ramas:
+Las dos ramas (`sed -i ''` edita desde la terminal en macOS; también vale a mano):
 
 ```bash
 git switch -c feat/tema-oscuro-defecto
@@ -602,8 +603,6 @@ git merge feat/tema-oscuro-defecto
 git merge feat/tema-sepia
 ```
 
-(`sed -i ''` edita el archivo desde la terminal, en la sintaxis de macOS. También puedes hacer el cambio a mano en VS Code).
-
 El conflicto:
 
 ```text
@@ -616,7 +615,7 @@ const TEMAS = ["light", "dark", "sepia"];
 >>>>>>> feat/tema-sepia
 ```
 
-`src/tema.js` resuelto, completo:
+`src/tema.js` resuelto:
 
 ```js
 // Tema de color del Planificador: claro u oscuro
@@ -656,15 +655,14 @@ git reset --hard HEAD@{1}
 git log --oneline --graph -4
 ```
 
-En el reflog verás `HEAD@{0}: reset: moving to HEAD~1` y, justo debajo, `HEAD@{1}: commit (merge): Merge branch 'feat/tema-sepia'`. Tras el último `reset`, el merge vuelve a estar en `main`.
-
-Y la explicación: si el merge ya estuviera en GitHub, `reset` haría que tu `main` y el de GitHub divergieran, y para subirlo tendrías que forzar el _push_, borrando el commit también para cualquiera que ya lo tuviera. Lo correcto sería `git revert -m 1 <id-del-merge>`, que deshace el cambio con un commit nuevo sin tocar el historial.
+- **En el reflog** verás `HEAD@{0}: reset: moving to HEAD~1` y, debajo, `HEAD@{1}: commit (merge): Merge branch 'feat/tema-sepia'`. Tras el último `reset`, el _merge_ vuelve a `main`.
+- **Si ya estuviera en GitHub,** `reset` haría divergir tu `main` del remoto, y subirlo exigiría forzar el _push_ y borrar el _commit_ para todos. Lo correcto: `git revert -m 1 <id-del-merge>`.
 
 <Callout type="risk">
 
-- **`HEAD~1` en un merge commit** es su **primer** padre, la línea de `main`, que aquí es el commit de `feat/tema-oscuro-defecto`. Por eso el `reset` "solo" pierde el merge y la rama de sepia, no el cambio del tema oscuro.
-- **El identificador `b2e155f` de la sección `|||||||`** es la base común de las dos ramas y será distinto en tu repositorio.
-- **El commit `wip: peso objetivo`** se queda en su rama sin mezclar. Es una forma válida de aparcar trabajo; en B2.4 subirás ramas así a GitHub para no perderlas aunque se rompa tu ordenador.
+- **`HEAD~1` en un _merge commit_ es su primer padre,** la línea de `main`. Por eso el `reset` solo pierde el _merge_ y la rama de sepia.
+- **El identificador `b2e155f` de `|||||||`** es la base común de las dos ramas, y en tu repositorio será otro.
+- **`wip: peso objetivo` se queda en su rama:** es una forma válida de aparcar trabajo. En B2.4 subirás ramas a GitHub para no perderlas.
 
 </Callout>
 
@@ -676,8 +674,8 @@ Un conflicto ya no te produce ansiedad: lo lees con `zdiff3`, combinas las inten
 
 ## Resumen
 
-- Un conflicto es un merge en pausa: edita el archivo, quita los marcadores, `git add` y `git commit`; o cancela con `git merge --abort`.
-- `merge.conflictStyle zdiff3` muestra la versión original, clave para combinar intenciones.
-- `restore` descarta (sin vuelta atrás) o saca de _staging_; `--amend` rehace el último commit local.
-- `revert` deshace con un commit nuevo (seguro en ramas compartidas); `reset --soft/--mixed/--hard` mueve la rama hacia atrás (solo en local).
-- `stash -u` aparta trabajo a medias; `reflog` registra cada movimiento de `HEAD` y recupera commits "perdidos".
+- Un conflicto es un _merge_ en pausa: edita, quita marcadores, `git add` y `git commit`, o `--abort`.
+- `zdiff3` muestra el original y ayuda a combinar intenciones.
+- `restore` descarta sin vuelta atrás; `--amend` rehace el último _commit_ local.
+- `revert` para lo compartido; `reset` solo para lo local.
+- `stash -u` aparta trabajo a medias; `reflog` recupera _commits_ "perdidos".

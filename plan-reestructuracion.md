@@ -56,7 +56,7 @@ Fecha de la auditoría: 2026-11-18. Base: commit `ebe7f3b`.
 
 El _script_ de la §5.2, ejecutado sobre `HEAD`:
 
-- **44 pasos con código y sin `risk`**, en 22 lecciones. Casi la mitad están en A8 (24) y A6 (6).
+- **40 pasos con código y sin `risk`.** Casi todos están en A8 (24) y A6 (6). La primera versión del validador contaba 44: tomaba por pasos los `##` de un README dentro de un bloque de código, y ya está corregido.
 - **Las 5 lecciones de A8 no tienen `## Ejercicio práctico`.** El bloque `exercise` va directamente tras el último paso.
 - **2 marcadores de código incompleto:** `fundamentos-de-bases-de-datos/05-transacciones-y-acid.mdx:304` (`// ...todas las operaciones...`) y `git-y-flujo-de-trabajo/04-github-remotos-y-pull-requests.mdx:449` (`# ...edita, prueba...`).
 
@@ -247,7 +247,7 @@ Mismo procedimiento, **un curso cada vez dentro de la Tanda** (editar, validar y
 
 | Tanda | Cursos                                         | Secc. | Prosa  | Atención especial                                                                                                   |
 | ----- | ---------------------------------------------- | ----- | ------ | ------------------------------------------------------------------------------------------------------------------- |
-| 2     | B2 Git · B3 Cómo funciona la web               | 9     | 25.200 | B2.4: el marcador `# ...edita, prueba...`. 3 pasos de B2 sin `risk`. B3.5 es la más larga del nivel.                |
+| 2     | B2 Git · B3 Cómo funciona la web               | 9     | 25.200 | B2.4: el marcador `# ...edita, prueba...`. B3.1: un paso sin `risk`. B3.5 es la más larga del nivel.                |
 | 3     | B4 Fundamentos de BD · B5 MongoDB esencial     | 11    | 24.500 | B4.5: el marcador `// ...todas las operaciones...`.                                                                 |
 | 4     | B6 React esencial · B7 Tailwind esencial       | 12    | 22.800 | B6.7 lo usan otros cursos como referencia de islas: cuidado con los IDs.                                            |
 | 5     | I1 TypeScript intermedio · I2 React intermedio | 12    | 26.200 | I2.6 la cita I3.1 (`Suspense` y el `fallback`).                                                                     |
@@ -350,9 +350,11 @@ def revisar(ruta, ref):
         errores.append("Callout sin línea en blanco tras la apertura o antes del cierre")
     if aperturas.count("exercise") != 1 or aperturas.count("mastery") != 1:
         errores.append("debe haber un exercise y un mastery")
-    for bloque in re.split(r"^## ", cuerpo, flags=re.M)[1:]:
+    # Los ## dentro de un bloque de código (un README de ejemplo) no son pasos
+    marcado = FENCE.sub("⟦CÓDIGO⟧", cuerpo)
+    for bloque in re.split(r"^## ", marcado, flags=re.M)[1:]:
         titulo = bloque.splitlines()[0]
-        if titulo.startswith("Paso") and FENCE.search(bloque) and 'type="risk"' not in bloque:
+        if titulo.startswith("Paso") and "⟦CÓDIGO⟧" in bloque and 'type="risk"' not in bloque:
             errores.append(f"«{titulo[:40]}» tiene código y no tiene risk")
     for risk in re.findall(r'<Callout type="risk">([\s\S]*?)</Callout>', cuerpo):
         vinetas = re.findall(r"^- ", risk, re.M)
