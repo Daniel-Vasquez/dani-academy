@@ -7,9 +7,7 @@ minutes: 60
 summary: "Listas los patrones de acceso de esta plataforma antes de crear ninguna colección, descubres que escribe siete veces más de lo que lee, mides cuánto ocupa cada documento y llevas un array hasta el límite de 16 MB."
 ---
 
-En B4.2 diseñaste el modelo de esta plataforma como se hace en SQL: primero las **entidades** (usuario, curso, sección, lectura, intento de evaluación) y después, ya con las tablas normalizadas, las consultas que hagan falta, con los `JOIN` necesarios. En MongoDB el orden se invierte. No hay `JOIN` baratos, un documento puede contener otros y lo que decide un buen diseño es **cómo se van a leer y escribir los datos**. La regla que resume todo el curso es esta: **los datos que se leen juntos se guardan juntos**. En esta sección vas a aplicarla de la única forma posible: escribiendo la lista de consultas **antes** de crear ninguna colección, midiendo cuánto ocupa cada documento y llevando un array hasta el límite de 16 MB de MongoDB.
-
-**Lo que tendrás al terminar:** `src/i4/01-patrones.ts` (los patrones de acceso de Dani Academy con su frecuencia), `src/i4/01-tamanos.ts` (el tamaño real de cada documento) y `src/i4/01-limite.ts` (un array que crece hasta que MongoDB lo rechaza).
+En SQL (B4.2) diseñas primero las entidades y después las consultas. En MongoDB el orden se invierte: no hay `JOIN` baratos, un documento puede contener otros y manda **cómo se leen y escriben los datos**. La regla de todo el curso: **lo que se lee junto se guarda junto**. Aquí escribes las consultas antes de crear colecciones, mides documentos y llevas un array al límite de 16 MB.
 
 **Requisitos:** el proyecto `mongo-academy` de B5, con su `.env` apuntando a `academy_lab`.
 
@@ -19,14 +17,9 @@ mkdir -p src/i4
 
 ## Paso 1: la regla, con un ejemplo de esta plataforma
 
-Piensa en la pantalla más visitada de Dani Academy: una sección de un curso, con la lista de secciones a la izquierda y una marca en las que ya leíste. Para pintarla hacen falta **las secciones leídas por ese usuario en ese curso**.
+**Qué es:** la pantalla más visitada (una sección, con el índice marcando lo leído) necesita **las secciones leídas por ese usuario en ese curso**. En SQL (B4.3) sale de un `JOIN` y el modelo lo deciden las entidades. En MongoDB se pregunta al revés: ¿qué consulta se hace más y qué necesita **a la vez**? Eso va en el mismo documento, o en una colección con un índice que lo encuentre de una vez.
 
-- **En SQL (B4.3)**, esa información sale de cruzar tablas: `lecturas JOIN secciones ON … WHERE usuario = ? AND curso = ?`. El modelo se decide por las entidades, y las consultas se adaptan después.
-- **En MongoDB**, la pregunta es al revés: ¿qué consulta se hace más y qué datos necesita **a la vez**? Si siempre se piden juntos, deben estar en el mismo documento (o, como mínimo, en la misma colección con un índice que los encuentre de una vez).
-
-Una analogía: en una biblioteca normalizada, cada libro está en su estantería y una ficha te dice dónde buscar cada capítulo. En una cocina bien organizada, todo lo que usas para el café (taza, cucharilla, café y azúcar) está en el mismo armario, aunque las cucharillas "pertenezcan" al cajón de los cubiertos. MongoDB es la cocina: se organiza por **uso**, no por categoría.
-
-Hay una consecuencia que conviene ver pronto: **no todos los datos van a la base de datos**. El catálogo de cursos de esta plataforma (títulos, niveles, número de secciones) solo lo cambia el autor, al publicar, y se lee en cada página. Por eso vive en archivos del proyecto (`src/content/courses.json` y las colecciones de contenido de Astro), que se compilan con la web, y no en MongoDB. Para los ejemplos de este curso, crea `src/i4/catalogo.ts` con el catálogo real:
+**Cómo se usa:** no todo va a la base de datos. El catálogo de cursos solo lo cambia el autor y se lee en cada página: vive en archivos (`src/content/courses.json` y las colecciones de contenido de Astro), compilados con la web. Para los ejemplos, crea `src/i4/catalogo.ts` con el catálogo real:
 
 ```ts
 // Archivo: src/i4/catalogo.ts
@@ -76,14 +69,16 @@ export const TOTAL_SECCIONES = CATALOGO.reduce((s, c) => s + c.secciones, 0);
 
 <Callout type="risk">
 
-- **Diseñar copiando las tablas de SQL es el error más común:** una colección por entidad (`usuarios`, `cursos`, `secciones`, `lecturas`) y referencias entre ellas obliga a hacer en la aplicación, o con `$lookup`, los `JOIN` que MongoDB no hace gratis. Funciona, pero pierdes la ventaja del modelo de documentos y pagas más consultas por pantalla.
-- **"Guardarlo todo junto" tampoco es la regla:** es "lo que se **lee** junto". Si un dato se lee junto a otro solo en una pantalla poco visitada, pero se escribe sin parar, juntarlos puede salir caro. Lo medirás en el Paso 4.
+- **Copiar las tablas de SQL es el error más común:** una colección por entidad y referencias entre ellas obliga a hacer los `JOIN` en la aplicación o con `$lookup`. Funciona, pero pagas más consultas por pantalla.
+- **La regla no es "todo junto", es "lo que se lee junto":** si algo se lee junto solo en una pantalla rara pero se escribe sin parar, juntarlo puede salir caro (Paso 4).
 
 </Callout>
 
 ## Paso 2: la lista de patrones de acceso
 
-Un **patrón de acceso** es una operación concreta que hace la aplicación: qué pantalla la provoca, si lee o escribe, cuántas veces ocurre y qué datos necesita. La lista se hace **antes** de diseñar, a partir de las pantallas (o de las historias de usuario). Crea `src/i4/01-patrones.ts` con los de esta plataforma:
+**Qué es:** un **patrón de acceso** es una operación concreta: qué pantalla la provoca, si lee o escribe, cuántas veces ocurre y qué datos necesita. La lista se hace **antes** de diseñar.
+
+**Cómo se usa:** crea `src/i4/01-patrones.ts` con los de esta plataforma.
 
 ```ts
 // Archivo: src/i4/01-patrones.ts
@@ -141,11 +136,9 @@ Lecturas: 9.5/h · escrituras: 66.2/h · proporción L:E = 1:7.0
 Sin el latido: 9.5/h frente a 6.2/h · L:E = 1.5:1
 ```
 
-- **La frecuencia no tiene que ser exacta:** basta con el orden de magnitud. Lo que importa es distinguir lo que pasa 60 veces por hora de lo que pasa una vez a la semana.
-- **El latido es real:** la plataforma envía uno por minuto mientras tienes una sección abierta y visible (`HEARTBEAT_INTERVAL_SECONDS = 60` en `src/lib/constants.ts`), para contar tus minutos de estudio. El resto son estimaciones razonables para una hora de estudio.
-- **La sorpresa:** esta app **escribe siete veces más de lo que lee**, y todo por una operación que no aparece en ninguna pantalla. Sin la lista, habrías diseñado pensando en las lecturas (que son las que se ven) y la colección más cargada sería otra.
-
-Con la lista delante, cada decisión tiene una justificación:
+- **Basta el orden de magnitud:** lo que importa es separar lo que pasa 60 veces por hora de lo semanal.
+- **El latido es real:** uno por minuto con una sección abierta y visible (`HEARTBEAT_INTERVAL_SECONDS = 60` en `src/lib/constants.ts`); el resto, estimaciones razonables.
+- **La sorpresa: la app escribe siete veces más de lo que lee,** por una operación que no tiene pantalla. Sin la lista, habrías diseñado para las lecturas.
 
 | Patrón                                  | Qué pide al diseño                                                                                 |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------- |
@@ -157,15 +150,17 @@ Con la lista delante, cada decisión tiene una justificación:
 
 <Callout type="risk">
 
-- **Olvidar las operaciones invisibles:** latidos, registros de actividad, contadores de visitas, límites de peticiones (`rate_limits` en esta plataforma). No tienen pantalla, pero suelen ser las escrituras más frecuentes.
-- **Diseñar para el patrón raro:** si la página de estadísticas (una vez por hora) pide una estructura que encarece el latido (60 por hora), gana el latido. Las páginas raras pueden pagar una agregación más lenta (I4.4 e I4.5).
-- **La lista cambia con la app:** cada pantalla nueva añade patrones. Guárdala junto al código (este archivo, o un `docs/modelo.md`) y revísala cuando el diseño cambie.
+- **No olvides las operaciones invisibles:** latidos, registros, contadores, `rate_limits`. Sin pantalla, suelen ser las escrituras más frecuentes.
+- **No diseñes para el patrón raro:** si las estadísticas (1/h) encarecen el latido (60/h), gana el latido. Lo raro puede pagar una agregación lenta (I4.4, I4.5).
+- **La lista cambia con la app:** guárdala junto al código y revísala con cada pantalla nueva.
 
 </Callout>
 
 ## Paso 3: cuánto ocupa cada documento y cuánto crecen los datos
 
-El segundo dato que necesita el diseño es el **tamaño**: de cada documento y de lo que acumula un usuario con el tiempo. `BSON.calculateObjectSize` del _driver_ mide el tamaño exacto en BSON (el formato en el que MongoDB guarda los documentos, B5.1) sin tocar la base de datos. Crea `src/i4/01-tamanos.ts`:
+**Qué es:** el segundo dato del diseño es el **tamaño**. `BSON.calculateObjectSize` mide el tamaño exacto en BSON (B5.1) sin tocar la base de datos.
+
+**Cómo se usa:** crea `src/i4/01-tamanos.ts`.
 
 ```ts
 // Archivo: src/i4/01-tamanos.ts
@@ -242,21 +237,23 @@ Un estudiante en un año (134 secciones, 24 cursos, 1 h al día):
   latidos (si se guardara cada uno)   21900 docs × 85 B = 1817.9 KB
 ```
 
-- **Las sesiones ocupan más que las lecturas y los intentos juntos:** una por día de estudio. Es el patrón #4, ya resumido como lo hace la plataforma: un documento por **sesión**, que cada latido actualiza, en lugar de un documento por latido.
-- **Guardar cada latido** costaría 21 900 documentos y 1,8 MB por estudiante y año, 23 veces más que todo lo demás junto.
-- **En números de Atlas:** el plan gratuito M0 tiene 512 MB. Con sesiones, un estudiante ocupa unos 80 KB al año (13,9 + 9,6 + 56,7), unos 6500 estudiantes-año. Con un latido por documento, unos 280. Son solo los datos: los índices ocupan aparte (lo medirás en I4.2).
+- **Las sesiones ocupan más que lecturas e intentos juntos:** una por día de estudio, que cada latido actualiza, como hace la plataforma.
+- **Un documento por latido** serían 21 900 documentos y 1,8 MB por estudiante y año: 23 veces todo lo demás.
+- **En Atlas M0 (512 MB):** con sesiones, unos 80 KB por estudiante y año, unos 6500 estudiantes-año; con latidos, unos 280. Los índices, aparte (I4.2).
 
 <Callout type="risk">
 
-- **El tamaño en BSON no es el del JSON:** cada documento lleva los nombres de sus campos. `userId` se repite en cada uno de los 134 documentos de lecturas. Los nombres muy largos (`identificadorDelUsuario`) cuestan en cada documento; los crípticos (`u`) hacen el código ilegible. Usa nombres cortos y claros, como hace la plataforma.
-- **Estimar con documentos vacíos engaña:** mide con valores realistas (un `userId` de verdad, textos de longitud real). Un documento de prueba con `userId: "a"` ocupa menos que el real.
-- **El almacenamiento real es otro número:** WiredTiger comprime los datos en disco y los índices ocupan aparte. `calculateObjectSize` sirve para comparar diseños y para el límite de 16 MB, no para la factura de almacenamiento.
+- **BSON lleva los nombres de campo en cada documento:** `userId` se repite 134 veces. Ni nombres larguísimos ni crípticos (`u`): cortos y claros.
+- **Mide con valores realistas:** un `userId: "a"` de prueba ocupa menos que el real.
+- **El disco es otro número:** WiredTiger comprime y los índices van aparte. `calculateObjectSize` compara diseños y vigila los 16 MB, no la factura.
 
 </Callout>
 
 ## Paso 4: el límite de 16 MB, medido
 
-Un documento de MongoDB no puede pasar de **16 MB**. Parece mucho, y lo es para un documento normal: el intento de evaluación ocupa 205 bytes. El problema aparece cuando un array crece **sin límite**. Prueba la versión extrema del Paso 3: guardar cada latido **dentro** del documento del usuario. Crea `src/i4/01-limite.ts`:
+**Qué es:** un documento no puede pasar de **16 MB**, mucho para uno normal (un intento ocupa 205 bytes). El problema es un array que crece **sin límite**: el antipatrón **array sin límite** (_unbounded array_, I4.2).
+
+**Cómo se usa:** la versión extrema del Paso 3, todos los latidos dentro del usuario. Crea `src/i4/01-limite.ts`:
 
 ```ts
 // Archivo: src/i4/01-limite.ts
@@ -330,7 +327,7 @@ try {
 npm start -- src/i4/01-limite.ts
 ```
 
-En el MongoDB local del laboratorio (en Atlas M0, con la red de por medio, los tiempos son mayores):
+En el MongoDB local del laboratorio (en Atlas M0, más lento):
 
 ```text
   20001 latidos ·  0.7 MB · añadir 1:   4.8 ms · leer el usuario:   8 ms · solo el nombre:  0.7 ms
@@ -347,17 +344,15 @@ En el MongoDB local del laboratorio (en Atlas M0, con la red de por medio, los t
   A 60 latidos por hora y 1 h al día: 20.1 años de estudio
 ```
 
-- **El límite llega tarde:** 440 022 latidos, 20 años de estudio a una hora al día. Si solo miraras el límite, concluirías que no hay problema.
-- **El coste llega mucho antes:** añadir **un** latido pasa de 5 ms a 64 ms, porque MongoDB reescribe el documento entero en cada actualización. Y leer el usuario, aunque la pantalla solo quiera su nombre, trae 15 MB por la red: 112 ms.
-- **La proyección no lo arregla del todo:** pedir solo `nombre` tarda 1,4 ms porque el documento ya está en la memoria del servidor, pero el servidor tiene que cargarlo entero desde el disco cuando no lo está, y en memoria ocupa 15 MB que no caben para otros datos.
-
-Un documento que crece sin límite es el antipatrón **array sin límite** (_unbounded array_), y lo verás a fondo en I4.2. La solución de esta plataforma ya la viste en el Paso 3: un documento por **sesión** de estudio, con un tamaño acotado.
+- **El límite llega tarde:** 440 022 latidos, 20 años a una hora al día.
+- **El coste llega mucho antes:** añadir **un** latido pasa de 5 a 64 ms, porque se reescribe el documento entero, y leer el usuario trae 15 MB: 112 ms.
+- **La proyección no lo arregla:** `nombre` tarda 1,4 ms solo porque el documento ya está en memoria; cuando no, se carga entero, y ocupa 15 MB que faltan para otros datos. La solución es la del Paso 3: un documento por sesión.
 
 <Callout type="risk">
 
-- **El error llega en producción, no en desarrollo:** con los datos de prueba de tu equipo, el documento ocupa unos KB y todo va rápido. El fallo (`Resulting document after update is larger than 16777216`, código 10334) aparece años después, en el usuario más activo, y esa actualización falla siempre, para ese usuario, a partir de ese momento.
-- **Prueba con volumen:** antes de dar por bueno un diseño con arrays, haz como este _script_: crece el array hasta el peor caso razonable y mide escritura y lectura. 50 líneas de código te ahorran una migración con la app en marcha.
-- **No ejecutes este _script_ en Atlas M0:** escribe unos 16 MB en una sola colección y tarda bastante con la red de por medio. Al final borra la colección (`drop`), pero en un clúster compartido es mejor usar uno local o, como mucho, lotes más pequeños.
+- **El error llega en producción, años después:** `Resulting document after update is larger than 16777216` (código 10334), en el usuario más activo, y desde entonces esa actualización falla siempre.
+- **Prueba con volumen:** crece el array hasta el peor caso razonable y mide. 50 líneas ahorran una migración en marcha.
+- **No ejecutes este _script_ en Atlas M0:** escribe unos 16 MB y tarda con la red. Mejor un MongoDB local.
 
 </Callout>
 
@@ -440,17 +435,14 @@ Lecturas 34.5/día · escrituras 13.05/día · L:E = 2.6:1
 Una tarea: 166 bytes · 5 al día durante un año: 296 KB por usuario
 ```
 
-Las decisiones:
-
-- **Las dos lecturas más frecuentes son "tareas de hoy" (con el nombre y el color de su categoría) y las preferencias,** cada una 15 veces al día. Las preferencias son pocas y se leen en cada página: van **dentro** del documento del usuario. "Tareas de hoy" pide encontrar las tareas de un usuario por fecha de un tirón (un índice `{ userId: 1, fecha: 1 }`) y, además, el nombre y el color de la categoría sin una segunda consulta.
-- **Eso último es una tensión que resolverás en I4.3:** si cada tarea guarda una copia del nombre y el color de su categoría (_Extended Reference_), "tareas de hoy" es una sola consulta. A cambio, renombrar una categoría (0,05 veces al día) tiene que actualizar todas sus tareas. Con estas frecuencias, compensa.
-- **Aquí la app lee 2,6 veces más de lo que escribe**, al contrario que Dani Academy. Por eso no hay un diseño "correcto" en abstracto: depende de la lista.
-- **Una tarea ocupa 166 bytes:** 296 KB por usuario y año. Ningún documento se acerca a 16 MB mientras las tareas sean documentos separados y no un array dentro del usuario.
+- **Las dos lecturas más frecuentes (15 al día):** las preferencias, pocas y en cada página, van **dentro** del usuario; "tareas de hoy" pide un índice `{ userId: 1, fecha: 1 }` y el nombre y color de la categoría sin otra consulta.
+- **Esa tensión se resuelve en I4.3:** copiar nombre y color en cada tarea (_Extended Reference_) hace "tareas de hoy" de una consulta, a cambio de actualizar las tareas al renombrar una categoría (0,05 al día). Compensa.
+- **Esta app lee 2,6 veces más de lo que escribe,** al revés que Dani Academy: no hay diseño correcto en abstracto. Una tarea ocupa 166 bytes (296 KB por usuario y año), lejos de 16 MB si cada tarea es un documento.
 
 <Callout type="risk">
 
-- **Una lista sin frecuencias no sirve para decidir:** "leer tareas" y "renombrar categoría" parecen igual de importantes hasta que escribes 15 y 0,05 al lado.
-- **Cuidado con las pantallas que lo leen "todo":** "Estadísticas" quiere tareas de meses. Es poco frecuente, así que puede ser una agregación (I4.4), pero márcala: si un día se convierte en la portada, el diseño tendrá que cambiar.
+- **Sin frecuencias, la lista no decide:** "leer tareas" y "renombrar categoría" parecen iguales hasta que escribes 15 y 0,05.
+- **Marca las pantallas que lo leen "todo":** las estadísticas pueden ser una agregación (I4.4), pero si un día son la portada, el diseño cambia.
 
 </Callout>
 
@@ -462,8 +454,8 @@ No empiezas a diseñar colecciones sin la lista de consultas: escribes los patro
 
 ## Resumen
 
-- En MongoDB, los datos que se leen juntos se guardan juntos: el diseño parte de las consultas, no de las entidades.
-- Un patrón de acceso es pantalla + operación + lectura o escritura + frecuencia + datos que necesita.
+- Lo que se lee junto se guarda junto: el diseño parte de las consultas.
+- Un patrón de acceso: pantalla, operación, lectura o escritura, frecuencia y datos.
 - Las operaciones invisibles cuentan: el latido hace que Dani Academy escriba siete veces más de lo que lee.
-- `BSON.calculateObjectSize` mide el tamaño real de un documento; multiplicado por su crecimiento, dice qué cabe en 512 MB.
-- El límite de 16 MB llega tarde; el coste de un array sin límite (escrituras y lecturas cada vez más lentas) llega mucho antes.
+- `BSON.calculateObjectSize` mide documentos y dice qué cabe en 512 MB.
+- El límite de 16 MB llega tarde; el coste del array sin límite, mucho antes.

@@ -7,11 +7,9 @@ minutes: 75
 summary: "Unes colecciones con $lookup simple y con pipeline, sacas varios resultados con $facet, $bucket y $dateTrunc, mides qué etapas impiden usar un índice y construyes la página de progreso en una agregación."
 ---
 
-En I4.4 agregaste sobre una sola colección. Las pantallas reales necesitan más: datos de dos colecciones a la vez, varios resultados distintos (una tabla, un total, una gráfica) y respuesta rápida aunque la colección crezca. En esta sección vas a unir colecciones con `$lookup`, a sacar varios resultados de una sola consulta con `$facet`, a agrupar por rangos y por meses, a medir qué etapas impiden que MongoDB use un índice y a tipar el resultado sin fiarte a ciegas del tipo. Al final construirás la página de progreso de esta plataforma con **una sola agregación**.
+Las pantallas reales piden más que una colección: datos de dos a la vez, varios resultados de una consulta y rapidez aunque todo crezca. Aquí unes colecciones con `$lookup`, sacas varios resultados con `$facet`, agrupas por rangos y meses, mides qué etapas impiden usar un índice y tipas el resultado. Al final, la página de progreso de esta plataforma en **una sola agregación**.
 
-**Lo que tendrás al terminar:** `src/i4/05-lookup.ts`, `05-facet.ts`, `05-rendimiento.ts` y `05-tipos.ts`, y el panel de progreso completo del ejercicio.
-
-**Requisitos:** el proyecto `mongo-academy` con las lecturas de I4.2 (`npm start -- src/i4/02-sembrar.ts`) y las evaluaciones de I4.4 (`npm start -- src/i4/04-sembrar.ts`), que usan los mismos usuarios. Y Zod, que ya usaste en I1.4:
+**Requisitos:** el proyecto `mongo-academy` con las lecturas de I4.2 (`npm start -- src/i4/02-sembrar.ts`) y las evaluaciones de I4.4 (`npm start -- src/i4/04-sembrar.ts`), con los mismos usuarios. Y Zod (I1.4):
 
 ```bash
 npm install zod
@@ -19,7 +17,9 @@ npm install zod
 
 ## Paso 1: `$lookup`, simple y con _pipeline_
 
-En la plataforma, el catálogo vive en archivos (I4.1). Para practicar `$lookup`, cópialo a una colección en la que el identificador del curso es el `_id` (que siempre tiene índice). Crea `src/i4/cursos.ts`:
+**Qué es:** el `$lookup` **simple** une por igualdad entre un campo local y otro de la otra colección (`LEFT JOIN … ON a.cursoId = b._id`). El **con _pipeline_** ejecuta una _pipeline_ entera en la otra colección por cada documento, con variables (`let`) del documento actual.
+
+**Cómo se usa:** el catálogo vive en archivos (I4.1); para practicar, cópialo a una colección con el curso como `_id` (siempre indexado). `src/i4/cursos.ts`:
 
 ```ts
 // Archivo: src/i4/cursos.ts
@@ -37,7 +37,7 @@ export interface CursoDoc {
 export const cursos = db.collection<CursoDoc>("i4_cursos");
 ```
 
-Y `src/i4/05-sembrar.ts`:
+`src/i4/05-sembrar.ts`:
 
 ```ts
 // Archivo: src/i4/05-sembrar.ts
@@ -56,7 +56,7 @@ await cliente.close();
 npm start -- src/i4/05-sembrar.ts
 ```
 
-`$lookup` tiene dos formas. La **simple** une por igualdad entre un campo local y uno de la otra colección, como un `LEFT JOIN … ON a.cursoId = b._id`. La forma **con _pipeline_** ejecuta una _pipeline_ completa en la otra colección por cada documento, con variables (`let`) para usar los valores del documento actual. Crea `src/i4/05-lookup.ts`:
+Y `src/i4/05-lookup.ts`:
 
 ```ts
 // Archivo: src/i4/05-lookup.ts
@@ -142,23 +142,23 @@ Cursos intermedios de u_00007:
   I8 Testing                                sin intentos
 ```
 
-- **`$lookup` siempre devuelve un array** en el campo `as`, aunque solo haya un resultado (o ninguno). `$first` lo convierte en un valor.
-- **`$limit` antes del `$lookup`:** solo se buscan 3 cursos, no uno por cada intento del usuario. Cada etapa antes del `$lookup` que reduzca documentos ahorra búsquedas.
-- **Con _pipeline_, el filtro puede ser cualquier cosa:** aquí, "las evaluaciones de **este** usuario en **este** curso", y además se agrupan dentro del propio `$lookup` (`$group` con `$max`). La forma simple solo sabe comparar un campo con otro.
-- **`$$curso` y `$cursoId`:** con dos `$`, la variable definida en `let` (el `_id` del curso); con uno, el campo del documento de la otra colección. Dentro de la _pipeline_, comparar dos campos necesita `$expr`.
-- **`$ifNull` para lo que no existe:** los cursos sin intentos dan un array vacío; `$first` de un array vacío no existe, y `$ifNull` lo convierte en `null` o en `0`.
+- **`$lookup` siempre devuelve un array** en `as`, aunque haya uno o ninguno: `$first` lo convierte en valor, y `$ifNull` cubre el vacío (`null` o `0`).
+- **`$limit` antes del `$lookup`:** solo se buscan 3 cursos, no uno por intento.
+- **Con _pipeline_, el filtro es libre:** "las evaluaciones de **este** usuario en **este** curso", agrupadas dentro con `$max`. **`$$curso`** es la variable de `let`; **`$cursoId`**, el campo de la otra colección; comparar dos campos exige `$expr`.
 
 <Callout type="risk">
 
-- **El `$match` de la _pipeline_ interna debe empezar por igualdades normales:** `{ userId, $expr: … }` usa el índice `{ userId, fecha }` de las evaluaciones. Si lo escribes todo dentro de `$expr`, MongoDB tiene más difícil usar el índice y puede acabar recorriendo la colección una vez por curso.
-- **Un `$lookup` con _pipeline_ se ejecuta una vez por documento de entrada:** 8 cursos son 8 _pipelines_. Con 10 000 documentos de entrada serían 10 000. Reduce la entrada antes (`$match`, `$limit`).
-- **Las dos colecciones deben estar en la misma base de datos** (`academy_lab`). `$lookup` no une bases de datos distintas.
+- **La _pipeline_ interna empieza por igualdades normales:** `{ userId, $expr: … }` usa el índice `{ userId, fecha }`; todo dentro de `$expr` puede acabar en un recorrido por curso.
+- **Un `$lookup` con _pipeline_ se ejecuta por documento de entrada:** 8 cursos, 8 _pipelines_; 10 000, 10 000. Reduce antes.
+- **Las dos colecciones van en la misma base de datos:** `$lookup` no cruza bases.
 
 </Callout>
 
 ## Paso 2: `$facet`, `$bucket` y `$dateTrunc`
 
-Un panel de estadísticas suele necesitar varios resultados de los mismos datos: una distribución, una serie temporal y unos totales. Con tres agregaciones, MongoDB recorre los documentos tres veces y la aplicación hace tres viajes. **`$facet`** ejecuta varias _sub-pipelines_ sobre la misma entrada, en una consulta, y devuelve un documento con un array por cada una. Crea `src/i4/05-facet.ts`:
+**Qué es:** **`$facet`** ejecuta varias _sub-pipelines_ sobre la misma entrada en una consulta y devuelve un documento con un array por cada una. **`$bucket`** agrupa por rangos y **`$dateTrunc`** redondea una fecha hacia abajo a una unidad (`day`, `week`, `month`, `year`).
+
+**Cómo se usa:** distribución, serie temporal y totales de un panel, en `src/i4/05-facet.ts`:
 
 ```ts
 // Archivo: src/i4/05-facet.ts
@@ -228,22 +228,23 @@ Por mes:
   junio de 2026         1 intentos · media 5.00
 ```
 
-- **`$bucket` agrupa por rangos:** `boundaries: [0, 2, 4, 6]` forma los rangos `[0, 2)`, `[2, 4)` y `[4, 6)`; el `_id` de cada grupo es su límite inferior. Es un `$group` con la clave calculada por ti.
-- **`$dateTrunc` redondea una fecha hacia abajo** a la unidad que pidas (`day`, `week`, `month`, `year`) y devuelve una fecha. Agrupar por ella da una serie temporal lista para una gráfica.
-- **El intento de "junio" no es un error:** se guardó el 1 de julio a las 00:00 UTC, que en Ciudad de México es todavía el 30 de junio por la tarde. `timezone` en `$dateTrunc` lo pone en el mes que vio el usuario.
-- **Dos `$group` seguidos cuentan valores distintos:** el primero forma un grupo por alumno; el segundo cuenta los grupos (260 alumnos). Es lo que te advertí en I4.4: no hace falta acumular la lista de alumnos con `$addToSet` para saber cuántos son.
+- **`boundaries: [0, 2, 4, 6]`** forma `[0, 2)`, `[2, 4)` y `[4, 6)`, con el límite inferior como `_id`: un `$group` con la clave calculada por ti.
+- **El intento de "junio" no es un error:** se guardó el 1 de julio a las 00:00 UTC, aún 30 de junio en México. `timezone` en `$dateTrunc` lo pone en el mes que vio el usuario.
+- **Dos `$group` seguidos cuentan valores distintos:** uno por alumno y otro que cuenta grupos (260), sin acumular la lista con `$addToSet` (I4.4).
 
 <Callout type="risk">
 
-- **El resultado de `$facet` es un solo documento**, y tiene el límite de 16 MB. Si una faceta devuelve miles de filas (una tabla sin `$limit`), el documento entero puede pasarse. Las facetas deben devolver resúmenes, no listados completos.
-- **Las _sub-pipelines_ de `$facet` no usan índices:** reciben los documentos que salen de la etapa anterior. Pon el filtro común en un `$match` **antes** del `$facet`, como hace el ejemplo, para que ese sí lo use.
-- **`$bucket` falla si un valor cae fuera de los rangos** y no hay `default`. Con `boundaries: [0, 2, 4]` y una puntuación de 5, el error es `$switch could not find a matching branch for an input, and no default was specified` (`$bucket` se implementa con un `$switch`). Si los datos pueden tener valores inesperados, añade `default: "otros"`.
+- **El resultado de `$facet` es un documento de 16 MB como máximo:** facetas con resúmenes, no listados sin `$limit`.
+- **Las _sub-pipelines_ no usan índices:** el filtro común va en un `$match` **antes** del `$facet`.
+- **`$bucket` falla con un valor fuera de rango** sin `default`: `$switch could not find a matching branch for an input, and no default was specified`. Con datos imprevisibles, `default: "otros"`.
 
 </Callout>
 
 ## Paso 3: rendimiento, `$match` y `$sort` al principio
 
-En I4.4 te dije que `$match` y `$sort` van al principio para usar los índices. Vamos a medirlo con las 69 159 lecturas de I4.2, escribiendo la misma consulta con las etapas en distinto orden. Crea `src/i4/05-rendimiento.ts`:
+**Qué es:** el **optimizador** de MongoDB reescribe la _pipeline_ antes de ejecutarla cuando puede demostrar que el resultado no cambia, y a veces arregla un orden mal escrito. A veces.
+
+**Cómo se usa:** la misma consulta con las etapas en distinto orden, sobre las 69 159 lecturas de I4.2, en `src/i4/05-rendimiento.ts`:
 
 ```ts
 // Archivo: src/i4/05-rendimiento.ts
@@ -308,25 +309,24 @@ Secciones leídas por curso de u_00007 (69159 lecturas en total)
 ✗ $match sobre un campo calculado   27.39 ms · COLLSCAN                                        0 claves ·  69159 documentos
 ```
 
-Hay una sorpresa: **las dos primeras variantes "mal escritas" van igual de rápido que la buena.** El **optimizador** de MongoDB reescribe la _pipeline_ antes de ejecutarla cuando puede demostrar que el resultado no cambia:
-
-- **Un `$match` después de un `$sort` se adelanta:** filtrar antes de ordenar da lo mismo y es más barato. Por eso la tercera variante usa el índice `{ userId, leidaEn }` y lee solo 5 documentos.
-- **Un `$match` sobre la clave de un `$group` se adelanta:** filtrar por `_id.userId` después de agrupar equivale a filtrar por `userId` antes. Las 46 claves examinadas lo demuestran: no recorrió las 69 159 lecturas.
-- **Un `$match` sobre un campo calculado no se puede adelantar:** `usuario` no existe hasta que `$addFields` lo crea, así que MongoDB recorre la colección entera (`COLLSCAN`, 69 159 documentos) y tarda 75 veces más.
-
-La regla sigue siendo escribir `$match` y `$sort` al principio, aunque el optimizador a veces lo arregle. Así no dependes de él, y la _pipeline_ se lee como lo que hace. Y **compruébalo con `explain`**: es lo único que dice qué hizo de verdad.
+- **Un `$match` tras un `$sort` se adelanta:** la tercera variante usa `{ userId, leidaEn }` y lee 5 documentos.
+- **Un `$match` sobre la clave de un `$group` se adelanta:** filtrar por `_id.userId` equivale a filtrar por `userId` antes (46 claves examinadas, no 69 159).
+- **Un `$match` sobre un campo calculado no:** `usuario` no existe hasta `$addFields`, y hay `COLLSCAN` de 69 159 documentos, 75 veces más lento.
+- **Escríbelos al principio de todos modos,** sin depender del optimizador, y **compruébalo con `explain`**, lo único que dice qué pasó.
 
 <Callout type="risk">
 
-- **El optimizador no adelanta un `$match` más allá de lo que no entiende:** campos calculados, campos que crea un `$lookup` o un `$unwind`, o acumuladores de un `$group`. Un `$match` sobre `leidas`, después de contarlas, es legítimo (como el `HAVING` de SQL), pero recorre todo lo anterior.
-- **Un índice solo sirve si el `$match` compara el campo tal cual:** `$match: { userId: "u_00007" }` lo usa; `$match: { $expr: { $eq: [{ $toUpper: "$userId" }, "U_00007"] } }` no, porque transforma cada valor antes de comparar. Si necesitas buscar sin distinguir mayúsculas, guarda el campo ya normalizado.
-- **`explain` con `executionStats` ejecuta la consulta:** tarda y consume lo mismo que ella. En producción, con una agregación pesada, usa `explain("queryPlanner")`, que solo planifica. (Con `$merge`, el `explain` no llega a escribir: comprobado, la colección destino queda vacía.)
+- **El optimizador no adelanta lo que no entiende:** campos calculados, de un `$lookup` o un `$unwind`, o acumuladores. Un `$match` sobre `leidas` tras contarlas es legítimo (el `HAVING` de SQL), pero recorre todo lo anterior.
+- **El índice solo sirve con el campo tal cual:** `$toUpper: "$userId"` dentro de `$expr` lo anula. Para búsquedas sin mayúsculas, guarda el campo normalizado.
+- **`explain` con `executionStats` ejecuta la consulta:** en producción, `explain("queryPlanner")`. (Con `$merge`, el `explain` no escribe: comprobado.)
 
 </Callout>
 
 ## Paso 4: tipar resultados con `aggregate<T>()`
 
-Has usado `aggregate<T>()` en todos los _scripts_. Es importante saber qué garantiza y qué no. Crea `src/i4/05-tipos.ts`:
+**Qué es:** `aggregate<T>()` tipa el resultado, pero **no lo comprueba**: `T` es una promesa del programador.
+
+**Cómo se usa:** crea `src/i4/05-tipos.ts`.
 
 ```ts
 // Archivo: src/i4/05-tipos.ts
@@ -375,14 +375,14 @@ Con el tipo correcto: B1 3.95 · B2 4.05
 Zod: 0.media: Invalid input: expected number, received undefined · 1.media: Invalid input: expected number, received undefined
 ```
 
-- **`T` es una promesa del programador, no una comprobación:** TypeScript cree que los documentos tienen `media` porque se lo dices. Si la _pipeline_ produce `promedio`, compila igual y falla al ejecutar, lejos de la causa.
-- **Validar con Zod en el borde** (I1.4) convierte ese fallo en un error claro y en el sitio correcto: `0.media: Invalid input: expected number, received undefined`. Cuesta una validación por consulta.
-- **¿Cuándo validar?** En las agregaciones complejas o que cambian a menudo, como la del ejercicio, sí. En un `$group` de tres líneas que no va a cambiar, `aggregate<T>()` basta.
+- **Si la _pipeline_ produce `promedio` y `T` dice `media`,** compila y falla al ejecutar, lejos de la causa.
+- **Zod en el borde** (I1.4) da un error claro en el sitio correcto: `0.media: Invalid input: expected number, received undefined`.
+- **Valida las agregaciones complejas o cambiantes,** como la del ejercicio; para un `$group` de tres líneas estable, `aggregate<T>()` basta.
 
 <Callout type="risk">
 
-- **Los nombres de `T` deben coincidir con los de la _pipeline_, y nada lo comprueba:** si renombras un campo en una, búscalo en la otra. Tener la _pipeline_ y su tipo en el mismo archivo, uno junto al otro, ayuda.
-- **Las fechas llegan como `Date`:** el _driver_ convierte las fechas de BSON en objetos `Date`, así que en Zod son `z.date()`, no `z.string()`. Al enviarlas al navegador como JSON se convierten en texto (B5.5).
+- **Nada comprueba que los nombres de `T` y de la _pipeline_ coincidan:** tenlos en el mismo archivo, uno junto al otro.
+- **Las fechas llegan como `Date`:** en Zod, `z.date()`; en el JSON del navegador, texto (B5.5).
 
 </Callout>
 
@@ -515,15 +515,14 @@ Progreso de u_00007 (una consulta, 11.8 ms)
   Total: 46 de 134 secciones (34.3 %)
 ```
 
-- **Se parte de los cursos, no de las lecturas:** el porcentaje necesita el número de secciones de cada curso, y "empezado" incluye cursos sin lecturas pero con evaluación (B7 e I1). Partiendo de las lecturas, esos dos no aparecerían.
-- **Dos `$lookup` con _pipeline_, uno por fuente:** el primero cuenta las lecturas del usuario en el curso (`$count`); el segundo trae su última evaluación (`$sort` + `$limit: 1`). Los dos filtran primero por `userId`, el primer campo de un índice.
-- **`$facet` al final** saca la tabla y el total de los mismos 24 documentos: una consulta, 12 ms en local.
-- **Zod valida la forma completa:** si alguien cambia la _pipeline_, `DashboardSchema.parse` falla con el campo exacto antes de que la página pinte un `undefined`.
+- **Se parte de los cursos, no de las lecturas:** el porcentaje necesita las secciones de cada curso, y "empezado" incluye cursos solo con evaluación (B7 e I1), que desde las lecturas no saldrían.
+- **Dos `$lookup` con _pipeline_:** uno cuenta las lecturas (`$count`) y otro trae la última evaluación (`$sort` + `$limit: 1`), ambos filtrando primero por `userId`. **`$facet`** saca tabla y total: una consulta, 12 ms en local.
+- **Zod valida la forma completa:** si cambia la _pipeline_, `DashboardSchema.parse` falla con el campo exacto antes de pintar un `undefined`.
 
 <Callout type="risk">
 
-- **Una sola consulta no siempre es mejor que tres:** esta hace 48 búsquedas internas (2 por curso). Para 24 cursos es rápido; para un catálogo de miles, tres consultas sencillas con índice y una unión en la aplicación (I4.2) pueden ser más rápidas y más fáciles de mantener. Mide antes de decidir.
-- **La plataforma real usa cinco consultas en paralelo** (`Promise.all` en `src/server/services/stats.service.ts`), porque mezcla datos del catálogo, que está en archivos, con los de MongoDB. Una agregación solo puede unir lo que está en la base de datos.
+- **Una consulta no siempre supera a tres:** esta hace 48 búsquedas internas; con miles de cursos, tres consultas con índice y unión en la aplicación (I4.2) pueden ganar. Mide.
+- **La plataforma real usa cinco consultas con `Promise.all`** (`src/server/services/stats.service.ts`), porque mezcla el catálogo en archivos con MongoDB: una agregación solo une lo que está en la base de datos.
 
 </Callout>
 
@@ -535,8 +534,8 @@ Una página completa de estadísticas sale de una sola consulta: unes coleccione
 
 ## Resumen
 
-- `$lookup` simple une por igualdad; con _pipeline_ y `let` filtra y agrega en la otra colección. Siempre devuelve un array.
-- `$facet` ejecuta varias _sub-pipelines_ sobre la misma entrada y devuelve un documento (máximo 16 MB).
-- `$bucket` agrupa por rangos y `$dateTrunc` por periodos; los dos, con la zona horaria correcta.
-- El optimizador adelanta algunos `$match`, pero no los que filtran campos calculados (de 0,4 ms a 27,5 ms). Escríbelos al principio y comprueba con `explain`.
-- `aggregate<T>()` tipa, pero no comprueba: valida con Zod las agregaciones complejas.
+- `$lookup` simple une por igualdad; con _pipeline_ y `let`, filtra y agrega. Siempre devuelve un array.
+- `$facet` saca varios resultados de la misma entrada en un documento de 16 MB como máximo.
+- `$bucket` por rangos y `$dateTrunc` por periodos, con zona horaria.
+- El optimizador adelanta algunos `$match`, no los de campos calculados (de 0,4 a 27,5 ms): escríbelos al principio y usa `explain`.
+- `aggregate<T>()` tipa sin comprobar: Zod en las agregaciones complejas.

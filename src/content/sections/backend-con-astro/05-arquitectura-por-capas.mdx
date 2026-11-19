@@ -7,9 +7,7 @@ minutes: 75
 summary: "Separas HTTP, reglas y datos en endpoint, servicio y repositorio con la base de datos inyectada, pruebas el servicio con un repositorio en memoria y adelgazas un endpoint gordo de 31 líneas a 14."
 ---
 
-Tu app ya tiene dos "puertas" para las mismas operaciones: los _endpoints_ REST (I3.2) y las Actions (I3.3). Si la regla "solo los entrenos de running llevan km" vive dentro del `PATCH`, la Action que edite un entreno tendrá que copiarla, y la copia acabará desincronizada. Además, para probar esa regla hoy necesitas levantar el servidor, entrar con una sesión y hacer peticiones HTTP. La **arquitectura por capas** separa el código por responsabilidad: la capa **HTTP** (_endpoints_ y Actions) traduce peticiones y respuestas; la capa de **servicio** guarda las reglas del negocio, y la de **repositorio** habla con la base de datos. Cada capa solo conoce a la de debajo. En esta sección vas a aplicarla a los entrenos, vas a probar las reglas sin MongoDB y vas a adelgazar un _endpoint_ gordo.
-
-**Lo que tendrás al terminar:** `src/repositories/` y `src/services/` con la base de datos inyectada, _endpoints_ y Actions de pocas líneas que comparten las reglas, y 13 tests con Vitest que se ejecutan en medio segundo.
+Con dos puertas para las mismas operaciones (_endpoints_ de I3.2 y Actions de I3.3), una regla escrita dentro del `PATCH` acaba copiada y desincronizada, y probarla exige servidor, sesión y peticiones HTTP. La **arquitectura por capas** separa la capa **HTTP** (traduce peticiones y respuestas), la de **servicio** (las reglas del negocio) y la de **repositorio** (la base de datos). Cada una solo conoce a la de debajo.
 
 **Requisitos:** la app de I3.4.
 
@@ -18,15 +16,17 @@ mkdir -p src/repositories src/services tests
 npm install --save-dev vitest mongodb-memory-server
 ```
 
+## Paso 1: el repositorio, con la base de datos inyectada
+
+**Qué es:** lo que era `src/server/entrenos.ts` (I3.2), pero **sin importar `db`: lo recibe**. En producción recibe la base de datos real; en los tests, una en memoria. Es la forma más simple de **inyección de dependencias**: una "fábrica" que recibe sus dependencias y devuelve las operaciones.
+
 | Capa        | Archivos                         | Sabe de                                                | No sabe de        |
 | ----------- | -------------------------------- | ------------------------------------------------------ | ----------------- |
 | HTTP        | `src/pages/api/`, `src/actions/` | `Request`, códigos de estado, _cookies_, `locals`      | MongoDB           |
 | Servicio    | `src/services/`                  | Las reglas del negocio y los errores de dominio (I1.5) | HTTP y MongoDB    |
 | Repositorio | `src/repositories/`              | MongoDB: colecciones, filtros, `ObjectId`              | Las reglas y HTTP |
 
-## Paso 1: el repositorio, con la base de datos inyectada
-
-El repositorio es lo que era `src/server/entrenos.ts` (I3.2), con una diferencia: **no importa `db`, lo recibe**. Así, en producción se le pasa la base de datos real y, en los tests, una en memoria. Crea `src/repositories/entrenos.repo.ts`:
+**Cómo se usa:** crea `src/repositories/entrenos.repo.ts`.
 
 ```ts
 // Archivo: src/repositories/entrenos.repo.ts
@@ -138,22 +138,22 @@ export const repos = {
 };
 ```
 
-- **`crearEntrenosRepo(db)` es una "fábrica":** una función que recibe sus dependencias y devuelve un objeto con las operaciones. Es la forma más simple de **inyección de dependencias**, sin librerías ni decoradores.
-- **`EntrenosRepo = ReturnType<typeof crearEntrenosRepo>`**: el tipo sale del código, así que nunca se desincroniza.
-- **El repositorio devuelve DTOs, nunca documentos:** `_id`, `userId` y el resto de detalles de MongoDB no salen de esta capa.
-- **`actualizar` borra con `$unset` lo que llega como `undefined`**, como `actualizarEntreno` en I3.2: así un `PATCH` con `"km": null` quita de verdad los km.
-- **`totales` y `entre`** son consultas nuevas para la página de estadísticas y para el ejercicio. El `aggregate` que estaba en `estadisticas.astro` (I3.1) se muda aquí.
+- **`EntrenosRepo = ReturnType<typeof crearEntrenosRepo>`:** el tipo sale del código y no se desincroniza.
+- **Devuelve DTOs, nunca documentos:** `_id`, `userId` y los detalles de MongoDB no salen de esta capa.
+- **`actualizar` usa `$unset`** con lo que llega como `undefined` (I3.2), y **`totales` y `entre`** acogen el `aggregate` de `estadisticas.astro` (I3.1) y el ejercicio.
 
 <Callout type="risk">
 
-- **Todas las consultas filtran por `userId`:** es lo que impide que Dani vea los entrenos de Ana. Al estar en el repositorio, ninguna capa de arriba puede olvidarlo. Nunca añadas un método como `obtenerPorId(id)` sin usuario "para uso interno": acabará llamándose desde un _endpoint_.
-- **Un `src/repositories/index.ts` que importa `db` es el único punto con la base de datos real:** si un servicio importa `../lib/mongo` directamente, sus tests necesitarán MongoDB. Lo comprobarás al final con un `grep`.
+- **Todas las consultas filtran por `userId`:** en el repositorio, ninguna capa de arriba puede olvidarlo. Nunca un `obtenerPorId(id)` sin usuario "para uso interno": acabará en un _endpoint_.
+- **Solo `src/repositories/index.ts` importa `db`:** un servicio que importe `../lib/mongo` necesitará MongoDB en sus tests. Lo comprobarás con un `grep`.
 
 </Callout>
 
 ## Paso 2: el servicio, donde viven las reglas
 
-Crea `src/services/entrenos.service.ts`:
+**Qué es:** la capa con las reglas del negocio. Lanza **errores de dominio** (`NoEncontradoError`, `ValidacionError`, I1.5), nunca respuestas, y cada puerta los traduce: `aRespuesta` en los _endpoints_ y `comoActionError` en las Actions.
+
+**Cómo se usa:** crea `src/services/entrenos.service.ts`.
 
 ```ts
 // Archivo: src/services/entrenos.service.ts
@@ -203,7 +203,7 @@ export function crearServicioEntrenos({ entrenos }: Dependencias) {
 export type ServicioEntrenos = ReturnType<typeof crearServicioEntrenos>;
 ```
 
-Y `src/services/index.ts`, que conecta los servicios con los repositorios reales:
+Y `src/services/index.ts`, que lo conecta con los repositorios reales:
 
 ```ts
 // Archivo: src/services/index.ts
@@ -216,20 +216,21 @@ export const servicios = {
 };
 ```
 
-- **La regla del `PATCH` ahora está en `editar`:** carga el entreno, comprueba que el **resultado** es válido y guarda. Cualquier puerta que edite un entreno pasa por aquí.
-- **El servicio lanza errores de dominio** (`NoEncontradoError`, `ValidacionError`, de I1.5), nunca respuestas. Cada puerta los traduce a su formato: `aRespuesta` en los _endpoints_ y `comoActionError` en las Actions.
-- **`Pick<EntrenosRepo, …>`** declara qué necesita el servicio del repositorio, y nada más. Un test puede pasarle cualquier objeto con esos cinco métodos.
+- **La regla del `PATCH` vive en `editar`:** carga, comprueba el **resultado** y guarda. Toda puerta que edite pasa por aquí.
+- **`Pick<EntrenosRepo, …>`** declara qué necesita del repositorio y nada más: un test le pasa cualquier objeto con esos cinco métodos.
 
 <Callout type="risk">
 
-- **Un servicio que recibe `Request` o devuelve `Response` ya no es un servicio:** si aparece `status: 404` en `src/services/`, la regla ha vuelto a la capa HTTP. El servicio dice "no existe"; la capa HTTP decide que eso es un 404 (o un `NOT_FOUND` en una Action).
-- **No crees capas vacías por costumbre:** `listar` y `crear` solo delegan en el repositorio. Está bien en este caso, porque así toda la HTTP pasa por el servicio y una regla futura tiene sitio. Pero si un servicio entero solo reenvía llamadas, en un proyecto pequeño puede bastar con el repositorio.
+- **Un servicio con `Request`, `Response` o `status: 404` ya no es un servicio:** dice "no existe"; la capa HTTP decide que es un 404 o un `NOT_FOUND`.
+- **No crees capas vacías por costumbre:** aquí `listar` y `crear` solo delegan, y está bien porque una regla futura tiene sitio. Si un servicio entero solo reenvía, en un proyecto pequeño basta el repositorio.
 
 </Callout>
 
 ## Paso 3: endpoints y Actions de pocas líneas
 
-Sustituye `src/pages/api/entrenos/[id].ts`:
+**Qué es:** la capa HTTP queda en leer la petición, validar, llamar al servicio y responder.
+
+**Cómo se usa:** sustituye `src/pages/api/entrenos/[id].ts`.
 
 ```ts
 // Archivo: src/pages/api/entrenos/[id].ts
@@ -268,7 +269,7 @@ export const DELETE: APIRoute = async ({ params, locals }) => {
 };
 ```
 
-Sustituye `src/pages/api/entrenos/index.ts`:
+`src/pages/api/entrenos/index.ts`:
 
 ```ts
 // Archivo: src/pages/api/entrenos/index.ts
@@ -303,7 +304,7 @@ export const POST: APIRoute = async ({ request, redirect, locals }) => {
 };
 ```
 
-Sustituye `src/actions/index.ts`. Tiene una Action nueva, `editarEntreno`, que reutiliza la regla del servicio sin duplicarla:
+`src/actions/index.ts`, con una Action nueva, `editarEntreno`, que reutiliza la regla del servicio:
 
 ```ts
 // Archivo: src/actions/index.ts
@@ -364,7 +365,7 @@ export const server = {
 };
 ```
 
-La página de estadísticas, `src/pages/estadisticas.astro`, usa el repositorio:
+`src/pages/estadisticas.astro`, con el repositorio:
 
 ```astro
 ---
@@ -386,7 +387,7 @@ const generada = new Date().toISOString();
 </Base>
 ```
 
-Y la _server island_ `src/components/UltimoEntreno.astro`, también:
+Y la _server island_ `src/components/UltimoEntreno.astro`:
 
 ```astro
 ---
@@ -409,13 +410,13 @@ const [ultimo] = usuario ? await repos.entrenos.listar(usuario.id, { limite: 1 }
 </p>
 ```
 
-Ya nadie usa `src/server/entrenos.ts`. Bórralo:
+Nadie usa ya `src/server/entrenos.ts`:
 
 ```bash
 rm src/server/entrenos.ts
 ```
 
-El `PATCH` ha pasado de 12 líneas a 8 (sin contar comentarios ni líneas en blanco). Lo importante es que el comportamiento es **el mismo** en las dos puertas. Medido con `curl`, con la sesión de Ana:
+Con `curl` y la sesión de Ana:
 
 ```text
 POST /api/entrenos                             → 201 {"id":"6ad19674a4d312595278bde4","tipo":"running","minutos":45,"km":9,…
@@ -428,18 +429,20 @@ DELETE /api/entrenos/:id                       → 204
 Action borrarEntreno (ya no existe)            → 404 {"type":"AstroActionError","code":"NOT_FOUND","status":404,"message":"El entreno 6ad19674a4d312595278bde4 no existe"}
 ```
 
-La regla del km funciona igual en el `PATCH` y en la Action (422), y el 404 de `borrarEntreno` ya no se escribe en la Action: sale del servicio.
+- **El `PATCH` pasa de 12 líneas a 8,** pero lo importante es que las dos puertas se comportan **igual**: la regla del km da 422 en el `PATCH` y en la Action, y el 404 de `borrarEntreno` sale del servicio.
 
 <Callout type="risk">
 
-- **Refactorizar no es cambiar el comportamiento:** antes de mover código entre capas, apunta lo que responde la API (como la tabla de arriba) y compáralo después. Si una respuesta cambia, es un _bug_ del refactor, no una mejora.
-- **Las notas siguen en `src/server/notas.ts`:** está bien migrar por partes, un recurso cada vez, con la app funcionando entre medias. Lo que no está bien es dejar las dos formas para siempre: apúntalo como tarea.
+- **Refactorizar no cambia el comportamiento:** apunta lo que responde la API antes y compáralo después. Una respuesta distinta es un _bug_ del refactor.
+- **Las notas siguen en `src/server/notas.ts`:** migrar por partes está bien; dejar las dos formas para siempre, no. Apúntalo.
 
 </Callout>
 
 ## Paso 4: probar las reglas sin servidor ni MongoDB
 
-Como el servicio recibe el repositorio, un test puede pasarle uno **falso**: un `Map` en memoria. Crea `vitest.config.ts`:
+**Qué es:** como el servicio recibe el repositorio, un test le pasa uno **falso**, un `Map` en memoria. Las consultas se prueban aparte contra un MongoDB temporal en memoria (`mongodb-memory-server`).
+
+**Cómo se usa:** crea `vitest.config.ts`.
 
 ```ts
 // Archivo: vitest.config.ts
@@ -451,7 +454,7 @@ export default defineConfig({
 });
 ```
 
-Añade el _script_ a `package.json`:
+El _script_ en `package.json`:
 
 ```json
 "test": "vitest run"
@@ -521,7 +524,7 @@ describe("servicio de entrenos", () => {
 });
 ```
 
-Y el del repositorio, que sí necesita un MongoDB de verdad para probar las consultas. `mongodb-memory-server` arranca uno temporal en memoria. `tests/entrenos.repo.test.ts`:
+Y el del repositorio, `tests/entrenos.repo.test.ts`:
 
 ```ts
 // Archivo: tests/entrenos.repo.test.ts
@@ -586,14 +589,13 @@ Tests  6 passed (6)
 Duration  513ms (tests 70%, import 27%, transform 2%, worker 1%)
 ```
 
-- **Los tests del servicio tardan 1 ms**, porque no hay red ni base de datos. Puedes tener cientos y ejecutarlos en cada guardado.
-- **El test del repositorio prueba lo que un falso no puede:** que el filtro por `userId` aísla a los usuarios y que `ignoreUndefined` no guarda `null` (la trampa de I3.2).
-- **Ninguno necesita Astro:** ni servidor, ni sesión, ni `curl`.
+- **Los tests del servicio tardan 1 ms:** sin red ni base de datos, se pueden tener cientos y ejecutarlos en cada guardado.
+- **El del repositorio prueba lo que un falso no puede:** el aislamiento por `userId` y que `ignoreUndefined` no guarda `null` (I3.2). Ninguno necesita Astro, sesión ni `curl`.
 
 <Callout type="risk">
 
-- **Un repositorio falso puede mentir:** el `Map` del test devuelve todo en `listar`, sin filtrar por usuario. Por eso el aislamiento entre usuarios se prueba en el test del repositorio, contra MongoDB. Los falsos sirven para las reglas del servicio, no para las consultas.
-- **La primera vez, `mongodb-memory-server` descarga MongoDB** (unos 100 MB) y el test puede tardar. En CI, guarda esa descarga en caché o el tiempo de cada ejecución se dispara. Por eso está el `hookTimeout: 120_000`.
+- **Un repositorio falso puede mentir:** el `Map` devuelve todo en `listar`, sin filtrar por usuario. Los falsos sirven para las reglas; las consultas, contra MongoDB.
+- **La primera vez, `mongodb-memory-server` descarga MongoDB** (unos 100 MB): de ahí `hookTimeout: 120_000`. En CI, guarda la descarga en caché.
 
 </Callout>
 
@@ -653,7 +655,7 @@ export const GET: APIRoute = async ({ url, locals }) => {
 
 </Callout>
 
-Antes de refactorizar, con los entrenos de Ana de dos semanas:
+Antes del refactor, con los entrenos de Ana de dos semanas:
 
 ```text
 GET /api/resumen?semana=2026-10-15 →
@@ -749,7 +751,7 @@ export const servicios = {
 };
 ```
 
-El esquema de la _query_, en `src/schemas/entreno.ts` (justo antes de los tipos):
+El esquema de la _query_, en `src/schemas/entreno.ts` (antes de los tipos):
 
 ```ts
 /** GET /api/resumen?semana=AAAA-MM-DD (cualquier día de la semana; por defecto, hoy) */
@@ -852,7 +854,7 @@ Test Files  3 passed (3)
 Tests  13 passed (13)
 ```
 
-Y la API, después del refactor:
+Y la API después del refactor:
 
 ```text
 GET /api/resumen?semana=2026-10-15 →
@@ -863,23 +865,15 @@ GET /api/resumen?semana=ayer →
 {"error":"Revisa los datos del formulario","campos":{"semana":["Fecha no válida"]}}
 ```
 
-Los números son los mismos. Hay dos diferencias, y las dos son intencionadas:
-
-- **El orden de `porTipo` cambió en la segunda semana** (`running` antes que `movilidad`): `entre` ordena por fecha y el _endpoint_ gordo no ordenaba. Las claves de un objeto JSON no tienen orden garantizado para ningún cliente, así que no rompe nada.
-- **El error de fecha usa el formato común** de la API (`campos`), en lugar de un mensaje suelto.
-
-Las decisiones:
-
-- **El _endpoint_ pasa de 31 líneas a 14**, y no sabe nada de semanas, objetivos ni MongoDB.
-- **`calcularResumen` es una función pura:** recibe arrays y devuelve un objeto. Sus casos límite (semana vacía, objetivo justo en 150, el domingo, el cambio de mes) se prueban en 0 ms. En el _endpoint_ gordo, para probar "semana vacía" hacía falta vaciar la base de datos.
-- **`Promise.all` en el servicio:** las dos consultas, que el _endpoint_ gordo hacía una tras otra, ahora van en paralelo. Mejorar el rendimiento es más fácil cuando la lógica está separada.
-- **`lunesDe` usa UTC**, como las fechas guardadas (I1.6). La zona horaria del usuario es una regla del negocio: si algún día importa, se cambia en un solo sitio.
+- **Los números son los mismos.** El orden de `porTipo` cambia en la segunda semana porque `entre` ordena por fecha (las claves JSON no tienen orden garantizado), y el error de fecha usa el formato común (`campos`): dos diferencias intencionadas.
+- **El _endpoint_ pasa de 31 líneas a 14,** y **`calcularResumen` es pura:** semana vacía, 150 justos, domingo y cambio de mes se prueban en 0 ms, sin vaciar la base de datos.
+- **`Promise.all`** lanza en paralelo las dos consultas que antes iban seguidas, y **`lunesDe` usa UTC** como las fechas guardadas (I1.6): si la zona del usuario importa, se cambia en un sitio.
 
 <Callout type="risk">
 
-- **El servicio tiene más líneas (56) que el _endpoint_ gordo (31):** separar en capas no reduce el código total, lo **ordena**. A cambio, cada parte se prueba sola y se puede reutilizar desde una Action, un _cron_ o un _script_.
-- **Comprueba que las capas no se saltan:** `grep -rn 'lib/mongo' src | grep -v repositories` debería mostrar solo `src/server/notas.ts`, la migración pendiente. Si aparece un servicio o un _endpoint_, una regla está hablando con la base de datos directamente.
-- **No exportes la función pura y la uses desde el cliente "porque ya está":** importaría todo el módulo del servicio en el _bundle_ del navegador. Si una regla se necesita en los dos lados, va a un módulo sin dependencias de servidor (como los esquemas de `src/schemas/`).
+- **Las capas no reducen el código, lo ordenan:** el servicio (56 líneas) supera al _endpoint_ gordo (31), pero cada parte se prueba sola y sirve a una Action, un _cron_ o un _script_.
+- **Comprueba que no se saltan capas:** `grep -rn 'lib/mongo' src | grep -v repositories` solo debería mostrar `src/server/notas.ts`, la migración pendiente.
+- **No importes la función pura desde el cliente:** arrastraría el módulo del servicio al _bundle_. Lo compartido va a un módulo sin dependencias de servidor, como `src/schemas/`.
 
 </Callout>
 
@@ -891,8 +885,8 @@ Separas una aplicación en capas con responsabilidades claras (HTTP traduce, el 
 
 ## Resumen
 
-- HTTP (_endpoints_ y Actions) → servicio → repositorio: cada capa solo conoce a la de debajo.
-- Las dependencias se reciben con fábricas (`crearEntrenosRepo(db)`, `crearServicioEntrenos({ entrenos })`); un único `index.ts` las conecta a la base de datos real.
-- El servicio lanza errores de dominio y cada puerta los traduce (`aRespuesta`, `comoActionError`).
-- Las reglas se prueban con un repositorio en memoria (1 ms por test); las consultas, contra `mongodb-memory-server`.
-- Refactorizar no cambia el comportamiento: compara las respuestas de la API antes y después.
+- HTTP → servicio → repositorio: cada capa solo conoce a la de debajo.
+- Fábricas que reciben sus dependencias; un único `index.ts` las conecta a la base de datos real.
+- El servicio lanza errores de dominio y cada puerta los traduce.
+- Reglas con un repositorio en memoria (1 ms); consultas con `mongodb-memory-server`.
+- Refactorizar no cambia lo que responde la API.

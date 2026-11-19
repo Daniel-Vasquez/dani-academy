@@ -7,11 +7,11 @@ minutes: 90
 summary: "Aplicas Computed, Bucket, Subset, Extended Reference, Outlier y Schema Versioning a problemas reales de esta plataforma, mides lo que ahorra cada uno y decides qué hacer cuando cambia un dato duplicado."
 ---
 
-En I4.2 decidiste entre embeber y referenciar. Con eso se resuelve la mayoría de los casos, pero hay problemas que se repiten tanto que tienen nombre: un dato que se calcula en cada visita, miles de documentos diminutos, un array que solo se necesita a medias, una copia que se queda vieja, un caso raro que rompe el diseño del normal o documentos antiguos con otra forma. MongoDB los llama **patrones de diseño**, y cada uno es una solución probada para un problema concreto. En esta sección vas a aplicar seis a problemas reales de esta plataforma y a medir lo que ahorra cada uno.
-
-**Lo que tendrás al terminar:** un _script_ por patrón (`src/i4/03-computed.ts`, `03-bucket.ts`, `03-subset.ts`, `03-extended.ts`, `03-outlier.ts` y `03-versiones.ts`) y la regla para elegir el adecuado.
+Embeber o referenciar (I4.2) resuelve casi todo, pero algunos problemas se repiten tanto que tienen nombre: **patrones de diseño**, cada uno una solución probada para un problema concreto. Aquí aplicas seis a esta plataforma y mides lo que ahorra cada uno.
 
 **Requisitos:** el proyecto `mongo-academy` con las lecturas sembradas en I4.2 (`npm start -- src/i4/02-sembrar.ts`).
+
+## Paso 1: _Computed_, calcular una vez y leer muchas
 
 | Patrón               | Problema que resuelve                                      | Paso |
 | -------------------- | ---------------------------------------------------------- | ---- |
@@ -22,9 +22,9 @@ En I4.2 decidiste entre embeber y referenciar. Con eso se resuelve la mayoría d
 | _Outlier_            | Unos pocos casos enormes rompen el diseño del caso normal  | 5    |
 | _Schema Versioning_  | Documentos con formas distintas tras un cambio             | 6    |
 
-## Paso 1: _Computed_, calcular una vez y leer muchas
+**Qué es:** **guardar el resultado** de un cálculo en lugar de repetirlo en cada lectura. Aquí, "702 alumnos estudian este curso" en la página más visitada (#1 de I4.1).
 
-La página de cada curso podría mostrar "702 alumnos estudian este curso". Es la página más visitada (patrón #1 de I4.1) y el número se calcula recorriendo todas las lecturas. El patrón _Computed_ consiste en **guardar el resultado** en lugar de calcularlo en cada lectura. Crea `src/i4/03-computed.ts`:
+**Cómo se usa:** crea `src/i4/03-computed.ts`.
 
 ```ts
 // Archivo: src/i4/03-computed.ts
@@ -101,23 +101,23 @@ Guardado: {
 }
 ```
 
-- **Calcular en cada visita cuesta 6,6 ms**, porque recorre las 69 159 lecturas (no hay índice por `cursoId`). Ese coste crece con la plataforma: con 100 veces más alumnos, 100 veces más.
-- **Recalcular los 24 cursos de golpe cuesta 17 ms.** Si un _script_ lo hace cada 5 minutos, son 17 ms cada 5 minutos, en lugar de 6,6 ms en **cada** visita.
-- **Leer el resultado guardado cuesta 0,1 ms:** 65 veces menos. La última etapa, `$merge`, escribe la salida de la agregación en otra colección: reemplaza los cursos que ya estaban e inserta los nuevos.
-
-Hay una tercera forma: actualizar el contador en cada escritura (`$inc` al marcar una lectura). Es exacta al instante, pero convierte el documento del curso en un **punto caliente**: todos los alumnos de un curso escriben en él, y en I4.2 mediste que eso multiplica por 22 el tiempo con escrituras simultáneas. Para un número que puede ir 5 minutos por detrás, el recálculo periódico es mejor.
+- **Calcular en cada visita cuesta 6,6 ms** y recorre las 69 159 lecturas: con 100 veces más alumnos, 100 veces más.
+- **Recalcular los 24 cursos cuesta 17 ms:** cada 5 minutos, en vez de 6,6 ms en **cada** visita. **Leerlo, 0,1 ms**, 65 veces menos. `$merge` escribe la salida en otra colección, reemplazando e insertando.
+- **`$inc` en cada escritura** es exacto al instante, pero convierte el curso en un **punto caliente** (22 veces más lento con escrituras simultáneas, I4.2). Para algo que puede ir 5 minutos por detrás, mejor el recálculo.
 
 <Callout type="risk">
 
-- **El dato guardado va por detrás:** con un recálculo cada 5 minutos, el contador puede mostrar 702 alumnos cuando ya hay 703. Acéptalo solo donde dé igual. Si una cifra tiene que ser exacta (un saldo, un inventario), calcúlala al momento o actualízala en la misma operación que la cambia.
-- **Si actualizas el resumen en cada escritura, puede desincronizarse:** un fallo entre "guardar la lectura" y "sumar 1" deja el contador mal para siempre. Ten siempre un _script_ que lo recalcule desde los datos de origen, como `recalcularTodo`, aunque normalmente uses `$inc`.
-- **Guarda cuándo se calculó** (`calculado: "$$NOW"`): sirve para depurar ("¿por qué no sale mi lectura?") y para detectar que el _script_ de recálculo ha dejado de ejecutarse.
+- **El dato guardado va por detrás:** acéptalo solo donde dé igual. Un saldo o un inventario se calculan al momento o en la misma operación.
+- **Un resumen actualizado en cada escritura puede desincronizarse:** un fallo entre "guardar" y "sumar 1" lo deja mal para siempre. Ten un _script_ como `recalcularTodo` aunque uses `$inc`.
+- **Guarda cuándo se calculó** (`calculado: "$$NOW"`): para depurar y para detectar que el recálculo dejó de ejecutarse.
 
 </Callout>
 
 ## Paso 2: _Bucket_, agrupar eventos en cubos
 
-El patrón de acceso más frecuente de la plataforma es el latido: 60 por hora de estudio (I4.1). Guardar cada uno como un documento crea millones de documentos diminutos, cada uno con su entrada en cada índice. El patrón _Bucket_ los agrupa en un **cubo** por periodo: un documento por usuario y día, con un array **acotado** (como mucho, los 1440 minutos del día). Crea `src/i4/03-bucket.ts`:
+**Qué es:** en lugar de millones de documentos diminutos (un latido cada uno, 60 por hora, I4.1), un **cubo** por periodo: un documento por usuario y día con un array **acotado** (como mucho, 1440 minutos).
+
+**Cómo se usa:** crea `src/i4/03-bucket.ts`.
 
 ```ts
 // Archivo: src/i4/03-bucket.ts
@@ -229,23 +229,23 @@ Minutos por día de un usuario en el último mes (media de 100):
   leer 30 documentos de día (solo dia y minutos)     0.17 ms
 ```
 
-- **De 25,6 MB a 4,1 MB:** 60 veces menos documentos y, sobre todo, 39 veces menos índice (19,5 MB frente a 0,5 MB). Cada documento suelto tenía su entrada en `_id` y en `{ userId, at }`; el cubo, una.
-- **Escribir cuesta lo mismo** (5,9 ms frente a 6,6 ms): un `upsert` con `$inc` y `$push` crea el día si no existe y, si existe, lo actualiza.
-- **Leer es 8 veces más rápido** (0,17 ms frente a 1,33 ms), y sin agregación: los minutos de cada día ya están sumados (`$inc: { minutos: 1 }` es _Computed_ dentro del cubo).
-
-Esta plataforma va un paso más allá: no guarda cada latido ni dentro del cubo. Guarda un documento por **sesión de estudio** (`study_sessions`), con su inicio, su último latido y las secciones vistas. Cada latido solo actualiza `lastSeenAt` (`src/server/repositories/study-sessions.repo.ts`). Si no necesitas cada evento, no lo guardes: guarda el resumen.
+- **De 25,6 a 4,1 MB:** 60 veces menos documentos y 39 veces menos índice (19,5 frente a 0,5 MB), porque cada documento suelto tenía su entrada en `_id` y en `{ userId, at }`.
+- **Escribir cuesta igual** (5,9 frente a 6,6 ms): un `upsert` con `$inc` y `$push`. **Leer, 8 veces más rápido** (0,17 frente a 1,33 ms), con los minutos ya sumados (_Computed_ dentro del cubo).
+- **Esta plataforma va más allá:** ni guarda cada latido, sino un documento por **sesión** (`study_sessions`) que cada latido actualiza en `lastSeenAt` (`src/server/repositories/study-sessions.repo.ts`). Si no necesitas cada evento, guarda el resumen.
 
 <Callout type="risk">
 
-- **El cubo necesita un tope:** "un documento por usuario y día" está acotado porque un día tiene 1440 minutos. "Un documento por usuario" volvería a ser un array sin límite (I4.2). Elige el periodo (hora, día, mes) para que el peor caso quepa con holgura.
-- **El día depende de la zona horaria:** `diaDe` usa `America/Mexico_City`. Si lo calcularas en UTC, la hora de estudio de las 19:00 a las 20:00 en México caería en el día siguiente. Guarda en el cubo el día **del usuario**, como en B5.5.
-- **Los cubos complican las consultas que cruzan cubos:** "los últimos 90 latidos" ya no es un `find().limit(90)`, porque pueden estar repartidos en dos días. Elige el cubo según las consultas frecuentes (aquí, "por día").
+- **El cubo necesita un tope:** por día está acotado; "por usuario" volvería a ser un array sin límite (I4.2).
+- **El día es el del usuario:** `diaDe` usa `America/Mexico_City`; en UTC, estudiar de 19:00 a 20:00 en México caería al día siguiente (B5.5).
+- **Las consultas que cruzan cubos se complican:** "los últimos 90 latidos" ya no es un `limit(90)`. Elige el cubo por las consultas frecuentes.
 
 </Callout>
 
 ## Paso 3: _Subset_, embeber solo la parte que se lee
 
-La página de evaluación muestra los últimos intentos del curso (patrón #7), y la de progreso, cuántos hay en total. El historial completo crece sin límite, así que va en su propia colección (I4.2). Pero la pantalla solo necesita **los tres más recientes**. El patrón _Subset_ embebe ese subconjunto acotado en un documento que ya se lee, y deja el resto aparte. Crea `src/i4/03-subset.ts`:
+**Qué es:** el historial completo crece sin límite y va aparte (I4.2), pero la pantalla solo necesita **los tres más recientes**. Ese subconjunto acotado se embebe en un documento que ya se lee.
+
+**Cómo se usa:** crea `src/i4/03-subset.ts`.
 
 ```ts
 // Archivo: src/i4/03-subset.ts
@@ -311,21 +311,22 @@ Historial: 10 intentos
 Resumen: { "userId": "u_ana", "cursoId": "B5", "intentos": 10, "ultimos": [ { "puntuacion": 4, "fecha": "2026-10-10T00:00:00.000Z" }, { "puntuacion": 5, "fecha": "2026-10-09T00:00:00.000Z" }, { "puntuacion": 3, "fecha": "2026-10-08T00:00:00.000Z" } ] }
 ```
 
-- **`$push` con `$each`, `$sort` y `$slice`** añade el intento, ordena por fecha y recorta a 3 en la misma operación. El array nunca pasa de 3, aunque haya 10 intentos (o 1000).
-- **El resumen tiene lo que pinta la pantalla:** el total (`intentos: 10`, _Computed_) y los tres últimos. Una sola lectura de un documento pequeño.
-- **El historial sigue completo** en `i4_intentos_historial`, para el "ver todos" (que se usa poco).
+- **`$push` con `$each`, `$sort` y `$slice`** añade, ordena y recorta a 3 en una operación: nunca pasa de 3, aunque haya 1000 intentos.
+- **El resumen tiene lo que pinta la pantalla:** el total (`intentos: 10`, _Computed_) y los tres últimos, en un documento pequeño. El historial completo sigue en `i4_intentos_historial` para "ver todos".
 
 <Callout type="risk">
 
-- **Son dos escrituras:** si la segunda falla, el resumen se queda sin el último intento. Para que las dos se apliquen a la vez hace falta una transacción (A2). Si no, vale la regla del Paso 1: un _script_ que reconstruya el resumen desde el historial.
-- **`$slice` sin `$sort` recorta por orden de llegada:** si un intento llega con retraso (una petición lenta), quedaría mal ordenado. `$sort: { fecha: -1 }` garantiza que se quedan los 3 más recientes por fecha.
-- **El subconjunto debe ser lo que la pantalla necesita, ni más ni menos:** si la pantalla muestra 5, guarda 5. Guardar 50 "por si acaso" vuelve a hacer grande el documento que querías mantener pequeño.
+- **Son dos escrituras:** si falla la segunda, al resumen le falta el último intento. Transacción (A2) o un _script_ que lo reconstruya.
+- **`$slice` sin `$sort` recorta por llegada:** un intento con retraso quedaría mal; `$sort: { fecha: -1 }` lo evita.
+- **Guarda lo que muestra la pantalla:** si son 5, 5. Cincuenta "por si acaso" agranda lo que querías pequeño.
 
 </Callout>
 
 ## Paso 4: _Extended Reference_ y desnormalizar con cabeza
 
-"Mis últimos intentos" muestra el título de cada curso. Con una referencia normal (`cursoId: "B5"`), cada lectura necesita un `$lookup`, o una segunda consulta, para sacar el título. El patrón _Extended Reference_ guarda junto a la referencia una **copia** de los campos que se leen siempre: `curso: { id: "B5", titulo: "MongoDB esencial" }`. Crea `src/i4/03-extended.ts`:
+**Qué es:** junto a la referencia, una **copia** de los campos que se leen siempre: `curso: { id: "B5", titulo: "MongoDB esencial" }`, para no hacer un `$lookup` en cada lectura de "mis últimos intentos".
+
+**Cómo se usa:** crea `src/i4/03-extended.ts`.
 
 ```ts
 // Archivo: src/i4/03-extended.ts
@@ -380,10 +381,10 @@ Renombrar B5: 834 copias actualizadas en 11 ms
 Una copia después: {"curso":{"id":"B5","titulo":"MongoDB esencial (2.ª edición)"}}
 ```
 
-- **La lectura frecuente ya trae el título:** una consulta, sin `$lookup`.
-- **El precio llega cuando el dato cambia:** renombrar un curso actualiza 834 copias, en 11 ms. Como un curso se renombra muy pocas veces (patrón #6 del ejercicio de I4.1: 0,05 veces al día), compensa con creces.
+- **La lectura frecuente trae el título** en una consulta.
+- **El precio llega al cambiar el dato:** renombrar un curso actualiza 834 copias en 11 ms. Como pasa muy pocas veces (0,05 al día, I4.1), compensa.
 
-Duplicar un dato (**desnormalizar**) es una decisión con tres respuestas posibles a la pregunta "¿qué pasa cuando cambia?":
+Duplicar un dato (**desnormalizar**) exige decidir qué pasa cuando cambia:
 
 | Estrategia                                          | Cuándo                                              | Ejemplo                                                   |
 | --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------- |
@@ -393,15 +394,17 @@ Duplicar un dato (**desnormalizar**) es una decisión con tres respuestas posibl
 
 <Callout type="risk">
 
-- **Copia solo campos que cambian poco:** el título, sí; el número de alumnos o la fecha de la última lectura, no. Cada copia multiplica las escrituras cuando el original cambia.
-- **Escribe la actualización de las copias junto al cambio del original:** la función que renombra un curso debe hacer también el `updateMany`. Si queda como "un _script_ que alguien ejecutará", alguien se olvidará y los títulos viejos aparecerán meses después.
-- **La foto histórica es una decisión, no un descuido:** si decides no actualizar (como el precio de un pedido), documéntalo junto al tipo (`/** título del curso cuando se hizo el intento */`), para que nadie lo "arregle".
+- **Copia solo lo que cambia poco:** el título sí; el número de alumnos, no.
+- **Actualiza las copias junto al original:** la función que renombra hace también el `updateMany`. "Un _script_ que alguien ejecutará" se olvida.
+- **Documenta la foto histórica** junto al tipo (`/** título del curso cuando se hizo el intento */`), para que nadie la "arregle".
 
 </Callout>
 
 ## Paso 5: _Outlier_, el caso raro aparte
 
-Imagina comentarios en las secciones. Casi todas tendrán unos pocos, que caben de sobra embebidos en un documento por sección. Pero alguna sección polémica tendrá cientos, y diseñar todo pensando en ella encarece el caso normal. El patrón _Outlier_ diseña para el caso habitual y trata los casos extremos aparte: aquí, en **páginas de desbordamiento** de 50 comentarios. Crea `src/i4/03-outlier.ts`:
+**Qué es:** diseñar para el caso habitual y tratar los extremos aparte. Casi todas las secciones tendrían pocos comentarios embebidos; las polémicas, cientos, en **páginas de desbordamiento** de 50.
+
+**Cómo se usa:** crea `src/i4/03-outlier.ts`.
 
 ```ts
 // Archivo: src/i4/03-outlier.ts
@@ -459,21 +462,22 @@ B5.3: 3 documento(s) → página 1: 50 · página 2: 50 · página 3: 30
 Primera página de B5.3: 50 comentarios (y "ver más" si hay página 2)
 ```
 
-- **El caso normal es un documento:** B5.2, con 3 comentarios, ocupa una página.
-- **El caso extremo no rompe nada:** B5.3, con 130, tiene 3 páginas, ninguna de más de 50 comentarios. Ningún documento crece sin límite.
-- **La pantalla normal lee solo la primera página**, que es lo que se muestra antes de "ver más". El caso raro paga una consulta más solo cuando alguien pide más.
+- **El caso normal es un documento** (B5.2, 3 comentarios); **el extremo no rompe nada** (B5.3, 130, en 3 páginas de 50 como máximo).
+- **La pantalla lee solo la primera página;** el caso raro paga otra consulta solo cuando alguien pide "ver más".
 
 <Callout type="risk">
 
-- **Dos peticiones a la vez pueden abrir la misma página nueva:** las dos ven la página 1 llena e intentan crear la 2. El índice único `{ seccionId, pagina }` hace que la segunda falle con E11000 (B5.5), en lugar de crear dos páginas 2. En una app real, reintenta la operación cuando eso pase.
-- **Elige el tamaño de página por la pantalla:** 50 porque es lo que se muestra antes de "ver más". Si la pantalla muestra 20, usa 20.
-- **No confundas _Outlier_ con _Bucket_:** el cubo agrupa por periodo (todos los usuarios, todos los días). El _outlier_ es una excepción: la inmensa mayoría de los documentos no la necesita nunca.
+- **Dos peticiones pueden abrir la misma página nueva:** el índice único `{ seccionId, pagina }` hace fallar la segunda con E11000 (B5.5). Reintenta.
+- **El tamaño de página lo decide la pantalla:** 50 porque es lo que se muestra antes de "ver más".
+- **_Outlier_ no es _Bucket_:** el cubo agrupa a todos por periodo; el _outlier_ es una excepción que la mayoría nunca necesita.
 
 </Callout>
 
 ## Paso 6: _Schema Versioning_, cambiar la forma sin parar la app
 
-Las apps cambian. La primera versión de los intentos solo guardaba la puntuación; la segunda guarda también el total de preguntas y si se aprobó. En SQL, un cambio así es un `ALTER TABLE` que afecta a todas las filas a la vez. En MongoDB pueden convivir documentos con las dos formas, y el patrón _Schema Versioning_ lo hace explícito: un campo `version` en cada documento y una sola función que convierte cualquier versión a la actual. Crea `src/i4/03-versiones.ts`:
+**Qué es:** en MongoDB conviven documentos con formas distintas tras un cambio. El patrón lo hace explícito: un campo `version` y una única función que convierte cualquier versión a la actual. Aquí, intentos que antes solo guardaban la puntuación y ahora también el total y si se aprobó.
+
+**Cómo se usa:** crea `src/i4/03-versiones.ts`.
 
 ```ts
 // Archivo: src/i4/03-versiones.ts
@@ -545,15 +549,15 @@ Migrados: 3. Repetir la migración: 0
 Después de migrar: [{"_id":2,"documentos":4}]
 ```
 
-- **La app funciona antes, durante y después de migrar:** `aV2` convierte los documentos antiguos al leerlos. El resto del código solo ve la versión 2, con TypeScript comprobando cada forma.
-- **La migración es idempotente:** solo toca los documentos sin `version`, así que repetirla no hace nada (0 modificados). Puedes ejecutarla por lotes, en segundo plano, sin parar la app.
-- **`updateMany` con un _pipeline_** (el array `[ { $set: … } ]`) calcula el valor nuevo a partir del documento: `aprobado` sale de `puntuacion` con `$gte`. Es la misma sintaxis de agregación que verás en I4.4.
+- **La app funciona antes, durante y después de migrar:** `aV2` convierte lo antiguo al leerlo, y el resto del código solo ve la versión 2.
+- **La migración es idempotente:** solo toca documentos sin `version`; repetirla modifica 0. Se puede hacer por lotes sin parar la app.
+- **`updateMany` con un _pipeline_** (`[ { $set: … } ]`) calcula `aprobado` desde `puntuacion` con `$gte`, la sintaxis de agregación de I4.4.
 
 <Callout type="risk">
 
-- **Los documentos sin `version` son la versión 1:** no hace falta añadir el campo a los antiguos antes de empezar. Basta con que la app nueva siempre lo escriba.
-- **Solo borra el código de conversión cuando no quede ningún documento antiguo:** compruébalo con la agregación `porVersion` en producción, no en tu copia local.
-- **Un valor por defecto en la conversión es una suposición:** `total: 5` es correcto porque todas las evaluaciones de la plataforma tienen 5 preguntas. Si no hubiera forma de saberlo, la migración debería marcar esos documentos (`total: null`) en lugar de inventar.
+- **Sin `version` es la versión 1:** basta con que la app nueva siempre lo escriba.
+- **Borra la conversión solo cuando no quede nada antiguo,** comprobado con `porVersion` en producción.
+- **Un valor por defecto en la conversión es una suposición:** `total: 5` es cierto porque todas las evaluaciones tienen 5 preguntas. Si no se sabe, marca (`total: null`), no inventes.
 
 </Callout>
 
@@ -660,15 +664,14 @@ Un día por documento:    3000 documentos ·  1032 KB (datos + índices)
 Vaso a las 23:30 en México: {"dia":"2026-09-30","totalMl":2300,"vasos":9}
 ```
 
-- **8 veces menos documentos y 3,4 veces menos espacio** (1032 KB frente a 3552 KB).
-- **La pantalla "esta semana" es un `find` de 7 documentos**, con el total y los vasos ya calculados (_Computed_ dentro del cubo).
-- **`registrarVaso` es un solo `upsert`:** crea el día con su primer vaso o actualiza el existente. No hace falta comprobar antes si el día existe.
-- **El vaso de las 23:30 suma al 30 de septiembre**, aunque en UTC ya sea 1 de octubre, porque `diaDe` usa la zona horaria del usuario.
+- **8 veces menos documentos y 3,4 veces menos espacio** (1032 frente a 3552 KB).
+- **"Esta semana" es un `find` de 7 documentos** con total y vasos ya calculados, y **`registrarVaso` es un `upsert`** que crea o actualiza el día.
+- **El vaso de las 23:30 suma al 30 de septiembre,** aunque en UTC sea 1 de octubre, porque `diaDe` usa la zona del usuario.
 
 <Callout type="risk">
 
-- **El índice único `{ userId, dia }` es imprescindible:** sin él, dos vasos registrados a la vez al empezar el día pueden crear dos documentos para el mismo día (la carrera de `upsert` que viste en B5.4).
-- **Si el usuario cambia de zona horaria,** los días antiguos se quedan con la antigua. Es lo correcto (fue su día), pero guarda la zona en las preferencias del usuario para calcular los nuevos.
+- **El índice único `{ userId, dia }` es imprescindible:** sin él, dos vasos a la vez al empezar el día crean dos documentos (la carrera de `upsert` de B5.4).
+- **Si el usuario cambia de zona horaria,** los días antiguos conservan la suya. Guarda la zona en sus preferencias para los nuevos.
 
 </Callout>
 
@@ -680,9 +683,9 @@ Reconoces qué patrón aplica a un problema concreto: _Computed_ para cálculos 
 
 ## Resumen
 
-- _Computed_: guarda el resultado (0,1 ms) en lugar de calcularlo en cada visita (6,6 ms y creciendo); recalcúlalo por lotes con `$merge` o con `$inc`, y ten siempre forma de reconstruirlo.
-- _Bucket_: un documento por usuario y día en lugar de uno por evento, con 39 veces menos índice.
-- _Subset_: `$push` con `$each`, `$sort` y `$slice` mantiene los N más recientes; el historial completo, aparte.
-- _Extended Reference_: copia los campos que se leen siempre y cambian poco; decide si las copias se actualizan o son una foto.
-- _Outlier_: diseña para el caso normal y desborda los casos extremos a documentos aparte.
-- _Schema Versioning_: un campo `version`, una función que convierte a la versión actual y migraciones idempotentes.
+- _Computed_: leer el resultado (0,1 ms) en vez de calcularlo (6,6 ms); recalcula con `$merge` o `$inc` y ten cómo reconstruirlo.
+- _Bucket_: un documento por usuario y día, con 39 veces menos índice.
+- _Subset_: `$push` con `$each`, `$sort` y `$slice` mantiene los N más recientes.
+- _Extended Reference_: copia lo que se lee siempre y cambia poco; actualiza o fotografía.
+- _Outlier_: el caso normal manda; los extremos se desbordan aparte.
+- _Schema Versioning_: `version`, una función de conversión y migraciones idempotentes.

@@ -7,15 +7,15 @@ minutes: 60
 summary: "Encadenas middleware con sequence, cargas la sesión en un locals tipado, proteges rutas sin tocar cada página, mides que una página estática no se puede proteger y registras cada petición con su duración."
 ---
 
-Hasta ahora, cada _endpoint_ y cada Action usaba un usuario fijo (`USUARIO_DEMO`). En una app real, el usuario sale de la **sesión** de cada petición, y hay dos tareas que se repiten en todas partes: averiguar quién es y bloquear a quien no ha entrado. Si cada página lo hiciera por su cuenta, bastaría con olvidarlo en una para tener un agujero. El **_middleware_** es código que se ejecuta **antes** de cada página o _endpoint_ renderizado en el servidor: el sitio único para cargar la sesión, proteger rutas, añadir cabeceras o medir. En esta sección vas a añadir una sesión de demostración a tu app de entrenamiento, vas a dejar que el _middleware_ la gestione entera y vas a encontrar el límite más importante del _middleware_: no puede proteger lo que no se ejecuta.
-
-**Lo que tendrás al terminar:** un `src/middleware.ts` con tres pasos encadenados (registro, sesión y protección), `locals.usuario` tipado y usado por todas las páginas, _endpoints_ y Actions, y un registro de cada petición con su código y su duración.
+Hasta ahora todo usaba un `USUARIO_DEMO` fijo. En una app real, el usuario sale de la **sesión** de cada petición, y si cada página comprobara la suya, bastaría un olvido para abrir un agujero. El **_middleware_** se ejecuta **antes** de cada página o _endpoint_ renderizado en el servidor: el sitio único para la sesión, la protección de rutas, las cabeceras o las mediciones.
 
 **Requisitos:** la app de I3.3.
 
 ## Paso 1: una sesión de demostración y `locals` tipado
 
-La autenticación real (contraseñas, Better Auth) es el curso I5. Aquí basta con una **sesión de demostración**: una _cookie_ que guarda el _id_ de uno de dos usuarios ficticios. Crea `src/lib/sesion.ts`:
+**Qué es:** una **sesión de demostración**, una _cookie_ con el _id_ de uno de dos usuarios ficticios (la autenticación real es I5). **`context.locals`** vive lo que dura **una petición**: el _middleware_ lo rellena y lo leen páginas (`Astro.locals`), _endpoints_ (`locals`) y Actions (`ctx.locals`).
+
+**Cómo se usa:** crea `src/lib/sesion.ts`.
 
 ```ts
 // Archivo: src/lib/sesion.ts
@@ -36,7 +36,7 @@ export const COOKIE_SESION = "demo_usuario";
 export const usuarioPorId = (id: string | undefined) => USUARIOS_DEMO.find((u) => u.id === id) ?? null;
 ```
 
-**`context.locals`** es un objeto que vive lo que dura **una petición**: el _middleware_ lo rellena y las páginas, _endpoints_ y Actions lo leen (`Astro.locals` en una página, `locals` en un _endpoint_, `ctx.locals` en una Action). Para que TypeScript sepa qué contiene, se declara en `src/env.d.ts`:
+El tipo de `locals`, en `src/env.d.ts`:
 
 ```ts
 // Archivo: src/env.d.ts
@@ -102,15 +102,17 @@ const { usuario } = Astro.locals;
 
 <Callout type="risk">
 
-- **Esta sesión no es segura, a propósito:** la _cookie_ guarda el _id_ del usuario sin firmar, así que cualquiera puede escribir `demo_usuario=u_dani` en su navegador y "ser" Dani. Medido: con la _cookie_ de un usuario que no existe, la API responde 401; con la de otro usuario real escrita a mano, responde 200. Una sesión real guarda un _token_ aleatorio que el servidor comprueba en la base de datos (B3.4 e I5).
-- **`httpOnly`, `sameSite: "lax"` y `path: "/"`:** el JavaScript de la página no puede leer la _cookie_, no se envía en peticiones de otros sitios (CSRF) y vale para toda la app. Sin `path: "/"`, la _cookie_ solo se enviaría a las rutas bajo `/api/`.
-- **`volver` puede ser un _open redirect_:** sin la comprobación, `?volver=//evil.com` mandaría al usuario a otra web tras entrar. Medido: con la comprobación, termina en `/`. La plataforma usa `safeRedirect` (Tanda 3) para esto mismo.
+- **Esta sesión no es segura, a propósito:** la _cookie_ lleva el _id_ sin firmar, y escribir `demo_usuario=u_dani` te convierte en Dani. Medido: un usuario inexistente da 401; otro real escrito a mano, 200. Una sesión real guarda un _token_ aleatorio comprobado en la base de datos (B3.4, I5).
+- **`httpOnly`, `sameSite: "lax"` y `path: "/"`:** sin acceso desde JavaScript, sin envío desde otros sitios (CSRF) y válida en toda la app. Sin `path: "/"`, solo iría a `/api/`.
+- **`volver` puede ser un _open redirect_:** `?volver=//evil.com` llevaría a otra web. Medido: con la comprobación, termina en `/`. La plataforma usa `safeRedirect`.
 
 </Callout>
 
 ## Paso 2: el middleware, en dos pasos encadenados
 
-Crea `src/middleware.ts`. Astro lo detecta por su nombre y lo ejecuta antes de cada petición:
+**Qué es:** **`defineMiddleware((ctx, next) => …)`** recibe el contexto (URL, _cookies_, `locals`) y `next()`, que continúa la cadena y devuelve la respuesta. **Devolver una respuesta sin llamar a `next()`** corta la cadena. **`sequence(a, b)`** encadena _middlewares_ en orden, cada uno con una tarea.
+
+**Cómo se usa:** crea `src/middleware.ts`; Astro lo detecta por su nombre.
 
 ```ts
 // Archivo: src/middleware.ts
@@ -141,11 +143,9 @@ const proteger = defineMiddleware((ctx, next) => {
 export const onRequest = sequence(cargarSesion, proteger);
 ```
 
-- **`defineMiddleware((ctx, next) => …)`**: `ctx` es el contexto de la petición (URL, _cookies_, `locals`…) y `next()` continúa hacia el siguiente _middleware_ o, al final, hacia la página. Devuelve la respuesta, así que el _middleware_ puede leerla y modificarla.
-- **Devolver una respuesta sin llamar a `next()`** corta la cadena: la página nunca se ejecuta. Es lo que hace `proteger` con un 401 o una redirección.
-- **`sequence(cargarSesion, proteger)`**: encadena _middlewares_ en orden. Primero se sabe quién es y, después, se decide si puede pasar. Cada uno hace una sola cosa.
+- **`cargarSesion` dice quién es y `proteger` decide si pasa:** un 401 para las APIs y una redirección para las páginas.
 
-Ahora sustituye el usuario fijo por el de la petición. `src/pages/api/entrenos/index.ts`:
+Sustituye el usuario fijo por el de la petición. `src/pages/api/entrenos/index.ts`:
 
 ```ts
 // Archivo: src/pages/api/entrenos/index.ts
@@ -317,7 +317,7 @@ export const DELETE: APIRoute = async ({ params, locals }) => {
 };
 ```
 
-`src/actions/index.ts`, donde el usuario sale de `ctx.locals`:
+`src/actions/index.ts`, con el usuario de `ctx.locals`:
 
 ```ts
 // Archivo: src/actions/index.ts
@@ -372,7 +372,7 @@ export const server = {
 };
 ```
 
-La página de estadísticas, `src/pages/estadisticas.astro`:
+`src/pages/estadisticas.astro`:
 
 ```astro
 ---
@@ -400,7 +400,7 @@ const generada = new Date().toISOString();
 </Base>
 ```
 
-Y la _server island_ de la portada, `src/components/UltimoEntreno.astro`, que es pública y puede no tener sesión:
+Y la _server island_ pública, `src/components/UltimoEntreno.astro`, que puede no tener sesión:
 
 ```astro
 ---
@@ -428,7 +428,7 @@ const ultimo = usuario && await db
 </p>
 ```
 
-El `!` de `locals.usuario!.id` es seguro porque el _middleware_ garantiza que, en las rutas privadas, hay usuario. Medido con `curl`:
+Medido con `curl`:
 
 ```text
 — sin sesión
@@ -445,19 +445,22 @@ El `!` de `locals.usuario!.id` es seguro porque el _middleware_ garantiza que, e
   cookie falsificada (usuario inventado) → 401
 ```
 
-Ninguna página ni _endpoint_ comprueba la sesión: lo hace el _middleware_. Ana ve su entreno y Dani no, porque todas las consultas filtran por el `userId` que sale de `locals`.
+- **Ninguna página ni _endpoint_ comprueba la sesión:** lo hace el _middleware_. El `!` de `locals.usuario!.id` es seguro porque garantiza un usuario en las rutas privadas.
+- **Ana ve su entreno y Dani no:** todas las consultas filtran por el `userId` de `locals`.
 
 <Callout type="risk">
 
-- **El orden de `sequence` importa:** con `sequence(proteger, cargarSesion)`, `proteger` se ejecutaría con `locals.usuario` todavía sin rellenar y bloquearía a todo el mundo.
-- **`locals` es de una sola petición:** no sirve para guardar nada entre peticiones (eso es la sesión o la base de datos). Y nunca lo rellenes con datos del cuerpo de la petición: lo que hay en `locals` debe ser de confianza.
-- **El `!` traslada la responsabilidad al _middleware_:** si mañana alguien quita `/api/` de `PRIVADAS`, todos esos `locals.usuario!.id` fallarán con `Cannot read properties of null`. Para el servicio (I3.5), es más robusto recibir el usuario como parámetro y comprobarlo en un solo sitio.
+- **El orden de `sequence` importa:** con `proteger` primero, `locals.usuario` aún estaría vacío y bloquearía a todos.
+- **`locals` es de una petición y de confianza:** nada entre peticiones (eso es la sesión) y nunca datos del cuerpo.
+- **El `!` depende del _middleware_:** si alguien quita `/api/` de `PRIVADAS`, fallará con `Cannot read properties of null`. En el servicio (I3.5), mejor recibir el usuario como parámetro.
 
 </Callout>
 
 ## Paso 3: el límite del middleware, las páginas estáticas
 
-Haz una prueba: añade `"/acerca"` a la lista `PRIVADAS` y pide la página sin sesión, primero con `npm run dev` y después con el _build_ de producción (`npm run build` y `PORT=4322 node dist/server/entry.mjs`). Medido:
+**Qué es:** una página estática (I3.1) se sirve en producción como un archivo, **sin ejecutar ningún código**: el _middleware_ no llega a correr y no puede protegerla. En desarrollo todo se renderiza bajo demanda, y parece que sí.
+
+**Cómo se usa:** añade `"/acerca"` a `PRIVADAS` y pídela sin sesión con `npm run dev` y con el _build_ (`npm run build` y `PORT=4322 node dist/server/entry.mjs`):
 
 ```text
 desarrollo, GET /acerca sin sesión → 302 http://localhost:4321/entrar?volver=%2Facerca
@@ -465,15 +468,15 @@ producción, GET /acerca sin sesión → 200
 producción, GET /estadisticas sin sesión → 302 http://localhost:4322/entrar?volver=%2Festadisticas
 ```
 
-**En desarrollo, la página está protegida; en producción, no.** `/acerca` es estática (I3.1): en producción se sirve como un archivo, sin ejecutar ningún código, y el _middleware_ no llega a correr. En desarrollo todo se renderiza bajo demanda, y por eso parece que funciona. El _build_ da la pista, con este aviso para cada página estática:
+- **En desarrollo, protegida; en producción, no.** El _build_ avisa en cada página estática:
 
 ```text
 [WARN] `Astro.request.headers` was used when rendering the route `src/pages/acerca.astro'`. `Astro.request.headers` is not available on prerendered pages. If you need access to request headers, make sure that the page is server-rendered using `export const prerender = false;` …
 ```
 
-El _middleware_ **también se ejecuta en el _build_**, una vez por cada página estática, y al leer la _cookie_ no hay ninguna petición de verdad. El mismo aviso apareció para `/notas`, que es privada pero se había quedado estática: en producción, cualquiera habría recibido su HTML (aunque sus datos seguían protegidos, porque la Action responde 401).
+- **El _middleware_ también corre en el _build_,** una vez por página estática, sin petición real. El aviso salió también en `/notas`, privada pero estática: cualquiera habría recibido su HTML (sus datos seguían protegidos por el 401 de la Action).
 
-La solución tiene dos partes. Primero, **toda página privada debe ser de servidor**: añade `export const prerender = false;` en `src/pages/notas.astro`:
+Toda página privada va en servidor: `prerender = false` en `src/pages/notas.astro`:
 
 ```astro
 ---
@@ -494,7 +497,7 @@ export const prerender = false; // privada: el middleware solo protege lo que se
 </Base>
 ```
 
-Segundo, el _middleware_ no debe leer la sesión durante el _build_. Sustituye `src/middleware.ts`:
+Y el _middleware_ no lee la sesión durante el _build_. Sustituye `src/middleware.ts`:
 
 ```ts
 // Archivo: src/middleware.ts
@@ -527,7 +530,7 @@ const proteger = defineMiddleware((ctx, next) => {
 export const onRequest = sequence(cargarSesion, proteger);
 ```
 
-Medido de nuevo en producción, ya sin avisos en el _build_:
+En producción, ya sin avisos:
 
 ```text
 producción, GET /acerca        sin sesión → 200
@@ -539,13 +542,13 @@ producción, server island sin sesión → Entra para ver tu último entreno
 producción, server island como Ana → Último entreno: running, 40 min (2026-10-14)
 ```
 
-La portada sigue siendo estática (y pública), pero su _server island_ se pide al servidor en cada visita, así que **sí** pasa por el _middleware_ y muestra el dato de quien la pide.
+- **La portada sigue estática y pública,** pero su _server island_ se pide en cada visita, pasa por el _middleware_ y muestra el dato de quien la pide.
 
 <Callout type="risk">
 
-- **Prueba la seguridad con el _build_ de producción, no con `npm run dev`:** el fallo de `/acerca` solo existe en producción. Los E2E de esta plataforma (Tanda 9) se ejecutan contra el servidor de desarrollo y no lo detectarían; por eso la plataforma usa `output: "server"`, donde nada es estático salvo lo que se marca a propósito.
-- **`ctx.isPrerendered` es `true` en el _build_:** úsalo para no leer _cookies_, cabeceras ni la sesión en ese momento. Esta plataforma lo comprueba al principio de su `loadSession`.
-- **Las cabeceras de seguridad tampoco llegan a las páginas estáticas:** un _middleware_ que añade `X-Frame-Options` (Tanda 9) no se ejecuta para un archivo servido tal cual. En Vercel, esas cabeceras se configuran también para los estáticos (en `vercel.json`) o se renderiza todo en el servidor.
+- **Prueba la seguridad con el _build_ de producción:** el fallo de `/acerca` no existe en `npm run dev`, donde corren los E2E de esta plataforma. Por eso la plataforma usa `output: "server"`: nada es estático sin quererlo.
+- **`ctx.isPrerendered` es `true` en el _build_:** no leas _cookies_, cabeceras ni sesión entonces. Lo comprueba el `loadSession` de la plataforma.
+- **Las cabeceras de seguridad no llegan a los estáticos:** en Vercel se configuran también en `vercel.json`, o se renderiza todo en servidor.
 
 </Callout>
 
@@ -608,7 +611,7 @@ const proteger = defineMiddleware((ctx, next) => {
 export const onRequest = sequence(registrar, cargarSesion, proteger);
 ```
 
-Lo que escribe el servidor de producción tras pedir `/`, `/acerca`, `/estadisticas` (sin y con sesión), `/api/entrenos?limite=abc`, `/api/entrenos/no-existe`, un `POST /api/entrenos` y la _server island_:
+Tras pedir `/`, `/acerca`, `/estadisticas` (sin y con sesión), `/api/entrenos?limite=abc`, `/api/entrenos/no-existe`, un `POST /api/entrenos` y la _server island_:
 
 ```text
 GET /estadisticas → 302 (0.3 ms)
@@ -619,18 +622,15 @@ POST /api/entrenos → 201 (7.1 ms)
 GET /_server-islands/UltimoEntreno → 200 (2.0 ms)
 ```
 
-Las decisiones:
-
-- **`registrar` va el primero:** `await next()` espera a toda la cadena (sesión, protección y la página o _endpoint_), así que la duración incluye todo. El 302 de `/estadisticas` sin sesión tarda 0,3 ms porque `proteger` corta antes de la consulta; con sesión, 7,9 ms, con la consulta a MongoDB incluida.
-- **`/` y `/acerca` no aparecen:** son estáticas y se sirven sin pasar por el _middleware_, la misma razón del Paso 3. Para registrar esas peticiones hacen falta los registros del servidor web o de la plataforma (Vercel los tiene).
-- **`ctx.url.pathname` y no la URL completa:** la _query string_ puede contener datos personales o _tokens_. El registro de la _server island_ tampoco incluye sus _props_ cifradas.
-- **El `try/catch` vuelve a lanzar el error:** el _middleware_ registra el fallo, pero no lo convierte en respuesta; eso es trabajo de Astro (un 500) o del manejador de errores de cada _endpoint_ (I1.5).
+- **`registrar` va primero:** `await next()` espera a toda la cadena. El 302 sin sesión tarda 0,3 ms (`proteger` corta antes de la consulta); con sesión, 7,9 ms con MongoDB.
+- **`/` y `/acerca` no aparecen:** son estáticas (Paso 3). Esos registros los dan el servidor web o la plataforma (Vercel).
+- **`ctx.url.pathname`, no la URL completa:** la _query string_ puede llevar datos personales o _tokens_. Y el `try/catch` relanza: registra, pero la respuesta la decide Astro o el _endpoint_ (I1.5).
 
 <Callout type="risk">
 
-- **No registres cuerpos, _cookies_ ni cabeceras de autorización:** un registro con contraseñas o _tokens_ es una filtración esperando a ocurrir, porque los registros se copian a servicios externos y se guardan durante meses.
-- **`console.log` en producción no es un sistema de registros:** sirve para empezar, pero en Vercel cada función escribe por separado y sin estructura. En A6 verás registros estructurados (JSON) y trazas.
-- **Medir en cada petición tiene un coste mínimo, pero no nulo:** `performance.now()` y un `console.log` son baratos. Un _middleware_ que consulta la base de datos en cada petición (por ejemplo, para registrar en MongoDB) multiplica la carga: hazlo de forma asíncrona o por lotes.
+- **Nada de cuerpos, _cookies_ ni cabeceras de autorización en los registros:** se copian a servicios externos y se guardan meses.
+- **`console.log` no es un sistema de registros:** en A6, registros estructurados (JSON) y trazas.
+- **Un _middleware_ que consulta la base de datos en cada petición** multiplica la carga: asíncrono o por lotes.
 
 </Callout>
 
@@ -642,8 +642,8 @@ Ninguna página privada comprueba la sesión por su cuenta: lo hace el _middlewa
 
 ## Resumen
 
-- `src/middleware.ts` exporta `onRequest`; `defineMiddleware((ctx, next) => …)` y `sequence(a, b, c)` encadenan pasos.
-- `locals` vive una petición: el _middleware_ lo rellena y se tipa en `src/env.d.ts` (`declare namespace App { interface Locals … }`).
-- Devolver una respuesta sin `next()` corta la cadena: un 401 para APIs y una redirección para páginas.
-- Una página prerenderizada se sirve sin ejecutar el _middleware_: en producción no se puede proteger (medido: 302 en desarrollo, 200 en producción).
-- Un _middleware_ de registro, el primero de la cadena, mide método, ruta, código y duración de todo lo que pasa por el servidor.
+- `src/middleware.ts` exporta `onRequest`; `defineMiddleware` y `sequence(a, b, c)` encadenan pasos.
+- `locals` vive una petición y se tipa en `src/env.d.ts`.
+- Una respuesta sin `next()` corta la cadena: 401 en APIs, redirección en páginas.
+- Una página prerenderizada no pasa por el _middleware_: 302 en desarrollo, 200 en producción.
+- Un _middleware_ de registro, el primero, mide todo lo que pasa por el servidor.

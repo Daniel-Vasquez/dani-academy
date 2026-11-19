@@ -7,20 +7,15 @@ minutes: 75
 summary: "Guardas el mismo progreso embebido y referenciado y mides espacio y tiempos, ves cómo un array sin límite frena las escrituras simultáneas 22 veces y cómo un $lookup sin índice pasa de 38 ms a 16 s."
 ---
 
-Cada relación de tu modelo tiene dos formas de guardarse en MongoDB. **Embeber** es meter los datos relacionados dentro del mismo documento: un pedido con sus líneas dentro. **Referenciar** es guardarlos en documentos aparte, con un campo que apunta al otro (`userId`, `cursoId`), como una clave foránea de SQL pero sin que MongoDB la compruebe. Ninguna es mejor en general: la buena es la que sirve a tus patrones de acceso (I4.1) sin crear documentos que crecen sin límite. En esta sección vas a guardar el mismo progreso de lectura de las dos formas y a medir cuánto ocupa cada una y cuánto tarda cada patrón. También medirás los dos costes que deciden la mayoría de diseños: el de un array sin límite y el de un `$lookup`.
-
-**Lo que tendrás al terminar:** `src/i4/02-modelos.ts` y `src/i4/02-comparar.ts` (los dos diseños, medidos), `src/i4/02-sin-limite.ts` (el antipatrón), `src/i4/02-lookup.ts` (el coste de unir colecciones) y el modelo completo de Dani Academy en MongoDB.
+Cada relación se guarda **embebida** (los datos relacionados dentro del mismo documento) o **referenciada** (en documentos aparte, con un campo que apunta al otro, sin que MongoDB lo compruebe). La buena es la que sirve a tus patrones de acceso (I4.1) sin documentos que crecen sin límite. Aquí mides las dos, el coste de un array sin límite y el de un `$lookup`.
 
 **Requisitos:** el proyecto `mongo-academy` con `src/i4/catalogo.ts` (I4.1).
 
 ## Paso 1: el mismo progreso, embebido y referenciado
 
-El temario propone dos formas de guardar qué secciones ha leído cada usuario:
+**Qué es:** dos formas de guardar lo leído. **A, embeber:** un documento por usuario y curso con las secciones en un array (B5.4). **B, referenciar:** un documento por sección leída, con `userId`, `cursoId` y `seccionId`, como `section_progress` en esta plataforma.
 
-- **Opción A, embeber:** un documento por usuario y curso, con las secciones leídas en un array. Es lo que hiciste en B5.4.
-- **Opción B, referenciar:** un documento por sección leída, con `userId`, `cursoId` y `seccionId`. Es lo que hace esta plataforma (`section_progress`).
-
-Crea `src/i4/02-modelos.ts` con los dos modelos y sus índices:
+**Cómo se usa:** los modelos y sus índices, en `src/i4/02-modelos.ts`:
 
 ```ts
 // Archivo: src/i4/02-modelos.ts
@@ -56,7 +51,7 @@ export async function crearIndices() {
 }
 ```
 
-Y `src/i4/02-sembrar.ts`, que llena las dos colecciones con **los mismos datos**: 2000 usuarios que han empezado, al azar, un tercio de los cursos:
+`src/i4/02-sembrar.ts` llena las dos con **los mismos datos**, 2000 usuarios con un tercio de los cursos empezados al azar:
 
 ```ts
 // Archivo: src/i4/02-sembrar.ts
@@ -104,7 +99,7 @@ npm start -- src/i4/02-sembrar.ts
 Sembrado: 2000 usuarios · A: 17641 documentos · B: 69159 documentos
 ```
 
-Ahora compara las dos opciones en espacio y en cada patrón de acceso. Crea `src/i4/02-comparar.ts`:
+Compara espacio y patrones en `src/i4/02-comparar.ts`:
 
 ```ts
 // Archivo: src/i4/02-comparar.ts
@@ -212,23 +207,24 @@ Tiempo medio (ms, 500 operaciones)   A        B
   continuar donde lo dejaste         —     0.14
 ```
 
-- **En tiempo, empate:** las dos opciones responden a todos los patrones en menos de un milisegundo para leer y unos 5 ms para escribir (la escritura espera a que el dato quede guardado en el diario de MongoDB, por eso tarda más). Con un índice adecuado, buscar 1 documento o 4 cuesta lo mismo.
-- **En espacio, gana A:** B tiene cuatro veces más documentos, cada uno repitiendo `userId` y `cursoId`, y sus índices ocupan 7,9 MB frente a 1,5 MB. Con 512 MB en Atlas M0, es una diferencia que importa.
-- **En posibilidades, gana B:** cada lectura tiene su fecha, así que "continuar donde lo dejaste" es una consulta de 0,14 ms. En A, la fecha es del curso entero (`actualizado`), y no se sabe qué sección se leyó la última.
-
-Por eso las dos opciones son válidas aquí: el array de A está **acotado** (como mucho, 8 secciones por curso). La plataforma eligió B porque necesita la fecha de cada lectura, para "continuar donde lo dejaste" y para las estadísticas por día. Si solo hiciera falta saber qué está leído, A sería la elección más barata.
+- **En tiempo, empate:** menos de 1 ms al leer y unos 5 ms al escribir (se espera al diario de MongoDB). Con índice, 1 documento o 4 cuestan igual.
+- **En espacio, gana A:** B tiene cuatro veces más documentos que repiten `userId` y `cursoId`, e índices de 7,9 MB frente a 1,5 MB.
+- **En posibilidades, gana B:** cada lectura tiene fecha, y "continuar donde lo dejaste" tarda 0,14 ms. A solo sabe la fecha del curso entero.
+- **Las dos valen porque el array de A está acotado** (8 secciones). La plataforma eligió B por la fecha de cada lectura; si bastara saber qué está leído, A sería más barata.
 
 <Callout type="risk">
 
-- **Un empate con 2000 usuarios no es un empate con 2 millones:** los tiempos se mantienen mientras los índices quepan en la memoria del servidor. Ahí, el espacio de B (cuatro veces más índice) puede convertirse en lentitud. Por eso se mide el espacio aunque los tiempos coincidan.
-- **`$addToSet` y el índice único hacen lo mismo de dos formas:** en A, `$addToSet` evita repetir una sección dentro del array; en B, el índice único `{ userId, cursoId, seccionId }` evita dos documentos para la misma lectura (lo demostraste en B5.4 con 100 peticiones simultáneas). Sin él, B acumularía duplicados.
-- **`$collStats` mide después del punto de control:** WiredTiger escribe en disco cada 60 s. Sin el `fsync` del _script_, el espacio "en disco" de una colección recién creada sale en 4 KB.
+- **Un empate con 2000 usuarios no lo es con 2 millones:** los tiempos aguantan mientras los índices quepan en memoria. Por eso se mide el espacio.
+- **`$addToSet` en A y el índice único en B** evitan lo mismo: duplicar una lectura (B5.4). Sin el índice, B acumularía duplicados.
+- **`$collStats` mide tras el punto de control** (cada 60 s): sin el `fsync` del _script_, una colección nueva sale en 4 KB.
 
 </Callout>
 
 ## Paso 2: el antipatrón, un array sin límite
 
-La pregunta clave antes de embeber es: **¿este array tiene un máximo?** Las secciones de un curso, sí (8). Los cursos de un usuario, sí (24). Los alumnos de un curso, **no**: crecen con cada usuario de la plataforma. El mismo dato ("quién estudia qué curso") puede guardarse en los dos lados, y solo uno es seguro. Crea `src/i4/02-sin-limite.ts`:
+**Qué es:** antes de embeber, la pregunta clave es **¿este array tiene un máximo?** Las secciones de un curso, sí (8); los cursos de un usuario, sí (24); los alumnos de un curso, **no**. El mismo dato se puede guardar en los dos lados, y solo uno es seguro.
+
+**Cómo se usa:** crea `src/i4/02-sin-limite.ts`.
 
 ```ts
 // Archivo: src/i4/02-sin-limite.ts
@@ -322,23 +318,24 @@ npm start -- src/i4/02-sin-limite.ts
   ✓ en usuario.cursos (200 documentos):   151 ms en total
 ```
 
-- **`$addToSet` se encarece con el tamaño:** para no repetir un valor, MongoDB recorre el array entero. Con 200 000 alumnos tarda el triple que con 1000 (14 ms frente a 4,9 ms), y seguirá creciendo. A unos 21 bytes por `userId`, el curso llegará a 16 MB con unos 780 000 alumnos y, a partir de ahí, nadie más podrá matricularse.
-- **Leer el título no empeora** porque la proyección no envía el array por la red y el documento está en memoria. No lo tomes como un alivio: el servidor sigue cargando 4 MB por cada lectura del curso.
-- **El coste que más duele es la concurrencia:** 200 matrículas a la vez tardan 3,3 s cuando todas escriben en el mismo documento, y 0,15 s cuando cada una escribe en su usuario. MongoDB no puede modificar un documento en dos escrituras a la vez: las pone en fila. Un documento que todos actualizan es un **punto caliente**.
-
-La regla práctica: **embebe en el lado acotado**. Si necesitas la lista de alumnos de un curso, no la guardes en el curso: búscala con una consulta sobre los usuarios (o sobre las lecturas), con un índice por `cursoId`.
+- **`$addToSet` recorre el array entero:** con 200 000 alumnos tarda el triple que con 1000 (14 frente a 4,9 ms). A unos 21 bytes por `userId`, el curso llega a 16 MB con unos 780 000, y nadie más podrá matricularse.
+- **Leer el título no empeora** porque la proyección no envía el array, pero el servidor carga 4 MB en cada lectura.
+- **Lo que más duele es la concurrencia:** 200 matrículas a la vez tardan 3,3 s en un mismo documento y 0,15 s en documentos distintos. MongoDB pone en fila las escrituras de un documento: es un **punto caliente**.
+- **Embebe en el lado acotado:** la lista de alumnos se busca con una consulta sobre usuarios o lecturas, indexada por `cursoId`.
 
 <Callout type="risk">
 
-- **"Pocos" tiene que ser un máximo, no una estimación:** "un usuario tendrá pocas notificaciones" no es un límite; "un intento tiene 5 respuestas" sí lo es. Si no puedes escribir el número máximo, no embebas.
-- **Los arrays sin límite no avisan:** con 1000 elementos, todo es rápido. El problema aparece meses después, primero en los usuarios o cursos más populares, que son justo los que no quieres que fallen.
-- **Los índices sobre arrays multiplican:** un índice sobre `alumnos` (multiclave) tendría una entrada por elemento, 200 000 para este curso. Y MongoDB no permite que un índice compuesto tenga dos campos de array.
+- **"Pocos" tiene que ser un máximo:** "pocas notificaciones" no lo es; "5 respuestas por intento", sí. Sin número máximo, no embebas.
+- **Los arrays sin límite no avisan:** fallan meses después, primero en lo más popular.
+- **Los índices sobre arrays multiplican:** uno sobre `alumnos` tendría 200 000 entradas para este curso, y un índice compuesto no admite dos campos de array.
 
 </Callout>
 
 ## Paso 3: el coste de referenciar, `$lookup`
 
-Referenciar resuelve el crecimiento, pero tiene un coste al leer: si una pantalla necesita datos de dos colecciones, hay que unirlas. MongoDB lo hace con **`$lookup`**, la etapa de agregación que busca, para cada documento, los relacionados en otra colección (el equivalente a un `LEFT JOIN`). La otra opción es unir en la aplicación, con dos consultas. Crea `src/i4/02-lookup.ts`, un informe de los intentos de la última semana con el nombre de cada alumno:
+**Qué es:** con datos en dos colecciones hay que unirlas. **`$lookup`** busca, para cada documento, los relacionados en otra colección (como un `LEFT JOIN`); la alternativa es unir en la aplicación con dos consultas.
+
+**Cómo se usa:** un informe de intentos de la última semana con el nombre de cada alumno, en `src/i4/02-lookup.ts`:
 
 ```ts
 // Archivo: src/i4/02-lookup.ts
@@ -439,19 +436,23 @@ Informe de la última semana con 20000 alumnos
   unir en la aplicación (2 consultas)      9997 filas ·     23 ms · estrategia: —
 ```
 
-- **Con 2000 alumnos, el índice parece no importar:** sin él, MongoDB 8 usa `HashJoin`. Lee los 2000 alumnos una vez, los guarda en una tabla en memoria y busca en ella. Es rápido, y te hace creer que el diseño está bien.
-- **Con 20 000, se derrumba:** por encima de un umbral (unos 10 000 documentos en la colección unida), MongoDB ya no usa la tabla en memoria y pasa a `NestedLoopJoin`, que recorre los 20 000 alumnos **por cada uno** de los 9997 intentos. Son 16,3 s frente a 38 ms con el índice (`IndexedLoopJoin`), 430 veces más lento.
-- **Unir en la aplicación fue lo más rápido** (19 y 23 ms): una consulta con `$in` trae los alumnos que aparecen y un `Map` hace la unión. Son dos viajes a la base de datos, que en Atlas pesan más que en local, pero es una opción perfectamente válida.
+- **Con 2000 alumnos, el índice parece no importar:** MongoDB 8 usa `HashJoin`, una tabla en memoria. Rápido, y engañoso.
+- **Con 20 000, se derrumba:** pasado un umbral (unos 10 000 documentos unidos), usa `NestedLoopJoin` y recorre los 20 000 alumnos por cada uno de los 9997 intentos: 16,3 s frente a 38 ms con índice (`IndexedLoopJoin`), 430 veces más lento.
+- **Unir en la aplicación fue lo más rápido** (19 y 23 ms): `$in` trae los alumnos y un `Map` une. Son dos viajes, que en Atlas pesan más, pero es válido.
 
 <Callout type="risk">
 
-- **Indexa siempre el `foreignField` de un `$lookup`:** es el campo por el que se busca en la otra colección. Si es `_id`, ya tiene índice; si es otro (`userId`, `slug`, `email`), créalo. Sin él, el `$lookup` funciona en desarrollo y se cae en producción en cuanto la colección crece.
-- **Comprueba la estrategia con `explain`:** `HashJoin` o `IndexedLoopJoin` son aceptables; `NestedLoopJoin` en una colección que va a crecer es un error. Atlas M0 usa MongoDB 8.0, con las mismas tres estrategias.
-- **Un `$lookup` en el patrón más frecuente es una señal:** si la pantalla que más se visita necesita unir colecciones en cada carga, quizá ese dato debería estar embebido o copiado (el patrón _Extended Reference_ de I4.3).
+- **Indexa siempre el `foreignField` de un `$lookup`:** `_id` ya lo tiene; `userId`, `slug` o `email`, no. Sin él, funciona en desarrollo y se cae al crecer.
+- **Mira la estrategia con `explain`:** `HashJoin` o `IndexedLoopJoin` valen; `NestedLoopJoin` en una colección que crece, no. Atlas M0 usa MongoDB 8.0, con las mismas tres.
+- **Un `$lookup` en el patrón más frecuente es una señal:** ese dato quizá debería ir embebido o copiado (_Extended Reference_, I4.3).
 
 </Callout>
 
 ## Paso 4: la decisión, en una tabla
+
+**Qué es:** el resumen de qué hacer con cada tipo de relación.
+
+**Cómo se usa:**
 
 | Relación                               | Ejemplo                                                 | Decisión                                    | Por qué                                                        |
 | -------------------------------------- | ------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------- |
@@ -465,8 +466,8 @@ Informe de la última semana con 20000 alumnos
 
 <Callout type="risk">
 
-- **Referenciar no garantiza la integridad:** MongoDB no tiene claves foráneas. Si borras un curso, nadie borra sus lecturas. La aplicación (o un _script_) debe ocuparse, o validarlo con `$jsonSchema` (I4.6), que comprueba la forma pero no si la referencia existe.
-- **Se puede cambiar de opinión, pero cuesta:** pasar de A a B con la app en producción exige una migración (I4.6). Por eso la decisión se toma con la lista de patrones y con volumen de prueba, no al tuntún.
+- **Referenciar no garantiza integridad:** sin claves foráneas, borrar un curso no borra sus lecturas. Lo hace la aplicación o un _script_; `$jsonSchema` (I4.6) comprueba la forma, no que la referencia exista.
+- **Cambiar de opinión cuesta una migración** (I4.6): decide con la lista de patrones y volumen de prueba.
 
 </Callout>
 
@@ -576,14 +577,14 @@ continuar donde lo dejaste     LIMIT ← FETCH ← IXSCAN(userId_1_leidaEn_-1) �
 #7 últimos intentos del curso  LIMIT ← FETCH ← IXSCAN(userId_1_cursoId_1_fecha_-1) · 1 devueltos / 1 documentos examinados
 ```
 
-- **`PROJECTION_COVERED` y 0 documentos examinados:** el índice `{ userId, cursoId, seccionId }` contiene todo lo que piden #1 y #2, así que MongoDB responde **solo con el índice**, sin leer ningún documento. Es una consulta cubierta, la más barata posible.
-- **Un índice por patrón, y no más:** tres índices para cuatro patrones (#1 y #2 comparten el mismo). Cada índice de más encarece las escrituras, y aquí el patrón más frecuente es una escritura.
-- **Este es el modelo de la plataforma** (`section_progress` y `quiz_attempts` en `src/server/db-types.ts`), con nombres en español. Las sesiones de estudio, que resuelven el latido de I4.1, las verás en I4.3.
+- **`PROJECTION_COVERED` con 0 documentos examinados:** el índice `{ userId, cursoId, seccionId }` contiene todo lo que piden #1 y #2, y MongoDB responde **solo con el índice**: una consulta cubierta, la más barata.
+- **Un índice por patrón, y no más:** tres para cuatro patrones. Cada índice de más encarece las escrituras, y aquí lo más frecuente es escribir.
+- **Es el modelo de la plataforma** (`section_progress` y `quiz_attempts` en `src/server/db-types.ts`), en español. Las sesiones de estudio llegan en I4.3.
 
 <Callout type="risk">
 
-- **Una consulta cubierta deja de serlo con un campo de más:** si añades `leidaEn` a la proyección de #1, MongoDB tiene que leer los documentos (`FETCH`). Pide solo lo que la pantalla necesita.
-- **`_id` rompe la cobertura:** MongoDB lo devuelve siempre salvo que lo excluyas (`_id: 0`). Por eso las proyecciones del ejercicio lo quitan.
+- **Un campo de más rompe la cobertura:** con `leidaEn` en la proyección de #1, hay que leer documentos (`FETCH`). Pide solo lo necesario.
+- **`_id` también la rompe:** se devuelve siempre salvo `_id: 0`, como en las proyecciones del ejercicio.
 
 </Callout>
 
@@ -595,8 +596,8 @@ Antes de embeber, preguntas cuál es el máximo del array: embebes lo acotado qu
 
 ## Resumen
 
-- Embeber da lecturas de un documento y ocupa menos; referenciar permite crecer sin límite y consultar cada elemento por separado.
-- Con un array acotado (8 secciones), las dos opciones tienen el mismo rendimiento: decide el espacio y lo que necesiten los patrones.
-- Un array sin límite encarece cada `$addToSet`, acaba en el límite de 16 MB y convierte el documento en un punto caliente (22 veces más lento con 200 escrituras simultáneas).
-- `$lookup` necesita un índice en `foreignField`: sin él, al crecer la colección pasa de `HashJoin` a `NestedLoopJoin` (de 38 ms a 16 s).
-- Unir en la aplicación, con `$in` y un `Map`, es una alternativa válida al `$lookup`.
+- Embeber da lecturas de un documento y ocupa menos; referenciar crece sin límite y consulta cada elemento.
+- Con un array acotado, empate en tiempo: deciden el espacio y los patrones.
+- Un array sin límite encarece `$addToSet`, acaba en 16 MB y crea un punto caliente (22 veces más lento con 200 escrituras a la vez).
+- `$lookup` sin índice en `foreignField` pasa de `HashJoin` a `NestedLoopJoin` (de 38 ms a 16 s).
+- Unir en la aplicación con `$in` y un `Map` es una alternativa válida.

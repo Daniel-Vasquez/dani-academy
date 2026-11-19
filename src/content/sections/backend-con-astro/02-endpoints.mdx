@@ -7,15 +7,15 @@ minutes: 60
 summary: "Diseñas e implementas una API REST con GET, POST, PATCH y DELETE, query params, [id], JSON y FormData, códigos y cabeceras correctos, y resuelves tres fallos reales: null en MongoDB, prerender e índices."
 ---
 
-Un **_endpoint_** es un archivo `.ts` dentro de `src/pages/` que, en lugar de una página, devuelve una respuesta HTTP cualquiera: JSON, un 204 vacío o una redirección. Es la forma de dar a tu app una **API**: el formulario de React la llama con `fetch`, otra app podría consumirla y, en una aplicación móvil, sería su único punto de contacto con el servidor. En B3.3 aprendiste los verbos y los códigos de estado de HTTP; en esta sección los vas a aplicar a una API de verdad, con un diseño REST coherente, y vas a medir cada respuesta con `curl`. Por el camino vas a encontrar tres fallos que solo aparecen cuando una API se usa de verdad.
+Un **_endpoint_** es un `.ts` en `src/pages/` que devuelve una respuesta HTTP cualquiera (JSON, un 204, una redirección): la **API** de tu app, que llaman el formulario de React u otra app. Aquí aplicas los verbos y códigos de B3.3 a una API REST, la mides con `curl` y encuentras tres fallos que solo aparecen al usarla de verdad.
 
-**Lo que tendrás al terminar:** la API de entrenos completa (listar con filtros, crear con JSON o con un formulario HTML, leer, editar y borrar uno) y la API REST de notas del Planificador.
-
-**Requisitos:** la app de I3.1 y los temas B3.3 (HTTP), I1.4 (Zod) e I1.5 (errores tipados, con `validar` y `aRespuesta` en `src/lib/errores.ts`).
+**Requisitos:** la app de I3.1, B3.3 (HTTP), I1.4 (Zod) e I1.5 (`validar` y `aRespuesta` en `src/lib/errores.ts`).
 
 ## Paso 1: diseñar antes de programar
 
-Una API REST se organiza alrededor de **recursos** (sustantivos: entrenos, notas) y de **verbos HTTP** (lo que haces con ellos). Antes de escribir código, se diseña en una tabla:
+**Qué es:** una API REST se organiza en **recursos** (sustantivos: entrenos, notas) y **verbos HTTP** (lo que haces con ellos), y se diseña en una tabla antes de programarla.
+
+**Cómo se usa:**
 
 | Método y ruta                     | Qué hace                  | Respuesta correcta                               | Errores posibles                |
 | --------------------------------- | ------------------------- | ------------------------------------------------ | ------------------------------- |
@@ -25,23 +25,22 @@ Una API REST se organiza alrededor de **recursos** (sustantivos: entrenos, notas
 | `PATCH /api/entrenos/:id`         | Cambia **algunos** campos | `200` con el resultado                           | `404`, `422`                    |
 | `DELETE /api/entrenos/:id`        | Borra uno                 | `204` sin cuerpo                                 | `404`                           |
 
-Las convenciones que sigue:
-
-- **Rutas en plural y sin verbos:** `/api/entrenos/123`, no `/api/borrarEntreno?id=123`. El verbo ya va en el método.
-- **La colección y el elemento son dos archivos:** `src/pages/api/entrenos/index.ts` (la colección) y `src/pages/api/entrenos/[id].ts` (un elemento, con el _id_ como parámetro dinámico).
-- **`PATCH` para cambios parciales, `PUT` para reemplazar entero:** un formulario de edición casi siempre envía solo lo que cambia, así que `PATCH` es lo habitual.
-- **El código de estado dice qué pasó, el cuerpo dice el detalle.** Un cliente debe poder decidir qué hacer solo mirando el código.
+- **Rutas en plural y sin verbos:** `/api/entrenos/123`, no `/api/borrarEntreno?id=123`.
+- **Colección y elemento, dos archivos:** `src/pages/api/entrenos/index.ts` y `src/pages/api/entrenos/[id].ts`.
+- **`PATCH` cambia parte, `PUT` reemplaza entero;** un formulario de edición casi siempre es `PATCH`. El código dice qué pasó y el cuerpo, el detalle.
 
 <Callout type="risk">
 
-- **No devuelvas 200 con `{ "error": … }`:** un cliente que solo mira `res.ok` creerá que todo fue bien. Cada fallo, con su código: 4xx si es culpa de la petición, 5xx si es del servidor.
-- **No reveles qué existe a quien no debe saberlo:** un `GET` de un recurso de otro usuario debe responder 404 (como si no existiera), no 403. Por eso las consultas de esta lección filtran siempre por `userId`.
+- **Nada de 200 con `{ "error": … }`:** quien mira `res.ok` creerá que fue bien. 4xx si es culpa de la petición, 5xx si es del servidor.
+- **Un recurso ajeno responde 404, no 403:** no reveles qué existe. Por eso todas las consultas filtran por `userId`.
 
 </Callout>
 
 ## Paso 2: la colección, con query params, JSON y FormData
 
-Primero, el esquema de los filtros y de los cambios parciales. Sustituye `src/schemas/entreno.ts` (añade `CambiosEntrenoSchema`, `FiltroEntrenosSchema` y sus tipos):
+**Qué es:** cada método es una función exportada con el nombre del verbo (`GET`, `POST`…) que recibe el **contexto** de la petición: **`url.searchParams`** (los _query params_, siempre texto), **`request.json()`** (un `fetch` con JSON) y **`request.formData()`** (un formulario HTML), y devuelve **`Response.json(datos, { status, headers })`** o **`redirect(url, 303)`**.
+
+**Cómo se usa:** sustituye `src/schemas/entreno.ts`, con `CambiosEntrenoSchema`, `FiltroEntrenosSchema` y sus tipos:
 
 ```ts
 // Archivo: src/schemas/entreno.ts
@@ -99,7 +98,7 @@ export type FiltroEntrenos = z.output<typeof FiltroEntrenosSchema>;
 export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
 ```
 
-Después, la capa de datos. Sustituye `src/server/entrenos.ts`:
+La capa de datos, `src/server/entrenos.ts`:
 
 ```ts
 // Archivo: src/server/entrenos.ts
@@ -186,7 +185,7 @@ export async function borrarEntreno(userId: string, id: string): Promise<boolean
 }
 ```
 
-Ahora el _endpoint_ de la colección. Borra `src/pages/api/entrenos.ts` y crea `src/pages/api/entrenos/index.ts` (la URL sigue siendo `/api/entrenos`):
+Borra `src/pages/api/entrenos.ts` y crea `src/pages/api/entrenos/index.ts` (la URL sigue siendo `/api/entrenos`):
 
 ```ts
 // Archivo: src/pages/api/entrenos/index.ts
@@ -233,13 +232,9 @@ export const POST: APIRoute = async ({ request, redirect }) => {
 };
 ```
 
-Cada método es una función exportada con el nombre del verbo (`GET`, `POST`…) que recibe el **contexto** de la petición:
-
-- **`url.searchParams`**: los _query params_ (`?tipo=fuerza&limite=10`). Llegan como texto; `FiltroEntrenosSchema` los convierte y valida (`z.coerce.number()`).
-- **`request.json()`**: el cuerpo de un `fetch` con `Content-Type: application/json`.
-- **`request.formData()`**: el cuerpo de un formulario HTML. El mismo `POST` acepta los dos, mirando la cabecera `Content-Type`.
-- **`Response.json(datos, { status, headers })`**: la respuesta JSON, con el código y las cabeceras.
-- **`redirect(url, 303)`**: una redirección. Tras un `POST` de formulario se responde **303**, que le dice al navegador que haga un `GET` a la nueva URL; así, recargar la página no vuelve a enviar el formulario.
+- **`FiltroEntrenosSchema`** convierte y valida los _query params_ (`z.coerce.number()`).
+- **El mismo `POST` acepta JSON y `FormData`,** mirando `Content-Type`.
+- **Tras un `POST` de formulario, 303:** el navegador hace un `GET` a la nueva URL y recargar no reenvía el formulario.
 
 Un formulario HTML que funciona **sin JavaScript**, `src/pages/nuevo.astro`:
 
@@ -267,9 +262,19 @@ const hayError = Astro.url.searchParams.has("error");
 </Base>
 ```
 
+<Callout type="risk">
+
+- **MongoDB guarda `undefined` como `null`:** con km vacío, Zod da `undefined` y el _driver_ guardó `km: null`, que `EntrenoDTOSchema` rechaza: **un solo documento así** rompió el listado. Por eso `{ ignoreUndefined: true }` (con `fetch` no pasaba: `JSON.stringify` elimina los `undefined`).
+- **Por eso también `actualizarEntreno` usa `$unset`:** con `ignoreUndefined`, `$set` con `km: undefined` no borra nada y el entreno quedaba como **fuerza con 9 km**. Lo destapó un test de integración en I8.4.
+- **Una página que lee la URL no puede ser estática:** sin `prerender = false`, el mensaje de `?error=1` de `nuevo.astro` nunca salía, porque se generó en el _build_ (I3.1).
+
+</Callout>
+
 ## Paso 3: un elemento con `[id]`, y la medición
 
-Crea `src/pages/api/entrenos/[id].ts`:
+**Qué es:** `[id].ts` atiende un recurso concreto; `params.id` es el trozo de la URL que ocupa `[id]`.
+
+**Cómo se usa:** crea `src/pages/api/entrenos/[id].ts`.
 
 ```ts
 // Archivo: src/pages/api/entrenos/[id].ts
@@ -317,13 +322,13 @@ export const DELETE: APIRoute = async ({ params }) => {
 };
 ```
 
-`params.id` es el trozo de la URL que ocupa `[id]`. Arranca `npm run dev` y prueba la API completa. Para guardar el _id_ de un entreno en una variable de la terminal:
+Arranca `npm run dev` y guarda el _id_ de un entreno en una variable:
 
 ```bash
 ID=$(curl -s "http://localhost:4321/api/entrenos?limite=1" | grep -oE '"id":"[0-9a-f]{24}"' | head -1 | cut -d'"' -f4)
 ```
 
-Medido con `curl -i` (que muestra el código y las cabeceras):
+Con `curl -i`, que muestra código y cabeceras:
 
 ```text
 $ POST /api/entrenos (JSON)
@@ -363,19 +368,14 @@ $ POST formulario HTML con error
   location: /nuevo?error=1
 ```
 
-Fíjate en los detalles:
-
-- **El `PATCH` a `fuerza` se rechaza** aunque `{ tipo: "fuerza" }` sea válido por sí solo: el entreno tiene km, y la regla dice que solo los de running los llevan. Por eso el _endpoint_ valida el **resultado** (`{ ...actual, ...cambios }`) con el esquema completo.
-- **Un _id_ mal formado es un 404,** no un 500: `aObjectId` comprueba el formato antes de crear el `ObjectId`, que lanzaría una excepción.
-- **Un método que no exportas responde 404** (con una página HTML), no el 405 _Method Not Allowed_ que sería lo correcto en HTTP. Es el comportamiento de Astro, en desarrollo y en producción.
+- **El `PATCH` a `fuerza` se rechaza** aunque `{ tipo: "fuerza" }` sea válido: el entreno tiene km. El _endpoint_ valida el **resultado** (`{ ...actual, ...cambios }`) con el esquema completo.
+- **Un _id_ mal formado es un 404, no un 500:** `aObjectId` comprueba el formato antes de crear un `ObjectId`, que lanzaría.
+- **Un método no exportado da 404** (con HTML), no el 405 correcto en HTTP: así lo hace Astro, en desarrollo y en producción.
 
 <Callout type="risk">
 
-- **Un `undefined` se guarda en MongoDB como `null`:** al enviar el formulario sin JavaScript con el campo km vacío, Zod lo convierte en `undefined` (correcto), pero el _driver_ de MongoDB lo guardó como `km: null`. Ese `null` no es un km válido para `EntrenoDTOSchema`, y **un solo documento así** hizo que el listado del navegador mostrara "No se pudieron cargar los entrenos". Por eso la colección se abre con `{ ignoreUndefined: true }`: los `undefined` no se guardan. (Con `fetch` no pasaba, porque `JSON.stringify` ya elimina los `undefined`).
-- **`ignoreUndefined` también afecta a los cambios, y por eso `actualizarEntreno` usa `$unset`:** para pasar un entreno de running a fuerza hay que quitarle los km, y el `PATCH` lo pide con `{"tipo":"fuerza","km":null}` (Zod convierte el `null` en `undefined`). Pero un `$set` con `km: undefined` no borra nada: el _driver_ descarta la clave, y el entreno quedaba como **fuerza con 9 km**, justo lo que la regla prohíbe. Lo descubrió un test de integración en I8.4. `$unset` borra explícitamente las claves que llegan con `undefined`.
-- **Una página que lee la URL no puede ser estática:** la primera versión de `nuevo.astro` no tenía `prerender = false`, y el mensaje de `?error=1` **nunca aparecía**: la página se generó en el _build_, cuando no había ninguna URL que leer (I3.1). Todo lo que lea `Astro.url.searchParams`, cookies o la sesión va en servidor.
-- **Un `PATCH` que valida solo los campos que llegan deja pasar estados inválidos:** cada campo puede ser válido y la combinación no. Valida el resultado, o las reglas de negocio en el servicio (I3.5).
-- **`checkOrigin` protege los formularios:** Astro rechaza con 403 un `POST` de formulario que venga de otro origen (CSRF, Tanda 9). Los `curl` de esta lección llevan la cabecera `Origin` por eso.
+- **Un `PATCH` que valida solo lo que llega** deja pasar combinaciones inválidas: valida el resultado, o las reglas en el servicio (I3.5).
+- **`checkOrigin` rechaza con 403** un `POST` de formulario de otro origen (CSRF). Por eso los `curl` llevan la cabecera `Origin`.
 
 </Callout>
 
@@ -517,7 +517,7 @@ export async function borrarNota(userId: string, id: string): Promise<boolean> {
 }
 ```
 
-El índice único, en un _script_ aparte, `scripts/crear-indices.mjs`:
+El índice único, en `scripts/crear-indices.mjs`:
 
 ```js
 // Archivo: scripts/crear-indices.mjs
@@ -662,18 +662,15 @@ $ curl /api/notas/$ID
   {"error":"La nota 6ad192e1787f958153901640 no existe"}
 ```
 
-Las decisiones:
-
-- **La unicidad la garantiza la base de datos, no el código:** comprobar "¿existe ya una nota con este título?" antes de insertar falla con dos peticiones simultáneas (las dos ven que no existe y las dos insertan). El índice único hace que MongoDB rechace la segunda con el error `11000`, y `siDuplicada` lo traduce a un `ConflictoError` (409, I1.5). Funciona igual al crear y al editar.
-- **El índice se crea en un _script_, no en el código de la API:** la primera versión de esta solución lo creaba en la primera petición y guardaba la promesa para no repetirlo. Al borrar la colección durante las pruebas, MongoDB borró también su índice, el código no lo volvió a crear y **el título repetido se aceptó con un 201**. Un _script_ de preparación (como el `db:setup` de esta plataforma) se ejecuta al desplegar y no depende del estado de un proceso.
-- **"No hay nada que cambiar" se comprueba en el _endpoint_:** como `.refine()` en el esquema, el mensaje no era de ningún campo y la respuesta llegaba como `"campos": {}`, sin ninguna explicación. Con un `ValidacionError` explícito, el cliente recibe el motivo.
-- **`CambiosNotaSchema` no tiene valores por defecto:** si los tuviera, un `PATCH` de solo el título reiniciaría `contenido` a `""` y `fijada` a `false`.
+- **La unicidad la garantiza la base de datos:** comprobar antes de insertar falla con dos peticiones simultáneas. El índice hace que MongoDB rechace la segunda con `11000`, y `siDuplicada` la traduce a un `ConflictoError` (409, I1.5), al crear y al editar.
+- **El índice va en un _script_, no en la API:** una primera versión lo creaba en la primera petición; al borrar la colección en las pruebas, el índice desapareció y un título repetido dio **201**. Un _script_ como el `db:setup` de esta plataforma se ejecuta al desplegar.
+- **"No hay nada que cambiar" se comprueba en el _endpoint_:** con `.refine()` llegaba como `"campos": {}`, sin explicación. Y **`CambiosNotaSchema` no tiene valores por defecto,** o un `PATCH` del título reiniciaría `contenido` y `fijada`.
 
 <Callout type="risk">
 
-- **Ejecuta el _script_ de índices en cada base de datos:** en desarrollo, en la de pruebas y en producción. Sin el índice, la API no da ningún error: simplemente deja de garantizar la regla.
-- **El índice no se puede crear si ya hay duplicados:** si la colección ya tiene dos notas con el mismo título, `createIndex` falla con `E11000`. Hay que limpiar los datos antes (con una migración, como en I1.6).
-- **La ordenación por `fijada` y `actualizada` necesita su índice cuando haya muchas notas:** con pocas da igual; con miles por usuario, añade `{ userId: 1, fijada: -1, actualizada: -1 }` al _script_ (B4.4).
+- **Ejecuta el _script_ de índices en cada base de datos:** sin el índice no hay error, solo deja de cumplirse la regla.
+- **Con duplicados ya existentes, `createIndex` falla con `E11000`:** limpia antes con una migración (I1.6).
+- **Con miles de notas, la ordenación necesita su índice:** `{ userId: 1, fijada: -1, actualizada: -1 }` (B4.4).
 
 </Callout>
 
@@ -685,8 +682,8 @@ Tus rutas y códigos de estado siguen las convenciones REST de B3.3: diseñas la
 
 ## Resumen
 
-- Un _endpoint_ exporta una función por verbo (`GET`, `POST`, `PATCH`, `DELETE`) que recibe `params`, `url`, `request` y devuelve un `Response`.
-- REST: recursos en plural, la colección en `index.ts`, el elemento en `[id].ts`; el verbo dice qué se hace y el código, qué pasó.
-- `201` + `Location` al crear, `204` al borrar, `303` tras un formulario HTML, `404` también para _ids_ mal formados.
-- Valida _query params_ y cuerpos con Zod, y en un `PATCH` valida el resultado completo.
-- Tres fallos medidos: MongoDB guarda `undefined` como `null` (`ignoreUndefined`), una página estática no lee la URL (`prerender = false`) y un índice creado desde el código se pierde (_script_ de índices).
+- Un _endpoint_ exporta una función por verbo y devuelve un `Response`.
+- REST: recursos en plural, `index.ts` y `[id].ts`; el verbo dice qué, el código qué pasó.
+- `201` + `Location`, `204`, `303` tras un formulario, `404` para _ids_ mal formados.
+- Zod para _query params_ y cuerpos; en un `PATCH`, valida el resultado.
+- Tres fallos medidos: `undefined` como `null`, una página estática que no lee la URL y un índice perdido.

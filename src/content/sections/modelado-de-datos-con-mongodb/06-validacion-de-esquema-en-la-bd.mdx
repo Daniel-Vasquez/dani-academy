@@ -7,15 +7,15 @@ minutes: 75
 summary: "Haces que MongoDB rechace documentos inválidos con $jsonSchema, mides qué hacen validationLevel y validationAction con datos antiguos, combinas Zod y la BD y aplicas migraciones versionadas en orden."
 ---
 
-MongoDB no obliga a que los documentos de una colección tengan la misma forma. Esa flexibilidad es útil al diseñar (I4.3, _Schema Versioning_), pero tiene un riesgo: un _bug_ en la app, un _script_ de mantenimiento con una errata o un servicio que escribe directamente pueden guardar una puntuación de 50, una fecha como texto o un campo con el nombre mal escrito, y nadie se entera hasta que una pantalla falla meses después. La **validación de esquema** hace que la propia base de datos rechace esos documentos. En esta sección vas a crear validadores con `$jsonSchema`, a medir qué pasa al añadirlos a una colección que ya tiene datos, a combinarlos con Zod y a cambiar el esquema con migraciones versionadas.
-
-**Lo que tendrás al terminar:** `src/i4/06-validar.ts` y `06-niveles.ts` (el validador y sus modos), `06-doble.ts` (Zod y la base de datos juntos) y un sistema de migraciones (`src/i4/migrar.ts` y `src/i4/migraciones/`).
+MongoDB no obliga a que los documentos tengan la misma forma, y un _bug_, un _script_ con una errata u otro servicio pueden guardar una puntuación de 50 o una fecha como texto sin que nadie se entere. La **validación de esquema** hace que la propia base de datos los rechace. Aquí creas validadores con `$jsonSchema`, los añades a colecciones con datos, los combinas con Zod y cambias el esquema con migraciones.
 
 **Requisitos:** el proyecto `mongo-academy` con Zod instalado (I4.5).
 
 ## Paso 1: `$jsonSchema`, la base de datos dice que no
 
-Un validador es un filtro que cada documento tiene que cumplir para entrar. Se define al crear la colección (`createCollection`) con `$jsonSchema`, una variante de JSON Schema con un campo propio, **`bsonType`**, para los tipos de BSON (`int`, `double`, `date`, `objectId`, `bool`…). Crea `src/i4/06-validar.ts`:
+**Qué es:** un validador es un filtro que cada documento debe cumplir para entrar. Se define al crear la colección (`createCollection`) con `$jsonSchema`, una variante de JSON Schema con **`bsonType`** para los tipos de BSON (`int`, `double`, `date`, `objectId`, `bool`…).
+
+**Cómo se usa:** crea `src/i4/06-validar.ts`.
 
 ```ts
 // Archivo: src/i4/06-validar.ts
@@ -97,27 +97,23 @@ npm start -- src/i4/06-validar.ts
 Documentos guardados: 2
 ```
 
-- **El error siempre es el código 121, `Document failed validation`**, para inserciones y para actualizaciones. El motivo concreto está en `errInfo.details` (desde MongoDB 5): la función `motivo` lo traduce a una línea (`puntuacion: comparison failed`).
-- **`bsonType: "int"` rechaza 4,5:** el _driver_ envía los números enteros de JavaScript como `int` y los decimales como `double`. Si un campo puede tener decimales, usa `"double"` o `"number"` (que acepta los cuatro tipos numéricos).
-- **`pattern` valida el formato:** `^([BIA][1-8]|P1)$` es el mismo que usa la plataforma para los identificadores de curso. `Z9` no pasa.
-- **Los campos que el esquema no menciona se aceptan:** `comentario` entró sin problemas. Para prohibirlos hace falta `additionalProperties: false` (lo usarás en el ejercicio).
+- **El error siempre es el código 121, `Document failed validation`,** al insertar y al actualizar. El motivo está en `errInfo.details` (MongoDB 5+), que `motivo` traduce a una línea (`puntuacion: comparison failed`).
+- **`bsonType: "int"` rechaza 4,5:** el _driver_ envía enteros como `int` y decimales como `double`. Con decimales, `"double"` o `"number"`.
+- **`pattern` valida formato:** `^([BIA][1-8]|P1)$`, el de los cursos de la plataforma, rechaza `Z9`. Y los campos no mencionados se aceptan (`comentario`), salvo con `additionalProperties: false` (ejercicio).
 
 <Callout type="risk">
 
-- **El validador no comprueba referencias:** `cursoId: "B5"` cumple el formato aunque el curso no exista. MongoDB no tiene claves foráneas (I4.2): eso lo tiene que comprobar la app.
-- **`errInfo` solo llega si lo lees:** el mensaje del error (`Document failed validation`) no dice qué campo falló. Registra `errInfo.details` en tus errores del servidor, o depurarás a ciegas.
-- **El validador no convierte nada:** si la app envía `"4"` (texto), MongoDB lo rechaza; no lo convierte en `4`. La conversión (como `z.coerce` en I1.4) es trabajo de la app, antes de guardar.
+- **El validador no comprueba referencias:** `cursoId: "B5"` pasa aunque el curso no exista (I4.2). Eso es de la app.
+- **`errInfo` solo llega si lo lees:** `Document failed validation` no dice qué falló. Registra `errInfo.details`.
+- **El validador no convierte:** `"4"` como texto se rechaza, no se convierte. La conversión (`z.coerce`, I1.4) es de la app.
 
 </Callout>
 
 ## Paso 2: añadirlo a una colección con datos, `validationLevel` y `validationAction`
 
-Lo normal es añadir el validador cuando la colección ya tiene datos, y algunos de esos datos pueden no cumplirlo. Dos opciones deciden qué pasa con ellos:
+**Qué es:** dos opciones deciden qué pasa con los datos antiguos que no cumplen. **`validationLevel`:** `strict` (por defecto) valida todo; `moderate` no valida actualizaciones de documentos **ya inválidos**. **`validationAction`:** `error` (por defecto) rechaza; `warn` acepta y avisa en el registro del servidor. **`collMod`** las cambia sin tocar los documentos.
 
-- **`validationLevel`:** `strict` (por defecto) valida todas las inserciones y actualizaciones; `moderate` no valida las actualizaciones de documentos que **ya eran inválidos**.
-- **`validationAction`:** `error` (por defecto) rechaza el documento; `warn` lo acepta y escribe un aviso en el registro del servidor.
-
-`collMod` cambia el validador y estas opciones en una colección existente, sin tocar sus documentos. Crea `src/i4/06-niveles.ts`:
+**Cómo se usa:** crea `src/i4/06-niveles.ts`.
 
 ```ts
 // Archivo: src/i4/06-niveles.ts
@@ -196,37 +192,36 @@ validationLevel: strict · validationAction: warn
 Documentos que incumplen el esquema: antiguo
 ```
 
-- **`strict` y `error`:** nada inválido entra, ni siquiera una actualización inocente (`revisado: true`) del documento antiguo, que ya era inválido. El efecto es que ese documento queda **bloqueado** hasta que alguien lo arregle.
-- **`moderate` y `error`:** los documentos nuevos y los válidos siguen protegidos, pero el antiguo se puede seguir actualizando. Es el modo para **introducir** un validador en una colección con datos imperfectos.
-- **`warn`:** todo entra. El aviso queda en el registro del servidor:
+- **`strict` y `error`:** nada inválido entra, y el documento antiguo queda **bloqueado** incluso para un inocente `revisado: true`.
+- **`moderate` y `error`:** lo nuevo sigue protegido y lo antiguo se puede actualizar. Es el modo para **introducir** un validador en datos imperfectos.
+- **`warn`:** todo entra, con este aviso en el registro:
 
 ```text
 W STORAGE 20294 Document would fail validation {"namespace":"academy_lab.i4v_niveles","document":{"_id":"bien","userId":"u_ana","cursoId":"B5","puntuacion":8},"errInfo":{"failingDocumentId":"bien","details":{"operatorName":"$jsonSchema", …
 ```
 
-- **`$jsonSchema` también sirve como filtro de consulta:** `find({ $nor: [esquema] })` devuelve los documentos que **no** cumplen el esquema. Así sabes cuántos tienes que migrar antes de pasar a `strict`.
+- **`find({ $nor: [esquema] })`** devuelve los documentos que **no** cumplen: cuántos hay que migrar antes de pasar a `strict`.
 
 <Callout type="risk">
 
-- **El aviso de `warn` incluye el documento entero**, y los registros se copian y se guardan durante meses. Si el documento tiene datos personales, acaban en el registro (I3.4). Usa `warn` solo un tiempo, para medir.
-- **En Atlas M0 no puedes leer esos avisos:** el plan gratuito no da acceso a los registros del servidor. Para medir sin registros, usa la consulta `$nor` del _script_.
-- **Cambiar el validador necesita permisos de administrador de la base de datos:** `collMod` requiere el rol `dbAdmin`, que `readWrite` no incluye. El _script_ `scripts/db-setup.ts` de esta plataforma lo detecta y avisa (`⚠ … no se actualizó la validación (el usuario necesita el rol dbAdmin para collMod)`) en lugar de fallar.
-- **`bypassDocumentValidation: true` se salta el validador** (el _script_ lo usa para restaurar). Requiere un permiso específico y solo debe aparecer en migraciones y restauraciones de _backup_, nunca en el código de la app.
+- **El aviso de `warn` lleva el documento entero** a registros que se guardan meses, con datos personales si los hay (I3.4). Úsalo poco tiempo; en Atlas M0, además, no puedes leerlo: mide con `$nor`.
+- **`collMod` requiere el rol `dbAdmin`,** que `readWrite` no incluye. `scripts/db-setup.ts` de esta plataforma lo detecta y avisa en vez de fallar.
+- **`bypassDocumentValidation: true` se salta el validador** con un permiso específico: solo en migraciones y restauraciones, nunca en la app.
 
 </Callout>
 
 ## Paso 3: doble validación, Zod en la app y `$jsonSchema` en la base de datos
 
-Si la app ya valida con Zod (I1.4), ¿para qué validar otra vez en la base de datos? Porque cada una protege de cosas distintas:
+**Qué es:** las dos protegen de cosas distintas.
 
-|                 | Zod en la app                          | `$jsonSchema` en la BD                                                   |
+| Aspecto         | Zod en la app                          | `$jsonSchema` en la BD                                                   |
 | --------------- | -------------------------------------- | ------------------------------------------------------------------------ |
 | Mensajes        | En español, por campo, para el usuario | Código 121 y detalles técnicos                                           |
 | Convierte tipos | Sí (`z.coerce`, `z.stringbool`)        | No                                                                       |
 | Protege de      | Datos del usuario                      | **Cualquiera** que escriba: la app, un _script_, otro servicio, un _bug_ |
 | Se puede saltar | Sí: basta con no llamarlo              | Solo con un permiso especial                                             |
 
-Crea `src/i4/06-doble.ts`:
+**Cómo se usa:** crea `src/i4/06-doble.ts`.
 
 ```ts
 // Archivo: src/i4/06-doble.ts
@@ -305,22 +300,22 @@ Script sin Zod, ×10:     MongoDB: Document failed validation
 Documentos: 1
 ```
 
-- **La ruta normal no llega a la base de datos con datos malos:** Zod los para antes, con mensajes que se pueden enseñar al usuario.
-- **El _script_ con _bug_ se salta Zod**, porque escribe directamente, y es la base de datos la que lo para. Sin el validador, la puntuación de 50 estaría guardada.
-- **El precio es mantener dos esquemas:** las reglas están escritas dos veces. Si cambias el máximo de 5 a 10 en uno y no en el otro, la app aceptará lo que la base de datos rechaza (o al revés).
+- **La ruta normal no llega a la base de datos con datos malos:** Zod para antes, con mensajes para el usuario.
+- **El _script_ con _bug_ se salta Zod** y lo para la base de datos; sin validador, la puntuación de 50 estaría guardada.
+- **El precio son dos esquemas:** cambiar el máximo en uno y no en el otro los desincroniza.
 
 <Callout type="risk">
 
-- **Mantén los dos esquemas juntos:** en el mismo archivo, o en dos archivos uno al lado del otro, y con un test que intente insertar en la base de datos un documento que Zod da por bueno. Zod 4 puede generar JSON Schema (`z.toJSONSchema`), pero no conoce `bsonType` (no hay `date` ni `objectId` en JSON Schema), así que no sirve tal cual para MongoDB.
-- **El validador de la base de datos debe ser igual de estricto o más permisivo que Zod, nunca más estricto:** si la base de datos rechaza algo que Zod acepta, el usuario recibe un error 500 en lugar de un mensaje claro.
+- **Mantén los dos esquemas juntos,** con un test que inserte en la base de datos lo que Zod da por bueno. `z.toJSONSchema` no sirve tal cual: no conoce `bsonType` (`date`, `objectId`).
+- **La base de datos, igual de estricta que Zod o más permisiva, nunca más:** si rechaza lo que Zod acepta, el usuario ve un 500 en vez de un mensaje.
 
 </Callout>
 
 ## Paso 4: migraciones de esquema con _scripts_ versionados
 
-En I4.3 migraste documentos con un `updateMany` suelto. En una app real hay muchos cambios a lo largo del tiempo (crear una colección, añadir un campo, cambiar un validador, crear un índice) y cada entorno (tu equipo, el de pruebas, producción) tiene que aplicarlos **todos, en orden y una sola vez**. Un sistema de migraciones lo resuelve con tres piezas: un archivo por cambio, numerado; una colección que apunta cuáles se han aplicado, y un ejecutor que aplica las pendientes.
+**Qué es:** cada entorno debe aplicar todos los cambios (colecciones, campos, validadores, índices) **en orden y una sola vez**. Un sistema de migraciones lo resuelve con un archivo numerado por cambio, una colección que apunta los aplicados y un ejecutor de los pendientes.
 
-Crea la carpeta y la primera migración, `src/i4/migraciones/001-crear-evaluaciones.ts`:
+**Cómo se usa:** crea la carpeta y la primera migración, `src/i4/migraciones/001-crear-evaluaciones.ts`:
 
 ```bash
 mkdir -p src/i4/migraciones
@@ -351,7 +346,7 @@ export async function subir(db: Db) {
 }
 ```
 
-La segunda, `src/i4/migraciones/002-anadir-aprobado.ts`, añade un campo obligatorio a una colección que ya tiene datos:
+La segunda, `src/i4/migraciones/002-anadir-aprobado.ts`, añade un campo obligatorio a una colección con datos:
 
 ```ts
 // Archivo: src/i4/migraciones/002-anadir-aprobado.ts
@@ -439,7 +434,7 @@ try {
 }
 ```
 
-Y un _script_ para probarlo con datos de la "versión 1" entre las dos migraciones, `src/i4/06-probar-migraciones.ts`:
+Y un _script_ que mete datos de la "versión 1" entre las dos, `src/i4/06-probar-migraciones.ts`:
 
 ```ts
 // Archivo: src/i4/06-probar-migraciones.ts
@@ -470,7 +465,7 @@ if (accion === "comprobar") {
 await cliente.close();
 ```
 
-La secuencia completa: aplicar solo la 001, insertar datos antiguos, aplicar las pendientes, repetir y comprobar:
+Aplicar la 001, insertar datos antiguos, aplicar las pendientes, repetir y comprobar:
 
 ```text
 $ npm start -- src/i4/migrar.ts --hasta 001
@@ -490,17 +485,15 @@ Insertar sin «aprobado» ahora falla: Document failed validation
 Registro: [{"_id":"001-crear-evaluaciones","descripcion":"Crear la colección de evaluaciones con validación e índice","ms":31},{"_id":"002-anadir-aprobado","descripcion":"Añadir «aprobado» a las evaluaciones y exigirlo en el validador","ms":9}]
 ```
 
-- **Cada migración se aplica una vez:** la segunda ejecución de `migrar.ts` no hace nada, porque `_migraciones` ya tiene las dos. En producción, ejecuta `migrar.ts` en cada despliegue: solo aplicará las nuevas.
-- **El orden de la 002 importa:** primero los datos (las 2 evaluaciones antiguas reciben `aprobado`) y después el validador que lo exige. Al revés, el `collMod` dejaría dos documentos inválidos y, con `strict`, bloqueados.
-- **Se apunta al terminar:** si una migración falla a mitad, no queda registrada y la próxima ejecución la reintenta. Por eso cada migración debe ser **idempotente**: `{ aprobado: { $exists: false } }` hace que repetirla no estropee nada.
-- **Si una falla, las siguientes no se ejecutan** (`process.exitCode = 1`): dependen de ella.
+- **Cada migración se aplica una vez:** la segunda ejecución no hace nada. En producción, `migrar.ts` en cada despliegue.
+- **El orden de la 002 importa:** primero los datos (`aprobado` en las 2 antiguas) y después el validador; al revés, quedarían bloqueadas con `strict`.
+- **Se apunta al terminar:** una migración fallida no queda registrada y se reintenta, así que debe ser **idempotente** (`{ aprobado: { $exists: false } }`). Si una falla, las siguientes no corren (`process.exitCode = 1`).
 
 <Callout type="risk">
 
-- **Nunca edites una migración ya aplicada:** en producción no se volverá a ejecutar (ya está en `_migraciones`), así que tu cambio solo llegaría a los entornos nuevos. Si te equivocaste, escribe la 003 que lo corrija.
-- **Dos despliegues a la vez pueden ejecutar la misma migración:** las dos instancias ven la 002 pendiente y la aplican. Por eso deben ser idempotentes, o el ejecutor debe tomar un "candado" antes (por ejemplo, insertar un documento con `_id` fijo, que solo uno de los dos conseguirá).
-- **Prueba cada migración con una copia de los datos de producción:** el _backup_ de la Tanda 10 restaurado en local (`npm run db:restore-test`) es el sitio para hacerlo. Un `updateMany` con un filtro equivocado sobre millones de documentos no se deshace.
-- **Esta plataforma usa `scripts/db-setup.ts`, no migraciones:** crea colecciones, validadores e índices de forma idempotente, y le basta mientras no haya que transformar datos existentes. Con el primer cambio que lo exija, conviene pasar a migraciones numeradas como estas.
+- **Nunca edites una migración aplicada:** en producción no se repetirá. Corrige con una 003.
+- **Dos despliegues a la vez pueden aplicar la misma:** idempotencia, o un "candado" (un documento con `_id` fijo que solo uno consigue insertar).
+- **Prueba con una copia de producción** (`npm run db:restore-test`, Tanda 10). Esta plataforma usa `scripts/db-setup.ts`, idempotente, y le basta hasta que haya que transformar datos: entonces, migraciones numeradas.
 
 </Callout>
 
@@ -617,15 +610,14 @@ npm start -- src/i4/06-ejercicio.ts
 Tareas guardadas: 2
 ```
 
-- **`additionalProperties: false` atrapa las erratas:** `fehca` se rechaza dos veces, porque sobra `fehca` y falta `fecha`. Sin esa opción, la tarea se habría guardado sin fecha y no aparecería nunca en "tareas de hoy".
-- **Con `additionalProperties: false`, `_id` tiene que estar en `properties`:** el _driver_ lo añade a cada documento antes de enviarlo. Si no lo declaras, **todas** las inserciones fallan con `sobran _id`.
-- **El objeto embebido se valida igual que el documento:** `categoria` tiene su propio `required`, sus `properties` y su `additionalProperties`. El color debe ser `#` y seis cifras hexadecimales en minúsculas: `2563EB` no pasa.
-- **`enum` limita los valores:** la prioridad es opcional (no está en `required`), pero si viene, solo puede ser uno de los tres valores.
+- **`additionalProperties: false` atrapa las erratas:** `fehca` falla dos veces (sobra `fehca`, falta `fecha`). Sin ella, la tarea se guardaría sin fecha y no saldría nunca en "tareas de hoy".
+- **`_id` debe estar en `properties`:** el _driver_ lo añade antes de enviar, y sin declararlo **todas** las inserciones fallan con `sobran _id`.
+- **`categoria` se valida como un documento** (su `required`, `properties` y `additionalProperties`), con color `#` y seis hexadecimales en minúsculas: `2563EB` no pasa. Y **`enum`** limita la prioridad opcional a tres valores.
 
 <Callout type="risk">
 
-- **`additionalProperties: false` complica los cambios:** cada campo nuevo exige primero cambiar el validador (una migración) y después desplegar el código que lo escribe. En el orden contrario, el código nuevo falla al guardar.
-- **Normaliza antes de validar:** si la interfaz permite escribir el color como `#2563EB`, conviértelo a minúsculas en la app (Zod con `.toLowerCase()`). El validador de la base de datos solo comprueba, nunca corrige.
+- **`additionalProperties: false` ordena los despliegues:** primero la migración del validador, después el código que escribe el campo nuevo. Al revés, el código nuevo falla al guardar.
+- **Normaliza antes de validar:** `#2563EB` se pasa a minúsculas en la app (Zod con `.toLowerCase()`); el validador solo comprueba.
 
 </Callout>
 
@@ -637,8 +629,8 @@ Tu base de datos rechaza datos corruptos aunque la app tenga un _bug_: defines v
 
 ## Resumen
 
-- `$jsonSchema` en `createCollection` (o `collMod`) hace que MongoDB rechace con el código 121 lo que no cumple el esquema; el motivo está en `errInfo.details`.
-- `bsonType` distingue `int` de `double`, `date` de texto y `objectId` de texto; `additionalProperties: false` prohíbe los campos no declarados.
-- `validationLevel: "moderate"` deja actualizar los documentos que ya eran inválidos; `validationAction: "warn"` acepta y avisa en el registro.
-- Zod en la app da los mensajes; `$jsonSchema` en la base de datos protege de todo lo que se salta la app.
-- Las migraciones van numeradas, se registran al terminar, son idempotentes y cambian primero los datos y después el validador.
+- `$jsonSchema` rechaza con el código 121; el motivo está en `errInfo.details`.
+- `bsonType` distingue `int`, `double`, `date` y `objectId`; `additionalProperties: false` prohíbe lo no declarado.
+- `moderate` deja actualizar lo que ya era inválido; `warn` acepta y avisa.
+- Zod da los mensajes; `$jsonSchema` protege de todo lo que se salta la app.
+- Migraciones numeradas, idempotentes, registradas al terminar: primero los datos, después el validador.
