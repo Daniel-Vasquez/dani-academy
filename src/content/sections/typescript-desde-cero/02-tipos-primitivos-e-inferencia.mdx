@@ -7,15 +7,15 @@ minutes: 60
 summary: "Practicas con los tipos básicos, aprendes a dejar que TypeScript deduzca los tipos y a anotarlos solo donde aportan, y sustituyes any por unknown con un caso real."
 ---
 
-La primera tentación al empezar con TypeScript es escribir el tipo de **todo**. El resultado es código más largo y, paradójicamente, más frágil. En esta sección vas a trabajar en tu `ts-playground` para descubrir qué tipos deduce TypeScript solo (la **inferencia**), en qué tres sitios conviene escribirlos tú, y por qué `any` es una trampa que se arregla con `unknown`. Terminarás leyendo de forma segura unas preferencias guardadas como texto, exactamente como harías con `localStorage` en una app real.
+Escribir el tipo de **todo** da código más largo y más frágil. Aquí ves qué deduce TypeScript solo, dónde conviene anotar y cómo leer datos externos con `unknown` en lugar de `any`.
 
-**Lo que tendrás al terminar:** cinco archivos nuevos en `ts-playground/src/` y una función `leerPreferencias` que convierte un texto desconocido en datos tipados sin riesgo de romper la app.
+**Requisitos:** el proyecto `ts-playground` de B1.1, con su `tsconfig.json` y los _scripts_ `typecheck` y `start`.
 
-**Requisitos:** el proyecto `ts-playground` de la sección B1.1, con su `tsconfig.json` y los _scripts_ `typecheck` y `start`.
+## Paso 1: los tipos primitivos
 
-## Paso 1: conocer los tipos primitivos
+**Qué es:** los valores más básicos de JavaScript, que no son objetos. TypeScript los nombra en minúscula.
 
-Los **primitivos** son los valores más básicos de JavaScript: no son objetos y no tienen propiedades propias que puedas modificar. TypeScript les pone nombre a todos. Crea `src/02-primitivos.ts`:
+**Cómo se usa:** crea `src/02-primitivos.ts`.
 
 ```ts
 // Archivo: src/02-primitivos.ts
@@ -31,39 +31,36 @@ console.log(typeof nombre, typeof kmSemana, typeof entrenoHecho);
 console.log(typeof notas, typeof lesion, typeof pasosAnuales, typeof idUnico);
 ```
 
-Ejecútalo:
-
 ```bash
 npm start -- src/02-primitivos.ts
 ```
-
-Salida:
 
 ```text
 string number boolean
 object undefined bigint symbol
 ```
 
-Por qué cada uno:
-
-- **`string`**: cualquier texto. Nombres, correos, identificadores como `"B1.3"`.
-- **`number`**: JavaScript solo tiene un tipo numérico (decimal de 64 bits). No hay `int` ni `float` separados.
-- **`boolean`**: `true` o `false`.
-- **`null` y `undefined`**: dos formas de "no hay valor". Por convención, `null` es "vacío a propósito" (el usuario no escribió notas) y `undefined` es "nunca se asignó".
-- **`bigint`**: para enteros más grandes de lo que `number` puede representar con exactitud (más de 9 billones). Rara vez lo necesitarás en una app web.
-- **`symbol`**: identificadores únicos. Lo usan librerías por dentro; tú casi nunca.
+| Tipo                 | Para qué                                                          |
+| -------------------- | ----------------------------------------------------------------- |
+| `string`             | Texto: nombres, correos, identificadores como `"B1.3"`            |
+| `number`             | Todos los números: no hay `int` ni `float` separados              |
+| `boolean`            | `true` o `false`                                                  |
+| `null` y `undefined` | "Vacío a propósito" y "nunca se asignó", por convención           |
+| `bigint` y `symbol`  | Enteros enormes e identificadores únicos: rara vez en una app web |
 
 <Callout type="risk">
 
-- **`typeof null` devuelve `"object"`.** Es un error histórico de JavaScript que nunca se corrigió para no romper la web. Para comprobar `null`, compara directamente: `valor === null`.
-- **Mayúsculas:** `String`, `Number` y `Boolean` (con mayúscula) son los objetos envoltorio de JavaScript, no los tipos primitivos. `let x: String` compila, pero es incorrecto y TypeScript lo trata distinto. Usa siempre la minúscula.
-- **Precisión decimal:** `0.1 + 0.2` da `0.30000000000000004` porque `number` es binario. Para dinero, trabaja en céntimos (enteros) o usa librerías de decimales.
+- **`typeof null` devuelve `"object"`:** un error histórico de JavaScript. Para comprobar `null`, compara: `valor === null`.
+- **`String`, `Number` y `Boolean` con mayúscula** son objetos envoltorio, no los primitivos. `let x: String` compila, pero es incorrecto.
+- **`0.1 + 0.2` da `0.30000000000000004`:** `number` es binario. Para dinero, trabaja en céntimos enteros.
 
 </Callout>
 
-## Paso 2: dejar que TypeScript infiera
+## Paso 2: la inferencia
 
-En el paso anterior escribiste cada tipo, pero TypeScript no lo necesitaba: **deduce el tipo a partir del valor**. Crea `src/02-inferencia.ts` sin una sola anotación:
+**Qué es:** TypeScript **deduce el tipo a partir del valor**, y una vez deducido, el tipo queda fijado.
+
+**Cómo se usa:** crea `src/02-inferencia.ts` sin una sola anotación, predice cada tipo y compruébalo con el ratón.
 
 ```ts
 // Archivo: src/02-inferencia.ts
@@ -84,8 +81,6 @@ vasosDeAgua = vasosDeAgua + 1;
 console.log(nombre, vasosDeAgua, completado, pesos.length, hoy instanceof Date, entreno.km, total);
 ```
 
-Antes de mirar, **predice** el tipo de cada variable. Después pasa el ratón por encima de cada una en VS Code:
-
 | Variable      | Tipo inferido                                     |
 | ------------- | ------------------------------------------------- |
 | `nombre`      | `string`                                          |
@@ -96,7 +91,7 @@ Antes de mirar, **predice** el tipo de cada variable. Después pasa el ratón po
 | `entreno`     | `{ tipo: string; km: number; }`                   |
 | `total`       | `number` (lo deduce de lo que devuelve `totalKm`) |
 
-La inferencia no es "adivinar": TypeScript sigue reglas precisas. Y una vez inferido, **el tipo queda fijado**. Añade al final del archivo esta línea y ejecuta `npm run typecheck`:
+Añade esta línea al final, ejecuta `npm run typecheck` y bórrala:
 
 ```ts
 vasosDeAgua = "tres";
@@ -106,19 +101,19 @@ vasosDeAgua = "tres";
 error TS2322: Type 'string' is not assignable to type 'number'.
 ```
 
-Borra esa línea antes de continuar.
-
 <Callout type="risk">
 
-- **Arrays vacíos:** con `const lista = []`, TypeScript no tiene ningún valor del que deducir el tipo. Le asigna uno provisional que va cambiando según lo que añadas con `push` (si haces `push(1)` pasa a `number[]`, y si después haces `push("a")`, a `(string | number)[]`). Es frágil y difícil de leer. Cuando un array empieza vacío, anótalo: `const lista: number[] = []`.
-- **Objetos que crecerán:** `const entreno = { tipo: "running" }` solo tiene `tipo`; si después haces `entreno.km = 5`, error: la propiedad no existe en el tipo inferido. Define el tipo completo desde el principio (lo harás con interfaces en B1.4).
-- **No anotes por inercia** (`const vasos: number = 0`): no aporta nada y, si un día cambias el valor, tendrás que cambiar dos cosas.
+- **Arrays vacíos:** `const lista = []` tiene un tipo provisional que cambia con cada `push`. Si un array empieza vacío, anótalo: `const lista: number[] = []`.
+- **Objetos que crecerán:** con `const entreno = { tipo: "running" }`, hacer luego `entreno.km = 5` da error. Define el tipo completo desde el principio (B1.4).
+- **No anotes por inercia:** `const vasos: number = 0` no aporta nada, y al cambiar el valor tendrás que cambiar dos cosas.
 
 </Callout>
 
 ## Paso 3: anotar solo donde aporta
 
-Hay tres sitios donde **sí** debes escribir el tipo. Crea `src/02-anotar.ts`:
+**Qué es:** hay tres sitios donde **sí** debes escribir el tipo: parámetros, variables sin valor inicial y el retorno de funciones que otros usan. La regla: **anota en los bordes y deja inferir dentro**.
+
+**Cómo se usa:** crea `src/02-anotar.ts` y ejecútalo con `npm start -- src/02-anotar.ts`. El objetivo es 6 vasos los domingos y 8 el resto.
 
 ```ts
 // Archivo: src/02-anotar.ts
@@ -147,32 +142,27 @@ console.log(`Objetivo de hoy: ${objetivoVasos} vasos`);
 console.log(`Volumen: ${volumenEntreno(4, 8, 70)} kg`);
 ```
 
-Ejecútalo con `npm start -- src/02-anotar.ts`. La salida depende del día: si es domingo, el objetivo es 6 vasos y, si no, 8.
-
 ```text
 Hola, Dani
 Objetivo de hoy: 8 vasos
 Volumen: 2240 kg
 ```
 
-Por qué cada caso:
-
-1. **Parámetros.** Quita el `: string` de `saludar` y ejecuta `npm run typecheck`: `error TS7006: Parameter 'nombre' implicitly has an 'any' type.` Es `strict` (a través de `noImplicitAny`) avisándote de que, sin anotación, el parámetro aceptaría cualquier cosa.
-2. **Variables sin valor inicial.** Si declaras `let objetivoVasos;` sin tipo, TypeScript lo va averiguando según lo que le asignes, pero el tipo explícito documenta la intención y te protege de asignar algo raro.
-3. **Retorno de funciones importantes.** `volumenEntreno` se exporta y otras partes del proyecto dependerán de ella. Si mañana alguien cambia la implementación y por error devuelve un texto, el error aparecerá **aquí**, en la función, y no en diez archivos que la usan.
-
-La regla práctica: **anota en los bordes** (entradas y salidas de funciones) y **deja inferir dentro**.
+- **Parámetros:** sin `: string`, `npm run typecheck` da `error TS7006: Parameter 'nombre' implicitly has an 'any' type.` Es `strict`, a través de `noImplicitAny`.
+- **Retorno de `volumenEntreno`:** se exporta. Si alguien rompe la implementación, el error sale **aquí**, no en los diez archivos que la usan.
 
 <Callout type="risk">
 
-- **Usar una variable antes de asignarla:** si quitas el `if/else` y haces directamente `console.log(objetivoVasos)`, TypeScript da `error TS2454: Variable 'objetivoVasos' is used before being assigned.` Es un bug que en JavaScript habría impreso `undefined`.
-- **Retornos inferidos en librerías:** si escribes una función que exportas y no anotas el retorno, un cambio interno puede alterar su tipo y romper a quien la usa sin que te des cuenta. En funciones públicas, anota.
+- **Usar una variable antes de asignarla:** sin el `if/else`, `console.log(objetivoVasos)` da `error TS2454: Variable 'objetivoVasos' is used before being assigned.` En JavaScript habría impreso `undefined`.
+- **Retornos inferidos en funciones exportadas:** un cambio interno altera su tipo y rompe a quien la usa sin avisar. En funciones públicas, anota.
 
 </Callout>
 
-## Paso 4: entender por qué `any` es peligroso
+## Paso 4: por qué `any` es peligroso
 
-`any` es el tipo que **desactiva** el compilador: acepta cualquier valor y te deja hacer cualquier cosa con él. Crea `src/02-any.ts` para ver el problema en vivo:
+**Qué es:** `any` **desactiva** el compilador: acepta cualquier valor y te deja hacer cualquier cosa con él.
+
+**Cómo se usa:** crea `src/02-any.ts`.
 
 ```ts
 // Archivo: src/02-any.ts
@@ -204,22 +194,21 @@ TypeError: valor.toFixed is not a function
     at formatearKm (…/src/02-any.ts:3:16)
 ```
 
-(Verás algunas líneas más de _stack trace_ debajo; lo importante es el `TypeError` y la línea donde ocurrió).
-
-La primera llamada funciona; la segunda **rompe el programa en ejecución**, que es justo lo que TypeScript debía evitar. Peor aún, `any` es **contagioso**: lo que sale de un `any` también es `any`, y el agujero se extiende por el código sin que lo veas.
+- **La segunda llamada rompe el programa en ejecución,** justo lo que TypeScript debía evitar. Debajo verás más líneas del _stack trace_.
+- **`any` se contagia:** lo que sale de un `any` también es `any`, y el agujero se extiende sin que lo veas.
 
 <Callout type="risk">
 
-- **`any` aparece sin que lo escribas:** las respuestas de `res.json()`, `JSON.parse()` y muchas librerías antiguas devuelven `any`. Si no lo conviertes en un tipo concreto, todo lo que hagas después queda sin protección.
-- **Si de verdad necesitas `any`** (por ejemplo, una librería sin tipos), limítalo a una línea y deja un comentario explicando por qué. Nunca lo uses "para que se quite el error".
+- **`any` aparece sin que lo escribas:** `res.json()`, `JSON.parse()` y muchas librerías antiguas lo devuelven. Conviértelo en un tipo concreto o todo lo que sigue queda sin protección.
+- **Si de verdad lo necesitas** (una librería sin tipos), limítalo a una línea con un comentario que explique por qué. Nunca "para que se quite el error".
 
 </Callout>
 
 ## Paso 5: sustituir `any` por `unknown`
 
-`unknown` también acepta **cualquier valor**, pero no te deja usarlo hasta que **compruebes qué es**. Es el tipo correcto para todo lo que viene de fuera y no controlas. Vas a resolverlo con un caso real: leer las preferencias del usuario, que una app web guarda como texto en `localStorage`.
+**Qué es:** `unknown` también acepta cualquier valor, pero **no te deja usarlo hasta que compruebes qué es**. Es el tipo correcto para lo que viene de fuera.
 
-Crea `src/02-unknown.ts`:
+**Cómo se usa:** leer unas preferencias guardadas como texto, como las de `localStorage`. Crea `src/02-unknown.ts`.
 
 ```ts
 // Archivo: src/02-unknown.ts
@@ -267,8 +256,6 @@ console.log(leerPreferencias("null"));
 npm start -- src/02-unknown.ts
 ```
 
-Salida:
-
 ```text
 { tema: 'dark', objetivoVasos: 10 }
 { tema: 'light', objetivoVasos: 8 }
@@ -276,44 +263,43 @@ Salida:
 { tema: 'light', objetivoVasos: 8 }
 ```
 
-Qué ha pasado, paso a paso:
+- **`const datos: unknown = JSON.parse(…)`:** desde aquí, TypeScript no deja usar `datos` sin comprobarlo.
+- **`typeof datos !== "object" || datos === null`:** descarta lo que no es un objeto. Después, TypeScript **sabe** que lo es: es el _narrowing_ (B1.6).
+- **`"tema" in datos`** comprueba que la propiedad existe. Cada valor se valida con su tipo **y** su rango, con un valor por defecto si no encaja.
 
-1. `JSON.parse` devuelve `any`, pero lo guardamos en una variable `unknown`: a partir de ahí, TypeScript **no nos deja** usarla sin comprobar.
-2. `typeof datos !== "object" || datos === null` descarta todo lo que no sea un objeto. Después de esa línea, TypeScript **sabe** que `datos` es un objeto: es el _narrowing_ (estrechamiento), que verás a fondo en B1.6.
-3. `"tema" in datos` comprueba que la propiedad existe antes de leerla.
-4. Cada valor se valida con su tipo **y** su rango (`objetivo > 0`), y si algo no encaja se usa el valor por defecto.
+Dos pruebas con `npm run typecheck` (borra cada línea antes de la siguiente):
 
-Haz dos pruebas y ejecuta `npm run typecheck` después de cada una (borra la línea antes de la siguiente):
-
-1. Justo después de la comprobación 1, escribe `datos.tema.toUpperCase();`:
+1. Tras la primera comprobación, `datos.tema.toUpperCase();`:
 
    ```text
-   error TS2339: Property 'tema' does not exist on type 'object'.
+      error TS2339: Property 'tema' does not exist on type 'object'.
    ```
 
-   TypeScript ya sabe que `datos` es un objeto, pero no que tenga `tema`: por eso hace falta `"tema" in datos`.
+   Sabe que es un objeto, no que tenga `tema`.
 
-2. Justo antes del `return` final, escribe `tema.toUpperCase();`:
+2. Antes del `return` final, `tema.toUpperCase();`:
 
    ```text
-   error TS18046: 'tema' is of type 'unknown'.
+      error TS18046: 'tema' is of type 'unknown'.
    ```
 
-   Sabes que `tema` existe, pero no qué es: podría ser un número. Hasta que no compruebes que es `"dark"` o `"light"`, no puedes usarlo.
+   Sabe que `tema` existe, no qué es.
 
-Con `any`, las dos líneas habrían compilado y roto la app con el segundo caso. Con `unknown`, el compilador te obliga a manejarlo.
+Con `any`, las dos habrían compilado y roto la app.
 
 <Callout type="risk">
 
-- **Este código es largo a propósito**: valida a mano para que entiendas qué hace falta. En proyectos reales se usa una librería de validación (Zod, curso I1) que hace lo mismo en una línea y genera el tipo automáticamente.
-- **`localStorage` puede lanzar errores** (modo privado de algunos navegadores, almacenamiento lleno). En el navegador, envuelve `localStorage.getItem` en `try/catch`, como hace el botón de tema de esta plataforma.
-- **No confíes en datos tuyos guardados hace meses:** si cambias la forma de las preferencias, los usuarios tendrán el formato antiguo guardado. Validar con valores por defecto te protege también de eso.
+- **Este código es largo a propósito:** en proyectos reales, Zod (I1) hace esta validación en una línea y genera el tipo.
+- **`localStorage` puede lanzar errores** (modo privado, almacenamiento lleno). Envuelve `getItem` en `try/catch`.
+- **Tus propios datos antiguos también son externos:** si cambias la forma de las preferencias, los usuarios conservan el formato viejo. Los valores por defecto te protegen.
 
 </Callout>
 
 ## Paso 6: `never`, lo que no puede ocurrir
 
-`never` representa un valor que **nunca existe**: una función que siempre lanza un error o una rama de código imposible. Crea `src/02-never.ts`:
+**Qué es:** el tipo de un valor que **nunca existe**: una función que siempre lanza un error o una rama imposible.
+
+**Cómo se usa:** crea `src/02-never.ts`.
 
 ```ts
 // Archivo: src/02-never.ts
@@ -336,25 +322,25 @@ try {
 }
 ```
 
-Salida:
-
 ```text
 2.5
 No se puede dividir entre 0
 ```
 
-Gracias a `: never`, TypeScript sabe que después de `fallar(...)` el código no continúa. Su uso más importante llegará en B1.6: hacer que el compilador te avise cuando olvidas manejar un caso en un `switch`.
+- **`: never` en `fallar`:** TypeScript sabe que el código no continúa tras la llamada. Su uso más importante llega en B1.6: que el compilador avise si olvidas un caso de un `switch`.
 
 <Callout type="risk">
 
-- **`void` no es `never`:** `void` significa "termina, pero no devuelve nada útil"; `never`, "no termina nunca con normalidad". Si anotas `: never` en una función que puede terminar, TypeScript da error.
-- **`catch (error)` es `unknown`:** con `strict`, el error capturado no tiene tipo. Por eso se comprueba con `error instanceof Error` antes de leer `.message`.
+- **`void` no es `never`:** `void` termina sin devolver nada útil; `never` no termina con normalidad. Anotar `: never` en una función que puede terminar da error.
+- **`catch (error)` es `unknown`** con `strict`. Comprueba `error instanceof Error` antes de leer `.message`.
 
 </Callout>
 
 ## Paso 7: tipos literales y uniones
 
-Un tipo puede ser **un valor concreto**, no solo una categoría. Crea `src/02-literales.ts`:
+**Qué es:** un tipo puede ser **un valor concreto**, como `"dark"`. Con `|` unes varios en un conjunto cerrado de valores permitidos.
+
+**Cómo se usa:** crea `src/02-literales.ts`.
 
 ```ts
 // Archivo: src/02-literales.ts
@@ -378,23 +364,18 @@ console.log(temaVariable, temaFijo, tema);
 console.log(colorDeCategoria("salud"));
 ```
 
-Salida:
-
 ```text
 dark dark dark
 #0d9488
 ```
 
-- Pasa el ratón por `temaVariable` (`string`) y por `temaFijo` (`"dark"`): con `const`, TypeScript infiere el **tipo literal** más preciso posible, porque el valor ya no puede cambiar.
-- Con `|` creas una **unión de literales**: un conjunto cerrado de valores permitidos. Escribe `tema = "sepia";` y comprueba el error: `Type '"sepia"' is not assignable to type 'Tema'.`
-- En VS Code, al escribir `colorDeCategoria("`, el autocompletado te ofrece exactamente las cuatro categorías. Es imposible equivocarse con una errata.
-
-Es el patrón perfecto para las categorías de color de tu Planificador 2026, los niveles de un curso o los estados de un formulario.
+- **`let` frente a `const`:** `temaVariable` es `string`; `temaFijo` es `"dark"`. Con `const`, el valor no puede cambiar, así que TypeScript infiere el **literal**.
+- **Unión de literales:** `tema = "sepia";` da `Type '"sepia"' is not assignable to type 'Tema'.` Y al escribir `colorDeCategoria("`, el editor ofrece las cuatro categorías.
 
 <Callout type="risk">
 
-- **Los valores del exterior no son literales:** un `<select>` de un formulario te da un `string`, no una `Categoria`. Para convertirlo, compruébalo contra la lista de valores permitidos (como en el Paso 5) antes de usarlo.
-- **Si añades una categoría**, la función `colorDeCategoria` la mandará al último `return` sin avisar. En B1.6 aprenderás a hacer que el compilador te obligue a manejar cada caso nuevo.
+- **Los valores del exterior no son literales:** un `<select>` da un `string`, no una `Categoria`. Compruébalo contra la lista permitida, como en el Paso 5.
+- **Una categoría nueva cae en el último `return` sin avisar.** En B1.6 harás que el compilador te obligue a manejarla.
 
 </Callout>
 
@@ -436,8 +417,6 @@ for (const entrada of ["35", "-5", "mucho", "", "1000"]) {
 }
 ```
 
-Salida:
-
 ```text
 "35" → 35 km
 "-5" → 20 km
@@ -446,12 +425,12 @@ Salida:
 "1000" → 20 km
 ```
 
-`valor is number` es un **type guard** propio: le dice a TypeScript "si esta función devuelve `true`, el valor es un `number`". Lo verás a fondo en B1.6.
+`valor is number` es un **type guard** propio: "si devuelve `true`, el valor es un `number`" (B1.6).
 
 <Callout type="risk">
 
-- **`Number("")` vale `0`, no `NaN`:** sin la comprobación de texto vacío, un campo en blanco se convertiría en un objetivo de 0 km. Las conversiones de JavaScript tienen trampas; cubre siempre el caso vacío.
-- **`Number.isFinite` frente a `isFinite`:** el `isFinite` global convierte el argumento antes de comprobarlo (`isFinite("5")` es `true`). `Number.isFinite` no convierte nada: es el que quieres.
+- **`Number("")` vale `0`, no `NaN`:** sin comprobar el texto vacío, un campo en blanco sería un objetivo de 0 km.
+- **`Number.isFinite`, no `isFinite`:** el global convierte antes de comprobar (`isFinite("5")` es `true`).
 
 </Callout>
 
@@ -463,8 +442,8 @@ Sabes qué tipo inferirá TypeScript antes de pasar el ratón por encima, anotas
 
 ## Resumen
 
-- Los primitivos se escriben en minúscula: `string`, `number`, `boolean`, `null`, `undefined`, `bigint`, `symbol`.
-- La inferencia deduce el tipo del valor y lo fija; no anotes lo evidente.
-- Anota en los bordes: parámetros, variables sin valor inicial y retornos de funciones públicas.
-- `any` apaga el compilador y se contagia; `unknown` acepta todo pero obliga a comprobar.
-- `never` marca lo imposible; `const` produce tipos literales, y las uniones crean conjuntos cerrados de valores.
+- Primitivos en minúscula: `string`, `number`, `boolean`, `null`, `undefined`, `bigint`, `symbol`.
+- La inferencia deduce el tipo y lo fija: no anotes lo evidente.
+- Anota en los bordes: parámetros, variables sin valor y retornos públicos.
+- `any` apaga el compilador; `unknown` acepta todo, pero obliga a comprobar.
+- `never` marca lo imposible; `const` da literales; `|` crea conjuntos cerrados.

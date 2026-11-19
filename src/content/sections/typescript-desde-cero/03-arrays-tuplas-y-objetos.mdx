@@ -7,15 +7,15 @@ minutes: 60
 summary: "Modelas paso a paso un día de entrenamiento con arrays, tuplas y objetos tipados, entiendes por qué TypeScript rechaza propiedades de más y calculas el volumen total del día."
 ---
 
-Casi todos los datos de una app web son **listas de objetos**: entrenos, tareas, comidas, usuarios. Lo que viene de una API como JSON, lo que guardas en MongoDB y lo que pintas con `.map()` en React tiene esa forma. En esta sección vas a modelar, de menos a más, **un día de tu app de entrenamiento**: primero listas simples, después pares de valores con tuplas, después objetos con propiedades opcionales y de solo lectura, y al final una función que calcula el volumen total del día.
+Casi todos los datos de una app web son **listas de objetos**: lo que llega de una API, lo que guardas en MongoDB y lo que pintas con `.map()` en React. Aquí modelas un día de tu app de entrenamiento, de menos a más.
 
-**Lo que tendrás al terminar:** el archivo `src/03-dia-entreno.ts` con el tipo completo de un día de entreno y una función `volumenTotal` probada con datos reales.
-
-**Requisitos:** el `ts-playground` de las secciones anteriores (con `strict` y `noUncheckedIndexedAccess` activos en `tsconfig.json`).
+**Requisitos:** el `ts-playground` de las secciones anteriores, con `strict` y `noUncheckedIndexedAccess` activos.
 
 ## Paso 1: tipar arrays
 
-Un array tipado garantiza que **todos** sus elementos son del mismo tipo. Crea `src/03-arrays.ts`:
+**Qué es:** un array tipado garantiza que **todos** sus elementos son del mismo tipo.
+
+**Cómo se usa:** crea `src/03-arrays.ts`.
 
 ```ts
 // Archivo: src/03-arrays.ts
@@ -45,24 +45,23 @@ Valores mezclados: series 4 repeticiones 8
 Último peso registrado: 78.9 kg
 ```
 
-Qué está pasando:
-
-- **`number[]` y `Array<number>` son exactamente lo mismo.** La primera forma es la más habitual; la segunda (con `<>`, llamada _genérico_) la verás en librerías. Elige una y úsala siempre igual. En este curso usamos `number[]`.
-- **`(string | number)[]`** es "un array cuyos elementos pueden ser texto o número". Los paréntesis importan: `string | number[]` significaría "un texto, o un array de números".
-- Dentro de `.map((e) => ...)`, TypeScript **sabe** que `e` es un `string` porque `ejercicios` es `string[]`. No tienes que anotar `e`.
-- **El `if (ultimoPeso !== undefined)` es obligatorio** gracias a `noUncheckedIndexedAccess`: al leer `pesos[algo]`, el tipo es `number | undefined`, porque el índice podría no existir. Quita el `if` y usa directamente `ultimoPeso.toFixed(1)`: `npm run typecheck` dará `error TS18048: 'ultimoPeso' is possibly 'undefined'.`
+- **`number[]` y `Array<number>` son lo mismo.** En este curso, `number[]`.
+- **`(string | number)[]`:** elementos de texto o número. Sin paréntesis, `string | number[]` sería "un texto, o un array de números".
+- **El `if (ultimoPeso !== undefined)` es obligatorio** por `noUncheckedIndexedAccess`: leer por índice da `number | undefined`. Sin él: `error TS18048: 'ultimoPeso' is possibly 'undefined'.`
 
 <Callout type="risk">
 
-- **Sin `noUncheckedIndexedAccess`**, `pesos[10]` se tipa como `number` aunque no exista, y `pesos[10].toFixed(1)` revienta en ejecución con `Cannot read properties of undefined`. Es la fuente número uno de errores con listas. Mantén la opción activada.
-- **`.find()` también puede no encontrar nada:** devuelve `T | undefined` incluso sin esa opción. Comprueba siempre el resultado antes de usarlo.
-- **Rendimiento:** `.find()` y `.includes()` recorren el array entero en el peor caso. Con unas decenas de elementos da igual; con miles de búsquedas sobre miles de elementos, usa un `Map` o un `Set`.
+- **Sin `noUncheckedIndexedAccess`,** `pesos[10].toFixed(1)` compila y revienta con `Cannot read properties of undefined`. Es la primera fuente de errores con listas: mantén la opción activa.
+- **`.find()` puede no encontrar nada:** devuelve `T | undefined` siempre. Comprueba el resultado.
+- **`.find()` e `.includes()` recorren todo el array:** con miles de búsquedas sobre miles de elementos, usa un `Map` o un `Set`.
 
 </Callout>
 
 ## Paso 2: tuplas para pares de valores
 
-Una **tupla** es un array de **longitud fija** donde **cada posición tiene su propio tipo**. Sirve cuando el orden tiene significado: una coordenada, un rango, un par clave-valor. Crea `src/03-tuplas.ts`:
+**Qué es:** un array de **longitud fija** donde **cada posición tiene su tipo**. Sirve cuando el orden significa algo: una coordenada, un rango.
+
+**Cómo se usa:** crea `src/03-tuplas.ts`.
 
 ```ts
 // Archivo: src/03-tuplas.ts
@@ -110,22 +109,23 @@ Vasos iniciales: 0
 Contador actualizado a 1
 ```
 
-- **`[latitud: number, longitud: number]`**: las etiquetas (`latitud`, `longitud`) son solo documentación; aparecen en el autocompletado y en el hover, pero no cambian nada. Úsalas siempre que el orden no sea evidente.
-- **`semana[0]`** es `string`, no `string | undefined`: en una tupla, TypeScript sabe exactamente qué posiciones existen. Prueba `semana[2]` y verás `error TS2493: Tuple type 'RangoFechas' of length '2' has no element at index '2'.`
-- **`Record<string, number>`** es "un objeto cuyas claves son texto y cuyos valores son números". Lo verás mucho.
-- La función `crearContador` imita lo que hace `useState` de React: por eso en React escribes `const [vasos, setVasos] = useState(0)`. Ahora sabes que esa sintaxis es **desestructurar una tupla**.
+- **Las etiquetas `[latitud: number, longitud: number]`** solo documentan: salen en el autocompletado.
+- **`semana[0]` es `string`, sin `undefined`:** TypeScript sabe qué posiciones existen. `semana[2]` da `error TS2493: Tuple type 'RangoFechas' of length '2' has no element at index '2'.`
+- **`crearContador` imita a `useState`:** `const [vasos, setVasos] = useState(0)` es desestructurar una tupla. `Record<string, number>` es un objeto de claves de texto y valores numéricos.
 
 <Callout type="risk">
 
-- **Las tuplas no son inmutables:** `gimnasio.push(5)` compila (es un método de array) y rompe la idea de "dos elementos". Si necesitas garantizarlo, usa `readonly [number, number]` (Paso 4).
-- **Tuplas largas = código ilegible:** `[string, number, boolean, string]` obliga a recordar qué es cada posición. A partir de tres elementos, usa un objeto con nombres.
-- **Orden de coordenadas:** Google Maps usa `[latitud, longitud]`, pero GeoJSON y MongoDB usan `[longitud, latitud]`. Los tipos no detectan si los cambias de orden: ambos son `number`. Las etiquetas de la tupla te ayudan a no equivocarte.
+- **Las tuplas no son inmutables:** `gimnasio.push(5)` compila. Para garantizarlo, `readonly [number, number]` (Paso 4).
+- **A partir de tres posiciones, usa un objeto:** `[string, number, boolean, string]` obliga a recordar qué es cada una.
+- **Orden de coordenadas:** Google Maps usa `[latitud, longitud]`; GeoJSON y MongoDB, `[longitud, latitud]`. Los tipos no lo detectan: los dos son `number`.
 
 </Callout>
 
-## Paso 3: objetos con tipo en línea y propiedades opcionales
+## Paso 3: objetos y propiedades opcionales
 
-Ahora el bloque principal: un **objeto** con propiedades de distintos tipos. Crea `src/03-objetos.ts`:
+**Qué es:** un tipo en línea describe la **forma** del objeto. Con `?`, una propiedad puede faltar, y su tipo real pasa a ser `T | undefined`.
+
+**Cómo se usa:** crea `src/03-objetos.ts`.
 
 ```ts
 // Archivo: src/03-objetos.ts
@@ -162,26 +162,22 @@ Notas: Rodaje suave por el parque
 Caracteres en notas: 26
 ```
 
-Pieza por pieza:
-
-1. **El tipo en línea** va entre `:` y `=`, entre llaves, con cada propiedad seguida de `;`. Describe la **forma** que debe tener el objeto.
-2. **`notas?: string`**: el `?` significa "esta propiedad puede no estar". Su tipo real es `string | undefined`. Por eso el objeto se crea sin `notas` y no hay error.
-3. **`entreno.notas?.length`** (_optional chaining_): si `notas` es `undefined`, la expresión entera vale `undefined` **sin lanzar error**; si existe, devuelve su longitud.
-4. **`?? 0`** (_nullish coalescing_): si lo de la izquierda es `null` o `undefined`, usa `0`.
-
-Juntos, `?.` y `??` sustituyen al clásico `entreno.notas ? entreno.notas.length : 0`, más largo y más propenso a errores.
+- **`notas?: string`:** el objeto se crea sin `notas` y no hay error.
+- **`entreno.notas?.length ?? 0`:** `?.` (_optional chaining_) da `undefined` sin lanzar error si `notas` falta, y `??` (_nullish coalescing_) pone `0` en ese caso.
 
 <Callout type="risk">
 
-- **`??` no es `||`:** `||` usa el valor por defecto con cualquier valor "falso", incluidos `0` y `""`. Si un entreno tiene `minutos: 0` y escribes `entreno.minutos || 30`, obtienes 30 aunque el usuario registrara 0. Con `??` obtienes 0. Usa `??` para valores por defecto, salvo que de verdad quieras tratar `0` y `""` como vacíos.
-- **Abusar de `?.`** esconde bugs: si escribes `usuario?.perfil?.nombre?.trim()` por todas partes "por si acaso", un dato que nunca debería faltar desaparecerá en silencio. Úsalo solo donde la ausencia sea un caso normal.
-- **Opcional no es lo mismo que admitir `undefined`:** `notas?: string` permite omitir la propiedad; `notas: string | undefined` obliga a escribirla (aunque sea `notas: undefined`). En la mayoría de casos quieres la primera.
+- **`??` no es `||`:** `||` sustituye también `0` y `""`. Con `minutos: 0`, `entreno.minutos || 30` da 30; `??` da 0.
+- **Abusar de `?.` esconde bugs:** un dato que nunca debería faltar desaparece en silencio. Úsalo solo donde faltar sea normal.
+- **`notas?: string` no es `notas: string | undefined`:** el primero permite omitir la propiedad; el segundo obliga a escribirla, aunque sea `undefined`.
 
 </Callout>
 
 ## Paso 4: proteger datos con `readonly`
 
-Algunas propiedades **no deberían cambiar nunca** después de crear el objeto: un identificador, una fecha de creación. `readonly` hace que el compilador lo impida. Crea `src/03-readonly.ts`:
+**Qué es:** `readonly` impide, al compilar, cambiar una propiedad tras crear el objeto: un identificador, una fecha de creación.
+
+**Cómo se usa:** crea `src/03-readonly.ts`.
 
 ```ts
 // Archivo: src/03-readonly.ts
@@ -213,7 +209,7 @@ Categorías disponibles: trabajo, personal, salud, estudio
 ¿Existe "salud"? true
 ```
 
-Ahora añade estas dos líneas al final y ejecuta `npm run typecheck`:
+Añade estas dos líneas, ejecuta `npm run typecheck` y bórralas:
 
 ```ts
 registro.id = "reg_002";
@@ -225,19 +221,21 @@ error TS2540: Cannot assign to 'id' because it is a read-only property.
 error TS2339: Property 'push' does not exist on type 'readonly string[]'.
 ```
 
-Un `readonly string[]` no tiene `push`, `pop`, `splice` ni `sort`: TypeScript elimina los métodos que modifican el array. Sí tiene los que crean uno nuevo (`map`, `filter`, `slice`, `toSorted`). Borra las dos líneas antes de continuar.
+- **Un `readonly string[]` no tiene `push`, `pop`, `splice` ni `sort`.** Sí tiene los que crean un array nuevo: `map`, `filter`, `slice`, `toSorted`.
 
 <Callout type="risk">
 
-- **`readonly` solo existe en TypeScript:** en el JavaScript compilado, nada impide cambiar `id`. Si necesitas inmutabilidad en ejecución, usa `Object.freeze()`.
-- **Es superficial:** en `readonly entrenos: Entreno[]` no puedes reasignar `entrenos`, pero sí cambiar un entreno de dentro (`entrenos[0].minutos = 5` sigue permitido si `minutos` no es `readonly`).
-- **`const` no es `readonly`:** `const registro = {...}` impide asignar otro objeto a la variable, pero no impide cambiar sus propiedades.
+- **`readonly` solo existe en TypeScript:** en ejecución, nada impide cambiar `id`. Para eso, `Object.freeze()`.
+- **Es superficial:** en `readonly entrenos: Entreno[]` no reasignas la lista, pero sí puedes cambiar un entreno de dentro.
+- **`const` no es `readonly`:** impide asignar otro objeto a la variable, no cambiar sus propiedades.
 
 </Callout>
 
-## Paso 5: entender por qué TypeScript rechaza propiedades de más
+## Paso 5: por qué se rechazan propiedades de más
 
-Este comportamiento sorprende a todo el mundo la primera vez. Crea `src/03-exceso.ts`:
+**Qué es:** TypeScript usa **tipado estructural**: un objeto encaja en un tipo si tiene **al menos** sus propiedades. Pero a un **objeto literal** escrito directamente le aplica el _excess property checking_: una propiedad de más ahí es casi seguro una errata.
+
+**Cómo se usa:** crea `src/03-exceso.ts`.
 
 ```ts
 // Archivo: src/03-exceso.ts
@@ -260,7 +258,7 @@ dominadas: 4 series
 fondos: 3 series
 ```
 
-Ahora añade al final este caso C, con una propiedad mal escrita, y ejecuta `npm run typecheck`:
+Añade este caso C, con una errata, y ejecuta `npm run typecheck`:
 
 ```ts
 console.log(describir({ nombre: "remo", serie: 3 }));
@@ -270,23 +268,21 @@ console.log(describir({ nombre: "remo", serie: 3 }));
 error TS2561: Object literal may only specify known properties, but 'serie' does not exist in type 'Ejercicio'. Did you mean to write 'series'?
 ```
 
-¿Por qué el caso A pasa y el C no, si los dos tienen una propiedad que `Ejercicio` no conoce?
-
-- TypeScript usa **tipado estructural**: un objeto encaja en un tipo si tiene **al menos** las propiedades que el tipo pide. `desdeVariable` tiene `nombre` y `series`, así que encaja (`descanso` sobra, pero no molesta).
-- Sin embargo, cuando escribes un **objeto literal directamente** donde se espera un tipo, TypeScript sabe que ese objeto no se usa en ningún otro sitio. Una propiedad de más ahí es casi seguro **una errata** (`serie` en lugar de `series`). A eso se le llama _excess property checking_.
-
-En el caso C, sin esta comprobación habrías tenido un bug doble: `serie` se ignoraría y faltaría `series`. En realidad TypeScript también te avisaría de que falta `series`, pero el mensaje sobre la errata es mucho más útil. Borra la línea antes de continuar.
+- **El caso A pasa:** `desdeVariable` tiene `nombre` y `series`, y `descanso` sobra sin molestar.
+- **El caso C no:** el objeto literal solo se usa ahí, así que `serie` es una errata. Borra la línea antes de seguir.
 
 <Callout type="risk">
 
-- **La comprobación desaparece con variables intermedias** (caso A). Si construyes un objeto en una variable y luego lo pasas, una errata en un campo **opcional** pasa sin aviso. Con `type Opciones = { minutos?: number; notas?: string }`, el objeto `const opciones = { minutos: 5, notass: "x" }` se acepta: tiene `minutos`, y `notas` no es obligatoria. La nota se pierde en silencio. (Solo si **ninguna** propiedad coincide, TypeScript avisa con `error TS2559: ... has no properties in common`). Escribe los objetos directamente en la llamada o anota la variable: `const opciones: Opciones = {...}`.
-- **Datos sobrantes en la base de datos:** como el caso A se acepta, si pasas a MongoDB un objeto con propiedades de más, se guardarán todas. Por eso en el curso I1 validarás con Zod, que elimina lo que sobra.
+- **La comprobación desaparece con variables intermedias:** con campos opcionales, `const opciones = { minutos: 5, notass: "x" }` se acepta y la nota se pierde. Anota la variable (`const opciones: Opciones = {…}`) o escribe el objeto en la llamada.
+- **Lo que sobra llega a la base de datos:** como el caso A se acepta, MongoDB guarda todas las propiedades. Zod (I1) elimina lo que sobra.
 
 </Callout>
 
 ## Paso 6: modelar un día de entreno completo
 
-Ya tienes todas las piezas. Ahora el objetivo de la sección: un día de entreno con fecha, ejercicios y agua, y una función que calcule el **volumen total** (series × repeticiones × peso, la medida estándar del trabajo en el gimnasio). Crea `src/03-dia-entreno.ts`:
+**Qué es:** el objetivo de la sección: un día con fecha, ejercicios y agua, y una función que calcula el **volumen total** (series × repeticiones × peso).
+
+**Cómo se usa:** crea `src/03-dia-entreno.ts`.
 
 ```ts
 // Archivo: src/03-dia-entreno.ts
@@ -362,19 +358,16 @@ Volumen de un día sin ejercicios: 0 kg
 Ejercicio con más peso en un día vacío: ninguno
 ```
 
-Las decisiones de diseño, una a una:
-
-1. **Dos tipos en lugar de uno gigante:** `EjercicioDelDia` y `DiaEntreno`. El segundo usa el primero (`ejercicios: EjercicioDelDia[]`). Así cada función recibe solo lo que necesita: `volumenEjercicio` no necesita el día entero.
-2. **`aguaMl` en mililitros (entero)**, no en litros con decimales: evitas los problemas de precisión del Paso 1 de B1.2 y la unidad queda en el nombre.
-3. **`reduce` con valor inicial `0`:** sin él, un día sin ejercicios lanzaría `TypeError: Reduce of empty array with no initial value`. El caso `diaVacio` lo comprueba.
-4. **`ejercicioMasPesado` devuelve `EjercicioDelDia | undefined`**, porque un día puede no tener ejercicios. El tipo de retorno **obliga** a quien la llama a manejar ese caso (con `?.` y `??`).
-5. **`toSorted`** en lugar de `sort`: `sort` reordena el array original (un efecto secundario que desordenaría `jueves.ejercicios`); `toSorted` devuelve una copia ordenada.
+- **Dos tipos en lugar de uno gigante:** `DiaEntreno` usa `EjercicioDelDia[]`, y `volumenEjercicio` recibe solo lo que necesita.
+- **`aguaMl` en mililitros enteros:** sin decimales (Paso 1 de B1.2), y la unidad va en el nombre.
+- **`reduce` con valor inicial `0`:** sin él, un día vacío lanza `TypeError: Reduce of empty array with no initial value`.
+- **`ejercicioMasPesado` devuelve `EjercicioDelDia | undefined`,** y obliga a quien llama a manejarlo. `toSorted` no desordena el original, a diferencia de `sort`.
 
 <Callout type="risk">
 
-- **Fechas como texto:** `fecha: string` acepta `"ayer"` o `"08/10/2026"` sin quejarse. El comentario `// formato AAAA-MM-DD` es una promesa, no una comprobación. En el curso I1 validarás el formato con Zod; en MongoDB (B5.5) aprenderás cuándo guardar `Date` en lugar de texto.
-- **Coste de `toSorted`:** ordenar para quedarte con el primero es O(n log n) y copia el array. Con 3 ejercicios es irrelevante; con listas de miles de elementos, un `reduce` que recorra una sola vez (O(n)) es lo correcto.
-- **`toSorted` es de ES2023:** funciona en Node 20+ y en navegadores desde 2023, y TypeScript solo lo conoce si `target` (o `lib`) es `ES2023` o superior. Por eso el `tsconfig.json` de B1.1 usa `"target": "ES2023"`. Con `"ES2022"` verías `error TS2550: Property 'toSorted' does not exist on type 'EjercicioDelDia[]'. Do you need to change your target library?`. Ese mensaje significa siempre lo mismo: estás usando un método más moderno que la versión de JavaScript configurada.
+- **Fechas como texto:** `fecha: string` acepta `"ayer"`. El comentario `// formato AAAA-MM-DD` es una promesa, no una comprobación: Zod (I1) y `Date` en MongoDB (B5.5).
+- **Ordenar para quedarte con el primero** es O(n log n) y copia el array. Con miles de elementos, un `reduce` de una pasada.
+- **`toSorted` es de ES2023:** con `"target": "ES2022"` da `error TS2550: Property 'toSorted' does not exist on type 'EjercicioDelDia[]'. Do you need to change your target library?`. Por eso B1.1 usa `ES2023`.
 
 </Callout>
 
@@ -457,8 +450,8 @@ for (const dia of [conComidas, sinComidas]) {
 
 <Callout type="risk">
 
-- **`dia.comidas ?? []`:** sin ese `?? []`, `dia.comidas.reduce(...)` da `error TS18048: 'dia.comidas' is possibly 'undefined'.` TypeScript te obliga a decidir qué pasa cuando no hay comidas. Es exactamente el tipo de error que en JavaScript solo verías en producción.
-- **Tipos duplicados:** has copiado `EjercicioDelDia` en dos archivos. Si cambias uno, el otro queda desactualizado. En la siguiente sección los convertirás en interfaces reutilizables, y en B1.7 los moverás a un archivo propio para importarlos.
+- **`dia.comidas ?? []`:** sin él, `error TS18048: 'dia.comidas' is possibly 'undefined'.` TypeScript te obliga a decidir qué pasa sin comidas, algo que en JavaScript verías en producción.
+- **`EjercicioDelDia` está duplicado** en dos archivos. En B1.4 lo conviertes en un tipo reutilizable, y en B1.7 lo mueves a un módulo.
 
 </Callout>
 
@@ -470,8 +463,8 @@ Puedes tipar cualquier objeto JSON que ya uses en tus proyectos sin consultar la
 
 ## Resumen
 
-- `number[]` y `Array<number>` son lo mismo; con `noUncheckedIndexedAccess`, leer por índice devuelve `T | undefined`.
-- Las tuplas son arrays de longitud fija con un tipo por posición; `useState` devuelve una.
-- `?` marca propiedades opcionales; `?.` lee sin romper y `??` da un valor por defecto solo ante `null` o `undefined`.
-- `readonly` impide reasignar en tiempo de compilación, pero es superficial y no existe en ejecución.
-- Los objetos literales pasan por el _excess property checking_, que atrapa erratas; los objetos en variables, no.
+- `number[]` es `Array<number>`; con `noUncheckedIndexedAccess`, leer por índice da `T | undefined`.
+- Tuplas: longitud fija y un tipo por posición. `useState` devuelve una.
+- `?` marca lo opcional; `?.` lee sin romper; `??` solo sustituye `null` y `undefined`.
+- `readonly` protege al compilar, es superficial y no existe en ejecución.
+- Un objeto literal con propiedades de más da error; uno en una variable, no.
