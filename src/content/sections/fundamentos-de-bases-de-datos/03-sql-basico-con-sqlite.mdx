@@ -7,15 +7,15 @@ minutes: 60
 summary: "Conviertes el diagrama de B4.2 en una base de datos SQLite con restricciones, la consultas con SELECT, JOIN y GROUP BY hasta calcular el progreso por curso, y la usas desde Node sin inyección SQL."
 ---
 
-**SQL** es el lenguaje para hablar con las bases de datos relacionales, y lleva más de 40 años siendo el estándar. Aunque tus proyectos usen MongoDB, vas a encontrarte SQL en entrevistas, en herramientas de analítica, en Supabase y PostgreSQL, en los paneles de Vercel… y, sobre todo, te enseña a **pensar en conjuntos de datos** en lugar de en bucles, que es justo lo que necesitarás con las agregaciones de MongoDB. En esta sección vas a convertir el diagrama de B4.2 en una base de datos real, vas a provocar cada error que protege tus datos, vas a responder preguntas cada vez más difíciles hasta calcular el **porcentaje de progreso por curso** (lo que hace la página de progreso de esta plataforma) y, al final, vas a usarla desde Node.
-
-**Lo que tendrás al terminar:** `academia.db` con el modelo de Dani Academy, los scripts `esquema.sql` y `datos.sql` para recrearla cuando quieras, y `consultas.js`, que la consulta desde Node con parámetros seguros.
+**SQL** es el lenguaje de las bases de datos relacionales: lo encontrarás en entrevistas, en analítica, en Supabase y en PostgreSQL, y te enseña a pensar en conjuntos en lugar de en bucles. Aquí conviertes el diagrama de B4.2 en una base de datos real y calculas el progreso por curso.
 
 **Requisitos:** el proyecto `db-lab` de B4.1 y B4.2, y `sqlite3` (viene en macOS).
 
 ## Paso 1: crear las tablas con `CREATE TABLE`
 
-Crea `esquema.sql` en `db-lab`. Es la traducción directa del diagrama de B4.2, con cada regla del modelo escrita como una **restricción** que la base de datos hará cumplir:
+**Qué es:** `CREATE TABLE` define las columnas de una tabla y sus **restricciones**, las reglas del modelo que la base de datos hará cumplir.
+
+**Cómo se usa:** crea `esquema.sql` en `db-lab`, la traducción del diagrama de B4.2.
 
 ```sql
 -- Archivo: esquema.sql
@@ -66,20 +66,11 @@ CREATE TABLE intentos (
 );
 ```
 
-Lo que dice cada pieza:
+- **`INTEGER PRIMARY KEY`** asigna el siguiente número si no indicas el `id`; **`TEXT PRIMARY KEY`** es una clave natural (`'B1.3'`).
+- **`NOT NULL`**, obligatoria; **`UNIQUE`**, sin repetidos; **`CHECK (…)`**, una condición que toda fila cumple; **`REFERENCES`**, una clave foránea, y **`ON DELETE CASCADE`** borra los hijos con el padre.
+- **`PRIMARY KEY (usuario_id, seccion_id)`** es compuesta: impide leer dos veces la misma sección. **`DROP TABLE IF EXISTS`**, en orden inverso a las dependencias, permite repetir el script.
 
-- **`INTEGER PRIMARY KEY`**: clave primaria numérica. Si no indicas el `id` al insertar, SQLite asigna el siguiente número automáticamente.
-- **`TEXT PRIMARY KEY`**: una clave natural (`'B1'`, `'B1.3'`), como decidiste en B4.2.
-- **`NOT NULL`**: la columna es obligatoria.
-- **`UNIQUE`**: no puede haber dos filas con el mismo valor (dos usuarios con el mismo correo).
-- **`CHECK (…)`**: una condición que toda fila debe cumplir (el nivel solo puede ser uno de tres; la nota, entre 0 y 5).
-- **`DEFAULT 60`**: valor si no se indica otro.
-- **`REFERENCES cursos(id)`**: una **clave foránea**: el valor debe existir en esa otra tabla.
-- **`ON DELETE CASCADE`**: si se borra el usuario, se borran también sus lecturas e intentos.
-- **`PRIMARY KEY (usuario_id, seccion_id)`**: una clave primaria **compuesta**: la pareja no se puede repetir. Es la restricción que impide leer dos veces la misma sección.
-- **`DROP TABLE IF EXISTS`**: borra las tablas si ya existían, para poder ejecutar el script tantas veces como quieras. Se borran en orden inverso a como dependen unas de otras.
-
-Crea `datos.sql` con datos de prueba:
+Datos de prueba, en `datos.sql`:
 
 ```sql
 -- Archivo: datos.sql
@@ -120,7 +111,7 @@ INSERT INTO intentos (usuario_id, curso_id, nota, enviado_en) VALUES
   (2, 'B1', 4, '2026-10-07T11:00:00Z');
 ```
 
-Crea la base de datos ejecutando los dos scripts (el `<` le pasa el contenido del archivo a `sqlite3`):
+Crea la base de datos (`<` pasa el archivo a `sqlite3`):
 
 ```bash
 sqlite3 academia.db < esquema.sql
@@ -134,15 +125,17 @@ cursos     intentos   lecturas   secciones  usuarios
 
 <Callout type="risk">
 
-- **`DROP TABLE` borra los datos para siempre.** En este script de laboratorio es lo que quieres; en una base de datos con datos reales, ejecutarlo por error es una catástrofe. Nunca ejecutes un `esquema.sql` con `DROP` contra producción.
-- **Los tipos de SQLite son flexibles:** a diferencia de PostgreSQL, SQLite acepta guardar `'hola'` en una columna `INTEGER`. Las restricciones `CHECK` y `NOT NULL` son las que de verdad protegen los datos. (Si quieres tipos estrictos, SQLite tiene tablas `STRICT`: `CREATE TABLE … ( … ) STRICT;`).
-- **Las fechas son texto:** SQLite no tiene un tipo fecha. Se guardan como texto ISO 8601 en UTC (`'2026-10-01T15:00:00Z'`), que se ordena correctamente como texto. Nunca guardes fechas como `'01/10/2026'`: no se ordenan bien y son ambiguas (¿1 de octubre o 10 de enero?).
+- **`DROP TABLE` borra los datos para siempre.** Aquí es lo que quieres; nunca ejecutes un `esquema.sql` con `DROP` contra producción.
+- **SQLite acepta `'hola'` en una columna `INTEGER`:** lo que protege son `CHECK` y `NOT NULL`. Para tipos estrictos, tablas `STRICT`.
+- **Las fechas son texto** en ISO 8601 y UTC (`'2026-10-01T15:00:00Z'`), que se ordena bien. Nunca `'01/10/2026'`: ambiguo y mal ordenado.
 
 </Callout>
 
 ## Paso 2: consultar con `SELECT`, `WHERE`, `ORDER BY` y `LIMIT`
 
-Abre una sesión interactiva y configura la salida para que sea legible:
+**Qué es:** `SELECT` lee filas: elige columnas, las filtra (`WHERE`), las ordena (`ORDER BY`) y limita cuántas (`LIMIT`).
+
+**Cómo se usa:** abre una sesión interactiva.
 
 ```bash
 sqlite3 academia.db
@@ -154,12 +147,12 @@ Enter ".help" for usage hints.
 sqlite>
 ```
 
+`.mode box` dibuja bordes (los comandos con punto son de `sqlite3`, no de SQL), y el `PRAGMA` se explica en el Paso 3:
+
 ```sql
 .mode box
 PRAGMA foreign_keys = ON;
 ```
-
-`.mode box` dibuja las tablas con bordes (los comandos que empiezan por punto son de la herramienta `sqlite3`, no de SQL). El `PRAGMA` lo explicarás en el Paso 3. Ahora, tu primera consulta, todo de la tabla de cursos:
 
 ```sql
 SELECT * FROM cursos;
@@ -175,7 +168,7 @@ SELECT * FROM cursos;
 └────┴────────────────────────┴────────┴───────┘
 ```
 
-Elige columnas, filtra, ordena y limita:
+Filtra, ordena y limita:
 
 ```sql
 SELECT id, titulo FROM secciones WHERE curso_id = 'B1' ORDER BY orden DESC LIMIT 2;
@@ -190,7 +183,7 @@ SELECT id, titulo FROM secciones WHERE curso_id = 'B1' ORDER BY orden DESC LIMIT
 └──────┴──────────────────────────┘
 ```
 
-Se lee casi como una frase: "selecciona el id y el título **de** secciones **donde** el curso sea B1, **ordenadas** por orden descendente, **solo 2**". Condiciones combinadas:
+Condiciones combinadas:
 
 ```sql
 SELECT id, titulo, minutos FROM secciones
@@ -205,22 +198,22 @@ WHERE curso_id IN ('B2', 'B3') AND titulo LIKE '%Git%';
 └──────┴─────────────────────────┴─────────┘
 ```
 
-- **`IN (…)`**: el valor está en la lista.
-- **`LIKE '%Git%'`**: el texto contiene "Git". `%` es "cualquier cosa" (cero o más caracteres) y `_`, "exactamente un carácter".
-- **`AND` / `OR`**: combinan condiciones. Usa paréntesis cuando mezcles los dos.
-- **Una consulta puede ocupar varias líneas**: termina cuando escribes `;`. Si pulsas Enter sin `;`, el _prompt_ cambia a `...>` y espera más texto.
+- **`IN (…)`:** el valor está en la lista. **`LIKE '%Git%'`:** contiene "Git"; `%` es cualquier cosa y `_`, un carácter.
+- **`AND` y `OR`,** con paréntesis si los mezclas. Una consulta termina en `;`: sin él, el _prompt_ cambia a `...>` y espera.
 
 <Callout type="risk">
 
-- **El orden de las filas no está garantizado sin `ORDER BY`.** Hoy SQLite te las devuelve en el orden de inserción; mañana, tras un índice nuevo o un cambio de versión, puede que no. Si el orden importa, escríbelo.
-- **`SELECT *` en el código de una app es frágil:** si mañana añades una columna enorme (o sensible, como un _hash_ de contraseña), todas las consultas la arrastrarán. En el código, enumera las columnas que necesitas.
-- **Comillas:** en SQL, los textos van entre comillas **simples** (`'B1'`). Las dobles son para nombres de columnas o tablas. `WHERE curso_id = "B1"` funciona en SQLite por compatibilidad, pero falla en otras bases de datos.
+- **Sin `ORDER BY`, el orden no está garantizado:** hoy sale el de inserción; tras un índice nuevo, puede que no.
+- **`SELECT *` en el código es frágil:** una columna nueva, enorme o sensible (un _hash_ de contraseña), viaja en todas las consultas. Enumera las columnas.
+- **Textos entre comillas simples** (`'B1'`). Las dobles son para nombres; `"B1"` funciona en SQLite por compatibilidad y falla en otras bases.
 
 </Callout>
 
-## Paso 3: insertar y comprobar que las restricciones protegen tus datos
+## Paso 3: las restricciones protegen tus datos
 
-Sigue en la sesión de `sqlite3`. Intenta guardar datos incorrectos, uno por uno:
+**Qué es:** cada restricción rechaza un dato incorrecto **antes** de que entre.
+
+**Cómo se usa:** en la sesión, intenta guardar datos incorrectos.
 
 ```sql
 INSERT INTO lecturas (usuario_id, seccion_id, leida_en) VALUES (2, 'B9.9', '2026-10-08T10:00:00Z');
@@ -236,14 +229,9 @@ Runtime error: UNIQUE constraint failed: usuarios.email (19)
 Runtime error: CHECK constraint failed: nivel IN ('basico', 'intermedio', 'avanzado') (19)
 ```
 
-Cuatro errores, cuatro bugs que **no llegarán a tus datos**:
+- **`FOREIGN KEY`:** la sección `B9.9` no existe. **`UNIQUE` en `lecturas`:** Ana ya leyó `B1.1`, la protección contra el doble clic. **`UNIQUE` en `email`:** correo repetido. **`CHECK`:** `'experto'` no es un nivel.
 
-1. **`FOREIGN KEY`**: la sección `B9.9` no existe.
-2. **`UNIQUE` en `lecturas`**: Ana ya había leído `B1.1`. Es la clave primaria compuesta en acción, la protección contra el doble clic.
-3. **`UNIQUE` en `usuarios.email`**: ese correo ya está registrado.
-4. **`CHECK`**: `'experto'` no es un nivel válido.
-
-Ahora el experimento más importante. Sal de la sesión (`.quit`) y repite el primer `INSERT` **sin** el `PRAGMA`, en una sola orden desde la terminal:
+Ahora, sal (`.quit`) y repite el primer `INSERT` **sin** el `PRAGMA`:
 
 ```bash
 sqlite3 academia.db "INSERT INTO lecturas (usuario_id, seccion_id, leida_en) VALUES (2, 'B9.9', '2026-10-08T10:00:00Z'); SELECT changes();"
@@ -253,7 +241,7 @@ sqlite3 academia.db "INSERT INTO lecturas (usuario_id, seccion_id, leida_en) VAL
 1
 ```
 
-**Se insertó.** `changes()` devuelve cuántas filas cambió la última operación: 1. Ana tiene ahora una lectura de una sección que no existe. Bórrala y vuelve a la sesión interactiva:
+- **Se insertó:** `changes()` dice que cambió 1 fila. Ana tiene una lectura de una sección inexistente. Bórrala y vuelve a la sesión:
 
 ```bash
 sqlite3 academia.db "DELETE FROM lecturas WHERE seccion_id = 'B9.9';"
@@ -267,14 +255,16 @@ PRAGMA foreign_keys = ON;
 
 <Callout type="risk">
 
-- **En SQLite, las claves foráneas están desactivadas por defecto** (por compatibilidad con bases de datos antiguas) y `PRAGMA foreign_keys = ON` hay que ejecutarlo en **cada conexión nueva**: cada vez que abres `sqlite3`, cada vez que tu programa abre la base de datos. Es el error más común con SQLite: crees que tus `REFERENCES` te protegen y no lo hacen. (PostgreSQL y MySQL las aplican siempre).
-- **La base de datos es tu última línea de defensa, no la única:** valida también en tu código para dar mensajes claros al usuario ("ese correo ya está registrado"). La restricción garantiza que, aunque tu validación falle, el dato incorrecto no entre.
+- **En SQLite, las claves foráneas están desactivadas por defecto,** y `PRAGMA foreign_keys = ON` va en **cada conexión nueva**. Es el error más común: crees que `REFERENCES` te protege y no. PostgreSQL y MySQL las aplican siempre.
+- **La base de datos es la última línea de defensa:** valida también en tu código para dar mensajes claros ("ese correo ya está registrado").
 
 </Callout>
 
-## Paso 4: modificar y borrar, y el peligro de olvidar el `WHERE`
+## Paso 4: modificar, borrar y el peligro de olvidar el `WHERE`
 
-`UPDATE` cambia filas existentes y `DELETE` las borra. Los dos usan `WHERE` para elegir **qué** filas:
+**Qué es:** `UPDATE` cambia filas y `DELETE` las borra. El `WHERE` decide **cuáles**.
+
+**Cómo se usa:**
 
 ```sql
 UPDATE usuarios SET email = 'dani@nuevo.com' WHERE id = 1;
@@ -295,7 +285,9 @@ SELECT * FROM usuarios WHERE id = 1;
 └────┴────────┴────────────────┘
 ```
 
-Gracias a la normalización de B4.2, el correo de Dani se cambia en **un solo sitio**. Ahora, lo que **no** debes hacer nunca. Sal de la sesión (`.quit`), haz una **copia** de la base de datos y practica el error sobre la copia:
+- **El correo de Dani cambia en un solo sitio,** gracias a la normalización de B4.2.
+
+Lo que no debes hacer nunca, practicado sobre una **copia**:
 
 ```bash
 cp academia.db copia.db
@@ -317,7 +309,9 @@ rm copia.db
 └────────────────┘
 ```
 
-Sin `WHERE`, `UPDATE` cambió **todas** las secciones y `DELETE` borró **todas** las lecturas. Sin confirmación, sin papelera, sin `Ctrl+Z`. Ahora, el borrado en cascada y la protección de las claves foráneas, también sobre una copia:
+- **Sin `WHERE`,** `UPDATE` cambió **todas** las secciones y `DELETE` borró **todas** las lecturas. Sin confirmación ni papelera.
+
+El borrado en cascada, también sobre una copia:
 
 ```bash
 cp academia.db prueba.db
@@ -352,20 +346,22 @@ Runtime error: FOREIGN KEY constraint failed (19)
 rm prueba.db
 ```
 
-- Al borrar a Ana, **`ON DELETE CASCADE`** borró sus dos lecturas: no quedan lecturas "huérfanas" de un usuario que no existe.
-- La sección `B1.1` **no se pudo borrar**: tiene lecturas que la referencian y su clave foránea no tiene `ON DELETE CASCADE`. La base de datos impide dejar lecturas apuntando a la nada.
+- **Al borrar a Ana, `ON DELETE CASCADE` borró sus lecturas:** no quedan huérfanas.
+- **`B1.1` no se pudo borrar:** tiene lecturas que la referencian, sin cascada.
 
 <Callout type="risk">
 
-- **Antes de un `UPDATE` o un `DELETE`, ejecuta el mismo `WHERE` con un `SELECT`:** `SELECT * FROM lecturas WHERE usuario_id = 2;`. Si ves las filas que esperas, cambia `SELECT *` por `DELETE`. Es la costumbre que más desastres evita.
-- **`ON DELETE CASCADE` es potente y peligroso:** borrar un usuario borra todo su historial sin preguntar. Úsalo solo donde los datos hijos no tienen sentido sin el padre (lecturas sin usuario). Para datos que deben conservarse (facturas), mejor impedir el borrado o marcar el registro como borrado (`borrado_en`).
-- **Haz copias de seguridad antes de operaciones masivas:** `sqlite3 academia.db ".backup antes-de-limpiar.db"`. En MongoDB Atlas, el plan gratuito no incluye copias automáticas.
+- **Antes de un `UPDATE` o un `DELETE`, ejecuta el mismo `WHERE` con un `SELECT`.** Si salen las filas esperadas, cambia `SELECT *` por `DELETE`. Es la costumbre que más desastres evita.
+- **`ON DELETE CASCADE` borra sin preguntar:** solo para hijos sin sentido sin el padre. Para lo que debe conservarse (facturas), impide el borrado o marca la fila (`borrado_en`).
+- **Copia de seguridad antes de operaciones masivas:** `sqlite3 academia.db ".backup antes-de-limpiar.db"`. El plan gratuito de Atlas no las hace solo.
 
 </Callout>
 
 ## Paso 5: combinar tablas con `JOIN`
 
-Los datos están repartidos en varias tablas (normalización). `JOIN` los **vuelve a unir** en una consulta, emparejando filas por sus claves. Abre de nuevo la sesión (`sqlite3 academia.db`, `.mode box` y el `PRAGMA`) y pregunta qué secciones ha leído Ana, con sus títulos:
+**Qué es:** `JOIN` **vuelve a unir** en una consulta lo que la normalización separó, emparejando filas por sus claves. Un `JOIN` normal solo devuelve filas **con pareja**; **`LEFT JOIN`** conserva todas las de la izquierda y rellena con `NULL`.
+
+**Cómo se usa:** abre la sesión (`sqlite3 academia.db`, `.mode box` y el `PRAGMA`). Las secciones que leyó Ana:
 
 ```sql
 SELECT u.nombre, s.id AS seccion, s.titulo, l.leida_en
@@ -385,11 +381,9 @@ ORDER BY l.leida_en;
 └────────┴─────────┴────────────────────────────────────┴──────────────────────┘
 ```
 
-- **`FROM lecturas l`**: la tabla de partida, con un alias corto (`l`).
-- **`JOIN usuarios u ON u.id = l.usuario_id`**: por cada lectura, busca el usuario cuyo `id` coincide con su `usuario_id`.
-- **`s.id AS seccion`**: renombra la columna en el resultado.
+- **`FROM lecturas l`:** la tabla de partida, con alias. **`JOIN usuarios u ON u.id = l.usuario_id`:** por cada lectura, su usuario. **`AS`** renombra una columna.
 
-Un `JOIN` normal (`INNER JOIN`) solo devuelve las filas que **tienen pareja** en las dos tablas. Pero la página de un curso necesita **todas** las secciones, leídas o no, para pintar las marcas. Para eso existe **`LEFT JOIN`**: conserva todas las filas de la tabla de la izquierda, y rellena con vacío (`NULL`) cuando no hay pareja:
+Todas las secciones, leídas o no, como necesita la barra lateral:
 
 ```sql
 SELECT s.id, s.titulo, l.leida_en
@@ -410,7 +404,7 @@ ORDER BY s.orden;
 └──────┴────────────────────────────────────┴──────────────────────┘
 ```
 
-Es exactamente la información que necesita la barra lateral de un curso. Y para responder "¿qué le queda por leer a Ana?", filtra las que no tienen pareja:
+Las que le quedan por leer:
 
 ```sql
 SELECT s.id, s.titulo
@@ -431,15 +425,17 @@ ORDER BY s.orden;
 
 <Callout type="risk">
 
-- **La condición del usuario va en el `ON`, no en el `WHERE`:** si escribes `LEFT JOIN lecturas l ON l.seccion_id = s.id WHERE l.usuario_id = 2`, el `WHERE` descarta las filas donde `l.usuario_id` es `NULL`… que son justo las secciones no leídas. El `LEFT JOIN` se convierte en un `JOIN` normal sin avisar. Las condiciones sobre la tabla de la derecha de un `LEFT JOIN` van en el `ON`.
-- **`= NULL` no funciona nunca:** en SQL, `NULL` significa "desconocido", y cualquier comparación con él da "desconocido", no "verdadero". Se compara con `IS NULL` o `IS NOT NULL`.
-- **Un `JOIN` sin condición multiplica filas:** olvidar el `ON` (o escribir una condición que no relaciona bien las tablas) produce todas las combinaciones posibles. Con 1000 usuarios y 134 secciones, 134 000 filas. Si un resultado tiene sospechosamente muchas filas, revisa los `ON`.
+- **La condición del usuario va en el `ON`, no en el `WHERE`:** en el `WHERE` descarta las filas con `NULL`, que son justo las no leídas, y el `LEFT JOIN` se vuelve un `JOIN` sin avisar.
+- **`= NULL` no funciona nunca:** `NULL` es "desconocido". Se compara con `IS NULL` o `IS NOT NULL`.
+- **Un `JOIN` sin condición multiplica filas:** con 1000 usuarios y 134 secciones, 134 000. Si salen demasiadas, revisa los `ON`.
 
 </Callout>
 
-## Paso 6: resumir con `GROUP BY` y funciones de agregado
+## Paso 6: resumir con `GROUP BY`
 
-Las preguntas de una página de progreso son resúmenes: cuántas, cuánto de media, el máximo. `GROUP BY` agrupa filas y las **funciones de agregado** (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) calculan un valor por grupo:
+**Qué es:** `GROUP BY` agrupa filas, y las **funciones de agregado** (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) calculan un valor por grupo. `WHERE` filtra filas **antes** de agrupar; **`HAVING`** filtra grupos **después**.
+
+**Cómo se usa:** cuántas secciones leyó cada usuario.
 
 ```sql
 SELECT u.nombre, COUNT(l.seccion_id) AS leidas
@@ -476,7 +472,7 @@ GROUP BY c.id;
 └───────┴──────────┴───────┴───────┘
 ```
 
-Y para filtrar **grupos** (no filas) se usa **`HAVING`**: los usuarios con al menos 2 secciones leídas:
+Los usuarios con al menos 2 lecturas, con `HAVING`:
 
 ```sql
 SELECT u.nombre, COUNT(l.seccion_id) AS leidas
@@ -495,19 +491,19 @@ HAVING COUNT(l.seccion_id) >= 2;
 └────────┴────────┘
 ```
 
-La diferencia: `WHERE` filtra filas **antes** de agrupar; `HAVING` filtra grupos **después**.
-
 <Callout type="risk">
 
-- **`COUNT(*)` frente a `COUNT(columna)`:** cambia la primera consulta por `COUNT(*)` y verás que **Luis aparece con 1** lectura en lugar de 0. Con `LEFT JOIN`, Luis tiene una fila con la lectura vacía (`NULL`): `COUNT(*)` cuenta filas (1), mientras que `COUNT(l.seccion_id)` cuenta solo los valores no nulos (0). Con `LEFT JOIN`, cuenta siempre una columna de la tabla de la derecha.
-- **La división entera:** en SQLite, `2 / 4` es `0`, no `0.5`, porque dividir dos enteros da un entero. Por eso las consultas de porcentaje multiplican primero por `100.0` (un número decimal): `100.0 * leidas / total`.
-- **Columnas fuera del `GROUP BY`:** SQLite te deja seleccionar una columna que no está agrupada ni agregada y te devuelve el valor de una fila cualquiera del grupo. PostgreSQL da error. No te fíes de ese valor.
+- **`COUNT(*)` frente a `COUNT(columna)`:** con `COUNT(*)`, Luis sale con 1 lectura, porque `LEFT JOIN` le da una fila con `NULL`. Con `LEFT JOIN`, cuenta una columna de la derecha.
+- **`2 / 4` es `0` en SQLite:** dos enteros dan un entero. Multiplica primero por `100.0`: `100.0 * leidas / total`.
+- **SQLite deja seleccionar una columna no agrupada** y devuelve la de una fila cualquiera. PostgreSQL da error. No te fíes de ese valor.
 
 </Callout>
 
 ## Paso 7: consultar desde Node, sin inyección SQL
 
-En una app, las consultas las lanza tu código con valores que vienen del usuario. Crea `consultas.js` en `db-lab`:
+**Qué es:** una **consulta preparada** usa **`?`** como hueco para cada valor, que se rellena aparte. El valor nunca se interpreta como SQL.
+
+**Cómo se usa:** crea `consultas.js` en `db-lab`.
 
 ```js
 // Archivo: consultas.js
@@ -566,21 +562,20 @@ Búsqueda segura con "x' OR '1'='1": []
 Búsqueda segura de un correo real: { id: 2, nombre: 'Ana', email: 'ana@ejemplo.com' }
 ```
 
-La primera consulta usa **`?`**: un hueco que se rellena con `progresoPorCurso.all(1)`. Es una **consulta preparada**.
-
-La segunda parte es la lección de seguridad más importante del curso. `buscarUsuarioInseguro` construye el SQL **pegando** el texto del usuario. Con un correo normal funciona. Pero con el texto `x' OR '1'='1`, el SQL resultante es:
+- **`progresoPorCurso.all(1)`** rellena el `?` con el id de Dani.
+- **`buscarUsuarioInseguro` pega el texto del usuario en el SQL.** Con `x' OR '1'='1`, la comilla cierra el texto y lo demás se ejecuta como SQL:
 
 ```sql
 SELECT id, nombre, email FROM usuarios WHERE email = 'x' OR '1'='1'
 ```
 
-La comilla del usuario **cerró** el texto y lo que sigue se ejecutó **como SQL**: `'1'='1'` siempre es verdadero, así que devuelve **todos** los usuarios. Es una **inyección SQL**. En un formulario de login, eso es entrar sin contraseña; con otros textos, borrar tablas o leer datos ajenos. Con la consulta preparada, el mismo texto se busca **literalmente** como correo, y no encuentra nada.
+- **`'1'='1'` siempre es verdadero, y devuelve todos los usuarios.** Es una **inyección SQL**: en un login, entrar sin contraseña. Con la consulta preparada, el texto se busca literalmente, y no encuentra nada.
 
 <Callout type="risk">
 
-- **Nunca construyas SQL concatenando valores del usuario**, ni con _template strings_ (`${email}`). Siempre parámetros (`?`). No hay excepciones: escapar comillas a mano tiene fallos conocidos. Lo que sí puede ir en el texto del SQL son valores que controla tu código (por ejemplo, elegir entre dos nombres de columna fijos para ordenar).
-- **MongoDB tiene su propia versión del ataque:** si pasas a una consulta un objeto que viene del cuerpo de la petición sin validar, `{ "email": { "$ne": null } }` encuentra a cualquier usuario. Se llama inyección NoSQL, y se evita validando el tipo de cada valor (curso A5).
-- **`DatabaseSync` es síncrona:** cada consulta bloquea Node hasta que termina. Para un script o una herramienta, perfecto; en un servidor con mucho tráfico, las consultas largas detendrían las demás peticiones.
+- **Nunca construyas SQL concatenando valores del usuario,** tampoco con `${email}`. Siempre `?`. En el texto del SQL solo va lo que controla tu código, como elegir entre dos nombres de columna fijos.
+- **MongoDB tiene su versión:** un objeto del cuerpo sin validar como `{ "email": { "$ne": null } }` encuentra a cualquiera. Se evita validando el tipo de cada valor (A5).
+- **`DatabaseSync` es síncrona:** cada consulta bloquea Node. Bien para un script; en un servidor con tráfico, detendría las demás peticiones.
 
 </Callout>
 
@@ -594,7 +589,7 @@ La comilla del usuario **cerró** el texto y lo que sigue se ejecutó **como SQL
 
 </Callout>
 
-Solución del punto 1. La clave es empezar desde **todas** las secciones combinadas con el usuario (`CROSS JOIN`, todas las combinaciones), y unir las lecturas con `LEFT JOIN`:
+Solución del punto 1. Se parte de **todas** las secciones combinadas con el usuario (`CROSS JOIN`, todas las combinaciones) y se unen las lecturas con `LEFT JOIN`:
 
 ```sql
 SELECT u.nombre,
@@ -620,7 +615,7 @@ ORDER BY s.curso_id;
 └────────┴───────┴────────┴───────┴────────────┘
 ```
 
-Solución del punto 2. Para cada usuario, la lectura cuya fecha coincide con la **máxima** de sus lecturas (una subconsulta):
+Solución del punto 2. Por cada usuario, la lectura con la fecha **máxima**, con una subconsulta:
 
 ```sql
 SELECT u.nombre, s.id AS seccion, s.titulo, l.leida_en
@@ -642,7 +637,7 @@ ORDER BY u.nombre;
 └────────┴─────────┴───────────────────────────────┴──────────────────────┘
 ```
 
-Es la consulta que alimenta el botón "Continuar donde lo dejaste" del temario.
+- **Es la consulta del botón "Continuar donde lo dejaste"** del temario.
 
 Solución del punto 3. Añade esto al final de `consultas.js`, **antes** de `db.close();`:
 
@@ -668,13 +663,13 @@ B1.3 para Ana: marcada
 B1.3 para Ana, otra vez: ya estaba leída
 ```
 
-`ON CONFLICT … DO NOTHING` convierte el error de `UNIQUE` en "no hagas nada". Es la versión SQL de lo que hace esta plataforma en MongoDB con un _upsert_ sobre su índice único: marcar dos veces deja una sola lectura.
+- **`ON CONFLICT … DO NOTHING`** convierte el error de `UNIQUE` en "no hagas nada". Es lo que hace esta plataforma en MongoDB con un _upsert_ sobre su índice único.
 
 <Callout type="risk">
 
-- **Si dos lecturas de un usuario tienen exactamente la misma fecha**, la consulta del punto 2 devolverá las dos. Con fechas al segundo es improbable, pero posible. Las bases de datos modernas resuelven este tipo de consultas con funciones de ventana (`ROW_NUMBER() OVER (PARTITION BY …)`), que verás en cursos avanzados.
-- **`new Date().toISOString()`** genera la fecha en UTC con milisegundos (`2026-10-09T15:42:10.123Z`), compatible con el formato de `datos.sql`. Si mezclaras fechas con y sin zona horaria en la misma columna, el orden alfabético dejaría de coincidir con el temporal.
-- **Ejecutar `consultas.js` dos veces** deja la lectura de `B1.3` de Ana ya creada desde la primera vez. Para empezar de cero, vuelve a crear la base de datos con `esquema.sql` y `datos.sql`.
+- **Dos lecturas con la misma fecha exacta** salen las dos en el punto 2. Se resuelve con funciones de ventana (`ROW_NUMBER() OVER (PARTITION BY …)`), en cursos avanzados.
+- **No mezcles fechas con y sin zona horaria** en una columna: el orden alfabético dejaría de ser el temporal. `toISOString()` da UTC con milisegundos.
+- **Ejecutar `consultas.js` dos veces** deja la lectura de `B1.3` creada desde la primera. Para empezar de cero, vuelve a ejecutar `esquema.sql` y `datos.sql`.
 
 </Callout>
 
@@ -686,8 +681,8 @@ Escribes un `SELECT` con `JOIN` y `GROUP BY` sin ayuda: sabes cuándo hace falta
 
 ## Resumen
 
-- `CREATE TABLE` define columnas y restricciones (`PRIMARY KEY`, `NOT NULL`, `UNIQUE`, `CHECK`, `REFERENCES`) que la base de datos hace cumplir.
-- En SQLite, `PRAGMA foreign_keys = ON` en cada conexión, o las claves foráneas no se comprueban.
-- `SELECT … FROM … WHERE … ORDER BY … LIMIT` para leer; `UPDATE` y `DELETE` siempre con `WHERE` comprobado antes con un `SELECT`.
-- `JOIN` une tablas por sus claves; `LEFT JOIN` conserva las filas sin pareja (`NULL`); `GROUP BY` + `COUNT`/`AVG`/`MAX` resume; `HAVING` filtra grupos.
-- Desde el código, consultas preparadas con `?`: concatenar texto del usuario abre la puerta a la inyección SQL.
+- `CREATE TABLE` con restricciones que la base de datos hace cumplir.
+- En SQLite, `PRAGMA foreign_keys = ON` en cada conexión.
+- `UPDATE` y `DELETE`, siempre con un `WHERE` comprobado antes con `SELECT`.
+- `JOIN` une; `LEFT JOIN` conserva lo que no tiene pareja; `GROUP BY` resume y `HAVING` filtra grupos.
+- Desde el código, consultas preparadas con `?`: nunca concatenar texto del usuario.

@@ -7,15 +7,15 @@ minutes: 60
 summary: "Escribes funciones tipadas para crear y listar entrenos, llenas la colección con datos de prueba y recorres cada filtro, proyección, orden y paginación con resultados reales, incluidas sus trampas."
 ---
 
-Crear y leer documentos es el 80 % del trabajo con una base de datos. En esta sección vas a construir el **módulo de acceso a datos** de los entrenos: unas pocas funciones tipadas que el resto de la app usará sin saber nada de MongoDB. Después llenarás la colección con 30 entrenos de prueba (siempre los mismos, para que tus resultados coincidan con los de la lección) y recorrerás, uno a uno, los filtros, las proyecciones, el orden y la paginación que usarás en cualquier pantalla real, con las trampas de cada uno.
-
-**Lo que tendrás al terminar:** `src/entrenos.ts` con `crearEntreno`, `crearEntrenos`, `listarEntrenos` y `contarPorTipo`, y un catálogo de consultas que funciona.
+Crear y leer documentos es el 80 % del trabajo con una base de datos. Aquí construyes el módulo de acceso a los entrenos, siembras 30 de prueba (siempre los mismos, para que tus resultados coincidan) y recorres filtros, proyecciones, orden y paginación.
 
 **Requisitos:** el proyecto `mongo-academy` de B5.2, con `db.ts`, `tipos.ts` y `colecciones.ts`.
 
 ## Paso 1: el módulo de acceso a datos
 
-La idea es que **ningún** otro archivo de la app llame a `entrenos.find(...)` directamente: todo pasa por funciones con nombre que dicen **qué** hacen. Así, si mañana cambias un índice o un campo, solo tocas este archivo. Crea `src/entrenos.ts`:
+**Qué es:** funciones con nombre que dicen **qué** hacen, y por las que pasa todo el acceso a una colección. Ningún otro archivo llama a `entrenos.find(...)`: si mañana cambias un campo o un índice, solo tocas este.
+
+**Cómo se usa:** crea `src/entrenos.ts`.
 
 ```ts
 // Archivo: src/entrenos.ts
@@ -50,25 +50,22 @@ export async function contarPorTipo(userId: string, tipo: TipoEntreno): Promise<
 }
 ```
 
-Las piezas nuevas:
-
-- **`Omit<Entreno, "_id">`** (B1.4): un entreno nuevo no lleva `_id`, porque lo genera el _driver_.
-- **`insertOne` devuelve `{ insertedId }`**: el `ObjectId` generado. Lo devuelves para que quien llama pueda, por ejemplo, redirigir a la página del entreno recién creado.
-- **`insertMany` devuelve `{ insertedCount, insertedIds }`**. Con un array vacío lanza un error (`Invalid BulkOperation, Batch cannot be empty`), por eso se comprueba antes.
-- **`WithId<Entreno>`**: el tipo de un documento **leído** de la base de datos, que siempre tiene `_id`.
-- **`find(...)` no devuelve los documentos**: devuelve un **cursor** (un puntero para recorrer resultados). `.toArray()` lo recorre entero y devuelve un array.
-- **`countDocuments(filtro)`** cuenta sin traer los documentos.
+- **`Omit<Entreno, "_id">`** (B1.4): un entreno nuevo no lleva `_id`. **`WithId<Entreno>`:** uno **leído**, que siempre lo tiene.
+- **`insertOne` devuelve `{ insertedId }`,** útil para redirigir a lo recién creado. **`insertMany`** devuelve `{ insertedCount, insertedIds }` y falla con un array vacío (`Invalid BulkOperation, Batch cannot be empty`), por eso se comprueba.
+- **`find(...)` devuelve un cursor,** no los documentos: `.toArray()` lo recorre entero. **`countDocuments(filtro)`** cuenta sin traerlos.
 
 <Callout type="risk">
 
-- **El intervalo de fechas, cerrado por un lado y abierto por el otro:** `$gte: desde, $lt: hasta` (desde incluida, hasta excluida) es la forma correcta de pedir "septiembre": del 1 de septiembre al 1 de octubre **sin incluir** el 1 de octubre. Con `$lte: 30 de septiembre a las 00:00`, perderías todos los entrenos del día 30 posteriores a medianoche.
-- **`insertMany` y los errores a medias:** si un documento del array falla (un `_id` repetido), por defecto se detiene ahí, y los anteriores **ya se han insertado**. Si necesitas "todo o nada", necesitas una transacción (B4.5).
+- **Las fechas, cerradas por un lado y abiertas por el otro:** `$gte: desde, $lt: hasta` pide septiembre del día 1 al 1 de octubre, **sin incluirlo**. Con `$lte` del 30 a las 00:00, pierdes lo de ese día.
+- **`insertMany` se detiene en el primer error,** con los anteriores ya insertados. Para "todo o nada", una transacción (B4.5).
 
 </Callout>
 
 ## Paso 2: datos de prueba
 
-Para que tus resultados coincidan con los de esta lección, crea siempre los mismos datos. Crea `src/03-sembrar.ts`:
+**Qué es:** un script que crea siempre los mismos 30 entrenos de `u_demo`, uno cada dos días desde el 1 de septiembre de 2026, con tipos en rotación.
+
+**Cómo se usa:** crea `src/03-sembrar.ts`.
 
 ```ts
 // Archivo: src/03-sembrar.ts
@@ -107,18 +104,21 @@ npm start -- src/03-sembrar.ts
 Borrados 1 · creados 30 entrenos de prueba
 ```
 
-(El borrado es el entreno que creaste en B5.2). El script genera 30 entrenos del usuario `u_demo`, uno cada dos días desde el 1 de septiembre de 2026: tipos en rotación (running, fuerza, yoga), duración entre 30 y 60 minutos, kilómetros solo en los de running y notas en algunos. El truco `...(condición && { campo })` añade un campo **solo si** la condición se cumple: así, los documentos de fuerza no tienen `km`, ni siquiera vacío.
+- **El borrado es el entreno que creaste en B5.2.**
+- **`...(condición && { campo })`** añade un campo **solo si** se cumple: los de fuerza no tienen `km`, ni siquiera vacío.
 
 <Callout type="risk">
 
-- **Un script que borra antes de insertar es cómodo… y peligroso:** `deleteMany({ userId: "u_demo" })` solo borra datos de prueba porque el filtro es muy concreto. Un `deleteMany({})` (filtro vacío) borraría **toda** la colección. Nunca ejecutes un script de "sembrado" contra la base de datos de producción.
-- **Fechas en UTC:** `Date.UTC(2026, 8, 1, 7, 30)` es el 1 de septiembre a las 07:30 en UTC (los meses empiezan en 0, B1.7). Construir fechas con `new Date(2026, 8, 1)` usa la zona horaria de tu Mac, y el mismo script daría fechas distintas en Vercel (UTC). Lo verás a fondo en B5.5.
+- **Borrar antes de insertar es peligroso:** `deleteMany({ userId: "u_demo" })` solo es seguro por su filtro concreto. Un `deleteMany({})` vacía la colección. Nunca siembres en producción.
+- **Fechas en UTC:** `Date.UTC(2026, 8, 1, 7, 30)` es el 1 de septiembre (los meses empiezan en 0, B1.7). `new Date(2026, 8, 1)` usa la zona de tu Mac, y daría otra fecha en Vercel (B5.5).
 
 </Callout>
 
 ## Paso 3: filtros con operadores
 
-Un **filtro** es un objeto que describe qué documentos quieres. Crea `src/03-consultas.ts`, que recorre todos los operadores esenciales:
+**Qué es:** un **filtro** es un objeto que describe qué documentos quieres. Varios campos en el mismo objeto son un **`AND` implícito**.
+
+**Cómo se usa:** crea `src/03-consultas.ts`, que recorre los operadores esenciales.
 
 ```ts
 // Archivo: src/03-consultas.ts
@@ -208,8 +208,6 @@ npm start -- src/03-consultas.ts
 10. Yoga de más de 100 min: ninguno (null)
 ```
 
-Los operadores de los puntos 1 a 5, en una tabla:
-
 | Filtro                                            | Significa                                               | Equivalente SQL (B4.3)            |
 | ------------------------------------------------- | ------------------------------------------------------- | --------------------------------- |
 | `{ tipo: "running" }`                             | Igual a                                                 | `tipo = 'running'`                |
@@ -220,34 +218,33 @@ Los operadores de los puntos 1 a 5, en una tabla:
 | `{ $or: [ {…}, {…} ] }`                           | Una condición u otra                                    | `… OR …`                          |
 | Varios campos en el mismo objeto                  | Todas a la vez (un `AND` implícito)                     | `… AND …`                         |
 
-Fíjate en el punto 1: `{ userId: "u_demo", tipo: "running", km: { $gte: 6 } }` combina tres condiciones con un **`AND` implícito**: basta con ponerlas en el mismo objeto. Y en el punto 5, `$or` recibe un **array** de filtros completos.
+- **El punto 1** combina tres condiciones solo con ponerlas juntas. **`$or`** (punto 5) recibe un **array** de filtros completos.
 
 <Callout type="risk">
 
-- **Dos condiciones sobre el mismo campo en un objeto se pisan:** `{ km: { $gte: 5 }, km: { $lte: 8 } }` repite la clave `km`. TypeScript lo detecta (`error TS1117: An object literal cannot have multiple properties with the same name.`), pero en `mongosh` o en JavaScript la segunda **sustituye** a la primera sin avisar. Se escriben juntas: `{ km: { $gte: 5, $lte: 8 } }`.
-- **Una `$regex` con texto del usuario es peligrosa:** el texto se interpreta como expresión regular. Un usuario que busque `rodilla (izq.)` provocará un error (paréntesis sin cerrar), y patrones como `(a+)+$` pueden hacer que el servidor tarde muchísimo en evaluarlos (un ataque llamado ReDoS). Escapa siempre el texto antes de usarlo en `$regex` (lo harás en el ejercicio).
-- **`$regex` no usa bien los índices:** una búsqueda "contiene" (`rodilla`, sin `^` al principio) recorre todos los documentos. Para buscar texto en serio, Atlas ofrece Atlas Search.
+- **Dos condiciones sobre el mismo campo, en un objeto, se pisan:** `{ km: { $gte: 5 }, km: { $lte: 8 } }`. TypeScript lo detecta (`error TS1117: An object literal cannot have multiple properties with the same name.`); en `mongosh`, la segunda sustituye a la primera. Van juntas: `{ km: { $gte: 5, $lte: 8 } }`.
+- **Una `$regex` con texto del usuario es peligrosa:** `rodilla (izq.)` da error, y patrones como `(a+)+$` pueden colgar el servidor (ReDoS). Escapa el texto (lo harás en el ejercicio).
+- **`$regex` "contiene" recorre todos los documentos.** Para buscar texto en serio, Atlas Search.
 
 </Callout>
 
 ## Paso 4: proyecciones, orden, límite y paginación
 
-**Proyección** (punto 3 y 6): el segundo argumento de `find`, `{ projection: { _id: 0, tipo: 1, fecha: 1 } }`, elige qué campos devolver. `1` incluye un campo; `0` lo excluye. El `_id` se incluye siempre, salvo que pongas `_id: 0`. Ahorra red y memoria, y evita enviar al navegador campos que no deben salir del servidor (como un _hash_ de contraseña).
+**Qué es:** las opciones que dan forma al resultado de `find`.
 
-**Orden y límite** (punto 6): `.sort({ fecha: -1 })` ordena por fecha descendente (`1`, ascendente) y `.limit(3)` se queda con los 3 primeros. Es la consulta de "los últimos entrenos" de cualquier panel.
+**Cómo se usa:** en el mismo `03-consultas.ts`.
 
-**Paginación** (punto 7): `.skip((pagina - 1) * porPagina).limit(porPagina)`. Para la página 2 de 5 en 5, salta 5 y toma 5.
-
-**Cursor** (punto 8): `for await (const entreno of entrenos.find(...))` recorre los resultados **por lotes**, sin cargarlos todos en memoria a la vez. Es la forma correcta de procesar colecciones grandes en un script.
-
-**`findOne`** (punto 10) devuelve el primer documento que cumple el filtro, o **`null`** si no hay ninguno. TypeScript te obliga a manejar el `null` (B5.2).
+- **Proyección** (puntos 3 y 6): `{ projection: { _id: 0, tipo: 1, fecha: 1 } }` elige qué campos devolver; `_id` sale siempre salvo `_id: 0`. Ahorra red y evita enviar campos que no deben salir del servidor.
+- **Orden y límite** (punto 6): `.sort({ fecha: -1 })` ordena descendente y `.limit(3)` se queda con 3. Es "los últimos entrenos" de cualquier panel.
+- **Paginación** (punto 7): `.skip((pagina - 1) * porPagina).limit(porPagina)`.
+- **Cursor** (punto 8): `for await (const entreno of entrenos.find(...))` recorre **por lotes**, sin cargarlo todo en memoria.
+- **`findOne`** (punto 10) devuelve el primero o **`null`**, y TypeScript obliga a manejarlo.
 
 <Callout type="risk">
 
-- **TypeScript no sabe qué has proyectado:** con `findOne({ userId: "u_demo" }, { projection: { minutos: 1 } })`, el resultado sigue teniendo el tipo `Entreno`, así que `entreno.tipo` y `entreno.fecha` compilan sin error… y valen `undefined` en ejecución. Al proyectar, usa solo los campos que pediste, o declara un tipo para el resultado (`entrenos.find<{ minutos: number }>(…)`).
-- **`skip` es lento con páginas altas:** para la página 1000, MongoDB tiene que recorrer y descartar 9990 documentos. Para listas largas (un historial infinito), se pagina por "lo que viene después del último que viste" (`fecha < últimaFecha`), que usa el índice directamente.
-- **Sin un orden único, la paginación repite o salta elementos:** si dos entrenos tienen exactamente la misma fecha, su orden relativo no está garantizado y uno puede aparecer en dos páginas. Añade `_id` como desempate: `.sort({ fecha: -1, _id: -1 })`.
-- **`toArray()` sin `limit` sobre una colección grande** carga todo en la memoria de tu función de Vercel. Limita siempre las consultas de listas.
+- **TypeScript no sabe qué has proyectado:** con `{ projection: { minutos: 1 } }`, `entreno.tipo` compila y vale `undefined`. Usa solo lo pedido, o tipa el resultado (`entrenos.find<{ minutos: number }>(…)`).
+- **`skip` es lento en páginas altas,** porque recorre y descarta. En historiales largos, pagina "después del último visto" (`fecha < últimaFecha`).
+- **Sin un orden único, la paginación repite o salta elementos.** Añade `_id` de desempate: `.sort({ fecha: -1, _id: -1 })`. Y nunca `toArray()` sin `limit` sobre una colección grande.
 
 </Callout>
 
@@ -331,17 +328,14 @@ Buscar "rodilla (": sin resultados
 Buscar "a": sin resultados
 ```
 
-Las decisiones:
-
-- **`Promise.all`** lanza el conteo y la consulta **a la vez**: dos viajes a la base de datos en paralelo en lugar de uno detrás de otro.
-- **`Math.max(1, Math.floor(pagina))`** protege de páginas 0, negativas o con decimales (que pueden llegar de un `?pagina=` en la URL).
-- **`escaparRegex`** antepone `\` a cada carácter especial, así que `"rodilla ("` se busca **literalmente**: sin error y sin resultados, porque ninguna nota contiene "rodilla (". Sin escapar, la misma búsqueda lanzaría `Regular expression is invalid: missing closing parenthesis`.
-- **Mínimo 2 caracteres:** buscar `"a"` coincidiría con casi todo y recorrería la colección entera; no tiene sentido para el usuario.
+- **`Promise.all`** lanza el conteo y la consulta **a la vez**. **`Math.max(1, Math.floor(pagina))`** protege de páginas 0, negativas o con decimales llegadas por `?pagina=`.
+- **`escaparRegex`** antepone `\` a cada carácter especial: `"rodilla ("` se busca literalmente, sin error. Sin escapar: `Regular expression is invalid: missing closing parenthesis`.
+- **Mínimo 2 caracteres:** `"a"` coincidiría con casi todo y recorrería la colección.
 
 <Callout type="risk">
 
-- **`countDocuments` y `find` pueden no coincidir** si alguien inserta un entreno entre las dos consultas. Para una paginación de interfaz es irrelevante (el total se recalcula en la siguiente página); para un informe que debe cuadrar exactamente, haría falta una transacción con lectura consistente.
-- **`Pagina<T>` es un genérico** (B1.6): el mismo tipo sirve para paginar entrenos, tareas o usuarios. Defínelo una vez en el proyecto y reutilízalo.
+- **`countDocuments` y `find` pueden no coincidir** si alguien inserta entre las dos. En una interfaz da igual; en un informe exacto, haría falta una transacción.
+- **`Pagina<T>` es un genérico** (B1.6): sirve para entrenos, tareas o usuarios. Defínelo una vez.
 
 </Callout>
 
@@ -353,8 +347,8 @@ Escribes filtros con operadores sin consultar la documentación (`$gte`, `$lt`, 
 
 ## Resumen
 
-- `insertOne` devuelve `insertedId`; `insertMany`, `insertedCount` (y falla con un array vacío).
-- `find` devuelve un cursor: `.toArray()` lo carga entero; `for await` lo recorre por lotes. `findOne` devuelve un documento o `null`.
-- Filtros: igualdad, `$gt`/`$gte`/`$lt`/`$lte`, `$in`, `$exists`, `$regex` (con el texto escapado) y `$or`; varios campos en un objeto son un `AND`.
-- `projection` elige campos (y TypeScript no lo sabe), `.sort()` ordena, `.limit()` limita y `.skip()` pagina (lento en páginas altas).
-- Todo el acceso a una colección pasa por un módulo de funciones con nombre.
+- `insertOne` da `insertedId`; `insertMany` falla con un array vacío.
+- `find` es un cursor (`toArray` o `for await`); `findOne`, un documento o `null`.
+- Filtros: igualdad, comparaciones, `$in`, `$exists`, `$regex` escapado y `$or`; varios campos son un `AND`.
+- Proyección (TypeScript no la ve), `sort`, `limit` y `skip` (lento en páginas altas).
+- Todo el acceso pasa por un módulo de funciones con nombre.

@@ -7,21 +7,21 @@ minutes: 60
 summary: "Construyes marcarLeido con upsert y $addToSet, demuestras con 100 peticiones simultáneas por qué necesita un índice único, recorres cada operador de actualización y eliges entre borrado físico y lógico."
 ---
 
-Actualizar en MongoDB no es "leer el documento, cambiarlo en JavaScript y guardarlo": es **describirle a la base de datos qué cambio hacer**, con operadores como `$set`, `$inc` o `$addToSet`, para que lo aplique ella de forma atómica (B4.5). En esta sección vas a construir la función estrella de esta plataforma, **marcar una sección como leída**, de forma que llamarla dos veces no duplique nada. Vas a someterla a 100 peticiones simultáneas para descubrir por qué necesita además un índice único, vas a recorrer cada operador de actualización sobre los entrenos y vas a decidir cuándo borrar de verdad y cuándo solo marcar como borrado.
-
-**Lo que tendrás al terminar:** `src/progreso.ts` con `marcarLeido`, `desmarcarLeido` y `seccionesLeidas`, resistente a peticiones simultáneas, y un catálogo de operadores de actualización probado.
+Actualizar en MongoDB no es leer, cambiar en JavaScript y guardar: es **describir el cambio** con operadores (`$set`, `$inc`, `$addToSet`) para que la base de datos lo aplique de forma atómica (B4.5). Aquí construyes "marcar una sección como leída", resistente a 100 peticiones simultáneas.
 
 **Requisitos:** el proyecto `mongo-academy` de B5.3, con los 30 entrenos de prueba.
 
 ## Paso 1: el modelo de progreso y sus tipos
 
-Para guardar qué secciones ha leído cada usuario, usarás **un documento por usuario y curso**, con un array de secciones leídas:
+**Qué es:** **un documento por usuario y curso**, con un array de las secciones leídas.
+
+**Cómo se usa:**
 
 ```json
 { "userId": "u_demo", "cursoId": "B1", "seccionesLeidas": ["B1.1", "B1.2"], "creado": "…", "actualizado": "…" }
 ```
 
-Añade al final de `src/tipos.ts` el tipo del documento:
+Añade el tipo al final de `src/tipos.ts`:
 
 ```ts
 export interface Progreso {
@@ -34,7 +34,7 @@ export interface Progreso {
 }
 ```
 
-Y en la misma interfaz `Entreno` de ese archivo, añade tres campos opcionales que usarás en el Paso 4. El archivo completo queda así:
+Y a `Entreno`, tres campos opcionales para el Paso 4. El archivo completo:
 
 ```ts
 // Archivo: src/tipos.ts
@@ -73,7 +73,7 @@ export interface Progreso {
 }
 ```
 
-Registra la colección en `src/colecciones.ts`. El archivo completo:
+Registra la colección en `src/colecciones.ts`:
 
 ```ts
 // Archivo: src/colecciones.ts
@@ -86,9 +86,18 @@ export const usuarios = db.collection<Usuario>("usuarios");
 export const progreso = db.collection<Progreso>("progreso");
 ```
 
+<Callout type="risk">
+
+- **Un array dentro del documento solo vale si está acotado:** un curso tiene unas decenas de secciones. Algo que crece sin límite acabaría en los 16 MB de un documento (B4.2).
+- **El tipo no valida nada** (B5.2): un documento antiguo con otra forma pasaría igual. Valida al escribir.
+
+</Callout>
+
 ## Paso 2: `marcarLeido` con `upsert` y `$addToSet`
 
-Crea `src/progreso.ts`:
+**Qué es:** **`upsert: true`** (_update_ + _insert_): si ningún documento cumple el filtro, MongoDB **crea uno** combinando el filtro con los cambios. Junto con `$addToSet`, marcar dos veces deja una sola marca.
+
+**Cómo se usa:** crea `src/progreso.ts`.
 
 ```ts
 // Archivo: src/progreso.ts
@@ -123,13 +132,8 @@ export async function seccionesLeidas(userId: string, cursoId: string): Promise<
 }
 ```
 
-Tres operadores en una sola operación atómica:
-
-- **`$addToSet`**: añade el valor al array **solo si no está ya**. Es lo que hace la función idempotente: marcar `B1.2` dos veces deja una sola `B1.2`.
-- **`$set`**: actualiza la fecha de última modificación.
-- **`$setOnInsert`**: establece campos **solo cuando el documento se crea**. La fecha de creación se fija una vez y no se toca nunca más.
-
-Y la opción clave, **`upsert: true`** (_update_ + _insert_): si ningún documento cumple el filtro (es la primera sección que lees de ese curso), MongoDB **crea uno nuevo** combinando el filtro (`userId`, `cursoId`) con las actualizaciones. Sin `upsert`, la primera vez no pasaría nada.
+- **`$addToSet`** añade al array **solo si no está**. **`$set`** actualiza la fecha de modificación. **`$setOnInsert`** fija campos **solo al crear**, como la fecha de creación.
+- **`$pull`** quita **todas** las apariciones de un valor. Desmarcar una sección que no estaba no da error.
 
 Pruébalo con `src/04-progreso.ts`:
 
@@ -175,27 +179,21 @@ Leídas: B1.2
 Documentos de progreso de u_demo en B1: 1 · creado ≠ actualizado
 ```
 
-Cómo leer el resultado de `updateOne`:
-
-- **`matchedCount`**: cuántos documentos cumplían el filtro. La primera vez, 0: no había progreso en B1.
-- **`modifiedCount`**: cuántos cambiaron de verdad.
-- **`upsertedId`**: el `_id` del documento creado por el _upsert_ (solo la primera vez).
-
-Fíjate en la tercera línea: marcar `B1.2` otra vez dice `modified=1`. El array **no** cambió (`$addToSet` no la añadió), pero `$set` actualizó la fecha, y eso cuenta como modificación. Si necesitas saber si la sección **ya estaba** leída, no te fíes de `modifiedCount`: compara antes y después, o usa `findOneAndUpdate` (Paso 4).
-
-**`$pull`** hace lo contrario de `$addToSet`: quita del array **todas** las apariciones del valor. Desmarcar una sección que no estaba no da error; simplemente no cambia el array.
+- **`matchedCount`:** cuántos cumplían el filtro (0 la primera vez). **`modifiedCount`:** cuántos cambiaron. **`upsertedId`:** el `_id` creado por el _upsert_.
+- **Marcar `B1.2` otra vez dice `modified=1`:** el array no cambió, pero `$set` actualizó la fecha. Para saber si ya estaba leída, no te fíes de `modifiedCount`: usa `findOneAndUpdate` (Paso 4).
 
 <Callout type="risk">
 
-- **`$push` frente a `$addToSet`:** `$push` añade **siempre**, aunque el valor ya esté. Con `$push`, cada doble clic duplicaría la sección y el progreso podría pasar del 100 %. Para conjuntos de valores únicos, `$addToSet`.
-- **`desmarcarLeido` no lleva `upsert`:** quitar una marca de un curso sin progreso no debe crear un documento vacío. Piensa en cada operación si tiene sentido que cree el documento.
-- **Arrays que crecen sin límite:** un curso tiene como mucho unas decenas de secciones, así que este array es pequeño y acotado. Si guardaras en un array algo que crece indefinidamente (todos los entrenos de un usuario en su vida), el documento crecería hasta el límite de 16 MB. Es la regla de B4.2: arrays sí, pero acotados.
+- **`$push` añade siempre,** aunque el valor esté: cada doble clic duplicaría la sección y el progreso pasaría del 100 %. Para valores únicos, `$addToSet`.
+- **`desmarcarLeido` no lleva `upsert`:** quitar una marca de un curso sin progreso no debe crear un documento vacío. Piénsalo en cada operación.
 
 </Callout>
 
-## Paso 3: 100 peticiones a la vez, y por qué hace falta un índice único
+## Paso 3: 100 peticiones a la vez, y el índice único
 
-`marcarLeido` parece a prueba de dobles clics. Ahora ponla a prueba en serio: 10 clientes (como 10 funciones de Vercel atendiendo peticiones a la vez) lanzan 10 marcas simultáneas cada uno, sobre el mismo usuario y un curso **sin progreso todavía**. Crea `src/04-carrera.ts`:
+**Qué es:** un _upsert_ busca el documento y, si no existe, lo crea. Si varias peticiones buscan **antes** de que ninguna lo haya creado, todas lo crean: una condición de carrera dentro de la base de datos.
+
+**Cómo se usa:** 10 clientes, como 10 funciones de Vercel, lanzan 10 marcas cada uno sobre un curso sin progreso. Crea `src/04-carrera.ts`:
 
 ```ts
 // Archivo: src/04-carrera.ts
@@ -261,29 +259,30 @@ Sin índice único: hasta 11 documento(s) por usuario · 0 llamadas fallidas
 Con índice único: hasta 1 documento(s) por usuario · 0 llamadas fallidas
 ```
 
-(El número exacto sin índice varía en cada ejecución; en las pruebas de esta lección salió entre 8 y 11).
+El número sin índice varía; en las pruebas de esta lección salió entre 8 y 11.
 
-**Sin índice único, un mismo usuario acabó con hasta 11 documentos de progreso** para el mismo curso. La razón: cada _upsert_ busca el documento, no lo encuentra (aún no existe) y lo crea. Si varias peticiones hacen la búsqueda **antes** de que ninguna haya creado el documento, todas lo crean. Es la condición de carrera de B4.1, esta vez dentro de la base de datos. Con un solo cliente en tu Mac casi nunca la verás, porque las peticiones se ordenan en el _pool_; con varios procesos a la vez, como en producción, sí.
-
-**Con un índice único en `{ userId, cursoId }`**, el segundo intento de crear el documento choca con el índice. MongoDB detecta que es un _upsert_ sobre ese mismo índice y **lo reintenta automáticamente como una actualización**: el resultado es siempre un documento y ninguna llamada falla. El índice se crea una vez:
+- **Sin índice único, hasta 11 documentos de progreso** del mismo usuario y curso. Con un solo cliente en tu Mac casi nunca lo verás; con varios procesos, como en producción, sí.
+- **Con un índice único en `{ userId, cursoId }`,** el segundo intento choca, MongoDB lo **reintenta solo como actualización**, y ninguna llamada falla. Se crea una vez:
 
 ```ts
 await progreso.createIndex({ userId: 1, cursoId: 1 }, { unique: true });
 ```
 
-Esta plataforma hace exactamente eso, con un modelo un poco distinto: guarda **un documento por cada sección leída** (en `section_progress`, con su propia fecha `readAt`) y lo protege con el índice único `{ userId: 1, sectionId: 1 }`. Las dos opciones son válidas: un documento por curso con un array es más compacto; uno por sección guarda la fecha de cada lectura y facilita consultas como "lo último que has leído".
+- **Esta plataforma hace lo mismo con otro modelo:** un documento por sección leída en `section_progress`, con su fecha `readAt` y el índice único `{ userId: 1, sectionId: 1 }`. Facilita consultas como "lo último que has leído".
 
 <Callout type="risk">
 
-- **`upsert` sin índice único no es idempotente bajo concurrencia.** Es una de las fuentes de datos duplicados más comunes en producción, y no aparece en las pruebas manuales. Todo filtro que uses con `upsert` debe estar respaldado por un índice único sobre esos mismos campos.
-- **Crear un índice único sobre una colección con duplicados falla** (`E11000 duplicate key error`). Si llegas tarde, primero tienes que limpiar los duplicados (fusionarlos) y después crear el índice.
-- **`drop()` y `dropIndexes()`** del script borran la colección de prueba y sus índices. Nunca los ejecutes sobre colecciones reales.
+- **Un `upsert` sin índice único no es idempotente bajo concurrencia,** y no aparece en las pruebas manuales. Todo filtro de un `upsert` necesita un índice único sobre esos campos.
+- **Crear el índice con duplicados ya existentes falla** con `E11000`. Primero hay que fusionarlos.
+- **`drop()` y `dropIndexes()`** del script borran la colección de prueba. Nunca sobre colecciones reales.
 
 </Callout>
 
 ## Paso 4: el resto de operadores, sobre los entrenos
 
-Vuelve a crear los entrenos de prueba (`npm start -- src/03-sembrar.ts`) y crea `src/04-actualizar.ts`, que aplica cada operador al primer entreno y muestra cómo queda:
+**Qué es:** el catálogo de operadores de actualización y los métodos que los aplican.
+
+**Cómo se usa:** vuelve a sembrar los entrenos y crea `src/04-actualizar.ts`, que aplica cada operador al primero.
 
 ```ts
 // Archivo: src/04-actualizar.ts
@@ -375,8 +374,6 @@ Borrado lógico:     2 marcados · quedan 28 visibles de 30
 deleteOne yoga:     1 · deleteMany marcados: 2 · quedan 27
 ```
 
-Los operadores, con lo que acabas de ver:
-
 | Operador            | Qué hace                                       | Lo has visto en                              |
 | ------------------- | ---------------------------------------------- | -------------------------------------------- |
 | `$set`              | Cambia o crea campos                           | `minutos` y `notas`                          |
@@ -386,28 +383,23 @@ Los operadores, con lo que acabas de ver:
 | `$pull`             | Quita todas las apariciones de un valor        | Desaparecen las dos `"lluvia"`               |
 | `$addToSet`         | Añade solo si no está                          | `"exterior"` no se repite; `"frío"` sí entra |
 
-Y los métodos:
-
-- **`updateOne`** modifica el **primer** documento que cumpla el filtro; **`updateMany`**, **todos**. Aquí, los 10 entrenos de yoga.
-- **`findOneAndUpdate`** modifica y **devuelve el documento** en la misma operación atómica. Con `returnDocument: "after"` devuelve la versión nueva (`km: 8.5`); con `"before"`, la anterior. Admite `sort` (cuál de los que cumplen el filtro) y `projection`. Es la herramienta para "modifícalo y dime cómo ha quedado", sin una segunda consulta en la que otro podría haberlo cambiado.
-- **`replaceOne`** sustituye el documento **entero** (salvo el `_id`) por otro. Todo lo que no incluyas desaparece.
+- **`updateOne`** cambia el **primero** que cumple el filtro; **`updateMany`**, **todos** (aquí, los 10 de yoga).
+- **`findOneAndUpdate`** cambia y **devuelve el documento** en la misma operación: `returnDocument: "after"` da la versión nueva (`km: 8.5`). Admite `sort` y `projection`.
+- **`replaceOne`** sustituye el documento **entero**, salvo el `_id`: lo que no incluyas desaparece.
 
 <Callout type="risk">
 
-- **Olvidar el operador:** `updateOne(filtro, { minutos: 50 })` (sin `$set`) **compila sin error** en TypeScript y falla al ejecutar con `Update document requires atomic operators`. Si querías sustituir el documento entero, es `replaceOne`; si querías cambiar un campo, `$set`.
-- **`$set` con el cuerpo de la petición es asignación masiva** (B3.3): `{ $set: datosDelFormulario }` permite al usuario escribir cualquier campo, incluidos `userId` o `rol`. Construye el `$set` campo a campo, solo con lo permitido y validado.
-- **`updateOne` con un filtro demasiado amplio** modifica "el primero que encuentre", que no está garantizado. Si tu intención es un documento concreto, filtra por `_id` (o por un campo único).
-- **`$inc` sobre un campo que es texto** falla (`Cannot apply $inc to a value of non-numeric type`). Es otro motivo para no guardar números como texto (B5.1).
+- **Olvidar el operador:** `updateOne(filtro, { minutos: 50 })` compila y falla al ejecutar con `Update document requires atomic operators`. Para un campo, `$set`; para todo el documento, `replaceOne`.
+- **`{ $set: datosDelFormulario }` es asignación masiva** (B3.3): el usuario podría escribir `userId` o `rol`. Construye el `$set` campo a campo, con lo permitido.
+- **`$inc` sobre un campo de texto** falla (`Cannot apply $inc to a value of non-numeric type`). Otro motivo para no guardar números como texto (B5.1).
 
 </Callout>
 
 ## Paso 5: borrar, de verdad o solo en apariencia
 
-**Borrado físico:** `deleteOne(filtro)` borra el primer documento que cumple el filtro; `deleteMany(filtro)`, todos. Devuelven `deletedCount`. El documento desaparece para siempre: MongoDB no tiene papelera.
+**Qué es:** el **borrado físico** (`deleteOne`, `deleteMany`) elimina para siempre, sin papelera, y devuelve `deletedCount`. El **borrado lógico** (_soft delete_) marca el documento (`$set: { borradoEn: new Date() }`) y todas las consultas filtran `borradoEn: { $exists: false }`.
 
-**Borrado lógico** (_soft delete_): en lugar de borrar, se marca con una fecha (`$set: { borradoEn: new Date() }`), y todas las consultas filtran `borradoEn: { $exists: false }`. En el resultado: 2 entrenos de fuerza marcados, 28 visibles de 30 que siguen en la colección.
-
-¿Cuándo usar cada uno?
+**Cómo se usa:** el final del resultado del Paso 4: 2 entrenos de fuerza marcados, 28 visibles de 30 que siguen en la colección.
 
 | Borrado físico                                                                  | Borrado lógico                                                      |
 | ------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
@@ -417,9 +409,9 @@ Y los métodos:
 
 <Callout type="risk">
 
-- **`deleteMany({})` borra la colección entera.** Un filtro vacío coincide con todo. Construye siempre el filtro de un borrado con variables comprobadas, y nunca a partir de un objeto que podría llegar vacío desde una petición.
-- **El borrado lógico exige disciplina:** **todas** las consultas deben excluir los borrados. Basta con olvidar el filtro en una sola (un contador, una exportación) para que reaparezcan datos "borrados". Centralizarlo en el módulo de acceso (B5.3) es lo que lo hace viable.
-- **Borrado lógico y obligaciones legales:** si un usuario solicita eliminar sus datos personales, marcarlos como borrados no basta. Hay que eliminarlos (o anonimizarlos) de verdad.
+- **`deleteMany({})` borra la colección entera.** Nunca construyas el filtro de un borrado con un objeto que podría llegar vacío de una petición.
+- **El borrado lógico exige que todas las consultas excluyan lo borrado:** basta un contador que lo olvide para que reaparezca. Centralizarlo en el módulo de acceso (B5.3) lo hace viable.
+- **Una petición legal de borrado no se cumple marcando:** hay que eliminar o anonimizar los datos de verdad.
 
 </Callout>
 
@@ -497,12 +489,12 @@ Desmarcar en un curso sin progreso: matched=0 (no crea nada)
 Documentos de u_ejercicio: 1
 ```
 
-**`$addToSet` con `$each`** añade cada elemento de la lista solo si no está: `B1.1` (ya estaba) y la segunda `B1.3` (repetida en la propia lista) no se duplican. Con 3 de 8 secciones, `Math.round(37.5)` da 38 %.
+- **`$addToSet` con `$each`** añade cada elemento solo si no está: `B1.1` y la segunda `B1.3` no se duplican. Con 3 de 8 secciones, `Math.round(37.5)` da 38 %.
 
 <Callout type="risk">
 
-- **`$addToSet` sin `$each` con un array** añade **el array entero como un único elemento**: `{ $addToSet: { seccionesLeidas: ["B1.1", "B1.2"] } }` mete `["B1.1", "B1.2"]` dentro del array, no dos secciones. Para añadir varios elementos sueltos, siempre `$each`.
-- **El total de secciones no está en la base de datos:** `porcentajeCurso` lo recibe como parámetro, porque en esta plataforma las secciones viven en archivos (B4.2). Si el total cambia (añades una sección), los porcentajes de todos los usuarios cambian solos, que es justo lo que quieres. Por eso no se guarda el porcentaje.
+- **`$addToSet` sin `$each`, con un array, lo mete entero como un elemento:** `["B1.1", "B1.2"]` dentro del array, no dos secciones.
+- **El total de secciones no está en la base de datos:** vive en archivos (B4.2) y llega como parámetro. Si añades una sección, los porcentajes cambian solos: por eso no se guardan.
 
 </Callout>
 
@@ -514,8 +506,8 @@ Eliges el operador de actualización correcto (`$set`, `$unset`, `$inc`, `$push`
 
 ## Resumen
 
-- Actualizar es describir el cambio con operadores; la base de datos lo aplica de forma atómica. Sin operador, error (o `replaceOne` si quieres sustituir el documento).
-- `upsert: true` crea el documento si no existe; `$setOnInsert` solo actúa al crear.
-- `$addToSet` (con `$each` para varios) evita duplicados; `$push` no; `$pull` quita todas las apariciones.
-- Un `upsert` concurrente sin índice único duplicó hasta 11 veces el mismo documento; con índice único, nunca.
-- `findOneAndUpdate` modifica y devuelve el documento; borrado físico (`deleteOne`/`deleteMany`) frente a lógico (`borradoEn` + filtrar siempre).
+- Actualizar es describir el cambio con operadores; sin operador, error o `replaceOne`.
+- `upsert` crea si no existe; `$setOnInsert` solo actúa al crear.
+- `$addToSet` (con `$each`) evita duplicados; `$push`, no; `$pull` quita.
+- Sin índice único, un `upsert` concurrente duplicó hasta 11 veces; con él, nunca.
+- `findOneAndUpdate` cambia y devuelve; borrado físico frente a lógico.

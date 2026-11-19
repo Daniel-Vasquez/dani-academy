@@ -7,15 +7,13 @@ minutes: 60
 summary: "Mides con explain() cómo un índice pasa de examinar 100 000 documentos a 30 claves, compruebas la regla ESR, creas un índice TTL que borra solo y aseguras los índices de tu proyecto con un script."
 ---
 
-En B4.4 viste que un índice convierte un recorrido completo en una búsqueda directa, con SQLite. En MongoDB, la idea es idéntica y cambian los nombres: `SCAN` se llama **`COLLSCAN`** y `SEARCH` se llama **`IXSCAN`**. Pero hay una regla propia que decide si un índice compuesto rinde o no, la **regla ESR**, y un tipo de índice que no existe en SQLite: el **TTL**, que borra documentos automáticamente. En esta sección vas a medirlo todo con `explain()` sobre 100 000 documentos, vas a comprobar la regla ESR comparando dos índices con los mismos campos en distinto orden y vas a terminar con el script que crea los índices de tu proyecto.
-
-**Lo que tendrás al terminar:** `src/06-indices.ts` (el banco de pruebas de índices), `src/06-ttl.ts` y `src/06-crear-indices.ts`, el script que asegura los índices de `mongo-academy` y comprueba que las consultas reales los usan.
+En MongoDB, los índices funcionan como en B4.4 con otros nombres: `SCAN` es **`COLLSCAN`** y `SEARCH` es **`IXSCAN`**. Lo nuevo es la **regla ESR**, que decide si un índice compuesto rinde, y los índices **TTL**, que borran documentos solos. Aquí lo mides todo con `explain()` sobre 100 000 documentos.
 
 **Requisitos:** el proyecto `mongo-academy` de B5.5, con los entrenos de prueba (`npm start -- src/03-sembrar.ts`) y el progreso de B5.4 (`npm start -- src/04-progreso.ts`).
 
 ## Paso 1: leer un `explain`
 
-`explain("executionStats")` ejecuta una consulta y, en lugar de los documentos, devuelve **cómo la ha ejecutado**. Los campos que importan:
+**Qué es:** `explain("executionStats")` ejecuta una consulta y devuelve **cómo la ejecutó**, en lugar de los documentos. La regla de oro: **un buen plan examina más o menos lo mismo que devuelve**.
 
 | Campo                                                 | Qué significa                              | Lo que quieres ver                                     |
 | ----------------------------------------------------- | ------------------------------------------ | ------------------------------------------------------ |
@@ -26,9 +24,7 @@ En B4.4 viste que un índice convierte un recorrido completo en una búsqueda di
 | `executionStats.totalDocsExamined`                    | Documentos leídos                          | Cerca de `nReturned`                                   |
 | `executionStats.executionTimeMillis`                  | Tiempo en el servidor                      | Bajo, pero lo importante son las dos filas anteriores  |
 
-La regla de oro: **un buen plan examina más o menos lo mismo que devuelve**. Si devuelve 10 documentos y examina 100 000, falta un índice o el índice no es el adecuado.
-
-En `mongosh`, el `explain` completo es un objeto enorme (más de 3000 caracteres incluso para una consulta simple). Pide solo los campos que importan:
+**Cómo se usa:** el `explain` completo supera los 3000 caracteres. En `mongosh`, pide solo lo que importa:
 
 ```js
 use academy_lab
@@ -36,7 +32,7 @@ const e = db.entrenos.find({ userId: "u_demo", tipo: "running" }).sort({ fecha: 
 printjson({ etapa: e.queryPlanner.winningPlan.stage, entrada: e.queryPlanner.winningPlan.inputStage.stage, indice: e.queryPlanner.winningPlan.inputStage.indexName, nReturned: e.executionStats.nReturned, totalKeysExamined: e.executionStats.totalKeysExamined, totalDocsExamined: e.executionStats.totalDocsExamined })
 ```
 
-Todavía no hay índices en `entrenos`, así que verás `COLLSCAN`. Al final de la sección, con los índices creados, la misma consulta devolverá:
+Aún no hay índices en `entrenos`: verás `COLLSCAN`. Al final de la sección, la misma consulta devolverá:
 
 ```text
 {
@@ -49,11 +45,20 @@ Todavía no hay índices en `entrenos`, así que verás `COLLSCAN`. Al final de 
 }
 ```
 
-`IXSCAN` encuentra las entradas en el índice y **`FETCH`** va a buscar los documentos completos. Examina exactamente lo que devuelve: 10. En Compass verás lo mismo de forma gráfica: abre la colección, escribe el filtro y pulsa **Explain**.
+- **`IXSCAN` encuentra las entradas y `FETCH` trae los documentos:** examina exactamente lo que devuelve, 10. En Compass, el botón **Explain** lo muestra en gráfico.
 
-## Paso 2: el banco de pruebas, de `COLLSCAN` a `IXSCAN`
+<Callout type="risk">
 
-Crea `src/06-indices.ts`. Genera 100 000 intentos de evaluación de 10 usuarios muy activos (10 000 cada uno) y mide la consulta de la página de progreso, "los intentos aprobados de un usuario, los más recientes primero", con cuatro configuraciones de índices:
+- **Si devuelve 10 y examina 100 000,** falta un índice o no es el adecuado. Esa proporción importa más que el tiempo.
+- **`explain` ejecuta la consulta de verdad:** sobre una colección enorme en producción, cuesta lo mismo que la consulta.
+
+</Callout>
+
+## Paso 2: de `COLLSCAN` a `IXSCAN`
+
+**Qué es:** un banco de pruebas con 100 000 intentos de evaluación de 10 usuarios, que mide "los intentos aprobados de un usuario, los más recientes primero" con cuatro configuraciones de índices.
+
+**Cómo se usa:** crea `src/06-indices.ts`.
 
 ```ts
 // Archivo: src/06-indices.ts
@@ -140,46 +145,42 @@ npm start -- src/06-indices.ts
 Índices: _id_, userId_1_fecha_-1_nota_1
 ```
 
-(Los milisegundos variarán; las cifras de documentos y claves examinadas, no).
+Los milisegundos variarán; las cifras de documentos y claves, no.
 
-La función `etapas` recorre el árbol del plan (cada etapa tiene un `inputStage`, o varios `inputStages`) y lo muestra en una línea, de la etapa final a la primera.
-
-- **1. Sin índices:** `COLLSCAN` lee los **100 000** documentos para devolver 10, y después los ordena en memoria (`SORT`).
-- **2. Índice en `userId`:** `IXSCAN` va directo a los **10 000** intentos de `u_7`, pero tiene que leerlos todos para filtrar por nota y ordenarlos (`SORT`). Mejor, pero aún lejos de 10.
+- **`etapas`** recorre el árbol del plan (`inputStage` o `inputStages`) y lo muestra en una línea.
+- **1. Sin índices:** `COLLSCAN` lee los **100 000** documentos para devolver 10, y luego ordena (`SORT`).
+- **2. Índice en `userId`:** `IXSCAN` va a los **10 000** intentos de `u_7`, pero los lee todos para filtrar por nota y ordenar.
 
 <Callout type="risk">
 
-- **El tiempo engaña en local:** 14 ms frente a 1 ms parece poca diferencia. Con la colección en memoria de tu Mac, recorrerla es rápido. En Atlas, con millones de documentos que no caben en memoria y muchas peticiones a la vez, la diferencia entre examinar 100 000 documentos y 30 claves es la diferencia entre una app que responde y una que se cae. Fíjate en las cifras de documentos y claves examinados, no en los milisegundos.
-- **`SORT` en memoria tiene un límite:** MongoDB solo permite ordenar en memoria hasta 100 MB de datos por consulta. Si la consulta lo supera, falla (salvo que permitas usar el disco, que es mucho más lento). Un índice que da el orden evita el problema de raíz.
+- **El tiempo engaña en local:** 14 ms frente a 1 ms parece poco con todo en memoria. En Atlas, con millones de documentos y muchas peticiones, es la diferencia entre responder y caerse. Mira las cifras examinadas.
+- **Un `SORT` en memoria tiene un límite de 100 MB** por consulta: si lo supera, falla. Un índice que da el orden lo evita de raíz.
 
 </Callout>
 
 ## Paso 3: la regla ESR
 
-Los casos 3 y 4 usan **los mismos tres campos**, en distinto orden, y el resultado es muy distinto:
+**Qué es:** el orden de los campos en un índice compuesto. **E (_Equality_):** primero, la igualdad (`userId: "u_7"`). **S (_Sort_):** después, el orden (`fecha: -1`). **R (_Range_):** al final, los rangos (`nota: { $gte: 4 }`, `$lt`, `$in`).
 
-- **3. `{ userId, nota, fecha }`:** el índice agrupa por usuario y, dentro, **por nota**. Para encontrar las notas `>= 4`, recorre los tramos de las notas 4 y 5 (**3333 claves**), pero dentro de cada nota las fechas van en su propio orden, así que el resultado final no está ordenado por fecha: necesita un **`SORT`** en memoria.
-- **4. `{ userId, fecha, nota }`:** el índice agrupa por usuario y, dentro, **por fecha descendente**. Recorre las entradas de `u_7` ya en el orden pedido, se queda con las que tienen nota `>= 4` y **se detiene en cuanto tiene 10** (`LIMIT`): **30 claves**, sin `SORT`.
+**Cómo se usa:** los casos 3 y 4 del banco de pruebas tienen **los mismos tres campos** en distinto orden.
 
-Esa es la **regla ESR**, el orden de los campos en un índice compuesto:
-
-1. **E (_Equality_):** primero, los campos que filtras por **igualdad** (`userId: "u_7"`).
-2. **S (_Sort_):** después, los campos por los que **ordenas** (`fecha: -1`).
-3. **R (_Range_):** al final, los campos con **rango** (`nota: { $gte: 4 }`, `$lt`, `$in`…).
-
-Es la regla de B4.4 con un matiz: allí decíamos "igualdad primero, luego orden o rango". ESR precisa que **el orden va antes que el rango**. Si el rango va antes (caso 3), el índice ya no sirve para ordenar.
+- **3. `{ userId, nota, fecha }`:** dentro del usuario, agrupa **por nota**. Para las notas `>= 4` recorre **3333 claves**, y las fechas no salen ordenadas: hace falta un **`SORT`**.
+- **4. `{ userId, fecha, nota }`:** dentro del usuario, agrupa **por fecha descendente**. Recorre en el orden pedido, se queda con las notas `>= 4` y **se detiene al tener 10**: **30 claves**, sin `SORT`.
+- **Es la regla de B4.4 con un matiz:** el orden va **antes** que el rango. Con el rango delante, el índice ya no sirve para ordenar.
 
 <Callout type="risk">
 
-- **El orden de los campos de ordenación importa:** un índice `{ userId: 1, fecha: -1 }` sirve para `sort({ fecha: -1 })` y también para `sort({ fecha: 1 })` (lo recorre al revés), pero un índice con dos campos de orden, como `{ a: 1, b: -1 }`, solo sirve para `sort({ a: 1, b: -1 })` o su inverso exacto, `sort({ a: -1, b: 1 })`.
-- **ESR es una guía, no una ley:** si un rango es muy selectivo (devuelve muy pocos documentos), a veces conviene ponerlo antes. Cuando dudes, haz lo de este script: crea las dos opciones y compara con `explain`.
-- **Un índice compuesto sirve para sus prefijos:** `{ userId, fecha, nota }` sirve para consultas por `userId` y por `userId` + `fecha`, pero no por `fecha` sola ni por `nota` sola (la guía telefónica de B4.4). No crees un índice `{ userId: 1 }` si ya tienes uno que empieza por `userId`.
+- **El sentido de los campos de orden importa:** `{ userId: 1, fecha: -1 }` sirve para `fecha` en los dos sentidos, pero `{ a: 1, b: -1 }` solo para `sort({ a: 1, b: -1 })` o su inverso exacto.
+- **ESR es una guía:** con un rango muy selectivo, a veces compensa ponerlo antes. En la duda, crea las dos opciones y compara con `explain`.
+- **Un índice compuesto sirve para sus prefijos:** `{ userId, fecha, nota }` sirve para `userId` y `userId` + `fecha`, no para `fecha` sola. No crees `{ userId: 1 }` si otro ya empieza por `userId`.
 
 </Callout>
 
 ## Paso 4: índices TTL, documentos que caducan solos
 
-Los códigos de verificación, las sesiones o los límites de peticiones deben **desaparecer** pasado un tiempo. En lugar de un proceso que los borre, MongoDB tiene los **índices TTL** (_Time To Live_): un índice sobre un campo de fecha con la opción `expireAfterSeconds`. Crea `src/06-ttl.ts`:
+**Qué es:** un índice **TTL** (_Time To Live_) sobre un campo de fecha, con `expireAfterSeconds`, hace que MongoDB borre solo los documentos caducados. Sirve para códigos de verificación, sesiones o límites de peticiones.
+
+**Cómo se usa:** crea `src/06-ttl.ts`.
 
 ```ts
 // Archivo: src/06-ttl.ts
@@ -231,21 +232,23 @@ npm start -- src/06-ttl.ts
 16:09:08 · documentos: 1 (ana@ejemplo.com)
 ```
 
-El código de Dani caducaba a los 5 segundos y **desapareció solo**; el de Ana (1 hora) sigue ahí. Con **`expireAfterSeconds: 0`**, cada documento caduca exactamente en la fecha de su campo `expiraEn`; con otro valor (por ejemplo, `3600`), caduca esa cantidad de segundos **después** de la fecha del campo (útil con un campo `creado`).
-
-Esta plataforma tiene prevista una colección `rate_limits` (los contadores de intentos de login, en la Tanda 9 de su plan) con un campo `expiresAt` pensado exactamente para esto: cada contador caducará solo cuando termine su ventana de tiempo. Better Auth, por su parte, guarda la caducidad de cada sesión en `expiresAt` y comprueba la fecha al leerla.
+- **El código de Dani caducaba a los 5 segundos y desapareció solo;** el de Ana, de 1 hora, sigue.
+- **`expireAfterSeconds: 0`** caduca en la fecha exacta del campo; con otro valor, esos segundos **después** (útil con un campo `creado`).
+- **Esta plataforma lo usa** en `rate_limits`, con un índice TTL sobre `expiresAt`: cada contador desaparece al terminar su ventana. Better Auth comprueba la caducidad de cada sesión al leerla.
 
 <Callout type="risk">
 
-- **El borrado no es instantáneo:** un proceso de MongoDB revisa los índices TTL **cada 60 segundos** aproximadamente, y con mucha carga puede tardar más. Aquí tardó unos 30 segundos; podría haber tardado más de un minuto. Si un documento caducado no debe usarse **ni un segundo** más (un código de un solo uso), comprueba también la fecha en la consulta: `{ codigo, expiraEn: { $gt: new Date() } }`.
-- **El campo debe ser un `Date`:** si `expiraEn` es un texto o un número, el documento **nunca** caduca, en silencio. Otro motivo más para no guardar fechas como texto (B5.5).
-- **Un índice TTL solo puede tener un campo** y no puede ser compuesto.
+- **El borrado no es instantáneo:** un proceso revisa los TTL **cada 60 segundos** aproximadamente, y con carga tarda más. Aquí tardó unos 30. Si un documento caducado no debe usarse ni un segundo (un código de un solo uso), filtra también: `{ codigo, expiraEn: { $gt: new Date() } }`.
+- **El campo debe ser un `Date`:** con un texto o un número, el documento **nunca** caduca, en silencio (B5.5).
+- **Un índice TTL tiene un solo campo** y no puede ser compuesto.
 
 </Callout>
 
 ## Paso 5: los índices de tu proyecto, en un script
 
-Los índices son parte del código: si los creas a mano en Compass, el día que crees otro entorno (una base de datos de _preview_, otro clúster) se te olvidarán. Se crean con un script que se puede ejecutar siempre. Crea `src/06-crear-indices.ts`:
+**Qué es:** los índices son parte del código. Creados a mano en Compass, se olvidan el día que creas otro entorno. Se crean con un script que se puede ejecutar siempre.
+
+**Cómo se usa:** crea `src/06-crear-indices.ts` y ejecútalo dos veces.
 
 ```ts
 // Archivo: src/06-crear-indices.ts
@@ -303,15 +306,15 @@ sin índice (por minutos): COLLSCAN · 14 devueltos / 33 documentos examinados
 Índices asegurados: userId_1_fecha_-1, userId_1_tipo_1_fecha_-1, userId_1_cursoId_1
 ```
 
-- **`createIndex` es idempotente:** si el índice ya existe con las mismas claves y opciones, no hace nada y devuelve su nombre. Por eso la segunda ejecución no falla. Esta plataforma tiene su equivalente en `scripts/db-setup.ts`, que se ejecuta con `npm run db:setup`.
-- **Cada índice se justifica con una consulta real** del módulo de acceso (B5.3 y B5.4), en un comentario. Un índice sin consulta que lo use es coste puro (B4.4).
-- **La comprobación con `explain`** confirma que las tres consultas del módulo usan su índice y examinan exactamente lo que devuelven. La última, por `minutos`, no tiene índice a propósito: `COLLSCAN` sobre los 33 documentos de la colección (los 30 de prueba más los 3 que creaste en `mongosh` en B5.1).
+- **`createIndex` es idempotente:** si el índice ya existe igual, devuelve su nombre. Esta plataforma tiene `scripts/db-setup.ts` (`npm run db:setup`).
+- **Cada índice se justifica con una consulta real** del módulo de acceso (B5.3 y B5.4), en un comentario.
+- **`explain` comprueba que las consultas usan su índice.** La de `minutos` no tiene a propósito: `COLLSCAN` sobre 33 documentos (los 30 de prueba y los 3 de B5.1).
 
 <Callout type="risk">
 
-- **El mismo índice con otro nombre falla:** si en B5.4 creaste `{ userId: 1, cursoId: 1 }` sin nombre (su nombre automático es `userId_1_cursoId_1`) y ahora lo creas con `{ name: "usuario_curso_unico" }`, MongoDB responde `Index already exists with a different name: userId_1_cursoId_1` (código 85, `IndexOptionsConflict`). Lo mismo si cambias una opción, como `unique`. Para cambiar un índice existente: bórralo (`dropIndex`) y créalo de nuevo. Por eso este script usa los nombres automáticos.
-- **Crear un índice en una colección grande en producción** consume recursos durante un tiempo, y en el plan gratuito de Atlas puede notarse en el rendimiento. Créalos al diseñar la colección o en momentos de poco tráfico.
-- **`Promise.all` sobre varios `createIndex`:** si uno falla, los que ya terminaron **quedan creados**. No es una transacción. Si el script falla a mitad, revisa con `db.coleccion.getIndexes()` qué quedó antes de volver a ejecutarlo.
+- **El mismo índice con otro nombre falla:** si `{ userId: 1, cursoId: 1 }` ya existe como `userId_1_cursoId_1`, crearlo con otro `name` da `Index already exists with a different name` (código 85, `IndexOptionsConflict`). Igual al cambiar `unique`. Bórralo (`dropIndex`) y créalo de nuevo; por eso el script usa los nombres automáticos.
+- **Crear un índice en una colección grande** consume recursos, y en el plan gratuito se nota. Créalos al diseñar o con poco tráfico.
+- **`Promise.all` no es una transacción:** si un `createIndex` falla, los demás quedan creados. Revisa con `getIndexes()` antes de repetir.
 
 </Callout>
 
@@ -335,12 +338,12 @@ Solución: el método, aplicado a las consultas típicas de una app de entrenami
 | Progreso de un curso              | `{ userId, cursoId }`                                           | `{ userId: 1, cursoId: 1 }`, único                                     | E, E; único porque se usa con `upsert` (B5.4)                                            |
 | Códigos de verificación           | `{ codigo, expiraEn: { $gt: ahora } }`                          | `{ codigo: 1 }` + TTL en `{ expiraEn: 1 }` con `expireAfterSeconds: 0` | Búsqueda por código y borrado automático                                                 |
 
-Exactamente los índices que crea `src/06-crear-indices.ts` para `mongo-academy`. El criterio de éxito en cada `explain`: `IXSCAN`, sin `SORT`, y `totalDocsExamined` igual (o casi) a `nReturned`.
+- **Son los índices de `src/06-crear-indices.ts`.** El criterio en cada `explain`: `IXSCAN`, sin `SORT`, y `totalDocsExamined` igual o casi igual a `nReturned`.
 
 <Callout type="risk">
 
-- **Mide con datos realistas:** con 30 documentos, todos los planes parecen buenos. Si tu app aún tiene pocos datos, genera datos de prueba con volumen (como `06-indices.ts`) en `academy_lab` antes de decidir.
-- **El planificador elige entre índices:** si hay varios índices que podrían servir, MongoDB prueba algunos y recuerda el ganador. Tras crear un índice nuevo, el plan puede cambiar en consultas que no esperabas: vuelve a comprobar las importantes.
+- **Mide con datos realistas:** con 30 documentos, todos los planes parecen buenos. Genera volumen en `academy_lab`, como `06-indices.ts`.
+- **El planificador elige entre índices** y recuerda el ganador: tras crear uno nuevo, el plan de otras consultas puede cambiar. Vuelve a comprobar las importantes.
 
 </Callout>
 
@@ -352,8 +355,8 @@ Lees un `explain` y sabes si tu consulta usa un índice: buscas `IXSCAN` en luga
 
 ## Resumen
 
-- `explain("executionStats")`: `COLLSCAN` recorre todo; `IXSCAN` usa un índice; `SORT` ordena en memoria. Compara `totalDocsExamined` y `totalKeysExamined` con `nReturned`.
-- Con 100 000 intentos: sin índice, 100 000 documentos examinados; con `{ userId }`, 10 000; con el orden equivocado, 3333 claves y un `SORT`; con ESR, 30 claves y ningún `SORT`.
-- Regla ESR para índices compuestos: igualdad, después orden (_sort_) y por último rango.
-- Índice TTL (`expireAfterSeconds`) sobre un campo `Date`: MongoDB borra los caducados cada 60 segundos aproximadamente.
-- Los índices se crean con un script idempotente; el mismo índice con otro nombre u otras opciones da `IndexOptionsConflict`.
+- `COLLSCAN` recorre todo, `IXSCAN` usa un índice y `SORT` ordena en memoria. Compara lo examinado con `nReturned`.
+- Con 100 000 intentos: sin índice, 100 000 documentos; con ESR, 30 claves y sin `SORT`.
+- ESR: igualdad, orden y por último rango.
+- TTL (`expireAfterSeconds`) sobre un `Date`: se borra cada 60 segundos aproximadamente.
+- Índices con un script idempotente; otro nombre u otras opciones dan `IndexOptionsConflict`.

@@ -7,41 +7,31 @@ minutes: 60
 summary: "Partes de una hoja de cálculo plana con los datos de esta plataforma, provocas sus anomalías con un script y la normalizas paso a paso hasta un modelo de entidades y relaciones que sabrás dibujar."
 ---
 
-Antes de escribir una sola línea de SQL o de MongoDB hay que decidir **qué** se guarda y **cómo se relaciona**. Es el **modelado de datos**, y es la decisión más difícil de cambiar después: el código se refactoriza en una tarde; los datos de miles de usuarios, no. En esta sección vas a modelar **esta misma plataforma** partiendo de cómo lo haría casi todo el mundo la primera vez (una hoja de cálculo con una fila por usuario y curso), vas a ver con un script los problemas que eso causa y vas a corregirlos paso a paso hasta un modelo limpio de entidades y relaciones, que dibujarás como diagrama.
-
-**Lo que tendrás al terminar:** `normalizar.js` en tu `db-lab` y el diagrama entidad-relación de Dani Academy, que convertirás en tablas reales en B4.3.
+Antes de escribir SQL o MongoDB hay que decidir **qué** se guarda y **cómo se relaciona**. El código se refactoriza en una tarde; los datos de miles de usuarios, no. Aquí modelas esta misma plataforma, desde una hoja de cálculo ingenua hasta un diagrama entidad-relación limpio.
 
 **Requisitos:** el proyecto `db-lab` de B4.1.
 
 ## Paso 1: entidades, atributos y claves
 
-Tres conceptos que vas a usar en todo el curso:
-
-- **Entidad**: una "cosa" de la que guardas información y que existe por sí misma. En esta plataforma: **usuario**, **curso**, **sección**, **evaluación**.
-- **Atributo**: un dato de una entidad. Un usuario tiene `nombre` y `email`; una sección tiene `titulo` y `minutos`.
-- **Clave primaria**: el atributo (o combinación de atributos) que identifica **una única** instancia de la entidad, sin repetirse nunca.
-
-Las claves primarias pueden ser de dos tipos:
+**Qué es:** una **entidad** es una "cosa" con identidad propia (usuario, curso, sección); un **atributo**, un dato suyo (`nombre`, `minutos`); la **clave primaria**, lo que identifica **una única** instancia sin repetirse nunca. Una **clave foránea** guarda la clave primaria **de otra entidad**: así se expresa una relación, como el `userId` y el `sectionId` del progreso de esta plataforma.
 
 | Tipo                       | Qué es                                      | Ejemplo en esta plataforma                                   | Ventaja                                 | Riesgo                                                               |
 | -------------------------- | ------------------------------------------- | ------------------------------------------------------------ | --------------------------------------- | -------------------------------------------------------------------- |
 | **Natural**                | Un dato que ya existe en el mundo real      | `"B1.3"` para una sección; el `email` de un usuario          | Tiene significado: se lee y se entiende | Puede cambiar (el usuario cambia de correo, renumeras las secciones) |
 | **Artificial** (subrogada) | Un identificador inventado, sin significado | El `_id` (un `ObjectId`) de MongoDB; un `id` autoincremental | No cambia nunca                         | No dice nada por sí mismo                                            |
 
-Esta plataforma usa las dos a propósito: el usuario tiene un `id` artificial (generado por Better Auth), porque su correo puede cambiar; las secciones usan el código natural `"B1.3"`, porque es estable y aparece en las URLs y en el temario.
-
-Una **clave foránea** es un atributo que guarda la clave primaria **de otra entidad**: es como se expresa una relación. Cada documento de progreso de esta plataforma tiene `userId` (apunta a un usuario) y `sectionId` (apunta a una sección).
+- **Esta plataforma usa las dos:** el usuario tiene un `id` artificial de Better Auth, porque su correo puede cambiar; las secciones, el código natural `"B1.3"`, estable y presente en URLs y temario.
 
 <Callout type="risk">
 
-- **El email como clave primaria es una trampa clásica:** si el usuario lo cambia, hay que actualizarlo en todas las tablas que lo usan como clave foránea. Usa un `id` artificial como clave y el email como atributo **único** (lo verás en B4.4).
-- **Las claves naturales "estables" a veces cambian:** si un día reorganizas el temario y `B1.3` pasa a ser `B1.4`, todo el progreso guardado apuntará a la sección equivocada. Solo usa claves naturales cuando estés seguro de que no cambiarán, o ten un plan de migración.
+- **El email como clave primaria es una trampa:** al cambiarlo, hay que actualizarlo en todas las tablas que lo usan. `id` artificial como clave, y el email como atributo **único** (B4.4).
+- **Las claves naturales "estables" a veces cambian:** si `B1.3` pasara a ser `B1.4`, el progreso guardado apuntaría a la sección equivocada. Úsalas solo con plan de migración.
 
 </Callout>
 
 ## Paso 2: la hoja de cálculo y sus anomalías
 
-Así guardaría el progreso de la plataforma alguien que empieza: una tabla, una fila por usuario y curso, con las secciones leídas en una celda:
+**Qué es:** guardar todo en una tabla plana, como haría alguien que empieza: una fila por usuario y curso, con las secciones leídas en una celda.
 
 | usuario | email            | curso | tituloCurso            | leidas           |
 | ------- | ---------------- | ----- | ---------------------- | ---------------- |
@@ -49,7 +39,7 @@ Así guardaría el progreso de la plataforma alguien que empieza: una tabla, una
 | Dani    | dani@ejemplo.com | B2    | Git y flujo de trabajo | B2.1             |
 | Ana     | ana@ejemplo.com  | B1    | TypeScript desde cero  | B1.1,B1.2        |
 
-Parece razonable. Vas a comprobar que no lo es. Crea `normalizar.js` en `db-lab`:
+**Cómo se usa:** crea `normalizar.js` en `db-lab`, que muestra sus problemas y los corrige.
 
 ```js
 // Archivo: normalizar.js
@@ -135,25 +125,20 @@ Dani: B1 3/3 · B2 1/1
 Ana: B1 2/3 · B2 0/1
 ```
 
-La primera mitad muestra los cuatro problemas de la hoja plana:
-
-1. **Varios valores en una celda:** para saber quién leyó `B1.2` hay que trocear texto. Y en la fila de Ana alguien escribió `"B1.1,B1.2"` sin espacio, así que `split(", ")` no la encuentra: el resultado es **1** en lugar de **2**. Un dato mal escrito y la estadística miente.
-2. **Anomalía de actualización:** el correo de Dani está **repetido** en dos filas. Al cambiarlo en una sola, Dani tiene dos correos y nadie sabe cuál es el bueno.
-3. **Anomalía de inserción:** no puedes guardar el curso B3 hasta que alguien lo lea, porque cada fila necesita un usuario.
-4. **Anomalía de borrado:** si borras la única fila de Ana (porque ya no tiene progreso), **borras a Ana**: su nombre y su correo estaban solo ahí.
-
-La segunda mitad resuelve los cuatro con **cuatro tablas separadas** (`usuarios`, `cursos`, `secciones`, `lecturas`), donde **cada dato vive en un solo sitio**. Ese proceso de separar se llama **normalización**.
+- **Varios valores en una celda:** Ana tiene `"B1.1,B1.2"` sin espacio, `split(", ")` no la encuentra, y la respuesta es **1** en lugar de **2**.
+- **Actualización:** el correo de Dani está en dos filas; cambiado en una, tiene dos correos. **Inserción:** el curso B3 no se puede guardar hasta que alguien lo lea. **Borrado:** borrar la única fila de Ana **borra a Ana**.
+- **La segunda mitad** reparte los datos en `usuarios`, `cursos`, `secciones` y `lecturas`, con **cada dato en un solo sitio**. Eso es la **normalización**.
 
 <Callout type="risk">
 
-- **Las hojas de cálculo compartidas son bases de datos sin protección:** estos cuatro problemas aparecen en cualquier Excel o Google Sheets que use un equipo. Si una hoja empieza a tener columnas repetidas y celdas con listas, es una base de datos pidiendo salir.
-- **Datos repetidos = datos que divergen:** cada copia de un dato es una oportunidad de que dejen de coincidir. La pregunta que debes hacerte siempre es: "si este dato cambia, ¿en cuántos sitios tengo que cambiarlo?". La respuesta ideal es "en uno".
+- **Una hoja compartida es una base de datos sin protección:** columnas repetidas y celdas con listas son una base de datos pidiendo salir.
+- **Datos repetidos acaban divergiendo:** pregúntate "si este dato cambia, ¿en cuántos sitios lo cambio?". Lo ideal es uno.
 
 </Callout>
 
 ## Paso 3: los tipos de relación
 
-Entre dos entidades solo hay tres tipos de relación. Para saber cuál es, hazte **dos preguntas**, una en cada sentido:
+**Qué es:** entre dos entidades solo hay tres relaciones. Se averigua con **dos preguntas**, una en cada sentido.
 
 | Relación | Pregunta 1                                    | Pregunta 2                                        | Ejemplo              | Cómo se guarda                                                      |
 | -------- | --------------------------------------------- | ------------------------------------------------- | -------------------- | ------------------------------------------------------------------- |
@@ -161,20 +146,23 @@ Entre dos entidades solo hay tres tipos de relación. Para saber cuál es, hazte
 | **1:N**  | ¿Un curso tiene cuántas secciones? **Muchas** | ¿Una sección es de cuántos cursos? **Uno**        | Curso → secciones    | Clave foránea en el lado "N" (`secciones.cursoId`)                  |
 | **N:M**  | ¿Un usuario lee cuántas secciones? **Muchas** | ¿Una sección la leen cuántos usuarios? **Muchos** | Usuarios ↔ secciones | **Tabla intermedia** con las dos claves foráneas (`lecturas`)       |
 
-Fíjate en el detalle más importante: en una 1:N, la clave foránea va **siempre en el lado de los muchos**. Cada sección dice a qué curso pertenece (`cursoId: "B1"`); el curso no guarda la lista de sus secciones. Y una N:M **no se puede** guardar con una clave foránea simple: necesita una tabla en medio, que además puede tener **sus propios atributos**. En esta plataforma, la tabla intermedia de lecturas guarda también **cuándo** se leyó (`readAt`).
+- **En una 1:N, la clave foránea va en el lado de los muchos:** cada sección dice su curso (`cursoId: "B1"`); el curso no guarda la lista.
+- **Una N:M necesita una tabla intermedia,** que puede tener atributos propios: aquí, **cuándo** se leyó (`readAt`).
 
 <Callout type="risk">
 
-- **Las relaciones "1:1" esconden a menudo una 1:N futura:** "un usuario tiene una dirección" hasta que alguien quiere dirección de envío y de facturación. Antes de fusionar dos entidades por ser 1:1, pregúntate si podrían dejar de serlo.
-- **Una lista de identificadores en una columna no es una N:M:** guardar `"B1.1, B1.2"` en una celda es exactamente el problema del Paso 2. En SQL, la N:M siempre lleva tabla intermedia. (En MongoDB a veces se guardan arrays de identificadores, pero con un tipo array de verdad, no con texto, y conociendo sus límites: curso I4).
+- **Una 1:1 esconde a menudo una 1:N futura:** "una dirección" hasta que hay una de envío y otra de facturación. Piénsalo antes de fusionar.
+- **Una lista de identificadores en una columna no es una N:M:** es el problema del Paso 2. En MongoDB se usan arrays de verdad, con límites (I4).
 
 </Callout>
 
 ## Paso 4: normalizar paso a paso (1FN, 2FN y 3FN)
 
-La normalización se hace por niveles llamados **formas normales**. Las tres primeras resuelven casi todos los problemas reales. Aplícalas a la hoja del Paso 2.
+**Qué es:** la normalización se hace por niveles, las **formas normales**. En una frase: **cada atributo depende de la clave, de toda la clave y de nada más que de la clave.**
 
-**Primera forma normal (1FN): un solo valor por celda, sin grupos repetidos.** La columna `leidas` tiene listas. Se separa en **una fila por cada lectura**:
+**Cómo se usa:** aplícalas a la hoja del Paso 2.
+
+**1FN, un solo valor por celda:** la columna `leidas` se separa en una fila por lectura.
 
 | usuario | email            | curso | tituloCurso            | seccion |
 | ------- | ---------------- | ----- | ---------------------- | ------- |
@@ -185,9 +173,9 @@ La normalización se hace por niveles llamados **formas normales**. Las tres pri
 | Ana     | ana@ejemplo.com  | B1    | TypeScript desde cero  | B1.1    |
 | Ana     | ana@ejemplo.com  | B1    | TypeScript desde cero  | B1.2    |
 
-Contar quién leyó `B1.2` ya es contar filas. Pero la repetición ha **empeorado**: el correo de Dani aparece cuatro veces.
+Contar quién leyó `B1.2` ya es contar filas, pero el correo de Dani está cuatro veces.
 
-**Segunda forma normal (2FN): todo atributo depende de la clave completa.** Lo que identifica cada fila es la pareja **(usuario, sección)**. Pero `email` depende solo del usuario, y `curso` y `tituloCurso` dependen solo de la sección. Esos atributos dependen de **una parte** de la clave, y por eso se repiten. Se separan en sus propias tablas:
+**2FN, todo depende de la clave completa:** la clave es **(usuario, sección)**, pero `email` depende solo del usuario, y `curso` y `tituloCurso`, solo de la sección. Se separan:
 
 ```text
 usuarios (id, nombre, email)
@@ -195,7 +183,7 @@ secciones (id, curso, tituloCurso)
 lecturas (usuarioId, seccionId)        ← clave: la pareja completa
 ```
 
-**Tercera forma normal (3FN): ningún atributo depende de otro atributo que no sea la clave.** En `secciones`, `tituloCurso` no depende de la sección, sino del **curso**: si sabes el curso, sabes su título. Es una dependencia **transitiva** (sección → curso → título), y hace que "TypeScript desde cero" se repita en cada sección de B1. Se separa:
+**3FN, nada depende de otro atributo:** `tituloCurso` depende del **curso**, no de la sección (una dependencia **transitiva**), y se repite en cada sección de B1. Se separa:
 
 ```text
 usuarios  (id, nombre, email)
@@ -204,19 +192,21 @@ secciones (id, cursoId → cursos.id)
 lecturas  (usuarioId → usuarios.id, seccionId → secciones.id)
 ```
 
-Son exactamente las cuatro tablas de la segunda mitad de `normalizar.js`. La forma de recordarlo, en una frase: **cada atributo depende de la clave, de toda la clave y de nada más que de la clave.**
+- **Son las cuatro tablas** de la segunda mitad de `normalizar.js`.
 
 <Callout type="risk">
 
-- **Normalizar no es gratis:** con los datos repartidos en cuatro tablas, para mostrar "Dani leyó B1.2 de TypeScript desde cero" hay que **combinarlas** en cada consulta (el `JOIN` de B4.3). En la mayoría de apps, ese coste es pequeño comparado con el de los datos incoherentes.
-- **Desnormalizar a propósito es válido** cuando una lectura muy frecuente se beneficia de tener el dato copiado, y sabes mantener la copia al día. Esta plataforma lo hace: cada documento de progreso guarda `courseId` además de `sectionId`, aunque el curso se deduce de la sección, para poder contar el progreso por curso con una consulta sencilla y un índice. Es una decisión consciente, no un descuido.
-- **Datos calculados:** no guardes un "porcentaje de progreso" que se puede calcular a partir de las lecturas; tendrías que actualizarlo cada vez que cambian. Si calcularlo es caro, guárdalo como caché y ten claro cuál es la fuente de verdad.
+- **Normalizar no es gratis:** mostrar "Dani leyó B1.2 de TypeScript desde cero" exige combinar tablas en cada consulta (el `JOIN` de B4.3). Casi siempre compensa.
+- **Desnormalizar a propósito es válido:** el progreso de esta plataforma guarda `courseId` además de `sectionId`, aunque se deduce, para contar por curso con una consulta sencilla y un índice.
+- **No guardes lo que se calcula,** como un porcentaje de progreso: habría que actualizarlo en cada cambio. Si es caro, guárdalo como caché y con una fuente de verdad clara.
 
 </Callout>
 
 ## Paso 5: el diagrama entidad-relación
 
-Un **diagrama entidad-relación** (E-R) dibuja las entidades como cajas, sus atributos dentro y las relaciones como líneas con su cardinalidad. Este es el modelo de **esta plataforma**, tal como está construida:
+**Qué es:** un **diagrama entidad-relación** (E-R) dibuja las entidades como cajas, sus atributos dentro y las relaciones como líneas con su cardinalidad.
+
+**Cómo se usa:** el modelo de esta plataforma, tal como está construida.
 
 ```text
 ┌──────────────┐ 1        N ┌──────────────────┐ N        1 ┌──────────────┐
@@ -241,11 +231,10 @@ Un **diagrama entidad-relación** (E-R) dibuja las entidades como cajas, sus atr
 └────────────────────┘
 ```
 
-Léelo así: un usuario tiene muchas lecturas y muchos intentos de evaluación; una sección pertenece a un curso y tiene muchas lecturas; un curso tiene muchas secciones y muchos intentos. La relación **N:M** entre usuarios y secciones se resuelve con **`lectura`**, que además guarda cuándo se leyó.
+- **Se lee así:** un usuario tiene muchas lecturas y muchos intentos; una sección es de un curso y tiene muchas lecturas. La N:M entre usuarios y secciones se resuelve con **`lectura`**.
+- **Cursos y secciones no están en la base de datos:** viven en archivos (`courses.json` y las `.mdx`, con su esquema en `src/content.config.ts`), porque los escribe el autor. En MongoDB solo está lo que generan los usuarios: `section_progress`, `quiz_attempts`, `study_sessions` y lo de Better Auth.
 
-Un detalle real que el diagrama no muestra: en esta plataforma, **cursos y secciones no están en la base de datos**. Viven en archivos (`courses.json` y las lecciones `.mdx`, con el esquema definido en `src/content.config.ts`), porque los escribe el autor y no cambian con el uso. En MongoDB solo están los datos que **generan los usuarios**: lecturas (`section_progress`), intentos (`quiz_attempts`) y sesiones de estudio (`study_sessions`), además de los usuarios y sesiones de login que gestiona Better Auth. El modelo entidad-relación es el mismo; lo que cambia es dónde vive cada entidad.
-
-Si prefieres dibujarlo con una herramienta, pega este texto en [mermaid.live](https://mermaid.live), que convierte esta notación en un diagrama:
+Para dibujarlo con una herramienta, pega esto en [mermaid.live](https://mermaid.live):
 
 ```text
 erDiagram
@@ -282,12 +271,12 @@ erDiagram
   }
 ```
 
-En esta notación, `||` es "exactamente uno", `o{` es "cero o muchos" y `|{` es "uno o muchos". Así, `CURSO ||--|{ SECCION` se lee "un curso tiene una o más secciones, y cada sección es de exactamente un curso".
+- **`||` es "exactamente uno", `o{` "cero o muchos" y `|{` "uno o muchos".** `CURSO ||--|{ SECCION`: un curso tiene una o más secciones, y cada sección es de exactamente un curso.
 
 <Callout type="risk">
 
-- **Falta una restricción que el diagrama sí sugiere:** un usuario no debe poder leer **dos veces** la misma sección. En la tabla `lectura`, la pareja `(usuarioId, seccionId)` debe ser **única**. Esta plataforma lo garantiza con un índice único en MongoDB (`user_section_unique`); en B4.4 crearás el equivalente en SQLite. Sin esa restricción, un doble clic podría crear dos lecturas y el progreso pasaría del 100 %.
-- **Modela lo que la app necesita hoy:** es tentador añadir entidades "por si acaso" (etiquetas, comentarios, favoritos). Cada entidad nueva es código, consultas y migraciones. El modelo crece cuando crecen los requisitos.
+- **Falta una restricción:** un usuario no debe leer **dos veces** la misma sección, así que `(usuarioId, seccionId)` debe ser **única**. Esta plataforma lo garantiza con el índice único `user_section_unique`; en B4.4 crearás el equivalente. Sin él, un doble clic pasaría el progreso del 100 %.
+- **Modela lo que la app necesita hoy:** cada entidad "por si acaso" es código, consultas y migraciones.
 
 </Callout>
 
@@ -311,7 +300,7 @@ Solución. Las dos entidades nuevas y sus relaciones:
 | Curso – pregunta            | Un curso tiene **muchas** (5) preguntas  | Una pregunta es de **un** curso                 | 1:N  | `pregunta.cursoId`                                                            |
 | Intento – pregunta          | Un intento responde **muchas** preguntas | Una pregunta se responde en **muchos** intentos | N:M  | Tabla intermedia `respuesta (intentoId, preguntaId, opcionElegida, correcta)` |
 
-Las nuevas cajas del diagrama:
+Las nuevas cajas:
 
 ```text
 sesion_estudio (id PK, usuarioId FK, inicio, ultimaActividad)
@@ -320,14 +309,13 @@ pregunta       (id PK, cursoId FK, enunciado, opciones, correcta, explicacion)
 respuesta      (intentoId FK, preguntaId FK, opcionElegida, correcta)   ← N:M con atributos
 ```
 
-Cómo lo resuelve de verdad la plataforma: en MongoDB, `study_sessions` guarda las secciones vistas como un **array** dentro de cada sesión (`sectionIds: ["B1.1", "B1.2"]`) en lugar de una tabla intermedia, y `quiz_attempts` guarda las respuestas y los aciertos como dos arrays (`answers` y `results`) dentro de cada intento. Es la forma documental de una N:M pequeña y acotada: unas pocas secciones por sesión y exactamente cinco respuestas por intento. Las preguntas viven en los archivos `b1.yaml`, `b2.yaml`… porque las escribe el autor.
-
-El dato calculable: la **nota** de un intento (`score`) se puede calcular contando los aciertos de `results`. La plataforma la guarda igualmente, porque un intento **no cambia nunca** después de enviarse: guardar el resultado ahorra recalcularlo en cada visita a la página de progreso y no hay riesgo de que se desincronice. El porcentaje de progreso por curso, en cambio, **no** se guarda: cambia con cada lectura y se calcula al vuelo.
+- **Cómo lo resuelve la plataforma:** en MongoDB, `study_sessions` guarda las secciones vistas como un **array** (`sectionIds: ["B1.1", "B1.2"]`), y `quiz_attempts`, las respuestas y los aciertos en dos arrays (`answers` y `results`). Es la forma documental de una N:M pequeña y acotada. Las preguntas viven en `b1.yaml`, `b2.yaml`…
+- **El dato calculable:** la nota (`score`) se deduce de `results`, pero se guarda, porque un intento **no cambia nunca**. El porcentaje de progreso, en cambio, cambia con cada lectura y se calcula al vuelo.
 
 <Callout type="risk">
 
-- **Un array dentro de un documento no sustituye siempre a una tabla intermedia:** funciona cuando el array es pequeño y acotado (5 respuestas, unas pocas secciones por sesión). Si pudiera crecer sin límite (todas las lecturas de un usuario en toda su vida), el documento crecería sin control. Es la decisión de modelado más importante de MongoDB (curso I4).
-- **Las preguntas de una evaluación pueden cambiar:** si editas una pregunta después de que alguien la responda, el intento antiguo apuntará a una pregunta distinta de la que vio. Por eso muchos sistemas guardan en el intento una **copia** de lo que se respondió, o versionan las preguntas.
+- **Un array solo sustituye a una tabla intermedia si es pequeño y acotado:** todas las lecturas de un usuario en toda su vida harían crecer el documento sin control (I4).
+- **Editar una pregunta ya respondida** hace que el intento antiguo apunte a otra. Muchos sistemas guardan una copia en el intento, o versionan las preguntas.
 
 </Callout>
 
@@ -339,8 +327,8 @@ Identificas el tipo de relación entre dos entidades al primer vistazo con las d
 
 ## Resumen
 
-- Entidad = cosa con identidad propia; atributo = dato de una entidad; clave primaria = identificador único (natural o artificial); clave foránea = referencia a otra entidad.
-- Una tabla sin normalizar sufre anomalías de actualización, inserción y borrado, y celdas con listas que mienten.
-- 1:1, 1:N (clave foránea en el lado N) y N:M (tabla intermedia, que puede tener atributos propios).
-- 1FN: un valor por celda. 2FN: todo depende de la clave completa. 3FN: nada depende de otro atributo que no sea la clave.
-- El diagrama E-R dibuja entidades, claves y cardinalidades; desnormalizar es válido si es consciente y sabes mantener las copias.
+- Entidad, atributo, clave primaria (natural o artificial) y clave foránea.
+- Una tabla sin normalizar sufre anomalías de actualización, inserción y borrado.
+- 1:1, 1:N (foránea en el lado N) y N:M (tabla intermedia).
+- 1FN, 2FN y 3FN: cada dato, en un solo sitio.
+- Desnormalizar vale si es consciente y las copias se mantienen.

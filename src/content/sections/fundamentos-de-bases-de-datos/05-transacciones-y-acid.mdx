@@ -7,15 +7,15 @@ minutes: 60
 summary: "Haces desaparecer dinero con una transferencia que falla a mitad, lo evitas con una transacción, provocas una escritura perdida entre dos conexiones, matas un proceso antes y después del COMMIT y entiendes ACID y CAP."
 ---
 
-Hay operaciones que son **varias escrituras que solo tienen sentido juntas**: una transferencia resta de una cuenta y suma en otra; un pedido descuenta el inventario y crea la factura; un registro crea el usuario y su cuenta de acceso. Si el servidor se cae entre una escritura y la siguiente, los datos quedan en un estado que **no debería existir**: dinero que desaparece, un pedido sin factura, un usuario sin forma de entrar. En esta sección vas a provocar exactamente eso con un banco de juguete en SQLite y a arreglarlo con **transacciones**. Vas a ver también qué pasa cuando dos conexiones modifican el mismo dato a la vez, y qué sobrevive cuando matas un proceso de golpe. Con esos experimentos, las siglas **ACID** dejarán de ser teoría.
-
-**Lo que tendrás al terminar:** `transacciones.js`, cuatro experimentos que demuestran cada garantía de ACID, y el criterio para reconocer en tus apps qué operaciones deben ser atómicas.
+Una transferencia resta de una cuenta y suma en otra: si el servidor se cae entre las dos, el dinero desaparece. Aquí lo provocas con un banco de juguete en SQLite, lo arreglas con **transacciones** y compruebas cada letra de **ACID** con un experimento.
 
 **Requisitos:** el proyecto `db-lab` de las secciones anteriores.
 
-## Paso 1: el problema, una transferencia que se queda a medias
+## Paso 1: una transferencia que se queda a medias
 
-Crea `banco.sql` en `db-lab`:
+**Qué es:** una **transacción** agrupa varias operaciones: o se confirman **todas** con `COMMIT`, o se descartan **todas**, con `ROLLBACK` o si la conexión se corta antes del `COMMIT`.
+
+**Cómo se usa:** crea `banco.sql` en `db-lab`.
 
 ```sql
 -- Archivo: banco.sql
@@ -29,7 +29,7 @@ CREATE TABLE cuentas (
 INSERT INTO cuentas (id, titular, saldo) VALUES (1, 'Dani', 100), (2, 'Ana', 100);
 ```
 
-Crea la base de datos y simula una transferencia de 30 de Dani a Ana que se interrumpe después del primer `UPDATE`. Para "matar el servidor" a mitad, ejecuta solo la resta y cierra la sesión:
+Simula una transferencia de 30 de Dani a Ana que se corta tras el primer `UPDATE`: ejecuta solo la resta y cierra la sesión.
 
 ```bash
 sqlite3 banco.db < banco.sql
@@ -40,8 +40,6 @@ sqlite3 banco.db
 UPDATE cuentas SET saldo = saldo - 30 WHERE id = 1;
 .quit
 ```
-
-Mira cómo ha quedado:
 
 ```bash
 sqlite3 -box banco.db "SELECT titular, saldo FROM cuentas; SELECT SUM(saldo) AS total FROM cuentas;"
@@ -61,9 +59,9 @@ sqlite3 -box banco.db "SELECT titular, saldo FROM cuentas; SELECT SUM(saldo) AS 
 └───────┘
 ```
 
-**Han desaparecido 30.** Había 200 en el sistema y ahora hay 170. Cada `UPDATE` se confirmó por separado en cuanto se ejecutó, y el segundo nunca llegó.
+- **Han desaparecido 30:** cada `UPDATE` se confirmó por separado, y el segundo nunca llegó.
 
-Repite el experimento dentro de una **transacción**. Recrea las cuentas y abre otra sesión:
+Ahora dentro de una transacción:
 
 ```bash
 sqlite3 banco.db < banco.sql
@@ -81,7 +79,7 @@ SELECT saldo FROM cuentas WHERE id = 1;
 70
 ```
 
-Dentro de la transacción, Dani ya tiene 70. Pero cierras la sesión **sin `COMMIT`**. Míralo desde fuera:
+Dentro, Dani ya tiene 70. Cierra la sesión **sin `COMMIT`** y míralo desde fuera:
 
 ```bash
 sqlite3 -box banco.db "SELECT titular, saldo FROM cuentas; SELECT SUM(saldo) AS total FROM cuentas;"
@@ -101,7 +99,7 @@ sqlite3 -box banco.db "SELECT titular, saldo FROM cuentas; SELECT SUM(saldo) AS 
 └───────┘
 ```
 
-**Como si nada hubiera pasado.** Una transacción agrupa varias operaciones: o se confirman **todas** con `COMMIT`, o se descartan **todas** (con `ROLLBACK`, o automáticamente si la conexión se corta antes del `COMMIT`). La transferencia completa se escribe así:
+- **Como si nada hubiera pasado.** La transferencia completa se escribe así:
 
 ```sql
 BEGIN;
@@ -112,36 +110,38 @@ COMMIT;
 
 <Callout type="risk">
 
-- **Un error dentro de una transacción no la deshace sola.** Recrea las cuentas y prueba, en una sesión, a transferir 500 que Dani no tiene, sumando primero a Ana:
+- **Un error dentro de una transacción no la deshace sola.** Recrea las cuentas y transfiere 500 que Dani no tiene, sumando primero a Ana:
 
   ```sql
-  .mode box
-  BEGIN;
-  UPDATE cuentas SET saldo = saldo + 500 WHERE id = 2;
-  UPDATE cuentas SET saldo = saldo - 500 WHERE id = 1;
-  SELECT titular, saldo FROM cuentas;
-  ROLLBACK;
+    .mode box
+    BEGIN;
+    UPDATE cuentas SET saldo = saldo + 500 WHERE id = 2;
+    UPDATE cuentas SET saldo = saldo - 500 WHERE id = 1;
+    SELECT titular, saldo FROM cuentas;
+    ROLLBACK;
   ```
 
   ```text
-  Runtime error near line 4: CHECK constraint failed: saldo >= 0 (19)
-  ┌─────────┬───────┐
-  │ titular │ saldo │
-  ├─────────┼───────┤
-  │ Dani    │ 100   │
-  │ Ana     │ 600   │
-  └─────────┴───────┘
+    Runtime error near line 4: CHECK constraint failed: saldo >= 0 (19)
+    ┌─────────┬───────┐
+    │ titular │ saldo │
+    ├─────────┼───────┤
+    │ Dani    │ 100   │
+    │ Ana     │ 600   │
+    └─────────┴───────┘
   ```
 
-  El segundo `UPDATE` falló, pero **el primero sigue aplicado** dentro de la transacción: Ana tiene 600. Si en lugar de `ROLLBACK` escribieras `COMMIT`, habrías **creado 500 de la nada**. Ante cualquier error dentro de una transacción, lo que toca es `ROLLBACK`. En el código, eso se hace en un `catch` (Paso 2).
+  El segundo `UPDATE` falló, pero **el primero sigue aplicado**: Ana tiene 600. Con `COMMIT` habrías **creado 500 de la nada**. Ante un error, `ROLLBACK`, en el `catch` (Paso 2).
 
-- **Las transacciones largas bloquean a los demás:** mientras una transacción de escritura está abierta, otras conexiones no pueden escribir (Paso 3). Nunca dejes una transacción abierta mientras esperas algo lento (una llamada a una API, una respuesta del usuario).
+- **Una transacción de escritura abierta bloquea a los demás** (Paso 3). Nunca la dejes abierta esperando algo lento, como una API o al usuario.
 
 </Callout>
 
-## Paso 2: los cuatro experimentos de ACID en código
+## Paso 2: los experimentos de ACID en código
 
-Ahora, desde Node, cada garantía con un experimento. Crea `transacciones.js` en `db-lab`:
+**Qué es:** cuatro experimentos en Node, uno por garantía, con el patrón de cualquier transacción: `BEGIN`, las operaciones, `COMMIT`, y `ROLLBACK` en el `catch`.
+
+**Cómo se usa:** crea `transacciones.js` en `db-lab`.
 
 ```js
 // Archivo: transacciones.js
@@ -296,12 +296,12 @@ Proceso matado después del COMMIT: ¿existe la cuenta de Luis? sí
 10 000 inserciones: 2695 ms sin transacción · 3 ms con transacción
 ```
 
-En los pasos siguientes vas a leer cada bloque. Fíjate primero en el patrón de código del bloque 1, que es **el** patrón de cualquier transacción:
+El patrón del bloque 1:
 
 ```js
 try {
   db.exec("BEGIN");
-  // ...todas las operaciones...
+  transferir(db, 1, 2, 30, { fallarAMitad: false }); // las operaciones que van juntas
   db.exec("COMMIT");
 } catch (error) {
   db.exec("ROLLBACK"); // ante cualquier error, se descarta todo
@@ -310,69 +310,66 @@ try {
 
 <Callout type="risk">
 
-- **El `ROLLBACK` va en el `catch`, siempre.** Sin él, tras un error la transacción queda abierta en esa conexión, la siguiente operación se mete dentro de ella y la base de datos queda bloqueada para los demás.
-- **Los tiempos dependen de tu disco:** las 10 000 inserciones sin transacción pueden tardar entre uno y varios segundos según tu Mac; lo que no cambia es la proporción.
+- **El `ROLLBACK` va en el `catch`, siempre.** Sin él, la transacción queda abierta, la siguiente operación entra en ella y la base de datos queda bloqueada para los demás.
+- **Los tiempos dependen de tu disco:** las 10 000 inserciones sin transacción tardan entre uno y varios segundos. La proporción no cambia.
 
 </Callout>
 
 ## Paso 3: las cuatro letras de ACID
 
-**A de atomicidad: todo o nada.** Es el bloque 1. Sin transacción, el fallo entre los dos `UPDATE` dejó el total en 170. Con transacción, el `ROLLBACK` deshizo la resta y el total sigue en 200. Una transacción es **indivisible**, como un átomo: o se aplica entera o no se aplica.
+**Qué es:** las cuatro garantías de una transacción. Cada una se ve en un bloque del resultado.
 
-**C de consistencia: de un estado válido a otro estado válido.** Es el tercer resultado: la transferencia de 500 violaba `CHECK (saldo >= 0)`, la base de datos la rechazó y el `ROLLBACK` dejó todo como estaba. La consistencia la definen **tus reglas** (restricciones, claves foráneas) y la transacción garantiza que nunca se confirme un estado que las incumpla.
+- **A, atomicidad: todo o nada** (bloque 1). Sin transacción, el fallo dejó el total en 170; con ella, el `ROLLBACK` lo dejó en 200.
+- **C, consistencia: solo estados válidos** (tercer resultado). La transferencia de 500 violaba `CHECK (saldo >= 0)` y se rechazó. La consistencia la definen **tus reglas**; la transacción impide confirmar un estado que las incumpla.
+- **D, durabilidad: lo confirmado sobrevive** (bloque 3). Un proceso hijo se mata con `SIGKILL`: antes del `COMMIT`, Luis no existe; después, sí. Un `COMMIT` promete que el dato ya está en disco.
 
-**I de aislamiento: las transacciones simultáneas no se pisan.** Es el bloque 2, el más importante para el día a día:
+**I, aislamiento: las transacciones simultáneas no se pisan** (bloque 2), el más importante a diario:
 
-- **Dos retiradas leyendo y escribiendo:** dos cajeros (dos conexiones) leen el saldo (100), cada uno calcula su resultado en JavaScript y escribe. El segundo **pisa** al primero: el saldo queda en 50 en vez de 20. Es la **escritura perdida** de B4.1, ahora con una base de datos de verdad. La base de datos no puede protegerte, porque para ella son dos `UPDATE` correctos e independientes; el error está en **calcular fuera** de ella.
-- **Retiradas atómicas:** `UPDATE cuentas SET saldo = saldo - ? WHERE id = 1 AND saldo >= ?` hace la lectura, la comprobación y la escritura **en una sola operación** dentro de la base de datos. Las dos primeras dejan el saldo en 20, y la tercera (50) **no encuentra ninguna fila** que cumpla `saldo >= 50`: `changes` es 0 y la retirada se rechaza sin dejar la cuenta en negativo.
-- **`database is locked`:** mientras el cajero A tiene una transacción de escritura abierta (`BEGIN IMMEDIATE`), el cajero B no puede escribir. SQLite garantiza el aislamiento de la forma más simple: un solo escritor a la vez. PostgreSQL o MongoDB permiten muchos escritores a la vez con mecanismos más finos, pero el principio es el mismo.
+- **Leer y escribir desde dos cajeros:** los dos leen 100, calculan en JavaScript y escriben. El segundo **pisa** al primero: 50 en vez de 20. Es la escritura perdida de B4.1 con una base de datos de verdad, porque el error está en **calcular fuera** de ella.
+- **Retiradas atómicas:** `UPDATE cuentas SET saldo = saldo - ? WHERE id = 1 AND saldo >= ?` lee, comprueba y escribe **en una sola operación**. La tercera retirada no encuentra fila que cumpla `saldo >= 50`, `changes` es 0 y se rechaza.
+- **`database is locked`:** con una transacción de escritura abierta (`BEGIN IMMEDIATE`), nadie más escribe. SQLite aísla con un solo escritor; PostgreSQL y MongoDB permiten varios, con el mismo principio.
 
-**D de durabilidad: lo confirmado sobrevive.** Es el bloque 3. Un proceso hijo inserta la cuenta de Luis dentro de una transacción y se mata a sí mismo con `SIGKILL` (sin cerrar nada, como un corte de luz). Si muere **antes** del `COMMIT`, Luis no existe: la transacción a medias se descartó. Si muere **después**, Luis existe: un `COMMIT` es una promesa de que el dato ya está en disco.
-
-**Y el bloque 4, la sorpresa:** 10 000 inserciones tardan unos 2700 ms sin transacción y **3 ms** con ella. Sin transacción explícita, cada `INSERT` es su propia transacción, y la durabilidad obliga a SQLite a asegurarse de que **cada una** llegó al disco antes de seguir. Con una sola transacción, solo se asegura una vez, en el `COMMIT`. Por eso `indices.js` (B4.4) insertaba sus 100 000 filas entre `BEGIN` y `COMMIT`.
+**El bloque 4:** 10 000 inserciones tardan unos 2700 ms sin transacción y **3 ms** con ella. Sin transacción, cada `INSERT` es la suya, y la durabilidad obliga a llegar al disco **cada vez**. Por eso `indices.js` (B4.4) insertaba entre `BEGIN` y `COMMIT`.
 
 <Callout type="risk">
 
-- **El patrón "leer → calcular en JavaScript → escribir" es la fuente número uno de errores de concurrencia**, en SQL y en MongoDB. Siempre que puedas, pide a la base de datos que haga el cálculo: `SET saldo = saldo - ?` en SQL, `{ $inc: { saldo: -30 } }` en MongoDB. Y pon la condición en el `WHERE` (o en el filtro): `AND saldo >= ?`.
-- **`database is locked` en producción** significa que una transacción de escritura está tardando demasiado, o que se quedó abierta tras un error sin `ROLLBACK`. Los reintentos ayudan (`PRAGMA busy_timeout = 5000` hace que SQLite espere hasta 5 segundos antes de rendirse), pero la causa real suele ser una transacción mal cerrada.
-- **La durabilidad tiene matices:** depende de que el disco cumpla lo que promete y de la configuración (`PRAGMA synchronous`). En un servicio gestionado como Atlas, la durabilidad incluye además copiar el dato a varios servidores antes de confirmar.
+- **Leer → calcular en JavaScript → escribir es la primera fuente de errores de concurrencia,** en SQL y en MongoDB. Calcula en la base de datos (`saldo - ?`, `{ $inc: { saldo: -30 } }`), con la condición en el filtro (`AND saldo >= ?`).
+- **`database is locked` en producción** suele ser una transacción larga o sin `ROLLBACK`. `PRAGMA busy_timeout = 5000` espera hasta 5 segundos, pero no arregla la causa.
+- **La durabilidad tiene matices:** depende del disco y de `PRAGMA synchronous`. Atlas, además, copia el dato a varios servidores antes de confirmar.
 
 </Callout>
 
 ## Paso 4: transacciones en MongoDB y en esta plataforma
 
-En MongoDB, la regla cambia ligeramente:
+**Qué es:** en MongoDB, **una operación sobre un solo documento siempre es atómica**: `updateOne` con `$set`, `$inc` y `$push` se aplica entera o no se aplica. Las transacciones multidocumento existen (requieren un _replica set_, como Atlas), pero son más lentas y tienen límites: se usan cuando no hay otra opción.
 
-- **Una operación sobre un solo documento siempre es atómica.** `updateOne` con varios cambios (`$set`, `$inc`, `$push`) se aplica entera o no se aplica. Por eso el modelado documental intenta que lo que debe cambiar a la vez viva **en el mismo documento**: un pedido con sus líneas anidadas se actualiza de forma atómica sin transacción.
-- **Las transacciones con varios documentos existen**, pero requieren un _replica set_ (tu clúster de Atlas lo es), son más lentas y tienen límites de tiempo. Se usan cuando no hay otra opción.
+Esta plataforma **no usa transacciones multidocumento**. Cada operación toca un solo documento:
 
-Esta plataforma **no usa transacciones multidocumento**, y es una decisión de diseño. Cada operación toca un solo documento y se apoya en operaciones atómicas e índices únicos:
+- **Marcar una sección** es un _upsert_ sobre `section_progress`, con el índice único `{ userId, sectionId }`: dos clics simultáneos no crean dos lecturas (el `ON CONFLICT DO NOTHING` de B4.3).
+- **Enviar una evaluación** inserta **un** documento en `quiz_attempts` con todo el resultado dentro.
+- **Los límites de peticiones** (`rate_limits`) suman con `$inc` en un _upsert_, sin leer antes.
 
-- **Marcar una sección como leída** es un _upsert_ (insertar o, si existe, actualizar) sobre `section_progress`, protegido por el índice único `{ userId, sectionId }`. Dos clics simultáneos no pueden crear dos lecturas: el índice lo impide (es el `ON CONFLICT DO NOTHING` de B4.3).
-- **Enviar una evaluación** inserta **un** documento en `quiz_attempts` con todo el resultado dentro (respuestas, aciertos, nota).
-- **Los límites de peticiones** previstos en el plan de la plataforma (una colección `rate_limits`, aún sin construir) usarán `$inc`, que suma de forma atómica sin leer antes.
-
-Diseñar para que cada operación importante sea **atómica por sí misma** es más simple y más rápido que coordinar transacciones, y es la forma natural de trabajar con MongoDB.
+Que cada operación importante sea **atómica por sí misma** es más simple y más rápido que coordinar transacciones.
 
 ## Paso 5: el teorema CAP, sin humo
 
-Cuando una base de datos vive en **varios servidores** (como tu clúster de Atlas, con tres réplicas), aparece un límite fundamental. El **teorema CAP** dice que, de estas tres propiedades, en el momento de un problema de red solo puedes garantizar dos:
+**Qué es:** con la base de datos en **varios servidores**, como tu clúster de Atlas, durante un fallo de red solo puedes garantizar dos de estas tres:
 
-- **C (_Consistency_, consistencia):** todas las lecturas ven el último dato escrito, sea cual sea el servidor que responda. (Ojo: no es la misma "C" que la de ACID).
-- **A (_Availability_, disponibilidad):** todos los servidores que funcionan responden siempre.
-- **P (_Partition tolerance_, tolerancia a particiones):** el sistema sigue funcionando aunque la red se corte entre servidores.
+- **C (_Consistency_):** todas las lecturas ven el último dato escrito. No es la "C" de ACID.
+- **A (_Availability_):** todo servidor que funciona responde siempre.
+- **P (_Partition tolerance_):** sigue funcionando aunque se corte la red entre servidores.
 
-La trampa es que **P no es opcional**: en un sistema distribuido, las redes **fallan**. Así que la elección real es qué hacer **cuando** la red se corta entre los servidores:
+**P no es opcional,** porque las redes fallan. La elección real es qué hacer **cuando** se corta:
 
-- **Priorizar consistencia (CP):** el servidor aislado deja de aceptar escrituras hasta que se recupera la conexión. Algunos usuarios verán errores, pero nadie leerá datos desactualizados. Es el comportamiento por defecto de MongoDB: solo el servidor **primario** acepta escrituras, y si queda aislado de la mayoría, deja de serlo.
-- **Priorizar disponibilidad (AP):** todos siguen respondiendo, aunque algunos con datos desactualizados durante un tiempo. Es lo que eligen sistemas como DynamoDB o Cassandra en ciertos modos, y es aceptable para, por ejemplo, el número de "me gusta" de una publicación.
+- **CP:** el servidor aislado deja de aceptar escrituras. Algunos ven errores, pero nadie lee datos viejos. Es MongoDB por defecto: solo el **primario** escribe, y deja de serlo si queda aislado.
+- **AP:** todos responden, algunos con datos desactualizados un tiempo. Lo eligen DynamoDB o Cassandra en ciertos modos, aceptable para un contador de "me gusta".
 
-Para tu día a día, la consecuencia práctica es una sola: **cuando lees de una réplica secundaria (o de una caché), puedes leer un dato un poco antiguo**. Por defecto, el _driver_ de MongoDB lee del primario y no tienes que preocuparte; si algún día configuras lecturas de secundarios para repartir carga, recuerda CAP.
+En el día a día: **leer de una réplica secundaria, o de una caché, puede dar un dato algo antiguo.** El _driver_ de MongoDB lee del primario por defecto.
 
 <Callout type="risk">
 
-- **CAP no dice que "las bases de datos NoSQL no son consistentes":** MongoDB, con su configuración por defecto, es consistente (CP). Es una afirmación sobre lo que ocurre durante un fallo de red, no sobre el día a día.
-- **La caché es una réplica más:** cuando la CDN de Vercel sirve una página guardada hace 60 segundos (B3.5), estás eligiendo disponibilidad y velocidad frente a consistencia. Es la misma decisión, en otra capa.
+- **CAP no dice que NoSQL no sea consistente:** MongoDB por defecto es CP. Habla de lo que pasa durante un fallo de red.
+- **La caché es una réplica más:** cuando la CDN de Vercel sirve una página de hace 60 segundos (B3.5), eliges disponibilidad frente a consistencia.
 
 </Callout>
 
@@ -405,7 +402,8 @@ console.log(`Dos retiradas (30 y 50) con transacciones: saldo de Dani = ${leerSa
 Dos retiradas (30 y 50) con transacciones: saldo de Dani = 20 (debería ser 20)
 ```
 
-Ya no se pierde nada, porque **`BEGIN IMMEDIATE` reserva la escritura desde el principio**: mientras la transacción de A está abierta, B no puede empezar la suya (si lo intentara a la vez, recibiría `database is locked`). Así B lee el saldo **después** de que A confirme. La lectura y la escritura de cada cajero quedan aisladas. En la vida real, B esperaría o reintentaría; aquí van una detrás de otra porque el script es secuencial. Aun así, la solución del `UPDATE … WHERE saldo >= ?` es mejor: no necesita transacción, no bloquea y no permite saldos negativos.
+- **Ya no se pierde nada:** `BEGIN IMMEDIATE` reserva la escritura desde el principio, así que B lee **después** de que A confirme. Si lo intentara a la vez, recibiría `database is locked`.
+- **Aun así, `UPDATE … WHERE saldo >= ?` es mejor:** no necesita transacción, no bloquea y no permite saldos negativos.
 
 Solución del punto 3, para el Planificador 2026:
 
@@ -419,8 +417,8 @@ Solución del punto 3, para el Planificador 2026:
 
 <Callout type="risk">
 
-- **`BEGIN IMMEDIATE` frente a `BEGIN`:** con un `BEGIN` normal, SQLite no reserva la escritura hasta el primer `UPDATE`, así que las dos conexiones pueden **leer** a la vez. Al escribir, la segunda recibe `database is locked`, y la primera **tampoco puede confirmar** su `COMMIT` mientras la otra transacción siga abierta: se bloquean mutuamente. Para el patrón leer → escribir en SQLite, `BEGIN IMMEDIATE`.
-- **Los contadores guardados son una fuente de inconsistencias:** cada vez que guardas un número que se puede calcular (cuántas tareas tiene una lista), te comprometes a mantenerlo al día en todas las operaciones. Calcularlo al leer, con un índice adecuado, suele ser más simple y más seguro.
+- **Con un `BEGIN` normal, las dos conexiones leen a la vez,** y al escribir se bloquean mutuamente: ninguna puede confirmar. Para leer → escribir en SQLite, `BEGIN IMMEDIATE`.
+- **Un contador guardado es una promesa de mantenerlo al día** en cada operación. Calcularlo al leer, con un buen índice, suele ser más seguro.
 
 </Callout>
 
@@ -432,8 +430,8 @@ Reconoces en tus apps qué operaciones deberían ser atómicas: las que hacen va
 
 ## Resumen
 
-- Una transacción agrupa operaciones: `COMMIT` las confirma todas; `ROLLBACK` (o un corte antes del `COMMIT`) las descarta todas. Un error dentro no la deshace solo.
-- ACID: atomicidad (todo o nada), consistencia (solo estados que cumplen las reglas), aislamiento (las transacciones simultáneas no se pisan) y durabilidad (lo confirmado sobrevive a un corte).
-- Leer, calcular en el código y escribir pierde escrituras: haz el cálculo en la base de datos (`SET saldo = saldo - ?`, `$inc`) con la condición en el filtro.
-- Agrupar inserciones en una transacción las acelera enormemente (aquí, de 2,7 s a 3 ms).
-- En MongoDB, cada documento se actualiza de forma atómica; diseña para que cada operación importante toque uno solo. CAP: en un fallo de red, consistencia o disponibilidad.
+- `COMMIT` confirma todo; `ROLLBACK` o un corte lo descartan todo. Un error no la deshace solo.
+- ACID: atomicidad, consistencia, aislamiento y durabilidad.
+- Calcula en la base de datos (`saldo - ?`, `$inc`) con la condición en el filtro.
+- Una transacción acelera las inserciones en lote: de 2,7 s a 3 ms.
+- En MongoDB, un documento es atómico: diseña para tocar uno. CAP: consistencia o disponibilidad ante un fallo de red.
