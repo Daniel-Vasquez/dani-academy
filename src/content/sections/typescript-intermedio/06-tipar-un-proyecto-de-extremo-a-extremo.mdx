@@ -7,15 +7,22 @@ minutes: 60
 summary: "Llevas un esquema Zod del formulario de React al endpoint, a MongoDB y de vuelta al listado, mapeas documentos a DTOs, migras JavaScript a TypeScript y añades un campo siguiendo los errores del compilador."
 ---
 
-Llevas cinco secciones con piezas sueltas: genéricos, tipos derivados, _utility types_, Zod y errores tipados. En un proyecto real, todas trabajan juntas a lo largo de un **viaje** que hace cada dato: el usuario lo escribe en un formulario de React, viaja como JSON hasta un _endpoint_, se guarda en MongoDB, se lee, se convierte en la respuesta de la API y vuelve al navegador para pintarse en una lista. En cada salto el dato puede deformarse: un número que llega como texto, una fecha que se convierte en _string_, un `_id` que el cliente no entiende o un `userId` que no debería salir nunca del servidor. En esta sección vas a construir ese viaje completo en la app de entrenamiento con **un solo esquema** como fuente de verdad, de forma que, si cambias un campo, el compilador te lleve de la mano por todos los sitios que deben cambiar.
+Un dato viaja del formulario al _endpoint_, a MongoDB y de vuelta, y en cada salto puede deformarse. Aquí construyes ese viaje con **un solo esquema** como fuente de verdad: si cambias un campo, el compilador te lleva por todos los sitios que deben cambiar.
 
-**Lo que tendrás al terminar:** una app Astro con un formulario de React para registrar entrenos, un _endpoint_ `GET`/`POST` que valida y guarda en MongoDB, y un listado. Todo comparte los mismos tipos, derivados de un esquema de Zod.
-
-**Requisitos:** las secciones I1.1–I1.5, un MongoDB al que conectarte (el de B5: Atlas o local) y lo que aprendiste de islas de React en Astro (B6.7).
+**Requisitos:** I1.1–I1.5, un MongoDB (el de B5: Atlas o local) y las islas de React en Astro (B6.7).
 
 ## Paso 1: el proyecto y dónde vive cada tipo
 
-Crea un proyecto nuevo para la app de entrenamiento:
+**Qué es:** la organización de carpetas responde a **quién puede importar cada archivo**.
+
+| Carpeta           | Contenido                             | Quién lo importa                                       |
+| ----------------- | ------------------------------------- | ------------------------------------------------------ |
+| `src/schemas/`    | Esquemas de Zod y tipos derivados     | Servidor **y** cliente: es el contrato compartido      |
+| `src/server/`     | Acceso a MongoDB                      | Solo el servidor (_endpoints_, páginas)                |
+| `src/lib/`        | Utilidades (`mongo.ts`, `errores.ts`) | `mongo.ts`, solo el servidor; `errores.ts`, cualquiera |
+| `src/components/` | Componentes de React                  | El cliente (y Astro, al renderizar)                    |
+
+**Cómo se usa:** crea el proyecto.
 
 ```bash
 npm create astro@latest entrenos-app -- --template minimal --install --no-git --yes
@@ -26,23 +33,14 @@ npm install --save-dev @types/node @astrojs/check typescript
 mkdir -p src/schemas src/server src/lib src/components src/pages/api scripts
 ```
 
-Y un archivo `.env` en la raíz con tu conexión de B5 (para una base local sin usuario, `mongodb://127.0.0.1:27017`):
+Un `.env` en la raíz con tu conexión de B5 (en local sin usuario, `mongodb://127.0.0.1:27017`):
 
 ```bash
 MONGODB_URI=mongodb+srv://usuario:contraseña@tu-cluster.mongodb.net/
 MONGODB_DB=entrenos_lab
 ```
 
-La organización de carpetas responde a una pregunta: **¿quién puede importar cada archivo?**
-
-| Carpeta           | Contenido                             | Quién lo importa                                       |
-| ----------------- | ------------------------------------- | ------------------------------------------------------ |
-| `src/schemas/`    | Esquemas de Zod y tipos derivados     | Servidor **y** cliente: es el contrato compartido      |
-| `src/server/`     | Acceso a MongoDB                      | Solo el servidor (_endpoints_, páginas)                |
-| `src/lib/`        | Utilidades (`mongo.ts`, `errores.ts`) | `mongo.ts`, solo el servidor; `errores.ts`, cualquiera |
-| `src/components/` | Componentes de React                  | El cliente (y Astro, al renderizar)                    |
-
-Sustituye `astro.config.mjs` por este, que añade la validación de las variables de entorno de B5.2:
+`astro.config.mjs`, con la validación de variables de entorno de B5.2:
 
 ```js
 // @ts-check
@@ -60,7 +58,7 @@ export default defineConfig({
 });
 ```
 
-Crea `src/lib/mongo.ts`, el módulo de conexión de B5.2:
+`src/lib/mongo.ts`, el módulo de conexión de B5.2:
 
 ```ts
 // Archivo: src/lib/mongo.ts (el de B5.2)
@@ -84,7 +82,7 @@ if (import.meta.env.DEV) globalThis.__mongoClient = mongoClient;
 export const db: Db = mongoClient.db(MONGODB_DB);
 ```
 
-Y copia el `errores.ts` final de I1.5 a `src/lib/errores.ts`. Es el mismo archivo; solo cambia el comentario de la primera línea:
+Y `src/lib/errores.ts`, el final de I1.5 (solo cambia el comentario de la primera línea):
 
 ```ts
 // Archivo: src/lib/errores.ts (el de I1.5)
@@ -162,15 +160,17 @@ export function aRespuesta(e: unknown): Response {
 
 <Callout type="risk">
 
-- **Un componente de React nunca debe importar de `src/server/` ni de `src/lib/mongo.ts`:** Astro intentaría enviar el _driver_ de MongoDB al navegador, con un error de compilación en el mejor caso y tu cadena de conexión expuesta en el peor. `astro:env/server` te protege: si un archivo del cliente lo importa, el build falla. Por eso las variables secretas siempre se leen por `astro:env/server`.
-- **`src/schemas/` debe ser "puro":** solo Zod y tipos, sin `import` de nada del servidor. Si un esquema importa `db` para comprobar algo en la base de datos, ya no se puede usar en el cliente.
-- **El `.env` nunca va a Git:** el `.gitignore` de la plantilla de Astro ya lo excluye; compruébalo antes del primer commit (B2).
+- **React nunca importa de `src/server/` ni de `mongo.ts`:** Astro enviaría el _driver_ al navegador, y en el peor caso tu cadena de conexión. `astro:env/server` hace fallar el build si un archivo del cliente lo importa.
+- **`src/schemas/` debe ser puro:** solo Zod y tipos. Un esquema que importa `db` ya no sirve en el cliente.
+- **El `.env` nunca va a Git:** el `.gitignore` de Astro lo excluye; compruébalo antes del primer commit (B2).
 
 </Callout>
 
 ## Paso 2: el esquema compartido, el contrato
 
-Crea `src/schemas/entreno.ts`. Es el archivo más importante de la sección: todo lo demás se deriva de él.
+**Qué es:** **dos esquemas**, uno por dirección del viaje. **`EntrenoSchema`** es lo que **entra**: usa `z.coerce` porque los `<input>` dan texto y `vacioComoAusente` para que `""` no sea `0` (I1.4); su `.refine()` dice que solo el running lleva km. **`EntrenoDTOSchema`** es lo que **sale**: los mismos `campos` más `id` y `creado`. Un DTO (_Data Transfer Object_) es la forma pensada para viajar al cliente.
+
+**Cómo se usa:** crea `src/schemas/entreno.ts`, del que se deriva todo lo demás.
 
 ```ts
 // Archivo: src/schemas/entreno.ts
@@ -216,13 +216,6 @@ export type EntrenoDTO = z.output<typeof EntrenoDTOSchema>;
 export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
 ```
 
-Hay **dos esquemas**, uno por cada dirección del viaje:
-
-- **`EntrenoSchema`**, lo que **entra**: lo que envía el formulario y valida el _endpoint_. Usa `z.coerce` porque los `<input>` dan texto, y `vacioComoAusente` para que un campo vacío (`""`) cuente como "no rellenado" y no como `0` (la trampa de I1.4). El `.refine()` añade una regla de negocio que afecta a dos campos: solo los entrenos de running llevan km.
-- **`EntrenoDTOSchema`**, lo que **sale**: lo que devuelve la API. Reutiliza los mismos `campos` y añade `id` y `creado`. DTO significa _Data Transfer Object_: la forma pensada para viajar al cliente, que no tiene por qué coincidir con la de la base de datos.
-
-Y **cuatro tipos**, todos derivados:
-
 | Tipo                | Qué es                                                     | Dónde se usa                        |
 | ------------------- | ---------------------------------------------------------- | ----------------------------------- |
 | `EntrenoInput`      | Un entreno validado (con `Date`, números…)                 | El servidor, al guardar             |
@@ -230,19 +223,21 @@ Y **cuatro tipos**, todos derivados:
 | `EntrenoFormulario` | Los mismos campos, todos como texto                        | El estado del formulario de React   |
 | `TipoEntreno`       | `"fuerza" \| "running" \| "movilidad"`                     | Donde haga falta el tipo suelto     |
 
-`EntrenoFormulario = Record<keyof EntrenoInput, string>` combina dos herramientas de este curso: `keyof` (I1.2) saca los nombres de los campos del esquema, y `Record` (I1.3) les da a todos el tipo `string`. Si añades un campo al esquema, el estado del formulario lo exige al momento.
+- **`EntrenoFormulario = Record<keyof EntrenoInput, string>`** combina `keyof` (I1.2) y `Record` (I1.3): un campo nuevo en el esquema lo exige al instante en el formulario.
 
 <Callout type="risk">
 
-- **Una fecha no sobrevive a JSON:** `JSON.stringify(new Date())` produce un texto (`"2026-10-08T00:00:00.000Z"`). Por eso el DTO usa `z.coerce.date()`: al validar la respuesta en el cliente, el texto vuelve a ser un `Date`. Sin eso, `e.fecha.toISOString()` fallaría en el navegador con `toISOString is not a function`, porque `fecha` sería un `string` aunque el tipo dijera `Date`.
-- **Las fechas sin hora se guardan a medianoche UTC:** `z.coerce.date()` convierte `"2026-10-08"` en `2026-10-08T00:00:00.000Z`. Si lo muestras con la hora local de alguien en América (UTC−6), verá el día **anterior**. Muestra estas fechas siempre en UTC (como hace el listado, con `toISOString().slice(0, 10)`) o guarda el día como texto `"AAAA-MM-DD"`.
-- **El `.refine()` solo se evalúa si los campos tienen el tipo correcto:** si la fecha es `"ayer"`, Zod no ejecuta la regla de los km y el error de km aparece cuando el usuario corrige la fecha. Es el comportamiento correcto (la regla no tiene sentido con datos rotos), pero conviene saberlo para no pensar que la regla no funciona.
+- **Una fecha no sobrevive a JSON:** sale como texto. El DTO usa `z.coerce.date()` para que el cliente recupere un `Date`; sin eso, `e.fecha.toISOString()` fallaría con `toISOString is not a function`.
+- **Las fechas sin hora se guardan a medianoche UTC:** en UTC−6 se verían el día **anterior**. Muéstralas en UTC (`toISOString().slice(0, 10)`) o guarda el día como texto.
+- **`.refine()` solo se evalúa con los campos bien tipados:** con la fecha `"ayer"`, el error de km aparece cuando se corrige la fecha. Es correcto, pero sorprende.
 
 </Callout>
 
 ## Paso 3: MongoDB y el paso de documento a DTO
 
-Crea `src/server/entrenos.ts`, la capa de datos:
+**Qué es:** la capa de datos, el único sitio que sabe que existe MongoDB, y **`aDTO`**, donde se decide qué se publica.
+
+**Cómo se usa:** crea `src/server/entrenos.ts`.
 
 ```ts
 // Archivo: src/server/entrenos.ts
@@ -285,22 +280,23 @@ export async function crearEntreno(userId: string, datos: EntrenoInput): Promise
 }
 ```
 
-- **`EntrenoDoc extends EntrenoInput`**: el documento es lo validado **más** lo que pone el servidor (`_id`, `userId`, `creado`). Una `interface` puede extender un tipo derivado de Zod, porque `EntrenoInput` es un tipo de objeto normal.
-- **`db.collection<EntrenoDoc>`**: el genérico de I1.1. `insertOne` exige un `EntrenoDoc` completo y `find` devuelve `WithId<EntrenoDoc>` (el documento con `_id` obligatorio).
-- **`aDTO` construye el objeto campo a campo**, en lugar de devolver `{ ...doc }`: así `userId` no sale nunca (la lección de `Pick` en I1.3) y `_id` (un `ObjectId`, que el navegador no entiende) se convierte en `id`, un texto. El tipo de retorno, `EntrenoDTO`, obliga a incluir cada campo obligatorio del DTO.
-- **`crearEntreno` recibe un `EntrenoInput`**: el compilador garantiza que nadie pueda guardar un entreno sin haberlo validado antes, porque el único sitio de donde sale un `EntrenoInput` es Zod.
+- **`EntrenoDoc extends EntrenoInput`:** lo validado más lo que pone el servidor (`_id`, `userId`, `creado`). Con **`collection<EntrenoDoc>`** (I1.1), `insertOne` exige un documento completo y `find` devuelve `WithId<EntrenoDoc>`.
+- **`aDTO` construye campo a campo:** `userId` nunca sale (`Pick`, I1.3) y el `ObjectId` pasa a `id` como texto. El retorno `EntrenoDTO` obliga a incluir cada campo.
+- **`crearEntreno` recibe un `EntrenoInput`,** que solo sale de Zod: nadie guarda sin validar.
 
 <Callout type="risk">
 
-- **`collection<EntrenoDoc>` describe lo que esperas, no lo que hay:** si en la base de datos quedan documentos de una versión anterior del esquema, `find` los devuelve con el tipo nuevo igualmente. Lo verás en el ejercicio, y es la razón por la que el cliente valida también la respuesta.
-- **`aDTO` es el sitio donde decides qué se publica:** cada campo nuevo de la base de datos tiene que añadirse aquí a propósito. Si un día cambias el cuerpo por `return { ...doc, id: … }`, cualquier campo interno que añadas después (una nota privada, un indicador de moderación) saldrá en la API sin que nadie lo decida.
-- **La ordenación necesita un índice con muchos datos:** `find({ userId }).sort({ fecha: -1 })` va bien con cientos de entrenos; con cientos de miles necesitas un índice `{ userId: 1, fecha: -1 }` (B4.4).
+- **`collection<EntrenoDoc>` describe lo que esperas, no lo que hay:** documentos de un esquema anterior salen con el tipo nuevo. Lo verás en el ejercicio; por eso el cliente valida la respuesta.
+- **Cada campo publicado se añade a `aDTO` a propósito:** con `{ ...doc, id }`, cualquier campo interno futuro saldría en la API sin que nadie lo decida.
+- **Con muchos datos, la ordenación necesita índice:** `{ userId: 1, fecha: -1 }` (B4.4).
 
 </Callout>
 
 ## Paso 4: el endpoint
 
-Crea `src/pages/api/entrenos.ts`:
+**Qué es:** un _endpoint_ corto porque el trabajo ya está repartido: `validar` (I1.5) convierte el cuerpo en `EntrenoInput` o lanza, `crearEntreno` guarda y `aRespuesta` traduce errores.
+
+**Cómo se usa:** crea `src/pages/api/entrenos.ts`, arranca con `npm run dev` y pruébalo.
 
 ```ts
 // Archivo: src/pages/api/entrenos.ts
@@ -334,8 +330,6 @@ export const POST: APIRoute = async ({ request }) => {
 };
 ```
 
-El _endpoint_ es corto porque el trabajo ya está repartido: `validar` (I1.5) convierte el cuerpo `unknown` en un `EntrenoInput` o lanza un `ValidacionError`; `crearEntreno` guarda; y `aRespuesta` convierte cualquier error en su código. Arranca el servidor (`npm run dev`) y pruébalo:
-
 ```bash
 curl http://localhost:4321/api/entrenos
 
@@ -359,16 +353,12 @@ curl http://localhost:4321/api/entrenos
 {"entrenos":[{"id":"6ac9d70ffb3dc052e01134a4","tipo":"fuerza","minutos":45,"fecha":"2026-10-09T00:00:00.000Z","creado":"2026-10-10T06:11:27.686Z"},{"id":"6ac9d70ffb3dc052e01134a3","tipo":"running","minutos":52,"km":10,"fecha":"2026-10-08T00:00:00.000Z","notas":"Rodaje suave","creado":"2026-10-10T06:11:27.650Z"}]}
 ```
 
-(Tus `id` y tus fechas de `creado` serán otros).
+Tus `id` y fechas de `creado` serán otros.
 
-Fíjate en cada salto del viaje:
+- **`"52"` y `"10"` entraron como texto y salieron como números** (`z.coerce`); las notas perdieron los espacios (`.trim()`). El POST inválido dio 422 sin tocar la base de datos.
+- **`userId: "atacante"` y `_id: "x"` se descartaron** (I1.4): se guardó para `u_demo` con un `_id` de MongoDB. En la respuesta, solo `id` (`aDTO`).
 
-1. **`"52"` y `"10"` entraron como texto** y salieron como números (`z.coerce`). Las notas perdieron los espacios (`.trim()`).
-2. **El POST inválido** devolvió un 422 con los errores de cada campo, sin tocar la base de datos.
-3. **El `userId: "atacante"` y el `_id: "x"` se descartaron** (`z.object` elimina las claves de más, I1.4): el entreno se guardó para `u_demo` con un `_id` generado por MongoDB.
-4. **En la respuesta no hay `userId` ni `_id`**, solo `id`: es el trabajo de `aDTO`.
-
-Así está guardado en MongoDB (Compass o `mongosh`):
+En MongoDB, `fecha` y `creado` son `Date` de verdad, que se ordenan y filtran por rangos:
 
 ```text
 {
@@ -383,19 +373,19 @@ Así está guardado en MongoDB (Compass o `mongosh`):
 }
 ```
 
-`fecha` y `creado` se guardan como fechas de verdad (`Date`), no como texto, así que puedes ordenarlas y filtrarlas por rangos en MongoDB.
-
 <Callout type="risk">
 
-- **El `USUARIO_DEMO` es provisional:** con autenticación (curso I5), el `userId` sale **siempre de la sesión** (`locals.user.id`), nunca del cuerpo de la petición. Gracias a que `z.object` descarta las claves de más, aunque un cliente envíe un `userId`, no llegará a `crearEntreno`.
-- **Si la base de datos no está disponible al arrancar, el cliente puede quedarse roto:** si la primera operación falla porque MongoDB no responde, el _driver_ puede cerrar la conexión del cliente guardado en `globalThis`, y las peticiones siguientes fallan con `MongoTopologyClosedError: Topology is closed` hasta que reinicies el servidor. Si ves ese error en desarrollo, reinicia `npm run dev` después de levantar la base de datos.
-- **Valida también en `GET` lo que lees por parámetros:** este `GET` no tiene filtros, pero en cuanto añadas `?tipo=running` o `?pagina=2`, pásalos por un esquema (como el `FiltroSchema` de I1.4) antes de usarlos en la consulta.
+- **`USUARIO_DEMO` es provisional:** con autenticación (I5), el `userId` sale **siempre de la sesión** (`locals.user.id`), nunca del cuerpo.
+- **Si MongoDB no responde al arrancar,** el cliente guardado en `globalThis` puede quedar cerrado: `MongoTopologyClosedError: Topology is closed` hasta reiniciar `npm run dev`.
+- **Los parámetros del `GET` también se validan:** con `?tipo=` o `?pagina=`, un esquema como el `FiltroSchema` de I1.4.
 
 </Callout>
 
 ## Paso 5: el formulario y el listado en React
 
-Crea `src/components/Entrenos.tsx`:
+**Qué es:** el mismo `EntrenoSchema` que protege el servidor valida en el navegador, con los mismos mensajes, y el cliente **también valida lo que recibe**.
+
+**Cómo se usa:** crea `src/components/Entrenos.tsx`.
 
 ```tsx
 // Archivo: src/components/Entrenos.tsx
@@ -556,7 +546,7 @@ import Entrenos from "../components/Entrenos";
 </html>
 ```
 
-Abre `http://localhost:4321`. Medido en Chrome: con el campo de minutos vacío, el formulario muestra `Mínimo 1 minuto`; con un entreno de fuerza con km, `Solo los entrenos de running llevan km`; y con datos correctos, el entreno aparece el primero de la lista:
+En `http://localhost:4321`, con minutos vacíos, fuerza con km y datos correctos:
 
 ```text
 1) vacío → [ 'minutos: Mínimo 1 minuto' ]
@@ -569,24 +559,23 @@ Abre `http://localhost:4321`. Medido en Chrome: con el campo de minutos vacío, 
 peticiones a la API: GET, POST · problemas: ninguno
 ```
 
-En la última línea está lo importante: los dos intentos inválidos **no llegaron a hacer una petición**. El mismo `EntrenoSchema` que protege el servidor validó en el navegador, con los mismos mensajes. Las piezas del componente:
-
-- **`useState<EntrenoFormulario>`**: el estado del formulario tiene exactamente los campos del esquema, como texto.
-- **`EntrenoSchema.safeParse(formulario)`** antes de enviar, y **`z.flattenError(...).fieldErrors`** para pintar los errores junto a cada campo. El tipo de `fieldErrors` ya conoce los nombres de los campos.
-- **`ListaEntrenosSchema.parse(json)`** y **`EntrenoDTOSchema.parse(json)`**: el cliente **también valida lo que recibe**, y así las fechas vuelven a ser `Date`. La API es una frontera (I1.4), en las dos direcciones.
-- **La fecha de hoy se pone en un `useEffect`:** el componente se renderiza primero en el servidor; si calculara la fecha al crear el estado, el servidor y el navegador podrían calcular días distintos (zonas horarias) y React avisaría de un error de hidratación.
+- **Los dos intentos inválidos no hicieron petición.** El estado es **`useState<EntrenoFormulario>`**, se valida con **`safeParse`** y los errores salen de **`z.flattenError(...).fieldErrors`**, que ya conoce los nombres de campo.
+- **`ListaEntrenosSchema.parse` y `EntrenoDTOSchema.parse`** validan la respuesta y devuelven las fechas a `Date`: la API es frontera en las dos direcciones (I1.4).
+- **La fecha de hoy va en un `useEffect`:** calculada al crear el estado, servidor y navegador podrían discrepar por zona horaria, con un error de hidratación.
 
 <Callout type="risk">
 
-- **Los estilos de un `.astro` no llegan a los componentes de React:** el `<style>` de Astro tiene **ámbito** (solo afecta a las etiquetas escritas en ese archivo), y el formulario lo pinta React. Sin `is:global`, el formulario aparece sin ningún estilo. Usa `is:global`, un CSS importado o, en un proyecto con Tailwind, clases en el propio componente.
-- **La validación del cliente es comodidad, no seguridad:** el usuario puede saltársela (por ejemplo, con `curl`, como en el Paso 4). El servidor valida siempre, y el cliente solo ahorra un viaje de ida y vuelta.
-- **Un `.parse()` de la respuesta que falla deja la lista vacía:** si la API devuelve datos que no encajan (lo verás en el ejercicio), `parse` lanza y el `catch` muestra "No se pudieron cargar los entrenos". Es mejor que pintar datos rotos, pero registra el error (`console.error` o un servicio de errores) para enterarte.
+- **El `<style>` de un `.astro` no llega a React:** tiene ámbito. Usa `is:global`, un CSS importado o clases en el componente.
+- **La validación del cliente es comodidad:** con `curl` se salta. El servidor valida siempre.
+- **Un `.parse()` de la respuesta que falla deja la lista vacía:** mejor que datos rotos, pero registra el error para enterarte.
 
 </Callout>
 
 ## Paso 6: migrar JavaScript a TypeScript poco a poco
 
-No siempre empiezas de cero: a veces heredas un proyecto en JavaScript. No hace falta reescribirlo entero; TypeScript puede comprobar archivos `.js` **uno a uno**, con los tipos escritos en comentarios **JSDoc**. Crea `src/lib/resumen.js`, como si fuera código antiguo, con dos erratas:
+**Qué es:** un proyecto heredado en JavaScript no se reescribe entero: con **`// @ts-check`** y tipos en comentarios **JSDoc**, TypeScript revisa los `.js` uno a uno.
+
+**Cómo se usa:** crea `src/lib/resumen.js`, código "antiguo" con dos erratas.
 
 ```js
 // @ts-check
@@ -620,21 +609,14 @@ src/lib/resumen.js:15:18 - error ts(2551): Property 'minuto' does not exist on t
 - 2 errors
 ```
 
-Un archivo JavaScript, revisado con **los tipos del esquema de Zod**: `@typedef {import(…)}` trae `EntrenoDTO` sin convertir el archivo a TypeScript. Ahora borra la primera línea (`// @ts-check`) y vuelve a ejecutar `npx astro check`: **0 errores**. Sin la marca, el archivo no se revisa, y las dos erratas (que darían `NaN` minutos y 0 km siempre) pasan desapercibidas. Vuelve a ponerla y corrige las erratas (`e.minutos` y `"running"`).
-
-La estrategia para un proyecto heredado:
-
-1. **Activa `allowJs`** para que `.js` y `.ts` convivan (Astro ya lo trae activado en su configuración base).
-2. **Archivos nuevos, siempre en `.ts`** y con `strict`.
-3. **`// @ts-check` en los `.js` existentes, uno a uno**, empezando por los más usados (utilidades, acceso a datos). Corrige lo que salga.
-4. **Renombra a `.ts`** cuando un archivo esté limpio, y sustituye los comentarios JSDoc por tipos de verdad.
-5. **Valida con Zod en las fronteras** desde el principio: es la parte que más errores reales evita.
+- **`@typedef {import(…)}` trae `EntrenoDTO`** del esquema sin convertir el archivo. Quita `// @ts-check`: **0 errores**, y las erratas (que darían `NaN` minutos y 0 km) pasan. Vuelve a ponerlo y corrige `e.minutos` y `"running"`.
+- **La estrategia:** `allowJs` (Astro lo trae), archivos nuevos en `.ts` con `strict`, `// @ts-check` en los `.js` más usados primero, renombrar a `.ts` cuando estén limpios y Zod en las fronteras desde el principio.
 
 <Callout type="risk">
 
-- **No actives `checkJs` en todo el proyecto de golpe:** en un proyecto grande aparecerán cientos de errores a la vez y la tentación será desactivarlo. `// @ts-check` archivo a archivo permite avanzar en pasos pequeños.
-- **JSDoc es una ayuda, no un sustituto:** comprueba lo mismo que TypeScript, pero los tipos complejos son incómodos de escribir en comentarios. Úsalo como paso intermedio, no como destino final.
-- **Una migración no debe cambiar el comportamiento:** al convertir un archivo, cambia solo los tipos; corrige los bugs que aparezcan en commits separados (B2), para que, si algo se rompe, sepas si fue la migración o la corrección.
+- **No actives `checkJs` en todo el proyecto de golpe:** cientos de errores invitan a desactivarlo. Archivo a archivo.
+- **JSDoc es un paso intermedio:** los tipos complejos son incómodos en comentarios.
+- **Una migración no cambia comportamiento:** los bugs que aparezcan, en commits separados (B2).
 
 </Callout>
 
@@ -657,7 +639,7 @@ src/server/entrenos.ts:18:3 - error ts(2741): Property 'sensacion' is missing in
 - 2 errors
 ```
 
-Dos errores, en los dos sitios que **tienen** que cambiar: el estado inicial del formulario (`EntrenoFormulario` exige el campo) y `aDTO` (el DTO lo exige). El _endpoint_, `crearEntreno` y la validación no dan error, porque ya funcionan con el tipo nuevo sin tocarlos.
+- **Dos errores, justo donde hay que decidir:** el estado inicial del formulario y `aDTO`. El _endpoint_, `crearEntreno` y la validación ya funcionan con el tipo nuevo.
 
 Solución. `src/schemas/entreno.ts` completo:
 
@@ -901,13 +883,13 @@ export default function Entrenos() {
 }
 ```
 
-Con los errores corregidos, recarga la página:
+Al recargar:
 
 ```text
 mensaje: No se pudieron cargar los entrenos · filas: []
 ```
 
-Los entrenos antiguos no tienen `sensacion`; la API los devuelve sin ella y `ListaEntrenosSchema.parse` en el cliente los rechaza. El compilador no podía saberlo: el problema no está en el código, sino en **los datos ya guardados**. La solución es una migración, `scripts/migrar-sensacion.mjs`:
+- **Los entrenos antiguos no tienen `sensacion`** y `ListaEntrenosSchema.parse` los rechaza. El compilador no podía saberlo: el problema está en **los datos guardados**. La migración, `scripts/migrar-sensacion.mjs`:
 
 ```js
 // Archivo: scripts/migrar-sensacion.mjs
@@ -938,7 +920,7 @@ Entrenos sin sensación: 3. Actualizados: 3.
 Entrenos sin sensación: 0. Actualizados: 0.
 ```
 
-La segunda ejecución no cambia nada: la migración es **idempotente** (se puede repetir sin riesgo), porque solo toca los documentos que **no** tienen el campo. Al recargar, y tras registrar un entreno de movilidad con sensación 5:
+- **La segunda ejecución no cambia nada:** es **idempotente**, porque solo toca los documentos sin el campo. Tras registrar uno de movilidad con sensación 5:
 
 ```text
 '2026-10-10 · movilidad · 20 min · sensación 5/5',
@@ -947,17 +929,14 @@ La segunda ejecución no cambia nada: la migración es **idempotente** (se puede
 '2026-10-08 · running · 52 min · 10 km · Rodaje suave · sensación 3/5'
 ```
 
-Las decisiones:
-
-- **Un campo, un cambio en el esquema:** todo lo demás (los tipos del formulario, del _endpoint_, de la base de datos y de la respuesta) se actualizó solo, y el compilador señaló los dos sitios que necesitaban una decisión humana.
-- **El selector del formulario no lo pidió el compilador:** TypeScript sabe que el estado necesita `sensacion`, pero no puede saber que olvidaste **pintar** el campo. Esa parte la cubren las pruebas en el navegador (curso I8).
-- **La migración da un valor neutro (3)**, en lugar de dejar el campo opcional para siempre. Así el tipo sigue diciendo la verdad: todo entreno tiene sensación.
+- **Un campo, un cambio en el esquema;** el compilador señaló los dos sitios que pedían decisión. El selector no lo pidió: que falte **pintarlo** lo cubren las pruebas en el navegador (I8).
+- **La migración da un valor neutro (3)** en vez de dejar el campo opcional para siempre: el tipo sigue diciendo la verdad.
 
 <Callout type="risk">
 
-- **Cambiar el esquema y migrar los datos van juntos:** si despliegas el código nuevo antes de migrar, los usuarios ven "No se pudieron cargar los entrenos" hasta que la migración termine. El orden seguro es: primero un esquema que acepte los dos formatos (`sensacion` opcional o con `.default(3)`), después la migración y, al final, el esquema estricto.
-- **Prueba la migración con una copia de los datos:** un `updateMany` con un filtro mal escrito (por ejemplo, `{ sensacion: { $exists: true } }`) pisa los valores reales de todos los documentos. Ejecútalo antes contra una base de prueba, o con un filtro que limite el alcance.
-- **Hay cambios que el compilador no ve:** renombrar un campo (`km` → `distanciaKm`) en el esquema rompe el código en todos los sitios, que es lo que buscas, pero los documentos guardados siguen teniendo `km`. Cada cambio de forma de los datos necesita su migración, igual que en una base SQL (curso A3).
+- **Esquema y migración van juntos:** desplegar antes el código estricto deja "No se pudieron cargar los entrenos". El orden seguro: esquema tolerante (opcional o `.default(3)`), migración y luego esquema estricto.
+- **Prueba la migración con una copia:** un filtro mal escrito (`{ sensacion: { $exists: true } }`) pisa los valores reales de todos.
+- **Renombrar un campo** rompe el código, como buscas, pero los documentos guardados siguen con el nombre viejo: cada cambio de forma necesita su migración (A3).
 
 </Callout>
 
@@ -969,8 +948,8 @@ Cambiar un campo del esquema hace fallar al compilador en todos los sitios que d
 
 ## Resumen
 
-- Un esquema compartido en `src/schemas/` es el contrato entre cliente y servidor; los tipos se derivan con `z.output`, `keyof` y `Record`.
-- Dos esquemas, uno por dirección: el de entrada (con coerción y reglas de negocio) y el del DTO (con `id` y fechas que vuelven a ser `Date`).
-- La capa de datos tipa la colección (`collection<EntrenoDoc>`) y convierte documentos en DTOs campo a campo: `_id` → `id`, y nada interno sale.
-- El _endpoint_ valida con `validar()` y responde errores con `aRespuesta()`; el cliente valida antes de enviar y valida lo que recibe.
-- Para migrar JavaScript: `// @ts-check` y JSDoc archivo a archivo; para cambiar datos: esquema tolerante, migración idempotente y después esquema estricto.
+- Un esquema en `src/schemas/` es el contrato entre cliente y servidor; los tipos se derivan.
+- Dos esquemas: entrada (coerción y reglas) y DTO (`id` y fechas como `Date`).
+- `collection<EntrenoDoc>` y `aDTO` campo a campo: `_id` → `id`, nada interno sale.
+- `validar()` y `aRespuesta()` en el _endpoint_; el cliente valida al enviar y al recibir.
+- JS heredado con `// @ts-check`; datos con esquema tolerante, migración idempotente y esquema estricto.

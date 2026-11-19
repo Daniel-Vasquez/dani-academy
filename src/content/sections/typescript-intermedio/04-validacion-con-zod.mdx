@@ -7,21 +7,21 @@ minutes: 60
 summary: "Validas datos externos con esquemas de Zod 4: parse y safeParse, tipos con z.infer, errores por campo para un 422, coerción de URLs, claves de más descartadas y una API real sin as."
 ---
 
-TypeScript tiene un límite que ya has visto dos veces: en B1.5, un `as TareaApi[]` dejó pasar una lista de usuarios como si fueran tareas; y al final de I1.3, un `JSON.parse` le cambió el dueño a una nota aunque el tipo lo "prohibía". El motivo es siempre el mismo: **los tipos desaparecen al compilar**. Al ejecutarse, tu programa no tiene ni idea de qué es un `Entreno`. Todo lo que cruza una frontera (el cuerpo de una petición, un formulario, la respuesta de una API, un documento de la base de datos) puede tener cualquier forma, y TypeScript solo puede creerte. **Zod** resuelve exactamente eso: describes la forma esperada una vez, como un **esquema**, y Zod la **comprueba al ejecutar** y te da el tipo de TypeScript gratis.
+**Los tipos desaparecen al compilar:** todo lo que cruza una frontera puede tener cualquier forma (I1.3). **Zod** describe la forma esperada como un **esquema**, la **comprueba al ejecutar** y te da el tipo de TypeScript gratis.
 
-**Lo que tendrás al terminar:** esquemas para entrenos, registro de usuarios, filtros de URL y cambios de notas; un _endpoint_ simulado que responde `422` con errores por campo, y la función de B1.5 validando de verdad lo que devuelve la API.
-
-**Requisitos:** las secciones I1.1–I1.3, y Zod en el `ts-playground`:
+**Requisitos:** I1.1–I1.3 y Zod en el `ts-playground`:
 
 ```bash
 npm install zod
 ```
 
-Esta lección usa **Zod 4** (comprueba la tuya con `npm ls zod`). Muchos tutoriales son de Zod 3 y usan formas que la 4 marca como obsoletas; el primer bloque de riesgos te dice cuáles.
+Esta lección usa **Zod 4** (compruébalo con `npm ls zod`); muchos tutoriales son de Zod 3 (ver los riesgos del Paso 2).
 
 ## Paso 1: el problema, en tres líneas de JSON
 
-Crea `src/i1/04-el-problema.ts`:
+**Qué es:** `as Entreno` le dice al compilador "confía en mí", y el compilador confía.
+
+**Cómo se usa:** crea `src/i1/04-el-problema.ts`.
 
 ```ts
 // Archivo: src/i1/04-el-problema.ts
@@ -51,7 +51,7 @@ npm run typecheck
 npm start -- src/i1/04-el-problema.ts
 ```
 
-`typecheck` pasa sin un solo error, y al ejecutar:
+`typecheck` pasa sin errores, y al ejecutar:
 
 ```text
 running: 45 min, el 2026-10-08
@@ -59,22 +59,21 @@ running: 3015 min, el 2026-10-08
 natacion: 60 min, el undefined
 ```
 
-1. **El primero** está bien.
-2. **El segundo** trae `"30"` (texto) en lugar de `30`. `"30" + 15` en JavaScript concatena: **3015 minutos**. Un formulario HTML siempre envía texto, así que este error es muy habitual.
-3. **El tercero** trae un tipo de entreno que no existe y le falta la fecha. Ningún error: un `undefined` que acabará en la pantalla o en la base de datos.
-
-El `as Entreno` le dijo al compilador "confía en mí" y el compilador confió. Necesitas algo que **compruebe al ejecutar**.
+- **El segundo trae `"30"`:** `"30" + 15` concatena, **3015 minutos**. Un formulario HTML siempre envía texto.
+- **El tercero tiene un tipo inexistente y le falta la fecha:** un `undefined` que acabará en pantalla o en la base de datos, sin error.
 
 <Callout type="risk">
 
-- **Las fronteras de una app web**, donde siempre hay que validar: el cuerpo de una petición (`request.json()`, `formData()`), los parámetros de la URL, las respuestas de APIs externas, `localStorage`, los mensajes de `postMessage` y, sí, la base de datos (otro programa, una migración a medias o una edición a mano en Compass pueden dejar documentos con otra forma).
-- **Dentro de tu código, no hace falta validar:** una vez que un dato pasó la frontera validado, los tipos de TypeScript son fiables. Validar en cada función interna es lento y repetitivo. Valida en el borde, y confía dentro.
+- **Las fronteras donde siempre se valida:** el cuerpo de una petición, los parámetros de la URL, APIs externas, `localStorage`, `postMessage` y la base de datos (una migración a medias o una edición en Compass dejan otras formas).
+- **Dentro de tu código, no:** valida en el borde y confía dentro. Validar en cada función es lento y repetitivo.
 
 </Callout>
 
 ## Paso 2: tu primer esquema, `parse` y `safeParse`
 
-Crea `src/i1/04-esquemas.ts`:
+**Qué es:** un esquema describe cada campo y sus reglas. **`safeParse`** **nunca lanza** y devuelve una unión discriminada (B1.6), `{ success: true, data }` o `{ success: false, error }`. **`parse`** devuelve el dato o **lanza un `ZodError`**.
+
+**Cómo se usa:** crea `src/i1/04-esquemas.ts`.
 
 ```ts
 // Archivo: src/i1/04-esquemas.ts
@@ -134,10 +133,6 @@ parse lanzó ZodError con 2 problemas:
   fecha: Invalid ISO date
 ```
 
-Los mismos tres JSON de antes, ahora con un resultado útil: el bueno pasa (y con `ejercicios: []` rellenado por `.default([])`), y los dos malos se rechazan diciendo **qué campo** falla y **por qué**.
-
-Las piezas del esquema:
-
 | Pieza                                    | Comprueba                                 |
 | ---------------------------------------- | ----------------------------------------- |
 | `z.object({ … })`                        | Que sea un objeto con esas propiedades    |
@@ -147,24 +142,23 @@ Las piezas del esquema:
 | `z.string().max(200).optional()`         | Texto de hasta 200 caracteres, o ausente  |
 | `z.array(z.string().min(1)).default([])` | Lista de textos no vacíos; si falta, `[]` |
 
-Y las dos formas de validar:
-
-- **`safeParse(dato)`** **nunca lanza**. Devuelve `{ success: true, data }` o `{ success: false, error }`, una unión discriminada (B1.6): dentro de `if (resultado.success)`, `resultado.data` está tipado. Es la que usarás en _endpoints_ y formularios, donde un dato inválido es algo **esperado**.
-- **`parse(dato)`** devuelve el dato si es válido y **lanza un `ZodError`** si no. Úsala cuando un dato inválido sea un error de verdad (una variable de entorno mal configurada, un archivo de configuración roto), o dentro de un `try/catch` que ya maneje errores.
-
-`error.issues` es la lista de problemas, cada uno con su `path` (el campo) y su `message`. `z.prettifyError(error)` los convierte en un texto legible.
+- **El bueno pasa, con `ejercicios: []` por `.default([])`;** los malos dicen **qué campo** falla y **por qué**.
+- **`safeParse` para lo esperado** (_endpoints_, formularios); **`parse` para lo que es un error de verdad** (una variable de entorno rota) o dentro de un `try/catch`.
+- **`error.issues`** lista cada problema con su `path` y su `message`; `z.prettifyError(error)` los hace legibles.
 
 <Callout type="risk">
 
-- **Zod 3 frente a Zod 4.** En Zod 4 están obsoletos `z.string().email()`, `.url()` y `.uuid()` (ahora `z.email()`, `z.url()` y `z.uuid()`), y `error.flatten()` y `error.format()` (ahora `z.flattenError(error)` y `z.treeifyError(error)`). Siguen funcionando, pero el editor los muestra tachados y desaparecerán en una versión futura. Si copias un ejemplo de internet, comprueba de qué versión es.
-- **Los mensajes por defecto están en inglés.** Zod 4 incluye traducciones: `z.config(z.locales.es())` al arrancar la app las cambia a español ("Opción inválida: se esperaba una de…"), aunque alguna frase queda forzada ("Inválido fecha ISO"). Para lo que ve el usuario en un formulario, escribe tus propios mensajes (Paso 4).
-- **`z.iso.date()` comprueba el formato, no que la fecha tenga sentido para tu app:** `"1900-01-01"` es válida. Las reglas de negocio ("no puede ser futura") se añaden con `.refine()`.
+- **Zod 4 marca obsoletos** `z.string().email()`, `.url()`, `.uuid()` (ahora `z.email()`, `z.url()`, `z.uuid()`) y `error.flatten()`/`format()` (ahora `z.flattenError` y `z.treeifyError`). Comprueba la versión de lo que copies.
+- **Los mensajes por defecto están en inglés:** `z.config(z.locales.es())` los traduce (con alguna frase forzada). Para lo que ve el usuario, tus propios mensajes (Paso 4).
+- **`z.iso.date()` comprueba el formato, no el sentido:** `"1900-01-01"` pasa. Las reglas de negocio, con `.refine()`.
 
 </Callout>
 
 ## Paso 3: `z.infer`, el tipo sale del esquema
 
-Hasta ahora tenías el tipo `Entreno` **y** el esquema: dos descripciones de lo mismo que se pueden desincronizar. `z.infer` deriva el tipo del esquema, igual que `typeof` derivaba tipos de valores en I1.2. Crea `src/i1/04-infer.ts`:
+**Qué es:** con tipo y esquema por separado, hay dos descripciones que se desincronizan. **`z.infer`** deriva el tipo del esquema, como `typeof` en I1.2.
+
+**Cómo se usa:** crea `src/i1/04-infer.ts`.
 
 ```ts
 // Archivo: src/i1/04-infer.ts
@@ -230,12 +224,11 @@ fuerza 50 min (0 ejercicios)
 Opciones del select: [ 'fuerza', 'running' ]
 ```
 
-- **`z.infer<typeof EntrenoSchema>`**: pasa el ratón por `Entreno` y verás la interfaz completa, sin haberla escrito. Si añades un campo al esquema, el tipo lo tiene al instante.
-- **`z.input` y `z.output`**: con `.default()` (o transformaciones, Paso 5), lo que **entra** y lo que **sale** son distintos. En la entrada, `ejercicios` es opcional; en la salida siempre es un array. `z.infer` es lo mismo que `z.output`.
-- **`.pick()` y `.partial()`** son los `Pick` y `Partial` de I1.3, pero para esquemas: el esquema del PATCH se deriva del completo, igual que los tipos.
-- **`EntrenoSchema.shape.tipo.options`** saca la lista de opciones del `enum` **en ejecución**: la misma fuente de verdad para validar, tipar y pintar el `<select>`.
+- **`z.infer<typeof EntrenoSchema>`** es la interfaz completa sin escribirla. Con `.default()` o transformaciones, **`z.input`** (lo que entra: `ejercicios` opcional) y **`z.output`** (lo que sale: siempre array) difieren; `z.infer` es `z.output`.
+- **`.pick()` y `.partial()`** son `Pick` y `Partial` (I1.3) para esquemas: el del PATCH sale del completo.
+- **`EntrenoSchema.shape.tipo.options`** da las opciones en ejecución: validar, tipar y pintar el `<select>` desde una fuente.
 
-Añade al final:
+Añade al final (y bórralo después):
 
 ```ts
 const sinEjercicios: Entreno = { tipo: "fuerza", minutos: 50, fecha: "2026-10-09" };
@@ -247,19 +240,21 @@ src/i1/04-infer.ts(46,7): error TS2741: Property 'ejercicios' is missing in type
 src/i1/04-infer.ts(47,23): error TS2322: Type '"natacion"' is not assignable to type '"fuerza" | "running"'.
 ```
 
-El tipo derivado protege igual que uno escrito a mano. El primer error muestra la diferencia entre entrada y salida: un `Entreno` (salida) siempre tiene `ejercicios`. Borra las dos líneas.
+- **El primer error muestra la salida:** un `Entreno` siempre tiene `ejercicios`.
 
 <Callout type="risk">
 
-- **Nunca escribas el tipo a mano "además" del esquema:** `interface Entreno {…}` + `EntrenoSchema` es la duplicación que esta sección quiere eliminar. Si ya tienes la interfaz, sustitúyela por `type Entreno = z.infer<typeof EntrenoSchema>`.
-- **Usa `z.input` para el estado de un formulario:** mientras el usuario escribe, el dato todavía es la **entrada** (campos vacíos, textos). Tipar el estado del formulario con `z.output` te obliga a inventar valores que el usuario aún no ha dado.
-- **Exporta el esquema, no solo el tipo:** el tipo desaparece al compilar; el esquema es lo que valida. Quien necesite comprobar un dato tiene que poder importar el esquema.
+- **Nunca escribas el tipo a mano "además" del esquema:** sustituye la interfaz por `type Entreno = z.infer<typeof EntrenoSchema>`.
+- **El estado de un formulario es `z.input`:** mientras se escribe, hay campos vacíos y textos; con `z.output` tendrías que inventar valores.
+- **Exporta el esquema, no solo el tipo:** el tipo desaparece; el esquema es lo que valida.
 
 </Callout>
 
 ## Paso 4: errores por campo y la respuesta 422
 
-En un formulario o un _endpoint_, "el dato no es válido" no basta: hay que decir **qué campo** falla, con un mensaje que entienda una persona. Crea `src/i1/04-registro.ts`:
+**Qué es:** en un formulario o un _endpoint_ hay que decir **qué campo** falla, con un mensaje para personas. **422** (_Unprocessable Content_) es "entendí la petición, pero los datos no valen"; 400 es para peticiones mal formadas.
+
+**Cómo se usa:** crea `src/i1/04-registro.ts`.
 
 ```ts
 // Archivo: src/i1/04-registro.ts
@@ -314,25 +309,24 @@ npm start -- src/i1/04-registro.ts
 422 {"errores":{},"generales":["Invalid input: expected object, received string"]}
 ```
 
-- **El segundo argumento de `.min()`, `.max()` o `z.email()`** es el mensaje. Es el que se muestra bajo cada campo.
-- **`.trim()` y `.toLowerCase()`** limpian el dato **antes** de validarlo: `"  Dani "` llega como `"Dani"` y `" Dani@Example.COM "` como `"dani@example.com"`. Sin esto, `"dani@example.com"` y `"Dani@example.com"` serían dos cuentas distintas.
-- **`.pipe(z.email(…))`**: primero se limpia el texto y después se valida como correo (la validación se aplica sobre el texto ya limpio).
-- **`z.flattenError(error)`** separa los errores en `fieldErrors` (un array de mensajes por campo, listo para pintarlo junto a cada `<input>`) y `formErrors` (los que no son de un campo, como "esto no es un objeto").
-- **422** (_Unprocessable Content_) es el código para "entendí la petición, pero los datos no son válidos". 400 se reserva para peticiones mal formadas.
-
-Esta plataforma valida así su registro: `src/schemas/auth.ts` usa la misma cadena `z.string().trim().toLowerCase().pipe(z.email(…))`, y el formulario de React y la validación comparten el esquema.
+- **El segundo argumento de `.min()`, `.max()` o `z.email()`** es el mensaje bajo cada campo.
+- **`.trim()` y `.toLowerCase()` limpian antes de validar,** y **`.pipe(z.email(…))`** valida el texto ya limpio: sin esto, `"Dani@example.com"` sería otra cuenta.
+- **`z.flattenError(error)`** separa `fieldErrors` (mensajes por campo) y `formErrors` (los generales).
+- **Esta plataforma valida así su registro** en `src/schemas/auth.ts`, con la misma cadena, y el formulario y el servidor comparten el esquema.
 
 <Callout type="risk">
 
-- **Valida en el servidor siempre, aunque el formulario ya valide:** la validación del navegador es para la comodidad del usuario; cualquiera puede saltársela enviando la petición con `curl`. El servidor es el único sitio donde la validación es una protección.
-- **No devuelvas los datos recibidos en el error:** un 422 que repite la contraseña enviada, o el valor completo de cada campo, puede acabar en los logs o en la caché de un proxy. Devuelve solo los mensajes.
-- **`request.json()` lanza si el cuerpo no es JSON válido:** por eso `.catch(() => null)`. Así, un cuerpo roto llega a Zod como `null` y se responde con un 422 controlado en lugar de un 500. El _endpoint_ de latidos de esta plataforma (`src/pages/api/study-sessions/heartbeat.ts`) usa este mismo patrón.
+- **Valida siempre en el servidor:** la validación del navegador es comodidad; con `curl` se salta.
+- **No devuelvas los datos recibidos en el error:** una contraseña repetida en un 422 acaba en logs o cachés. Solo los mensajes.
+- **`request.json()` lanza con un cuerpo roto:** con `.catch(() => null)`, Zod recibe `null` y sale un 422, no un 500. Lo usa `src/pages/api/study-sessions/heartbeat.ts`.
 
 </Callout>
 
 ## Paso 5: transformaciones y coerción
 
-Los parámetros de una URL y los campos de un `FormData` son **siempre texto**: `?pagina=2` llega como `"2"`. La **coerción** convierte el texto al tipo correcto antes de validar, y las **transformaciones** cambian el dato después de validarlo. Crea `src/i1/04-coercion.ts`:
+**Qué es:** los parámetros de URL y los campos de `FormData` son **siempre texto**. La **coerción** convierte al tipo correcto antes de validar; las **transformaciones** cambian el dato después.
+
+**Cómo se usa:** crea `src/i1/04-coercion.ts`.
 
 ```ts
 // Archivo: src/i1/04-coercion.ts
@@ -397,23 +391,23 @@ stringbool('false'): false
 { pagina: '2' }
 ```
 
-- **`z.coerce.number()`** aplica `Number(valor)` y después valida: `"20"` pasa a `20`, y `"abc"` pasa a `NaN`, que se rechaza.
-- **`.default(1)`**: sin `?pagina`, la primera URL obtiene `pagina: 1` y `limite: 10`.
-- **`z.coerce.date()`** convierte `"2026-10-01"` en un `Date`.
-- **`.transform()`** convierte `"running, fuerza"` en un array, y **`.pipe()`** valida ese array con otro esquema. Por eso `tipos=natacion` falla en `tipos[0]`.
-- **`z.input` frente a `z.output`**: `FiltroEntrada` acepta textos (`{ pagina: "2" }`), y `Filtro` tiene números, fechas y booleanos.
+- **`z.coerce.number()`** aplica `Number()` y valida: `"20"` es `20`; `"abc"`, `NaN` rechazado. **`.default(1)`** cubre la URL sin `?pagina`, y **`z.coerce.date()`** da un `Date`.
+- **`.transform()`** convierte `"running, fuerza"` en array, y **`.pipe()`** lo valida: por eso `tipos=natacion` falla en `tipos[0]`.
+- **`FiltroEntrada` (`z.input`) acepta textos;** `Filtro` (`z.output`), números, fechas y booleanos.
 
 <Callout type="risk">
 
-- **`z.coerce.number()` convierte `""` en `0`:** un campo de formulario vacío pasa la validación como un cero, no como un error. Si cero no tiene sentido, añade `.min(1)`; si el campo es opcional, trata `""` como ausente antes (`z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().optional())`).
-- **`z.coerce.boolean()` convierte `"false"` en `true`:** aplica `Boolean(valor)`, y cualquier texto no vacío es `true` en JavaScript. Para textos de URL o de formulario, usa **`z.stringbool()`**, que entiende `"true"`/`"false"`, `"1"`/`"0"`, `"yes"`/`"no"` y `"on"`/`"off"` (no `"si"`: cualquier otro texto es un error)
-- **Una transformación hace que el esquema deje de ser "invertible":** `tipos` entra como texto y sale como array. Si necesitas volver a construir la URL a partir del filtro, tendrás que hacer el camino inverso a mano.
+- **`z.coerce.number()` convierte `""` en `0`:** un campo vacío pasa como cero. Añade `.min(1)` o trata `""` como ausente con `z.preprocess((v) => (v === "" ? undefined : v), z.coerce.number().optional())`.
+- **`z.coerce.boolean()` convierte `"false"` en `true`:** usa **`z.stringbool()`**, que entiende `"true"`/`"false"`, `"1"`/`"0"`, `"yes"`/`"no"` y `"on"`/`"off"` (no `"si"`).
+- **Una transformación no es invertible:** para reconstruir la URL desde el filtro, el camino inverso es a mano.
 
 </Callout>
 
 ## Paso 6: las claves de más se descartan
 
-Vuelve al ataque del final de I1.3: un cuerpo de PATCH con un `usuarioId` colado. Crea `src/i1/04-claves-de-mas.ts`:
+**Qué es:** por defecto, **`z.object` descarta** las propiedades no declaradas: el _mass assignment_ de I1.3 desaparece. **`z.strictObject`** las convierte en error y **`z.looseObject`** las conserva sin validar.
+
+**Cómo se usa:** crea `src/i1/04-claves-de-mas.ts`, con el PATCH y su `usuarioId` colado.
 
 ```ts
 // Archivo: src/i1/04-claves-de-mas.ts
@@ -452,12 +446,10 @@ z.strictObject → ✖ Unrecognized key: "usuarioId"
 z.looseObject → { titulo: 'Correr 12 km', usuarioId: 'atacante' }
 ```
 
-Por defecto, **`z.object` descarta** las propiedades que no están en el esquema: el dato que sale de `parse` solo tiene lo que declaraste. El _mass assignment_ de I1.3 desaparece sin escribir nada más. **`z.strictObject`** las convierte en error (útil en APIs internas, para detectar un cliente que envía campos que no debería), y **`z.looseObject`** las conserva sin validar.
-
 <Callout type="risk">
 
-- **Usa siempre el `data` validado, nunca el original:** `const r = Schema.safeParse(cuerpo); if (r.success) guardar(cuerpo)` valida bien y luego guarda el objeto **sin limpiar**, con el `usuarioId` dentro. Lo que se guarda es `r.data`.
-- **Descartar no es avisar:** si un cliente envía `titulo` con una errata (`titlo`), `z.object` la descarta en silencio y el cambio "no hace nada". En formularios propios, `z.strictObject` ayuda a encontrar esos fallos durante el desarrollo.
+- **Usa siempre el `data` validado:** `if (r.success) guardar(cuerpo)` guarda el objeto **sin limpiar**, con el `usuarioId`. Se guarda `r.data`.
+- **Descartar no es avisar:** una errata (`titlo`) se descarta en silencio y el cambio "no hace nada". En formularios propios, `z.strictObject` lo destapa en desarrollo.
 
 </Callout>
 
@@ -534,20 +526,15 @@ npm start -- src/i1/04-ejercicio.ts
 No se pudieron cargar las tareas: La API devolvió datos con otra forma (6 problemas). Primeros: 0.userId: Invalid input: expected number, received undefined; 0.title: Invalid input: expected string, received undefined; 0.completed: Invalid input: expected boolean, received undefined
 ```
 
-En B1.5, `/users` producía `[ ] #1 undefined` sin un solo error; ahora la función se niega a devolver datos falsos y explica qué ha cambiado en la API: 3 campos que faltan en cada uno de los 2 usuarios, es decir, 6 problemas.
-
-Las decisiones:
-
-- **`TareasSchema`** valida y convierte en un solo paso: quien llama a `obtenerTareas` nunca ve la forma en inglés de la API.
-- **`z.output<typeof TareasSchema>[number]`**: el tipo `Tarea` sale del resultado de la transformación (con el `[number]` de I1.2), no de una interfaz escrita aparte.
-- **`safeParse` + `throw`**: dentro de la función se usa `safeParse` para construir un mensaje claro, y se lanza un `Error` normal; quien llama solo necesita un `try/catch`, sin saber nada de Zod.
-- **`AbortSignal.timeout(5000)`**: la mejora que proponía el bloque de riesgos de B1.5. Si la API no responde en 5 segundos, `fetch` se cancela.
+- **En B1.5, `/users` daba `[ ] #1 undefined`;** ahora la función se niega y explica: 3 campos que faltan en cada uno de los 2 usuarios, 6 problemas.
+- **`TareasSchema` valida y convierte en un paso,** y **`z.output<typeof TareasSchema>[number]`** da `Tarea` desde la transformación (con el `[number]` de I1.2).
+- **`safeParse` + `throw` de un `Error` normal:** quien llama solo necesita un `try/catch`. **`AbortSignal.timeout(5000)`** es la mejora que proponía B1.5.
 
 <Callout type="risk">
 
-- **Valida solo lo que usas de una API externa:** el esquema declara 4 campos y la API podría enviar 20. Como `z.object` descarta el resto, si la API añade campos nuevos, tu app sigue funcionando; si **quita** uno que usas, falla con un mensaje claro. Validar campos que no usas solo hace que tu app se rompa por cambios que no le afectan.
-- **Una validación que falla en producción debe registrarse:** el mensaje "la API cambió de forma" es oro para depurar, pero solo si llega a tus logs. En un _endpoint_, regístralo en el servidor y devuelve al usuario un mensaje genérico (lo verás en I1.5).
-- **Validar listas grandes cuesta tiempo:** para miles de elementos, Zod recorre cada uno. Para datos de tu propia base de datos ya validados al escribir, a veces basta con validar en la escritura y confiar en la lectura; para datos externos, valida siempre.
+- **Valida solo lo que usas de una API externa:** campos nuevos no te rompen (se descartan); uno que usas y desaparece, falla con un mensaje claro.
+- **Una validación fallida en producción se registra en el servidor,** y al usuario va un mensaje genérico (I1.5).
+- **Validar listas grandes cuesta tiempo:** para datos propios validados al escribir, a veces basta con eso; los externos, siempre.
 
 </Callout>
 
@@ -559,8 +546,8 @@ Validas todo dato que cruza una frontera (petición, formulario, URL, API extern
 
 ## Resumen
 
-- Los tipos de TypeScript no existen al ejecutar: `as` y `JSON.parse` dejan pasar cualquier forma.
-- Un esquema de Zod describe la forma y la comprueba al ejecutar: `z.object`, `z.enum`, `z.number().min()`, `z.email()`, `z.array`.
-- `safeParse` devuelve `{ success, data | error }` y nunca lanza; `parse` lanza un `ZodError`.
-- `z.infer` (o `z.output`) da el tipo del esquema; `z.input` el de la entrada antes de transformar.
-- `z.coerce.*` y `z.stringbool()` convierten textos de URL y formularios; `z.object` descarta las claves que no declaraste.
+- Los tipos no existen al ejecutar: `as` y `JSON.parse` dejan pasar cualquier forma.
+- Un esquema de Zod describe la forma y la comprueba al ejecutar.
+- `safeParse` nunca lanza; `parse` lanza un `ZodError`.
+- `z.infer` (`z.output`) y `z.input` derivan los tipos del esquema.
+- `z.coerce.*` y `z.stringbool()` para textos; `z.object` descarta claves no declaradas.

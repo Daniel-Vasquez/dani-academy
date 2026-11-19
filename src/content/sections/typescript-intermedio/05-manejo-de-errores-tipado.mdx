@@ -7,15 +7,15 @@ minutes: 60
 summary: "Tratas el unknown del catch, creas errores propios con código HTTP y causa, usas Result<T, E> para fallos esperables, capturas solo en el borde y conviertes cualquier error en la respuesta correcta."
 ---
 
-En una app real, las cosas fallan constantemente y por motivos muy distintos: un usuario pide una nota que no existe, otro envía un formulario incompleto, alguien intenta ver datos ajenos, la base de datos tarda demasiado o tú dejas un bug. Si todo eso acaba igual, como un `500 Error interno` o, peor, como un `null` silencioso, ni el usuario sabe qué hacer ni tú sabes qué arreglar. En esta sección vas a darle **tipo** a los errores: distinguir lo que se lanzó, crear errores que llevan su código HTTP, decidir cuándo un fallo es una excepción y cuándo un resultado normal, y concentrar en **un solo sitio** la traducción de errores a respuestas.
+Una nota que no existe, un formulario incompleto, datos ajenos, una base de datos lenta, un bug: si todo acaba como un `500` o un `null` silencioso, nadie sabe qué hacer. Aquí das **tipo** a los errores, decides cuándo un fallo es excepción y cuándo resultado normal, y traduces todos a respuestas desde **un solo sitio**.
 
-**Lo que tendrás al terminar:** un módulo `src/i1/errores.ts` con tus errores HTTP, un _helper_ `validar()` que une Zod con esos errores y una función `aRespuesta(e: unknown): Response` que convierte cualquier error en la respuesta correcta.
-
-**Requisitos:** las secciones I1.1–I1.4 (genéricos, uniones discriminadas y Zod).
+**Requisitos:** I1.1–I1.4 (genéricos, uniones discriminadas y Zod).
 
 ## Paso 1: el `catch` recibe `unknown`
 
-Crea `src/i1/05-unknown.ts`:
+**Qué es:** en JavaScript, `throw` acepta **cualquier valor** (un `Error`, un texto, un objeto). Con `strict`, la variable del `catch` es `unknown`, y hay que **estrecharla** antes de usarla (B1.6).
+
+**Cómo se usa:** crea `src/i1/05-unknown.ts`.
 
 ```ts
 // Archivo: src/i1/05-unknown.ts
@@ -68,7 +68,7 @@ valor desconocido: {"codigo":503,"motivo":"mantenimiento"}
 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
 ```
 
-En JavaScript, `throw` acepta **cualquier valor**: un `Error`, un texto o un objeto. Por eso, con `strict` activado, TypeScript tipa la variable del `catch` como `unknown`: no puede saber qué se lanzó. Compruébalo. Añade al final:
+Añade al final (y bórralo después):
 
 ```ts
 try {
@@ -82,25 +82,22 @@ try {
 src/i1/05-unknown.ts(40,15): error TS18046: 'e' is of type 'unknown'.
 ```
 
-Tienes que **estrechar** el tipo antes de usarlo, igual que con cualquier `unknown` (B1.6):
-
-- **`e instanceof Error`** cubre `Error` y **todas sus subclases** (`TypeError`, `SyntaxError` y las que crees tú). Dentro del `if`, `e.message` y `e.name` existen.
-- **`typeof e === "string"`** para los textos sueltos.
-- **El resto** se describe sin suponer nada (`JSON.stringify`).
-
-Borra las cinco líneas que añadiste.
+- **`e instanceof Error`** cubre `Error` y sus subclases (`TypeError`, `SyntaxError`, las tuyas): dentro, `e.message` y `e.name` existen.
+- **`typeof e === "string"`** para textos sueltos; el resto se describe sin suponer nada (`JSON.stringify`).
 
 <Callout type="risk">
 
-- **No uses `catch (e: any)`:** compila y te deja escribir `e.message`, pero si se lanzó un texto, `e.message` es `undefined` y el mensaje de error se pierde justo cuando más lo necesitas. Mantén el `unknown` y estrecha.
-- **Lanza siempre objetos `Error`:** `throw "algo falló"` no tiene traza (_stack trace_), así que no sabrás desde dónde se lanzó. `throw new Error("algo falló")` sí la tiene.
-- **`JSON.stringify` de un `Error` da `{}`:** sus propiedades `message` y `stack` no son enumerables. Para registrar un error, usa `console.error(e)` o lee `e.message` y `e.stack` explícitamente.
+- **No uses `catch (e: any)`:** si se lanzó un texto, `e.message` es `undefined` y el mensaje se pierde cuando más falta hace.
+- **Lanza siempre `Error`:** `throw "algo falló"` no tiene traza, y no sabrás desde dónde vino.
+- **`JSON.stringify` de un `Error` da `{}`:** `message` y `stack` no son enumerables. Para registrar, `console.error(e)` o léelos a mano.
 
 </Callout>
 
 ## Paso 2: tus propias clases de error
 
-Un `Error` genérico solo tiene un mensaje. Para responder bien a una petición necesitas saber **qué tipo de fallo** es: "no existe" es un 404, "ya existe" es un 409. Crea `src/i1/errores.ts`, un módulo que solo declara clases:
+**Qué es:** un `Error` genérico solo tiene un mensaje. Para responder bien hay que saber **qué fallo** es: "no existe" es 404 y "ya existe", 409. Una clase por tipo de fallo, con su código HTTP.
+
+**Cómo se usa:** crea `src/i1/errores.ts`, que solo declara clases:
 
 ```ts
 // Archivo: src/i1/errores.ts
@@ -187,28 +184,24 @@ ConflictoError (409): Ya existe un entreno con id e1
 true true true
 ```
 
-Las piezas:
-
-- **`extends Error`**: tus errores son errores de verdad, con traza y con todo lo que espera cualquier herramienta (`console.error`, Sentry, los logs de Vercel).
-- **`public readonly status`** en el constructor: declara y asigna la propiedad en un solo paso. Cada error sabe su código HTTP.
-- **`this.name = new.target.name`**: `new.target` es la clase con la que se hizo el `new`. Así, un `NoEncontradoError` se llama `"NoEncontradoError"` sin repetir esa línea en cada subclase. Sin ella, todos se llamarían `"Error"`.
-- **`{ cause }`** (opción estándar de `Error`): `ConflictoError` **traduce** el error técnico del driver (`E11000 duplicate key`) a uno que entiende el dominio ("ya existe"), pero **conserva el original** como causa para los logs.
-- **`instanceof`** funciona en toda la cadena: un `NoEncontradoError` también es un `HttpError` y un `Error`. Por eso basta con un solo `if (e instanceof HttpError)` para todos.
-- **`throw e`** en el `else`: si el error no es tuyo, **no lo tragues**. Vuelve a lanzarlo para que llegue a quien sepa tratarlo.
-
-Esta plataforma tiene exactamente este módulo: `src/lib/errors.ts` define `HttpError` y sus subclases (`BadRequestError`, `NotFoundError`, `TooManyRequestsError`…), con el mismo truco de `new.target.name`.
+- **`extends Error`** da traza y compatibilidad con `console.error`, Sentry o los logs de Vercel. **`public readonly status`** declara y asigna en un paso.
+- **`this.name = new.target.name`** nombra cada subclase sin repetir la línea; sin ella, todos se llamarían `"Error"`.
+- **`{ cause }`:** `ConflictoError` traduce `E11000 duplicate key` a "ya existe" y **conserva el original** para los logs.
+- **Un `if (e instanceof HttpError)` cubre todas las subclases,** y **`throw e`** en el `else` devuelve lo ajeno: no lo tragues. Esta plataforma tiene este módulo en `src/lib/errors.ts`, con el mismo `new.target.name`.
 
 <Callout type="risk">
 
-- **Un módulo de errores no debe ejecutar nada al importarse:** si `errores.ts` tuviera código de prueba al final (un `console.log`, una consulta), se ejecutaría cada vez que otro archivo lo importe. Mantén los módulos compartidos con solo declaraciones, y las pruebas en archivos aparte, como `05-errores.ts`.
-- **`instanceof` falla si hay dos copias de la clase:** si una librería empaqueta su propia copia de tu `HttpError`, o un archivo se carga dos veces con rutas distintas, `e instanceof HttpError` da `false` aunque el error "sea" un `HttpError`. Si algún día te pasa, compara por una propiedad (`"status" in e`) o por `e.name`.
-- **El mensaje de un error de dominio puede llegar al usuario:** escribe `message` pensando en quien lo leerá ("La nota n9 no existe"), y deja los detalles técnicos en `cause`, que solo va a los logs.
+- **Un módulo compartido no debe ejecutar nada al importarse:** solo declaraciones; las pruebas, en archivos aparte.
+- **`instanceof` falla con dos copias de la clase** (una librería que empaqueta la suya, un archivo cargado por dos rutas). Compara entonces por `"status" in e` o `e.name`.
+- **El `message` puede llegar al usuario:** escríbelo para él ("La nota n9 no existe") y deja lo técnico en `cause`.
 
 </Callout>
 
 ## Paso 3: `Result<T, E>`, cuando el fallo es un resultado normal
 
-Lanzar un error tiene un problema: **la firma de la función no lo dice**. `function calcularRitmo(km, min): number` puede lanzar, y nada obliga a quien la llama a usar `try/catch`. Para fallos **esperables**, los que forman parte del funcionamiento normal (un dato que el usuario escribe mal, una búsqueda sin resultados), es mejor que el error forme parte del **tipo de retorno**. Es el `Resultado<T>` de I1.1, ahora con un tipo de error propio. Crea `src/i1/05-result.ts`:
+**Qué es:** un `throw` no aparece en la firma, y nada obliga a capturarlo. Para fallos **esperables** (un dato mal escrito, una búsqueda vacía), el error va en el **tipo de retorno**: el `Resultado<T>` de I1.1 con un tipo de error propio.
+
+**Cómo se usa:** crea `src/i1/05-result.ts`.
 
 ```ts
 // Archivo: src/i1/05-result.ts
@@ -260,7 +253,7 @@ npm start -- src/i1/05-result.ts
 10 km en 12 min → Ese ritmo no es humano: revisa los datos
 ```
 
-Añade al final:
+Añade al final (y bórralo después):
 
 ```ts
 const r = calcularRitmo(5, 25);
@@ -272,9 +265,8 @@ src/i1/05-result.ts(39,15): error TS2339: Property 'value' does not exist on typ
   Property 'value' does not exist on type '{ ok: false; error: ErrorRitmo; }'.
 ```
 
-Esa es la ventaja: **no se puede olvidar el caso de error**. El compilador obliga a comprobar `r.ok`. Y como `ErrorRitmo` es una unión de literales, `Record<ErrorRitmo, string>` obliga a tener un mensaje para cada error posible: si añades `"km-excesivos"`, `MENSAJES` deja de compilar hasta que lo escribas. Borra las dos líneas.
-
-¿Cuándo usar cada uno?
+- **No se puede olvidar el error:** el compilador obliga a mirar `r.ok`. Y `Record<ErrorRitmo, string>` exige un mensaje por cada error: añadir `"km-excesivos"` rompe `MENSAJES` hasta que lo escribas.
+- **`safeParse` de Zod es exactamente un `Result`.**
 
 | Situación                                                       | Herramienta                    | Por qué                                                               |
 | --------------------------------------------------------------- | ------------------------------ | --------------------------------------------------------------------- |
@@ -283,19 +275,19 @@ Esa es la ventaja: **no se puede olvidar el caso de error**. El compilador oblig
 | Bugs (algo que "no puede pasar")                                | `throw`                        | Debe llegar al log con su traza, no quedar oculto                     |
 | Fallos que atraviesan varias capas hasta el _endpoint_          | `throw` de un `HttpError`      | Evita repetir `if (!r.ok) return r` en cada capa                      |
 
-`safeParse` de Zod es exactamente un `Result`: `{ success: true, data } | { success: false, error }`.
-
 <Callout type="risk">
 
-- **`Result` en cadenas largas se vuelve verboso:** si cinco funciones se llaman entre sí y todas devuelven `Result`, cada una repite `if (!r.ok) return r`. Usa `Result` en las funciones de lógica, donde el error es parte del dominio, y excepciones para atravesar capas.
-- **El `never` de `ok` y `err` no es decorativo:** `ok(5)` devuelve `Result<number, never>`, y `never` encaja con cualquier tipo de error, así que se puede devolver desde cualquier función. Si `ok` devolviera `Result<T>` (con el error por defecto, `string`), `return ok(5)` en una función que devuelve `Result<number, ErrorRitmo>` daría `Type 'Result<number, string>' is not assignable to type 'Result<number, ErrorRitmo>'`.
-- **`!(km > 0)` en vez de `km <= 0`:** si `km` es `NaN` (un `Number("abc")`), `km <= 0` es `false` y el `NaN` pasaría como válido. `!(km > 0)` también rechaza `NaN`.
+- **`Result` en cadenas largas repite `if (!r.ok) return r`:** úsalo en la lógica de dominio y excepciones para atravesar capas.
+- **El `never` de `ok` no es decorativo:** `Result<number, never>` encaja con cualquier error. Con `Result<T>` (error `string` por defecto), `return ok(5)` no sería asignable a `Result<number, ErrorRitmo>`.
+- **`!(km > 0)` en vez de `km <= 0`:** con `NaN`, `km <= 0` es `false` y lo dejaría pasar.
 
 </Callout>
 
 ## Paso 4: dónde capturar, en el borde y en ningún otro sitio
 
-Un error se **lanza** donde se detecta y se **captura** donde se puede hacer algo útil con él. En una API, ese sitio es casi siempre el **borde**: el _endpoint_, que es quien decide la respuesta. Crea `src/i1/05-donde-capturar.ts`:
+**Qué es:** un error se **lanza** donde se detecta y se **captura** donde se puede hacer algo útil con él. En una API, el **borde**: el _endpoint_, que decide la respuesta. **No captures un error si no sabes qué hacer con él.**
+
+**Cómo se usa:** crea `src/i1/05-donde-capturar.ts`, con una versión "mal" y otra "bien" del mismo servicio.
 
 ```ts
 // Archivo: src/i1/05-donde-capturar.ts
@@ -364,18 +356,14 @@ bien: 500 Error interno
 bien: 500 Error interno
 ```
 
-Con la base de datos funcionando, las dos versiones parecen iguales. Con la base de datos **caída**, se ve la diferencia:
-
-- **La versión "mal"** responde `404 La nota no existe`. El `catch` del servicio convirtió una caída de la base de datos en "no hay nota". El usuario cree que su nota se ha borrado, y en tus logs **no hay nada**: el error desapareció.
-- **La versión "bien"** responde `500 Error interno` y deja el error real en el log del servidor. El servicio solo traduce lo que entiende (no existe → `NoEncontradoError`) y deja pasar el resto, que llega intacto al único `catch`, el del _endpoint_.
-
-La regla: **no captures un error si no sabes qué hacer con él**. Capturar para "que no explote" casi siempre esconde el problema.
+- **Con la base de datos caída, "mal" responde `404 La nota no existe`:** su `catch` convirtió la caída en "no hay nota". El usuario cree que se borró y el log **no tiene nada**.
+- **"Bien" responde `500 Error interno` y registra el error real:** el servicio solo traduce lo que entiende (no existe → `NoEncontradoError`) y el resto llega intacto al `catch` del _endpoint_.
 
 <Callout type="risk">
 
-- **Un `catch` vacío es casi siempre un bug escondido:** `catch {}` o `catch { return null }` hace que el error desaparezca sin rastro. Si de verdad quieres ignorar un error concreto (por ejemplo, `localStorage` bloqueado), compruébalo y vuelve a lanzar todo lo demás, y deja un comentario explicando por qué.
-- **No muestres el error interno al cliente:** el mensaje `MongoServerSelectionError: connection timed out` revela qué base de datos usas y cómo falla. Al cliente, `Error interno`; en el log, todo.
-- **Los errores asíncronos sin `await` no llegan al `catch`:** `try { guardar(); } catch {}` no captura nada si `guardar` es `async` y no lo esperas. Con `await guardar()` dentro del `try`, sí.
+- **Un `catch` vacío casi siempre esconde un bug:** para ignorar un error concreto (`localStorage` bloqueado), compruébalo, relanza el resto y comenta por qué.
+- **El error interno no va al cliente:** `MongoServerSelectionError: connection timed out` revela tu infraestructura. Al cliente, `Error interno`; al log, todo.
+- **Sin `await`, el `catch` no captura:** `try { guardar(); }` no ve el error de una función `async`. Con `await guardar()`, sí.
 
 </Callout>
 
@@ -390,7 +378,7 @@ La regla: **no captures un error si no sabes qué hacer con él**. Capturar para
 
 </Callout>
 
-Solución. `src/i1/errores.ts` completo (sustituye al del Paso 2; los archivos anteriores siguen funcionando):
+Solución. `src/i1/errores.ts` completo (sustituye al del Paso 2; lo anterior sigue funcionando):
 
 ```ts
 // Archivo: src/i1/errores.ts
@@ -516,6 +504,8 @@ npm run typecheck
 npm start -- src/i1/05-ejercicio.ts
 ```
 
+Las líneas `at …` de la traza están abreviadas:
+
 ```text
 no existe                → 404 {"error":"La nota n9 no existe"}
 sin sesión               → 401 {"error":"Inicia sesión para continuar"}
@@ -532,22 +522,15 @@ algo que no es un Error  → 500 {"error":"Error interno"}
 validar OK: { titulo: 'Correr 10 km' }
 ```
 
-(Las líneas `at …` de la traza muestran las rutas de tu equipo; aquí están abreviadas).
-
-Las decisiones:
-
-- **El orden de los `if` importa:** `ValidacionError` va **antes** que `HttpError`, porque también es un `HttpError` y necesita su propia respuesta (con `campos`).
-- **Un `ZodError` suelto también es un 422:** si alguien usa `parse` y olvida capturarlo, el fallo es de los datos, no del servidor. Sin ese caso, un formulario mal rellenado acabaría como `500 Error interno`.
-- **`validar<T>`** junta las tres secciones anteriores: es genérico (I1.1), usa Zod (I1.4) y lanza un error tipado (I1.5). En un _endpoint_, `const nota = validar(NotaSchema, await request.json())` deja `nota` tipada, y el error, si lo hay, lo traduce `aRespuesta`.
-- **Lo desconocido se registra entero y no se explica:** el bug y el texto lanzado acaban en el log con todos sus detalles, y el cliente solo recibe `Error interno`.
-
-Esta plataforma tiene la misma función: `toErrorResponse` en `src/lib/errors.ts`, que usan todos sus _endpoints_ en el `catch`.
+- **El orden de los `if` importa:** `ValidacionError` va **antes** que `HttpError`, porque también lo es y necesita su respuesta con `campos`.
+- **Un `ZodError` suelto también es 422:** un `parse` sin capturar es un fallo de los datos, no del servidor.
+- **`validar<T>` junta I1.1, I1.4 e I1.5:** `const nota = validar(NotaSchema, await request.json())` deja `nota` tipada, y `aRespuesta` traduce el error. Lo desconocido va entero al log y el cliente recibe `Error interno`, como en `toErrorResponse` de `src/lib/errors.ts`.
 
 <Callout type="risk">
 
-- **Un 500 genérico no es un fracaso, es un aviso:** la meta no es que nunca haya 500, sino que cada 500 sea un bug de verdad (y aparezca en el log), no un error esperable mal clasificado. Si ves en los logs un 500 que debería ser un 404 o un 422, falta una clase de error o un `throw` en el sitio correcto.
-- **401 frente a 403:** `NoAutorizadoError` (401) significa "no sé quién eres: inicia sesión". Si sé quién eres pero **no tienes permiso** (intentas ver la nota de otro usuario), es un 403. A veces conviene responder 404 en su lugar, para no revelar a un curioso que esa nota existe.
-- **No pongas datos sensibles en el mensaje:** `new NoEncontradoError("El usuario", email)` mete el correo en la respuesta y en los logs. Usa identificadores internos, nunca contraseñas, _tokens_ ni datos personales.
+- **Cada 500 debe ser un bug de verdad:** si en los logs ves un 500 que debería ser 404 o 422, falta una clase de error o un `throw` en su sitio.
+- **401 es "no sé quién eres"; 403, "sé quién eres y no puedes".** A veces conviene un 404 para no revelar que la nota existe.
+- **Nada sensible en el mensaje:** `new NoEncontradoError("El usuario", email)` lleva el correo a la respuesta y a los logs. Identificadores internos, nunca contraseñas ni _tokens_.
 
 </Callout>
 
@@ -559,8 +542,8 @@ Ningún error de tu app termina como un 500 genérico sin motivo: estrechas el `
 
 ## Resumen
 
-- La variable del `catch` es `unknown`: estréchala con `instanceof Error` antes de usarla; lanza siempre `Error`.
-- Las clases de error propias (`extends Error`) llevan su código HTTP y su `cause`; `new.target.name` les da su nombre.
-- `Result<T, E>` pone el error en el tipo de retorno para los fallos esperables; `throw`, para infraestructura y bugs.
-- Captura en el borde (el _endpoint_), no en cada función; un `catch` que devuelve `null` esconde caídas reales.
-- Una sola función, `aRespuesta(e: unknown)`, traduce cada error a su respuesta y registra lo desconocido.
+- El `catch` recibe `unknown`: estrecha con `instanceof Error` y lanza siempre `Error`.
+- Errores propios con código HTTP y `cause`; `new.target.name` les da nombre.
+- `Result<T, E>` para fallos esperables; `throw` para infraestructura y bugs.
+- Captura en el borde; un `catch` que devuelve `null` esconde caídas.
+- `aRespuesta(e: unknown)` traduce cada error y registra lo desconocido.

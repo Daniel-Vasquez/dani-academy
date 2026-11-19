@@ -7,11 +7,9 @@ minutes: 60
 summary: "Provocas el error de romper las reglas de los hooks, extraes useFetch genérico con Zod, mides por qué useLocalStorage falla al hidratar una isla y lo rehaces con useSyncExternalStore, y creas useTema."
 ---
 
-Mira el componente `Progreso` de B6.6: la mitad de su código es lógica (el `useEffect`, el `AbortController`, los tres estados) y solo el final es lo que se ve. Si mañana necesitas pedir otro dato a otra URL, copiarás esa mitad entera. Un **_custom hook_** es una función que empieza por `use` y llama a otros hooks: permite sacar esa lógica del componente, darle un nombre (`useFetch`, `useLocalStorage`, `useTema`) y reutilizarla. El objetivo es una regla sencilla: **los componentes contienen UI y los hooks contienen lógica**. En esta sección vas a ver primero las reglas que hacen posibles los hooks (rompiéndolas), y después vas a escribir cuatro hooks genéricos. Uno de ellos te va a enseñar un error que solo aparece en las islas de Astro.
+La mitad del `Progreso` de B6.6 es lógica (efecto, `AbortController`, tres estados), y pedir otro dato obligaría a copiarla. Un **_custom hook_** es una función `use…` que llama a otros hooks: saca esa lógica, le da nombre y la reutiliza. La regla: **los componentes contienen UI y los hooks, lógica**.
 
-**Lo que tendrás al terminar:** una carpeta `src/hooks/` con `useFetch`, `useLocalStorage`, `useMediaQuery` y `useTema`, y componentes que solo pintan.
-
-**Requisitos:** la sección I2.1, el `react-lab` y Zod, que se usa para validar lo que entra:
+**Requisitos:** I2.1, el `react-lab` y Zod para validar lo que entra:
 
 ```bash
 npm install zod
@@ -20,12 +18,9 @@ mkdir -p src/hooks src/components/hooks
 
 ## Paso 1: las reglas de los hooks, y por qué existen
 
-React no sabe cómo se llaman tus variables de estado. Cuando escribes `useState(false)` y luego `useState(0)`, React los guarda en una **lista, por orden de llamada**: "el primer `useState` de este componente es `false`, el segundo es `0`". En cada render vuelve a recorrer esa lista en el mismo orden. De ahí salen las dos reglas:
+**Qué es:** React no conoce los nombres de tus estados: guarda los hooks en una **lista, por orden de llamada**, y la recorre igual en cada render. De ahí las dos reglas: **solo en el nivel superior** (nunca en un `if`, un bucle o una función anidada) y **solo desde componentes u otros hooks** (por eso empiezan por `use`).
 
-1. **Llama a los hooks solo en el nivel superior:** nunca dentro de un `if`, un bucle o una función anidada. El orden tiene que ser **el mismo en cada render**.
-2. **Llama a los hooks solo desde componentes o desde otros hooks:** no desde funciones normales (por eso los _custom hooks_ empiezan por `use`, para que las herramientas sepan que son hooks).
-
-Rompe la primera para ver qué pasa. Crea `src/components/hooks/ReglaRota.tsx`:
+**Cómo se usa:** rompe la primera. Crea `src/components/hooks/ReglaRota.tsx`.
 
 ```tsx
 // Archivo: src/components/hooks/ReglaRota.tsx
@@ -54,7 +49,7 @@ export function ReglaRota() {
 }
 ```
 
-Crea la página `src/pages/hooks.astro`, que también usarás en el Paso 2 (crea antes el archivo del Paso 2 o comenta esa línea):
+La página `src/pages/hooks.astro`, también para el Paso 2 (crea antes su archivo o comenta la línea):
 
 ```astro
 ---
@@ -71,26 +66,28 @@ import { SelectorConHook } from "../components/hooks/SelectorConHook";
 </Base>
 ```
 
-`npx astro check` no da ningún error. Abre `/hooks` y pulsa "Mostrar nota":
+`npx astro check` no da errores. En `/hooks`, pulsa "Mostrar nota":
 
 ```text
 React has detected a change in the order of Hooks called by ReglaRota. This will lead to bugs and errors if not fixed. For more information, read the Rules of Hooks: https://react.dev/link/rules-of-hooks
 Uncaught Error: Rendered more hooks than during the previous render.
 ```
 
-Y la tarjeta **desaparece de la página**: React desmonta la isla entera. En el primer render, la lista era `[mostrarNota, vasos]`; en el segundo, `[mostrarNota, nota, efecto, vasos]`. El segundo hook ya no es el que React esperaba, y no hay forma segura de continuar.
+- **La tarjeta desaparece:** React desmonta la isla. La lista pasó de `[mostrarNota, vasos]` a `[mostrarNota, nota, efecto, vasos]`, y el segundo hook ya no es el esperado.
 
 <Callout type="risk">
 
-- **El compilador no detecta las reglas, el _linter_ sí:** TypeScript (y `npx astro check`) no las comprueba. La regla `react-hooks/rules-of-hooks` de `eslint-plugin-react-hooks` marca este error al escribirlo; esta plataforma la tiene activada (Tanda 9). En un proyecto sin ESLint, el primer aviso es un error en el navegador.
-- **Un hook condicional que "funciona" es una bomba de relojería:** si la condición no cambia nunca durante la vida del componente, no verás el error… hasta que cambie. Si necesitas lógica condicional, pon el `if` **dentro** del hook (`useEffect(() => { if (mostrarNota) … })`), no alrededor.
-- **Un _return_ temprano antes de un hook también rompe la regla:** `if (!usuario) return null;` seguido de un `useState` hace que ese `useState` exista solo a veces. Coloca todos los hooks **antes** de cualquier `return`.
+- **El compilador no detecta las reglas; el _linter_ sí:** `react-hooks/rules-of-hooks` de `eslint-plugin-react-hooks`, activada en esta plataforma. Sin ESLint, el primer aviso es un error en el navegador.
+- **Un hook condicional que "funciona"** solo espera a que cambie la condición. El `if` va **dentro** del hook: `useEffect(() => { if (mostrarNota) … })`.
+- **Un `return` temprano antes de un hook** también rompe la regla: todos los hooks, antes de cualquier `return`.
 
 </Callout>
 
 ## Paso 2: `useFetch`, un hook genérico con validación
 
-Extrae la lógica de `Progreso` (B6.6) a un hook. Crea `src/hooks/useFetch.ts`:
+**Qué es:** la lógica de `Progreso` (B6.6) en un hook genérico (I1.1) que además valida la respuesta (I1.4).
+
+**Cómo se usa:** crea `src/hooks/useFetch.ts`.
 
 ```ts
 // Archivo: src/hooks/useFetch.ts
@@ -134,7 +131,7 @@ export function useFetch<T>(url: string | null, esquema: z.ZodType<T>): EstadoFe
 }
 ```
 
-Y úsalo. `src/components/hooks/ProgresoConHook.tsx`:
+`src/components/hooks/ProgresoConHook.tsx`:
 
 ```tsx
 // Archivo: src/components/hooks/ProgresoConHook.tsx
@@ -180,7 +177,7 @@ export function SelectorConHook() {
 }
 ```
 
-Medido en `/hooks` (la API de B6.6 tarda 1,5 s con B1 y 0,2 s con B2):
+En `/hooks` (la API de B6.6 tarda 1,5 s con B1 y 0,2 s con B2):
 
 ```text
 progreso inicial: React esencial: 71 % completado
@@ -188,24 +185,23 @@ B1 y después B2 (B1 tarda 1,5 s): Git y flujo de trabajo: 50 % completado
 B9: Error: HTTP 404
 ```
 
-El comportamiento es idéntico al de `Progreso` (incluida la carrera de B6.6: la respuesta lenta de B1 no pisa la de B2, porque el efecto la cancela), pero ahora:
-
-- **El componente solo pinta:** `ProgresoConHook` tiene 10 líneas de JSX y una llamada al hook. Toda la lógica de red está en `useFetch`.
-- **El hook es genérico (I1.1):** `useFetch<T>` devuelve un `EstadoFetch<T>`, y `T` se infiere del esquema. `r.datos.porcentaje` está tipado como `number` sin escribir ninguna interfaz.
-- **El hook valida (I1.4):** la respuesta de una API es una frontera. Si el servidor cambia de forma, el componente muestra un error claro en lugar de pintar `undefined`.
-- **`url: null` desactiva la petición:** útil cuando todavía no sabes qué pedir (por ejemplo, hasta que el usuario elija algo). Recuerda que un hook no se puede llamar dentro de un `if`; esta es la forma de "llamarlo condicionalmente".
+- **Igual que `Progreso`,** incluida la carrera de B6.6 resuelta, pero **el componente solo pinta:** 10 líneas de JSX y una llamada.
+- **`T` se infiere del esquema:** `r.datos.porcentaje` es `number` sin escribir interfaces, y si la API cambia de forma, sale un error claro en vez de `undefined`.
+- **`url: null` desactiva la petición:** la forma de "llamar condicionalmente" a un hook que no puede ir en un `if`.
 
 <Callout type="risk">
 
-- **El esquema debe tener identidad estable:** es una dependencia del efecto. Si lo creas dentro del componente (`useFetch(url, z.object({…}))`), es un objeto nuevo en cada render, el efecto se dispara en cada render y la petición se repite sin parar (I2.1, Paso 3). Decláralo fuera del componente, como `ProgresoSchema`.
-- **Cada componente que usa `useFetch` hace su propia petición:** un hook reutiliza **lógica**, no **datos**. Si tres componentes piden la misma URL, salen tres peticiones. Para compartir datos y caché entre componentes existen librerías como TanStack Query; en Astro, a menudo es mejor pedir los datos en el servidor y pasarlos como props.
-- **No pongas `fetch` directamente en el render:** dentro de un hook también vale la regla de I2.1: la petición va en un efecto o en un evento, nunca en el cuerpo.
+- **El esquema necesita identidad estable:** es dependencia del efecto. Creado dentro del componente, la petición se repite en cada render (I2.1). Decláralo fuera, como `ProgresoSchema`.
+- **Un hook reutiliza lógica, no datos:** tres componentes con la misma URL hacen tres peticiones. Para compartir caché, TanStack Query; en Astro, a menudo, pedirlos en el servidor.
+- **Nunca `fetch` en el cuerpo:** también dentro de un hook, en un efecto o un evento (I2.1).
 
 </Callout>
 
 ## Paso 3: `useLocalStorage`, y la trampa de la hidratación
 
-Este es el `useLocalStorage` que aparece en casi todos los tutoriales. Crea `src/hooks/useLocalStorageIngenuo.ts`:
+**Qué es:** **durante la hidratación, el primer render del navegador debe dar exactamente lo mismo que el servidor.** Lo que solo existe en el navegador (`localStorage`, el tamaño de ventana, la hora local) se lee **después**. **`useSyncExternalStore`** lee almacenes externos con tres funciones: suscribirse, leer en el navegador y **qué valor usar en el servidor y en la hidratación**.
+
+**Cómo se usa:** primero, la versión de casi todos los tutoriales, `src/hooks/useLocalStorageIngenuo.ts`:
 
 ```ts
 // Archivo: src/hooks/useLocalStorageIngenuo.ts
@@ -234,7 +230,7 @@ export function useLocalStorageIngenuo<T>(clave: string, inicial: T) {
 }
 ```
 
-Un componente que lo usa, `src/components/hooks/ObjetivoIngenuo.tsx`:
+`src/components/hooks/ObjetivoIngenuo.tsx`:
 
 ```tsx
 // Archivo: src/components/hooks/ObjetivoIngenuo.tsx
@@ -251,7 +247,7 @@ export function ObjetivoIngenuo() {
 }
 ```
 
-Y la página `src/pages/almacen.astro`:
+`src/pages/almacen.astro`:
 
 ```astro
 ---
@@ -266,7 +262,7 @@ import { ObjetivoIngenuo } from "../components/hooks/ObjetivoIngenuo";
 </Base>
 ```
 
-Abre `/almacen`, pulsa "+1" hasta llegar a 12 y recarga la página. Medido:
+En `/almacen`, sube a 12 y recarga:
 
 ```text
 HTML del servidor: [ 'Objetivo: <!-- -->8' ]
@@ -276,15 +272,10 @@ errores: [
 ]
 ```
 
-Funciona "a medias" y con un error. Esto es lo que ha pasado:
+- **El servidor no tiene `localStorage`** y pinta **8**; al hidratar, el navegador lee **12** y no coincide.
+- **React lanza un error de hidratación,** tira el HTML del servidor y reconstruye la isla. En una app solo de navegador funcionaría; en Astro (y Next.js), no.
 
-1. **En el servidor**, Astro renderiza la isla. No existe `localStorage`, el `try/catch` devuelve el valor inicial y el HTML dice **8**.
-2. **En el navegador**, React hidrata: ejecuta el componente para comprobar que su resultado coincide con el HTML. Ahora `localStorage` sí existe, el inicializador de `useState` lee **12** y el resultado **no coincide**.
-3. React lanza un **error de hidratación**, tira el HTML del servidor y vuelve a construir la isla desde cero en el navegador. Pierdes lo que aportaba el renderizado en el servidor, y la consola se llena de errores.
-
-En una app de React que solo se ejecuta en el navegador, este hook funciona bien. En Astro (y en Next.js), donde los componentes se renderizan primero en el servidor, falla. La regla: **durante la hidratación, el primer render del navegador tiene que dar exactamente lo mismo que el servidor**. Lo que solo existe en el navegador (`localStorage`, el tamaño de la ventana, la hora local) se lee **después**.
-
-React tiene un hook para eso: **`useSyncExternalStore`**, pensado para leer "almacenes" externos a React. Recibe tres funciones: cómo suscribirse a los cambios, cómo leer el valor en el navegador y **qué valor usar en el servidor y durante la hidratación**. Crea `src/hooks/useLocalStorage.ts`:
+La versión correcta, `src/hooks/useLocalStorage.ts`:
 
 ```ts
 // Archivo: src/hooks/useLocalStorage.ts
@@ -348,7 +339,7 @@ export function useLocalStorage<T>(clave: string, inicial: T, esquema: z.ZodType
 }
 ```
 
-Un componente que lo usa, `src/components/hooks/Objetivo.tsx`:
+`src/components/hooks/Objetivo.tsx`:
 
 ```tsx
 // Archivo: src/components/hooks/Objetivo.tsx
@@ -370,7 +361,7 @@ export function Objetivo({ id }: { id: string }) {
 }
 ```
 
-Y sustituye `src/pages/almacen.astro`, ahora con **dos islas** que leen la misma clave:
+Y `src/pages/almacen.astro`, ahora con **dos islas** sobre la misma clave:
 
 ```astro
 ---
@@ -387,7 +378,7 @@ import { Objetivo } from "../components/hooks/Objetivo";
 </Base>
 ```
 
-Recarga la página con el 12 guardado. Medido:
+Con el 12 guardado:
 
 ```text
 HTML del servidor: [ 'Objetivo: <!-- -->8', 'Objetivo: <!-- -->8' ]
@@ -399,7 +390,9 @@ en pantalla: [
 ]
 ```
 
-Sin errores: el servidor y la hidratación usan `getServerSnapshot` (`null`, es decir, el valor inicial 8), y justo después React vuelve a renderizar con el valor real. Además, al estar suscrito, el hook mantiene sincronizado todo lo que lee esa clave. Medido con dos pestañas abiertas:
+- **Sin errores:** servidor e hidratación usan `getServerSnapshot` (`null`, el inicial 8) y justo después React renderiza el valor real.
+
+Con dos pestañas abiertas:
 
 ```text
 pestaña 1: Objetivo: 8 vasos | Objetivo: 8 vasos · pestaña 2: Objetivo: 8 vasos | Objetivo: 8 vasos
@@ -407,21 +400,22 @@ tras +1 en la isla A de la pestaña 1 → pestaña 1: Objetivo: 9 vasos | Objeti
 dato inválido guardado ('"doce"') → Objetivo: 8 vasos | Objetivo: 8 vasos
 ```
 
-- **Dos islas, un solo dato:** al pulsar en la isla A, la B se actualiza, aunque sean aplicaciones de React separadas. El evento propio `uselocalstorage` avisa a esta pestaña; el evento estándar `storage`, a las demás.
-- **Lo guardado se valida:** `localStorage` es otra frontera (I1.4). Un valor de una versión antigua, o escrito a mano en DevTools (`"doce"`), vuelve al valor inicial en lugar de romper el componente.
-- **`useMemo([raw, …])`:** el objeto se vuelve a convertir solo cuando cambia el texto guardado, así que su identidad es estable entre renders.
+- **Dos islas, un dato:** el evento propio `uselocalstorage` avisa a esta pestaña y el estándar `storage`, a las demás.
+- **Lo guardado se valida:** `localStorage` es frontera (I1.4); un `"doce"` vuelve al inicial. **`useMemo([raw, …])`** solo reconvierte si cambia el texto, con identidad estable.
 
 <Callout type="risk">
 
-- **El valor inicial se ve un instante:** entre la hidratación y el segundo render, la isla muestra 8 y luego 12. Para un contador no importa; para el tema de la página sería un parpadeo molesto (lo verás en el ejercicio). Para eso, el valor se aplica antes de que React exista, con un script en línea en el `<head>`.
-- **`inicial` y `esquema` deben ser estables:** son dependencias del `useMemo`. Un número o un texto lo son siempre; un objeto literal (`useLocalStorage("filtros", { tipo: "todos" }, …)`) es nuevo en cada render. Decláralo fuera del componente.
-- **`localStorage` no es seguro ni privado:** cualquier script de la página puede leerlo (B3.4). Úsalo para preferencias (tema, filtros, borradores), nunca para _tokens_ de sesión ni datos personales.
+- **El inicial se ve un instante** (8 y luego 12). En un contador no importa; en el tema de la página sería un parpadeo (ejercicio), que se evita con un script en línea en el `<head>`.
+- **`inicial` y `esquema` deben ser estables:** un objeto literal como inicial es nuevo en cada render. Decláralo fuera.
+- **`localStorage` no es seguro ni privado** (B3.4): preferencias y borradores, nunca _tokens_ ni datos personales.
 
 </Callout>
 
 ## Paso 4: `useMediaQuery`
 
-Una _media query_ de CSS (`(prefers-color-scheme: dark)`, `(min-width: 1024px)`) también es un valor externo que cambia. Con `useSyncExternalStore` queda así. Crea `src/hooks/useMediaQuery.ts`:
+**Qué es:** una _media query_ (`(prefers-color-scheme: dark)`, `(min-width: 1024px)`) también es un valor externo que cambia, y sigue el mismo patrón.
+
+**Cómo se usa:** crea `src/hooks/useMediaQuery.ts`.
 
 ```ts
 // Archivo: src/hooks/useMediaQuery.ts
@@ -447,14 +441,14 @@ export function useMediaQuery(consulta: string, enServidor = false): boolean {
 }
 ```
 
-- **`window.matchMedia(consulta)`** devuelve un objeto con `.matches` (si ahora se cumple) y un evento `change` (cuando deja de cumplirse o empieza a cumplirse).
-- **`enServidor`:** en el servidor no hay ventana que medir. Por defecto se supone `false`; quien use el hook puede cambiarlo si sabe que lo más probable es lo contrario.
-- **`useCallback` en `suscribir`:** `useSyncExternalStore` vuelve a suscribirse si la función cambia de identidad. Así solo lo hace cuando cambia la consulta.
+- **`window.matchMedia(consulta)`** da `.matches` y un evento `change`.
+- **`enServidor`** es la suposición para el servidor, `false` por defecto.
+- **`useCallback` en `suscribir`:** `useSyncExternalStore` se resuscribe si la función cambia de identidad; así solo cuando cambia la consulta.
 
 <Callout type="risk">
 
-- **Para el diseño, usa CSS, no `useMediaQuery`:** mostrar u ocultar una barra lateral según el ancho se hace con clases (`hidden lg:block`, B7.4), que funcionan sin JavaScript y sin parpadeo. Reserva el hook para **lógica** que dependa del dispositivo (no cargar un componente pesado en el móvil, por ejemplo).
-- **El valor del servidor es una suposición:** con `enServidor = false`, una isla que muestre algo distinto según la consulta pintará primero la versión "falsa" y cambiará al hidratar. Si eso se nota, la solución vuelve a ser CSS.
+- **Para el diseño, CSS:** mostrar u ocultar según el ancho es `hidden lg:block` (B7.4), sin JavaScript ni parpadeo. El hook, para **lógica** (no cargar algo pesado en el móvil).
+- **El valor del servidor es una suposición:** si se nota el cambio al hidratar, la solución vuelve a ser CSS.
 
 </Callout>
 
@@ -547,7 +541,7 @@ import { SelectorTema } from "../components/hooks/SelectorTema";
 </style>
 ```
 
-Medido en Chrome, emulando la preferencia del sistema operativo:
+Emulando la preferencia del sistema operativo:
 
 ```text
 1) sistema claro, sin preferencia: Preferencia: sistema · tema aplicado: light · <html data-theme="light"> · fondo rgba(0, 0, 0, 0)
@@ -558,18 +552,15 @@ Medido en Chrome, emulando la preferencia del sistema operativo:
 localStorage: "sistema" · errores: ninguno
 ```
 
-Las decisiones:
-
-- **`useTema` compone dos hooks:** `useLocalStorage` (con un esquema `z.enum`, así que un valor raro guardado vuelve a `"sistema"`) y `useMediaQuery`. Un _custom hook_ puede usar otros hooks, igual que un componente.
-- **El tema aplicado se calcula, no se guarda:** `tema` sale de `preferencia` y `sistemaOscuro` en cada render. Guardarlo en otro estado obligaría a mantener dos valores sincronizados (y a que se desincronicen).
-- **`useEffect` para tocar el DOM:** cambiar `document.documentElement` es un efecto secundario: va en un efecto, no en el cuerpo del componente.
-- **`SelectorTema` no sabe nada de `localStorage` ni de _media queries_:** si mañana el tema se guarda en la cuenta del usuario, solo cambia el hook.
+- **`useTema` compone dos hooks:** `useLocalStorage` (con `z.enum`: un valor raro vuelve a `"sistema"`) y `useMediaQuery`.
+- **El tema aplicado se calcula, no se guarda:** sale de `preferencia` y `sistemaOscuro` en cada render. **`useEffect`** toca `document.documentElement`, un efecto secundario.
+- **`SelectorTema` no sabe de `localStorage` ni de _media queries_:** si el tema pasa a la cuenta del usuario, solo cambia el hook.
 
 <Callout type="risk">
 
-- **Este tema parpadea al cargar:** el HTML llega sin `data-theme`, React hidrata y solo entonces el efecto aplica el tema. Con el sistema en oscuro, la página se ve un instante en claro. Esta plataforma lo evita con un script en línea en el `<head>` que aplica el tema **antes** del primer pintado (`src/scripts/theme-init.js`, Tanda 9). El hook se encarga de los cambios **después** de cargar.
-- **Si hay varios selectores de tema en la página,** todos comparten el mismo estado gracias a `useLocalStorage`, pero cada uno ejecuta el efecto. No pasa nada (escriben el mismo valor), pero es una señal de que el tema es estado **global**: en I2.4 verás herramientas mejores para eso.
-- **"Sistema" debe ser una opción explícita:** si solo ofreces claro y oscuro, el usuario que elige uno ya no puede volver a seguir al sistema operativo sin borrar `localStorage` a mano.
+- **Este tema parpadea al cargar:** el efecto llega tras la hidratación. Esta plataforma aplica el tema **antes** del primer pintado con un script en línea (`src/scripts/theme-init.js`); el hook solo gestiona los cambios.
+- **Varios selectores comparten estado** pero cada uno ejecuta el efecto: señal de estado **global** (I2.4).
+- **"Sistema" debe ser una opción explícita:** si no, quien elige claro u oscuro no puede volver sin borrar `localStorage`.
 
 </Callout>
 
@@ -581,8 +572,8 @@ Tus componentes contienen UI y tus hooks contienen lógica: respetas las reglas 
 
 ## Resumen
 
-- React guarda los hooks por orden de llamada: llámalos siempre en el nivel superior, nunca en un `if`, un bucle o después de un `return`.
-- Un _custom hook_ es una función `use…` que usa otros hooks: reutiliza lógica, no datos.
-- `useFetch<T>(url, esquema)`: genérico, cancelable y validado con Zod; el esquema, declarado fuera del componente.
-- En una isla, leer `localStorage` en el inicializador de `useState` rompe la hidratación; `useSyncExternalStore` con un valor de servidor lo resuelve y sincroniza componentes y pestañas.
-- `useMediaQuery` y `useTema` siguen el mismo patrón; para el diseño adaptable, CSS sigue siendo mejor que un hook.
+- Los hooks se identifican por orden: nivel superior, nunca en `if`, bucles ni tras un `return`.
+- Un _custom hook_ reutiliza lógica, no datos.
+- `useFetch<T>(url, esquema)`: genérico, cancelable y validado; esquema fuera del componente.
+- En una isla, `localStorage` en `useState` rompe la hidratación; `useSyncExternalStore` lo resuelve.
+- `useMediaQuery` y `useTema` siguen el patrón; para el diseño, CSS.

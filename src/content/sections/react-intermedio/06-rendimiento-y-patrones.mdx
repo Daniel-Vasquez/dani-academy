@@ -7,11 +7,9 @@ minutes: 60
 summary: "Mides cuándo useMemo y memo compensan, pruebas el React Compiler en Astro y su conflicto de versiones, usas render props, lifting state up, lazy con Suspense y construyes unas Tabs compuestas accesibles."
 ---
 
-Cuando una app de React "va lenta", la tentación es llenarla de `memo`, `useMemo` y `useCallback`. A veces ayuda; muchas veces solo añade ruido y complejidad sin ganar nada medible. En esta sección vas a decidir con datos: vas a medir cuánto ahorra `useMemo` en un caso concreto, vas a probar el **React Compiler**, que promete hacer esa memorización automáticamente, y vas a comprobar en qué estado está hoy dentro de Astro. Después verás tres patrones para organizar componentes (_render props_, _lifting state up_ y componentes compuestos), la carga diferida con `lazy`, y terminarás construyendo unas pestañas accesibles con teclado.
+Ante una app "lenta", la tentación es llenarla de `memo`, `useMemo` y `useCallback`, y a menudo solo añade ruido. Aquí decides con datos: mides cuánto ahorra `useMemo`, pruebas el **React Compiler** en Astro, ves tres patrones de componentes y `lazy`, y construyes unas pestañas accesibles con teclado.
 
-**Lo que tendrás al terminar:** mediciones reales de memorización (manual y automática), una página de patrones, un componente cargado bajo demanda y un componente `Tabs` compuesto y accesible.
-
-**Requisitos:** las secciones I2.1 a I2.5 (sobre todo la medición de identidad de I2.1) y el adaptador de Node de I2.1.
+**Requisitos:** I2.1–I2.5 (sobre todo la identidad de I2.1) y el adaptador de Node de I2.1.
 
 ```bash
 mkdir -p src/components/rendimiento src/components/tabs
@@ -19,7 +17,7 @@ mkdir -p src/components/rendimiento src/components/tabs
 
 ## Paso 1: `memo`, `useMemo` y `useCallback`, cuándo sirven
 
-Las tres herramientas evitan trabajo repetido entre renders:
+**Qué es:** tres herramientas que evitan trabajo repetido entre renders.
 
 | Herramienta                  | Qué memoriza                                        | Sirve cuando…                                                                            |
 | ---------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -27,7 +25,7 @@ Las tres herramientas evitan trabajo repetido entre renders:
 | `useMemo(() => valor, deps)` | Un valor calculado                                  | El cálculo es caro, o el valor es una _prop_ de un `memo` o una dependencia de un efecto |
 | `useCallback(fn, deps)`      | Una función                                         | La función es una _prop_ de un `memo` o una dependencia de un efecto                     |
 
-En I2.1 ya mediste el segundo uso (identidad): sin `useMemo`/`useCallback`, `memo` no servía de nada y el efecto se disparaba en cada render. Ahora mide el primero, un cálculo caro. Crea `src/components/rendimiento/Estadisticas.tsx`:
+**Cómo se usa:** el uso por identidad ya lo mediste en I2.1; ahora, un cálculo caro. Crea `src/components/rendimiento/Estadisticas.tsx`.
 
 ```tsx
 // Archivo: src/components/rendimiento/Estadisticas.tsx
@@ -98,7 +96,7 @@ import { EstadisticasConMemo, EstadisticasSinMemo } from "../components/rendimie
 </Base>
 ```
 
-Pulsa tres veces "Ver detalles" en cada tarjeta. El botón cambia un estado que **no** tiene nada que ver con el cálculo. Medido en Chrome (en desarrollo):
+Pulsa tres veces "Ver detalles" en cada tarjeta, un estado ajeno al cálculo. En desarrollo:
 
 ```text
 al hidratar: sin useMemo: 1.7 ms · con useMemo: 1.7 ms
@@ -106,19 +104,22 @@ al hidratar: sin useMemo: 1.7 ms · con useMemo: 1.7 ms
 3 clics en "Ver detalles" (con-memo): con useMemo: 0.1 ms · con useMemo: 0.0 ms · con useMemo: 0.0 ms
 ```
 
-`useMemo` funciona: tras el primer render, el cálculo no se repite (0 ms). Pero fíjate en la escala: recorrer **200 000 entrenos** cuesta entre 1,4 y 4,7 ms. Un fotograma dura 16 ms, así que ni siquiera sin `useMemo` el usuario notaría nada. Esa es la lección: **la mayoría de los cálculos son más baratos de lo que parecen**. La documentación de React propone una regla práctica: si un cálculo tarda más de **1 ms** de forma constante, memorizarlo puede compensar; por debajo, es ruido. Y la única forma de saberlo es medir (`console.time`, el _Profiler_ de I2.1).
+- **`useMemo` funciona:** tras el primer render, 0 ms. Pero recorrer **200 000 entrenos** cuesta 1,4–4,7 ms, y un fotograma dura 16: sin `useMemo`, nadie notaría nada.
+- **La regla práctica de React:** memorizar compensa si un cálculo tarda más de **1 ms** de forma constante. Se sabe midiendo (`console.time`, el _Profiler_ de I2.1).
 
 <Callout type="risk">
 
-- **La memorización tiene coste:** cada `useMemo` guarda el valor anterior y compara sus dependencias en cada render. Envolver un `a + b` o un `.filter` de 20 elementos es más lento que no hacerlo, y además más difícil de leer.
-- **`memo` sin estabilizar las _props_ no hace nada:** si pasas un objeto o una función creados en el render (I2.1, Paso 3), `memo` compara, ve que han cambiado y renderiza igual. O estabilizas las _props_ o quitas el `memo`.
-- **Unas dependencias incompletas dan valores viejos:** `useMemo(() => calcular(datos), [])` con `datos` cambiantes devolverá siempre el primer resultado. Deja que la regla `react-hooks/exhaustive-deps` revise las dependencias.
+- **La memorización cuesta:** guarda el valor y compara dependencias en cada render. Envolver un `a + b` es más lento y menos legible.
+- **`memo` sin _props_ estables no hace nada** (I2.1): estabilízalas o quita el `memo`.
+- **Dependencias incompletas dan valores viejos:** `useMemo(() => calcular(datos), [])` devuelve siempre el primero. Que lo revise `react-hooks/exhaustive-deps`.
 
 </Callout>
 
 ## Paso 2: el React Compiler y su estado actual en Astro
 
-El **React Compiler** analiza tus componentes al compilar y añade la memorización por ti: es como si cada valor, función y JSX llevara su `useMemo` o `useCallback` exacto, sin escribirlos. Su versión 1.0 es estable y React recomienda usarlo en proyectos nuevos. La integración de React de Astro 7 lo activa con una opción:
+**Qué es:** el **React Compiler** analiza tus componentes al compilar y añade la memorización exacta, sin escribirla. Su versión 1.0 es estable y React lo recomienda en proyectos nuevos. En Astro 7 se activa con una opción de la integración.
+
+**Cómo se usa:**
 
 ```js
 // @ts-check
@@ -139,13 +140,13 @@ export default defineConfig({
 });
 ```
 
-Pero al activarlo hay que instalar una pieza más, y ahí aparece el problema. Si arrancas el proyecto solo con `compiler: true`:
+Solo con `compiler: true`, al arrancar:
 
 ```text
 React Compiler requires the optional `oxc-transform-react` package. Install it in your project before enabling `react({ compiler: true })`.
 ```
 
-Con estas versiones, el compilador lo ejecuta `oxc-transform-react`, y no el `babel-plugin-react-compiler` que indican la mayoría de los tutoriales. Pero al instalarlo, npm encuentra un conflicto entre lo que pide cada paquete (fragmento):
+- **Aquí lo ejecuta `oxc-transform-react`,** no el `babel-plugin-react-compiler` de los tutoriales. Al instalarlo, npm encuentra un conflicto (fragmento):
 
 ```text
 npm error While resolving: @astrojs/react@7.0.1
@@ -155,13 +156,13 @@ npm error Could not resolve dependency:
 npm error peerOptional oxc-transform-react@"^0.145.0" from @astrojs/react@7.0.1
 ```
 
-`@astrojs/react` 7.0.1 pide la versión `^0.145.0` y el _plugin_ de Vite que trae dentro pide `^0.152.0`. En versiones `0.x`, `^0.145.0` no admite la `0.152`, así que no hay ninguna versión que satisfaga a los dos. Para **probarlo** (no para producción), se puede forzar:
+- **`@astrojs/react` 7.0.1 pide `^0.145.0` y su _plugin_ de Vite, `^0.152.0`:** en versiones `0.x` no hay ninguna que valga para los dos. Para **probarlo**, no para producción:
 
 ```bash
 npm install --save-dev "oxc-transform-react@^0.152.0" --legacy-peer-deps
 ```
 
-Con el compilador funcionando, repite las mediciones de `/identidad` (I2.1) y `/rendimiento` **sin cambiar ni una línea de los componentes** (solo las líneas que cambian respecto a las mediciones anteriores):
+Repitiendo `/identidad` (I2.1) y `/rendimiento` **sin tocar los componentes** (solo lo que cambia):
 
 ```text
 === /identidad con React Compiler:
@@ -174,22 +175,22 @@ Con el compilador funcionando, repite las mediciones de `/identidad` (I2.1) y `/
 3 clics en "Ver detalles" (sin-memo): sin useMemo: 0.0 ms · sin useMemo: 0.0 ms · sin useMemo: 0.0 ms
 ```
 
-En I2.1, "Re-renderizar el padre" renderizaba también la **Tarjeta A** (objetos nuevos en cada render) y volvía a ejecutar el efecto; con el compilador, ni lo uno ni lo otro. Y el cálculo de `EstadisticasSinMemo`, que no tiene `useMemo`, ya no se repite. El compilador ha memorizado todo lo que tú hacías a mano.
-
-**El estado actual, en resumen:** el compilador funciona y hace exactamente lo que promete, pero en Astro 7.3 con `@astrojs/react` 7.0.1 solo se instala forzando las dependencias. Hasta que una versión nueva de la integración resuelva el conflicto, úsalo para experimentar en una rama, no en producción. Cuando lo pruebes, **deshazlo** al terminar: quita `compiler: true` y desinstala el paquete (`npm uninstall oxc-transform-react --legacy-peer-deps`).
+- **La Tarjeta A ya no se renderiza** con el padre, el efecto no se repite y `EstadisticasSinMemo` deja de recalcular: el compilador memorizó todo lo que hacías a mano.
+- **En Astro 7.3 con `@astrojs/react` 7.0.1 solo se instala forzando dependencias:** experiméntalo en una rama y deshazlo (quita `compiler: true` y `npm uninstall oxc-transform-react --legacy-peer-deps`).
 
 <Callout type="risk">
 
-- **`--legacy-peer-deps` instala combinaciones que nadie ha probado juntas:** aquí funcionó en las mediciones, pero las versiones de pares (_peer dependencies_) existen precisamente para avisar de incompatibilidades. En producción, espera a una combinación oficial.
-- **Tras activar o desactivar el compilador, Vite puede quedarse con una caché incoherente:** en el laboratorio, una isla falló al hidratar con `_jsxDEV is not a function`. Reiniciar con `npm run dev -- --force` (que regenera la caché de dependencias) lo resolvió.
-- **El compilador no arregla un componente lento:** evita renders y cálculos **repetidos**, pero el primer render de una lista de 10 000 filas sigue costando lo mismo. Para eso, menos filas (paginación, virtualización) o `useTransition` (I2.5).
-- **El compilador asume que tu código sigue las reglas de React:** componentes puros y estado sin mutar. Si un componente las rompe (modifica una _prop_, lee algo mutable en el render), el compilador puede saltárselo o cambiar su comportamiento. Otra razón para respetar las reglas de I2.1 e I2.2.
+- **`--legacy-peer-deps` instala combinaciones no probadas juntas:** en producción, espera una combinación oficial.
+- **Tras activarlo o desactivarlo, Vite puede quedar incoherente:** en el laboratorio, `_jsxDEV is not a function`. `npm run dev -- --force` regenera la caché.
+- **No arregla un componente lento:** evita lo **repetido**, no el primer render de 10 000 filas (paginación, virtualización o `useTransition`, I2.5). Y asume componentes puros y estado sin mutar (I2.1, I2.2).
 
 </Callout>
 
 ## Paso 3: patrones para organizar componentes
 
-Tres patrones que verás en cualquier proyecto de React. Crea `src/components/rendimiento/Patrones.tsx`:
+**Qué es:** **_render props_** (el componente pone la lógica y una función decide cómo se pinta), **_lifting state up_** (el estado compartido sube al padre común) y **componentes compuestos** (varios que solo tienen sentido juntos, con un contexto interno). Y **`lazy`** con **`Suspense`**, que cargan una parte bajo demanda y muestran un _fallback_ mientras llega.
+
+**Cómo se usa:** crea `src/components/rendimiento/Patrones.tsx`.
 
 ```tsx
 // Archivo: src/components/rendimiento/Patrones.tsx
@@ -263,11 +264,10 @@ export function DemoPatrones() {
 }
 ```
 
-- **_Render props_:** `ListaFiltrable` se encarga de la **lógica** (el filtro y su estado) y recibe una función `renderElemento` que decide **cómo se pinta** cada elemento. Es genérica (`<T>`, I1.1): sirve para entrenos, cursos o notas. Hoy, la mayoría de estos casos se resuelven con un _custom hook_ (I2.2), pero el patrón sigue siendo útil cuando la parte variable es JSX.
-- **_Lifting state up_:** `SelectorSemana` y `ResumenSemana` necesitan la misma semana. El estado "sube" al padre común (`PanelSemanal`) y baja a cada hijo por _props_. Es la primera herramienta que hay que probar antes que el contexto o un _store_ (I2.4).
-- **Componentes compuestos:** varios componentes que solo tienen sentido juntos (`<Tabs>`, `<Tabs.List>`, `<Tabs.Panel>`) y comparten estado a través de un contexto interno. Es el patrón del ejercicio.
+- **`ListaFiltrable<T>`** (I1.1) lleva el filtro y recibe `renderElemento`. Hoy, casi siempre lo resuelve un _custom hook_ (I2.2), salvo cuando lo variable es JSX.
+- **`PanelSemanal`** sube la semana que comparten `SelectorSemana` y `ResumenSemana`: lo primero que probar antes que contexto o un _store_ (I2.4). Los componentes compuestos son el ejercicio.
 
-La carga diferida va en dos archivos más. `src/components/rendimiento/GraficoPesado.tsx`:
+La carga diferida, `src/components/rendimiento/GraficoPesado.tsx`:
 
 ```tsx
 // Archivo: src/components/rendimiento/GraficoPesado.tsx
@@ -286,7 +286,7 @@ export default function GraficoPesado() {
 }
 ```
 
-Y `src/components/rendimiento/PanelGrafico.tsx`, que lo carga con **`lazy`** y muestra un _fallback_ con **`Suspense`** mientras llega:
+Y `src/components/rendimiento/PanelGrafico.tsx`, con `lazy` y `Suspense`:
 
 ```tsx
 // Archivo: src/components/rendimiento/PanelGrafico.tsx
@@ -329,14 +329,14 @@ import { PanelGrafico } from "../components/rendimiento/PanelGrafico";
 </Base>
 ```
 
-Para ver la carga diferida, compila y mide en producción, con la red de DevTools en modo lento (_Slow 4G_):
+Compila y mide en producción con la red lenta (_Slow 4G_):
 
 ```bash
 npm run build
 PORT=4322 node dist/server/entry.mjs
 ```
 
-Medido en Chrome, con la red limitada a 200 KB/s y 300 ms de latencia:
+Con 200 KB/s y 300 ms de latencia:
 
 ```text
 al cargar, ¿se ha pedido GraficoPesado? no (6 archivos /_astro/)
@@ -346,14 +346,13 @@ lifting state up, tras →: Resumen de la semana 42: 54 min
 al final: gráfico visible · pedido tras el clic: [ 'GraficoPesado.DAhAWByG.js' ]
 ```
 
-El _build_ generó un archivo propio para el gráfico (`GraficoPesado.DAhAWByG.js`; el código final varía), y el navegador **solo lo pidió al pulsar** "Ver gráfico". Mientras tanto, `Suspense` mostró "Cargando gráfico…".
+- **El _build_ separó el gráfico** (`GraficoPesado.DAhAWByG.js`; el código varía), el navegador **solo lo pidió al pulsar** "Ver gráfico" y `Suspense` mostró "Cargando gráfico…".
 
 <Callout type="risk">
 
-- **En Astro, la primera herramienta de carga diferida son las directivas:** `client:visible` o `client:idle` (B6.7) ya retrasan toda una isla. `lazy` sirve **dentro** de una isla, para una parte que solo se necesita a veces (una pestaña, un modal, un gráfico).
-- **`lazy` necesita un `export default`:** `lazy(() => import("./GraficoPesado"))` espera un módulo con exportación por defecto. Con una exportación con nombre, hay que adaptarla: `lazy(() => import("./X").then((m) => ({ default: m.X })))`.
-- **Declara `lazy` fuera del componente:** si lo llamas dentro, cada render crea un componente nuevo, React desmonta el anterior y el estado del gráfico se pierde en cada render.
-- **Un _fallback_ que cambia de tamaño hace saltar la página:** si "Cargando…" ocupa una línea y el gráfico 200 px, el contenido de debajo se mueve (CLS). Dale al _fallback_ el mismo alto que el contenido.
+- **En Astro, primero las directivas:** `client:visible` o `client:idle` (B6.7) retrasan toda la isla; `lazy` es para una parte **dentro** de ella (una pestaña, un modal).
+- **`lazy` necesita `export default`:** con uno con nombre, `lazy(() => import("./X").then((m) => ({ default: m.X })))`. Y se declara **fuera** del componente, o cada render crea uno nuevo y pierde el estado.
+- **Un _fallback_ de otro tamaño hace saltar la página (CLS):** dale el alto del contenido final.
 
 </Callout>
 
@@ -521,7 +520,7 @@ import { PanelProgreso } from "../components/tabs/PanelProgreso";
 </style>
 ```
 
-Medido en Chrome, recorriendo el componente solo con el teclado (y después con axe, la misma herramienta de accesibilidad que usan los E2E de esta plataforma):
+Recorrido solo con teclado y después con axe (la herramienta de los E2E de esta plataforma):
 
 ```text
 Tab:         foco: tab "Progreso" · seleccionada: Progreso · panel visible: "8 de 24 cursos completados." (aria-labelledby ok: true)
@@ -537,20 +536,15 @@ tabindex de las pestañas: Progreso=0 Exámenes=-1 Sesiones=-1
 axe (WCAG A/AA): sin infracciones
 ```
 
-Las decisiones:
-
-- **Un contexto interno y un hook que lo exige:** `useTabs("Tabs.Trigger")` lanza un error que dice qué subcomponente se usó fuera de `<Tabs>` (el patrón de I2.4).
-- **_Roving tabindex_:** solo la pestaña activa tiene `tabIndex={0}`; las demás, `-1`. Así, Tab entra en el grupo una sola vez y sale al panel, en lugar de recorrer cada pestaña. Dentro del grupo se navega con flechas, como espera cualquier usuario de lector de pantalla.
-- **Activación automática:** mover el foco con las flechas también selecciona la pestaña. Es lo recomendado cuando los paneles se muestran al instante (si cargaran datos, sería mejor activar solo con Intro o espacio).
-- **`useId()` para los identificadores:** dos `<Tabs>` en la misma página no chocan, y el id coincide entre el servidor y la hidratación (un contador propio o `Math.random()` romperían la hidratación).
-- **`hidden` en los paneles inactivos:** quedan fuera de la vista, del orden de tabulación y del árbol de accesibilidad, pero siguen montados (el estado de su contenido se conserva al cambiar de pestaña).
-- **`Tabs.List = List`:** asignar los subcomponentes como propiedades de la función da la sintaxis `<Tabs.List>` y deja claro que solo tienen sentido juntos.
+- **Contexto interno y un hook que lo exige:** `useTabs("Tabs.Trigger")` dice qué subcomponente se usó fuera de `<Tabs>` (I2.4). `Tabs.List = List` da la sintaxis `<Tabs.List>`.
+- **_Roving tabindex_:** solo la activa tiene `tabIndex={0}`, así Tab entra una vez y sale al panel; dentro, flechas. Mover el foco también selecciona: conviene con paneles instantáneos (si cargaran datos, solo con Intro o espacio).
+- **`useId()`** evita choques entre dos `<Tabs>` y coincide entre servidor e hidratación. **`hidden`** saca los paneles inactivos de la vista, del tabulado y de la accesibilidad, pero los mantiene montados con su estado.
 
 <Callout type="risk">
 
-- **Unas pestañas no son navegación:** si cada pestaña debe tener su propia URL (compartible, con historial), usa enlaces normales y páginas, no `role="tab"`. Las pestañas son para cambiar de vista **dentro** de una página.
-- **Los atributos ARIA prometen un comportamiento:** poner `role="tab"` sin implementar las flechas es peor que no ponerlo, porque el lector de pantalla anuncia "pestaña 1 de 3" y el usuario intentará usar las flechas. Si añades un rol, implementa su teclado completo (guía de patrones de la WAI-ARIA).
-- **Con muchos paneles pesados, `hidden` puede no bastar:** todos los paneles se renderizan aunque no se vean. Si un panel es caro, renderízalo solo cuando esté activo (`{activa && …}`), a cambio de perder su estado al salir, o cárgalo con `lazy` como el gráfico.
+- **Unas pestañas no son navegación:** si cada una necesita URL e historial, enlaces y páginas, no `role="tab"`.
+- **Un rol ARIA promete un teclado:** `role="tab"` sin flechas es peor que nada, porque el lector anuncia "pestaña 1 de 3". Implementa el patrón completo de la WAI-ARIA.
+- **Con paneles pesados, `hidden` no basta:** todos se renderizan. Renderiza solo el activo (`{activa && …}`), perdiendo su estado, o cárgalo con `lazy`.
 
 </Callout>
 
@@ -562,8 +556,8 @@ Optimizas solo después de medir con el _Profiler_: sabes que la mayoría de los
 
 ## Resumen
 
-- `useMemo` evitó repetir un cálculo de 200 000 elementos… que solo costaba 1,4–4,7 ms: memoriza lo que dura más de ~1 ms o lo que necesita identidad estable.
-- El React Compiler memoriza automáticamente (medido: sin re-renders de la Tarjeta A ni cálculos repetidos), pero en Astro 7.3 con `@astrojs/react` 7.0.1 solo se instala forzando un conflicto de dependencias.
-- _Render props_: lógica en el componente, presentación en una función; _lifting state up_: el estado compartido en el padre común.
-- `lazy` + `Suspense` cargan una parte de una isla solo cuando se necesita (medido: el archivo del gráfico se pide tras el clic).
-- Componente compuesto accesible: contexto interno, roles ARIA, _roving tabindex_, flechas/Inicio/Fin y `useId`.
+- `useMemo` ahorró un cálculo de 1,4–4,7 ms: memoriza lo que pasa de ~1 ms o necesita identidad.
+- El React Compiler memoriza solo, pero en Astro 7.3 con `@astrojs/react` 7.0.1 exige forzar dependencias.
+- _Render props_ separan lógica y presentación; _lifting state up_ sube el estado al padre común.
+- `lazy` + `Suspense` piden una parte de la isla solo al necesitarla, con un _fallback_ mientras tanto.
+- Componente compuesto accesible: contexto, roles ARIA, _roving tabindex_, flechas y `useId`.

@@ -7,11 +7,9 @@ minutes: 60
 summary: "Escribes funciones, interfaces y tipos genéricos con restricciones y valores por defecto, reconoces los genéricos de Promise, Array, useState y MongoDB, y lees firmas reales de librerías."
 ---
 
-En B1 aprendiste a poner tipos a todo. Pronto aparece un problema: escribes una función útil (dame el primer elemento, búscalo por `id`, pagina esta lista) y la necesitas para entrenos, para cursos y para notas. Tienes tres salidas malas: copiarla una vez por tipo, usar `any` y perder toda la ayuda del compilador, o usar `unknown` y llenar el código de comprobaciones. Los **genéricos** son la salida buena: una sola función que **recuerda el tipo** de lo que le pasas. En esta sección vas a verlos fallar y funcionar, y al final vas a poder leer firmas como `map<U>(callbackfn: (value: T) => U): U[]` sin que te parezcan jeroglíficos.
+Una función útil (dame el primero, búscalo por `id`, pagina esta lista) la necesitas para entrenos, cursos y notas. Copiarla, usar `any` o usar `unknown` son malas salidas; los **genéricos** son la buena: una sola función que **recuerda el tipo** de lo que le pasas. Al terminar leerás firmas como `map<U>(callbackfn: (value: T) => U): U[]`.
 
-**Lo que tendrás al terminar:** una carpeta `src/i1/` en tu `ts-playground` con funciones e interfaces genéricas, y una función `agruparPor` reutilizable para cualquier lista.
-
-**Requisitos:** el proyecto `ts-playground` de B1 (TypeScript con `strict` y `noUncheckedIndexedAccess`). Durante todo el curso I1 trabajarás ahí, dentro de una carpeta nueva:
+**Requisitos:** el proyecto `ts-playground` de B1 (con `strict` y `noUncheckedIndexedAccess`). Todo I1 se trabaja en una carpeta nueva:
 
 ```bash
 cd ts-playground
@@ -20,7 +18,9 @@ mkdir src/i1
 
 ## Paso 1: el problema que resuelven
 
-Crea `src/i1/01-sin-genericos.ts`, con tres intentos de escribir "dame el primer elemento" sin genéricos:
+**Qué es:** tres intentos de escribir "dame el primer elemento" sin genéricos, y por qué ninguno sirve.
+
+**Cómo se usa:** crea `src/i1/01-sin-genericos.ts`.
 
 ```ts
 // Archivo: src/i1/01-sin-genericos.ts
@@ -61,7 +61,7 @@ npm run typecheck
 npm start -- src/i1/01-sin-genericos.ts
 ```
 
-`typecheck` no da ningún error, pero al ejecutar:
+`typecheck` no da errores, pero al ejecutar:
 
 ```text
 fuerza
@@ -69,30 +69,26 @@ fuerza
 TypeError: b.toUpperCase is not a function
 ```
 
-Los tres intentos tienen un problema:
-
-1. **Una función por tipo** (`primerNumero`, `primerTexto`): funciona y está bien tipada, pero el cuerpo es idéntico. Con diez tipos, diez copias.
-2. **`any`**: una sola función, pero el resultado es `any` y TypeScript **deja de comprobar**. `b` es un número, `b.toUpperCase()` compila sin quejas y el programa explota al ejecutarse. Es justo el tipo de error que TypeScript existe para evitar.
-3. **`unknown`**: segura, pero inútil sin más trabajo. Añade al final del archivo `console.log(c.toFixed(1));` y ejecuta `npm run typecheck`:
+- **Una función por tipo** (`primerNumero`, `primerTexto`) está bien tipada, pero el cuerpo es idéntico: diez tipos, diez copias.
+- **Con `any`, TypeScript deja de comprobar:** `b` es un número, `b.toUpperCase()` compila y explota al ejecutar.
+- **Con `unknown`, la función "olvida" el tipo.** Añade `console.log(c.toFixed(1));` al final y ejecuta `npm run typecheck` (luego bórralo):
 
 ```text
 src/i1/01-sin-genericos.ts(32,13): error TS18046: 'c' is of type 'unknown'.
 ```
 
-TypeScript no sabe que `c` es un número, porque la función "olvidó" el tipo al devolverlo. Borra esa línea antes de seguir.
-
-Lo que necesitas es una función que diga: "devuelvo **el mismo tipo** que había dentro de la lista que me pasaste". Eso es un genérico.
-
 <Callout type="risk">
 
-- **`any` es contagioso:** un `any` que sale de una función se propaga a todo lo que lo toca (`const x = b.algo` también es `any`). Un solo `any` en una función de utilidades puede desactivar la comprobación en media aplicación sin que lo notes.
-- **`unknown` no es el enemigo:** es la opción correcta cuando de verdad no sabes qué llega (un `JSON.parse`, el cuerpo de una petición). Lo usarás con Zod en I1.4. El problema aquí es usarlo cuando **sí** sabes el tipo y solo lo estás perdiendo por el camino.
+- **`any` es contagioso:** todo lo que toca también es `any`. Un solo `any` en una utilidad puede desactivar la comprobación en media aplicación.
+- **`unknown` es correcto cuando de verdad no sabes qué llega** (un `JSON.parse`, el cuerpo de una petición; I1.4). El error es usarlo cuando sí sabes el tipo.
 
 </Callout>
 
 ## Paso 2: tu primera función genérica
 
-Crea `src/i1/01-genericos.ts`:
+**Qué es:** **`<T>`** tras el nombre declara un **parámetro de tipo**: igual que `lista` recibe un valor, `T` recibe un tipo. La firma de `primero` dice "devuelvo uno de los elementos de la lista que me pasaste, o `undefined`".
+
+**Cómo se usa:** crea `src/i1/01-genericos.ts`.
 
 ```ts
 // Archivo: src/i1/01-genericos.ts
@@ -134,27 +130,23 @@ FUERZA
 7 10.00
 ```
 
-Cómo funciona:
-
-- **`<T>` después del nombre** declara un **parámetro de tipo**. Igual que `lista` es un parámetro que recibe un valor, `T` recibe un tipo. El nombre `T` es una convención (de _Type_); podría llamarse `Elemento`.
-- **`lista: T[]` y `: T | undefined`** usan ese tipo. La firma dice: "recibo una lista de algo y devuelvo uno de esos algo, o `undefined` si está vacía".
-- **Inferencia:** en `primero(km)` no escribes el tipo; TypeScript ve que `km` es `number[]` y deduce `T = number`. Pasa el ratón por `a` en VS Code: `const a: number | undefined`. Con `tipos`, `T = string`, y por eso `b?.toUpperCase()` es válido.
-- **Tipo explícito:** en `primero<string>([])`, la lista vacía no da pistas, así que lo indicas tú entre `< >`.
-- **Varios parámetros de tipo:** `par<A, B>` devuelve una tupla `[A, B]`. En `par("running", 10)`, `p[0]` es `string` (por eso tiene `.length`) y `p[1]` es `number`.
-
-La analogía: una función normal es una **receta** con huecos para ingredientes (los parámetros). Una función genérica es una receta en la que también es un hueco **el tipo de recipiente**. Escribes la receta una vez y quien la usa decide si la sirve en `number` o en `string`, y el resultado sale en ese mismo recipiente.
+- **Inferencia:** en `primero(km)`, TypeScript deduce `T = number` (pasa el ratón por `a`: `number | undefined`). Con `tipos`, `T = string`, y `b?.toUpperCase()` es válido.
+- **Tipo explícito solo sin pistas:** `primero<string>([])`.
+- **Varios parámetros:** `par<A, B>` devuelve `[A, B]`; en `par("running", 10)`, `p[0]` es `string` y `p[1]`, `number`.
 
 <Callout type="risk">
 
-- **No hace falta escribir `<T>` al llamar:** si TypeScript puede inferirlo, déjalo inferir. Escribir `primero<number>(km)` es redundante y, si un día cambia el tipo de `km`, es una línea más que actualizar.
-- **Un genérico que no relaciona nada sobra:** `function log<T>(x: T): void` no gana nada frente a `(x: unknown): void`, porque `T` no aparece en el resultado ni en otro parámetro. Un parámetro de tipo vale la pena cuando **conecta** la entrada con la salida (o dos entradas entre sí).
-- **Los genéricos no existen al ejecutar:** como todos los tipos, desaparecen al compilar. Dentro de `primero` no puedes preguntar "¿T es número?" (`typeof T` no funciona en ejecución). Si necesitas comportarte distinto según el tipo, el genérico no es la herramienta.
+- **No escribas `<T>` al llamar si se infiere:** `primero<number>(km)` es una línea más que actualizar si cambia `km`.
+- **Un genérico que no conecta nada sobra:** `function log<T>(x: T): void` no gana nada frente a `(x: unknown)`. `T` vale la pena si une entrada y salida.
+- **Los genéricos no existen al ejecutar:** dentro de `primero` no puedes preguntar si `T` es número.
 
 </Callout>
 
 ## Paso 3: restricciones con `extends` y valores por defecto
 
-A veces la función necesita **algo concreto** del tipo. `porId` tiene que leer `x.id`; con un `T` cualquiera, TypeScript no puede garantizar que exista. La restricción `T extends { id: string }` significa "T puede ser cualquier tipo, **siempre que** tenga un `id` de texto". Crea `src/i1/01-restricciones.ts`:
+**Qué es:** **`T extends { id: string }`** significa "T puede ser cualquier tipo, **siempre que** tenga un `id` de texto". Pone un **mínimo**, y el tipo completo viaja hasta el resultado. **`<T = string>`** da un valor por defecto.
+
+**Cómo se usa:** crea `src/i1/01-restricciones.ts`.
 
 ```ts
 // Archivo: src/i1/01-restricciones.ts
@@ -217,9 +209,10 @@ running
 GUARDADO 4
 ```
 
-Lo importante está en lo que **no** se pierde: `porId(entrenos, "e2")` devuelve `Entreno | undefined`, no `{ id: string } | undefined`. La restricción pone un **mínimo**, pero el tipo completo viaja hasta el resultado, y por eso puedes leer `entreno?.minutos`.
+- **`porId(entrenos, "e2")` devuelve `Entreno | undefined`,** no `{ id: string } | undefined`: por eso lees `entreno?.minutos`.
+- **`Respuesta` a secas es `Respuesta<string>`;** `Respuesta<number>` lo cambia.
 
-Prueba qué pasa si no cumples la restricción. Añade al final del archivo:
+Añade estas líneas para incumplir la restricción (y bórralas después):
 
 ```ts
 const numeros = [1, 2, 3];
@@ -233,21 +226,21 @@ src/i1/01-restricciones.ts(48,7): error TS2345: Argument of type 'number[]' is n
 src/i1/01-restricciones.ts(49,10): error TS2345: Argument of type 'number' is not assignable to parameter of type '{ length: number; }'.
 ```
 
-Los números no tienen `id` ni `length`, así que el compilador los rechaza **en la llamada**, con un mensaje que dice exactamente qué falta. Borra esas tres líneas.
-
-**Valor por defecto:** `interface Respuesta<T = string>` funciona como un parámetro opcional con valor por defecto. `Respuesta` a secas es `Respuesta<string>`; `Respuesta<number>` lo cambia.
+- **Los números no tienen `id` ni `length`:** el error sale **en la llamada**, diciendo qué falta.
 
 <Callout type="risk">
 
-- **`extends` en un genérico no es herencia de clases:** aquí significa "es asignable a", "cumple como mínimo con". `T extends { id: string }` lo cumple cualquier objeto con un `id` de texto, aunque no tenga nada que ver con una clase.
-- **Restringe lo mínimo necesario:** `T extends Entreno` haría que `porId` solo sirviera para entrenos. Pide solo lo que la función usa (`{ id: string }`) y será reutilizable para cursos, notas o usuarios.
-- **Un valor por defecto no sustituye a la inferencia:** en una función, si TypeScript puede inferir `T` desde los argumentos, ignora el valor por defecto. Los valores por defecto son útiles sobre todo en interfaces y tipos, donde no hay argumentos de los que inferir.
+- **`extends` aquí no es herencia:** significa "es asignable a". Lo cumple cualquier objeto con un `id` de texto.
+- **Restringe lo mínimo:** `T extends Entreno` solo serviría para entrenos. Pide lo que la función usa.
+- **En funciones, la inferencia gana al valor por defecto:** los valores por defecto sirven sobre todo en interfaces y tipos.
 
 </Callout>
 
 ## Paso 4: interfaces y tipos genéricos
 
-Las interfaces y los alias de tipo también pueden tener parámetros de tipo. Es lo que permite describir **una vez** la forma de "una página de resultados" o "una operación que puede fallar", sea cual sea el dato. Crea `src/i1/01-tipos-genericos.ts`:
+**Qué es:** las interfaces y los alias de tipo también tienen parámetros: describes **una vez** "una página de resultados" o "una operación que puede fallar", sea cual sea el dato.
+
+**Cómo se usa:** crea `src/i1/01-tipos-genericos.ts`.
 
 ```ts
 // Archivo: src/i1/01-tipos-genericos.ts
@@ -314,10 +307,8 @@ e3: running, 50 min
 e9: No existe e9
 ```
 
-- **`Paginado<T>`**: cualquier endpoint que pagine (entrenos, cursos, notas) devuelve la misma forma. `paginar(entrenos, 2)` devuelve un `Paginado<Entreno>`, así que `pagina2.items` es `Entreno[]`.
-- **`Resultado<T>`**: una **unión discriminada** (B1.6) con el dato solo en la rama `ok: true`. Dentro de `if (r.ok)`, TypeScript sabe que existe `r.datos` y que es un `Entreno`.
-
-Comprueba que el compilador te obliga a mirar `ok` antes de usar el dato. Añade al final:
+- **`Paginado<T>`:** cualquier endpoint que pagine devuelve la misma forma; `paginar(entrenos, 2).items` es `Entreno[]`.
+- **`Resultado<T>`** es una unión discriminada (B1.6): dentro de `if (r.ok)`, `r.datos` existe y es un `Entreno`. Comprueba que el compilador obliga a mirar `ok` (y borra las líneas después):
 
 ```ts
 const r = buscar(entrenos, "e1");
@@ -329,18 +320,20 @@ src/i1/01-tipos-genericos.ts(54,15): error TS2339: Property 'datos' does not exi
   Property 'datos' does not exist on type '{ ok: false; error: string; }'.
 ```
 
-Es la ventaja de `Resultado<T>` frente a devolver `null`: el compilador no te deja olvidar el caso de error. Borra esas dos líneas. Volverás a este patrón en I1.5.
+- **Frente a devolver `null`,** el compilador no deja olvidar el error. Volverás a este patrón en I1.5.
 
 <Callout type="risk">
 
-- **`interface` o `type` para genéricos:** las dos aceptan parámetros de tipo. Las uniones (`Resultado<T>`) solo se pueden escribir con `type`; para formas de objeto (`Paginado<T>`), cualquiera de las dos sirve.
-- **Paginar en memoria solo vale para listas pequeñas:** `paginar` recibe la lista completa y la recorta. Con miles de documentos en MongoDB, la paginación se hace en la consulta (`skip` y `limit`, o mejor, por cursor). La interfaz `Paginado<T>` sigue siendo la misma; cambia cómo se rellena.
+- **Las uniones solo se escriben con `type`;** para formas de objeto, `interface` o `type` valen igual.
+- **Paginar en memoria solo vale para listas pequeñas:** con miles de documentos, se pagina en la consulta (`skip` y `limit`, o por cursor). `Paginado<T>` no cambia.
 
 </Callout>
 
 ## Paso 5: genéricos que ya usabas sin saberlo
 
-Llevas meses usando genéricos: `Promise<T>`, `Array<T>`, `useState<T>`, `collection<T>`. Crea `src/i1/01-ya-los-usas.ts`:
+**Qué es:** `Promise<T>`, `Array<T>`, `useState<T>` y `collection<T>` son genéricos: el tipo entre `< >` **protege todo lo que entra y sale**.
+
+**Cómo se usa:** crea `src/i1/01-ya-los-usas.ts`.
 
 ```ts
 // Archivo: src/i1/01-ya-los-usas.ts
@@ -382,11 +375,10 @@ npm start -- src/i1/01-ya-los-usas.ts
 Dani: 125 min, 21.1 km
 ```
 
-- **`Array<number>`** es exactamente lo mismo que `number[]`; son dos formas de escribirlo.
-- **`Map<string, number>`**: dos parámetros de tipo, uno para las claves y otro para los valores.
-- **`Promise<T>`**: `esperar` devuelve `Promise<T>` y, al hacer `await`, obtienes un `T`. Con `Promise.all`, TypeScript conserva el tipo de **cada posición**: `nombre` es `string` y `km` es `number`.
+- **`Array<number>` es `number[]`;** `Map<string, number>` tiene un tipo para claves y otro para valores.
+- **`await` sobre `Promise<T>` da un `T`,** y `Promise.all` conserva el tipo de cada posición: `nombre` es `string` y `km`, `number`.
 
-Ahora las librerías. Instala MongoDB, React y los tipos de React en el `ts-playground` (solo para comprobar tipos; no vas a ejecutar nada de esto aquí):
+Instala MongoDB y React solo para comprobar tipos:
 
 ```bash
 npm install mongodb react
@@ -422,40 +414,37 @@ export function useEntrenos() {
 }
 ```
 
-`npm run typecheck` pasa sin errores. Ahora provoca dos fallos: en `insertOne`, cambia `tipo: "running"` por `tipo: "natacion"`; y dentro de `useEntrenos`, debajo de `añadir`, añade `setLista([{ tipo: "running", minutos: "30" }]);`:
+`npm run typecheck` pasa. Cambia `tipo: "running"` por `tipo: "natacion"` en `insertOne` y añade `setLista([{ tipo: "running", minutos: "30" }]);` bajo `añadir` (deshazlo después):
 
 ```text
 src/i1/01-librerias.ts(14,25): error TS2322: Type '"natacion"' is not assignable to type '"fuerza" | "running"'.
 src/i1/01-librerias.ts(23,32): error TS2322: Type 'string' is not assignable to type 'number'.
 ```
 
-Ese es el valor de `collection<Entreno>` y `useState<Entreno[]>`: el tipo que pasas entre `< >` **protege todo lo que entra y sale**. MongoDB ya no acepta un documento con un tipo de entreno inventado, y el estado de React no acepta minutos como texto. Deshaz los dos cambios.
+- **MongoDB rechaza el tipo inventado y el estado rechaza minutos como texto:** es lo que aportan `collection<Entreno>` y `useState<Entreno[]>`.
 
 <Callout type="risk">
 
-- **`useState([])` sin tipo infiere `never[]`:** un array vacío no da pistas, así que TypeScript deduce "una lista de nada". Al intentar guardar algo, el error es `Type '{ tipo: string; minutos: number; }' is not assignable to type 'never'`. Con estado inicial vacío o `null`, escribe siempre el tipo: `useState<Entreno[]>([])`, `useState<Entreno | null>(null)`.
-- **`collection<T>` no valida nada en la base de datos:** solo comprueba **tu código** al compilar. Si otro programa (o tú desde Compass) inserta un documento con otra forma, `findOne` lo devolverá igualmente con el tipo `Entreno`, y mentirá. Para eso existen la validación con `$jsonSchema` en MongoDB (B5) y Zod (I1.4).
-- **`collection<T>` sin tipo** usa `Document` por defecto (`TSchema extends Document = Document`): cualquier propiedad es válida y todo sale como `any`. Es fácil olvidarlo y perder toda la comprobación de la capa de datos.
+- **`useState([])` sin tipo infiere `never[]`:** al guardar algo, `is not assignable to type 'never'`. Con estado inicial vacío o `null`, `useState<Entreno[]>([])` o `useState<Entreno | null>(null)`.
+- **`collection<T>` no valida la base de datos,** solo tu código. Un documento insertado desde Compass sale tipado como `Entreno` y miente: para eso `$jsonSchema` (B5) y Zod (I1.4).
+- **`collection` sin tipo usa `Document`:** todo es `any`, y se pierde la comprobación de la capa de datos.
 
 </Callout>
 
 ## Paso 6: leer la firma genérica de una librería
 
-Este es el objetivo real de la sección: abrir los tipos de una librería y entenderlos. Haz `Cmd` + clic (o `Ctrl` + clic) sobre `.map` en `01-ya-los-usas.ts`. VS Code abre `lib.es5.d.ts`, la descripción de los arrays que trae TypeScript, en esta línea:
+**Qué es:** el objetivo real de la sección: abrir los tipos de una librería y entenderlos.
+
+**Cómo se usa:** `Cmd` + clic (o `Ctrl` + clic) sobre `.map` en `01-ya-los-usas.ts` abre `lib.es5.d.ts` en esta línea:
 
 ```ts
 map<U>(callbackfn: (value: T, index: number, array: T[]) => U, thisArg?: any): U[];
 ```
 
-Léela por partes, de izquierda a derecha:
+- **`map<U>`** tiene su propio parámetro, `U`; `T` es el de los elementos, declarado en `interface Array<T>`.
+- **`callbackfn: (value: T, ...) => U`** convierte cada `T` en un `U`, y **`: U[]`** devuelve la lista de `U`. Por eso ``minutos.map((m) => `${m} min`)`` es `string[]`.
 
-1. **`map<U>`**: el método tiene su propio parámetro de tipo, `U`. Además existe `T`, el tipo de los elementos del array (lo declara `interface Array<T>` más arriba).
-2. **`callbackfn: (value: T, ...) => U`**: recibe una función que toma un elemento (`T`) y devuelve **algo** (`U`).
-3. **`: U[]`**: devuelve una lista de ese algo.
-
-Traducido: "si me das una función que convierte cada `T` en un `U`, te devuelvo una lista de `U`". Por eso ``minutos.map((m) => `${m} min`)`` es `string[]`: `T = number` y `U = string`, deducido de lo que devuelve tu función.
-
-Dos firmas más para practicar:
+Dos firmas más:
 
 ```ts
 // React (@types/react): el estado S y su función de actualización
@@ -465,12 +454,12 @@ function useState<S>(initialState: S | (() => S)): [S, Dispatch<SetStateAction<S
 collection<TSchema extends Document = Document>(name: string, options?: CollectionOptions): Collection<TSchema>;
 ```
 
-Con lo que sabes ya puedes leerlas: `useState` acepta un valor inicial (o una función que lo calcula) y devuelve una tupla con el estado y su actualizador. `collection` tiene una **restricción** (`extends Document`) y un **valor por defecto** (`= Document`), los dos conceptos del Paso 3.
+- **`useState`** acepta un valor (o una función que lo calcula) y devuelve la tupla estado-actualizador. **`collection`** tiene restricción (`extends Document`) y valor por defecto (`= Document`), los dos del Paso 3.
 
 <Callout type="risk">
 
-- **Las firmas reales tienen ruido:** sobrecargas, `thisArg?: any`, `readonly`… No intentes entender todo a la vez. Busca primero los parámetros de tipo (lo que va entre `< >`) y sigue por dónde aparecen: en qué parámetro entran y en qué resultado salen.
-- **El editor es tu mejor herramienta:** pasar el ratón sobre una llamada muestra la firma **con los tipos ya sustituidos** (`map<string>(…): string[]`). Es mucho más fácil de leer que la declaración genérica.
+- **Las firmas reales tienen ruido** (sobrecargas, `thisArg?: any`, `readonly`): busca primero lo que va entre `< >` y sigue por dónde entra y sale.
+- **Pasar el ratón sobre una llamada** muestra la firma con los tipos ya sustituidos (`map<string>(…): string[]`): más fácil de leer.
 
 </Callout>
 
@@ -485,7 +474,7 @@ Con lo que sabes ya puedes leerlas: `useState` acepta un valor inicial (o una fu
 
 </Callout>
 
-`K extends keyof T` es un adelanto de la sección siguiente: `keyof T` es la unión de los nombres de las propiedades de `T` (`"id" | "tipo" | "minutos" | "semana"`), así que `K` solo puede ser una propiedad que exista.
+`K extends keyof T` adelanta la sección siguiente: `keyof T` es la unión de los nombres de las propiedades de `T`, así que `K` solo puede ser una que exista.
 
 Solución completa, `src/i1/01-ejercicio.ts`:
 
@@ -554,23 +543,21 @@ movilidad  1 entrenos, 20 min
 }
 ```
 
-Y con `agruparPor(entrenos, "color");` al final:
+Con `agruparPor(entrenos, "color");` al final:
 
 ```text
 src/i1/01-ejercicio.ts(47,22): error TS2345: Argument of type '"color"' is not assignable to parameter of type 'keyof Entreno'.
 ```
 
-Las decisiones:
-
-- **`item[clave]`** es de tipo `T[K]`: el tipo de esa propiedad concreta (`"fuerza" | "running" | "movilidad"` para `tipo`, `number` para `semana`). Como las claves de un objeto JavaScript son siempre texto, se convierte con `String()`. Por eso las semanas salen como `'40'` y `'41'`.
-- **`(grupos[valor] ??= []).push(item)`**: si el grupo no existe, lo crea vacío y después añade el elemento. Con `noUncheckedIndexedAccess`, `grupos[valor]` es `T[] | undefined`, y `??=` resuelve ese `undefined`.
-- **La misma función** agrupa entrenos y cursos sin cambiar una línea: es el objetivo de un genérico.
+- **`item[clave]` es de tipo `T[K]`,** el de esa propiedad. Las claves de un objeto son texto, así que se convierte con `String()`: las semanas salen como `'40'` y `'41'`.
+- **`(grupos[valor] ??= []).push(item)`** crea el grupo si falta; con `noUncheckedIndexedAccess`, `??=` resuelve el `undefined`.
+- **La misma función agrupa entrenos y cursos** sin cambiar una línea.
 
 <Callout type="risk">
 
-- **`String()` mezcla valores distintos:** el número `1` y el texto `"1"` acaban en el mismo grupo, y `null` y `"null"` también. Si eso importa, usa un `Map<T[K], T[]>`, que conserva el tipo real de la clave.
-- **`Object.groupBy` ya existe:** los navegadores y Node modernos traen `Object.groupBy(lista, (e) => e.tipo)`, que hace lo mismo (requiere `"lib": ["ES2024"]` o superior en `tsconfig.json`). Escribir `agruparPor` es el ejercicio para entender los genéricos; en un proyecto real, usa la función estándar.
-- **`Record<string, T[]>` miente un poco:** dice que **cualquier** texto es una clave válida, pero `porTipo["natacion"]` no existe. Gracias a `noUncheckedIndexedAccess`, leerlo devuelve `T[] | undefined` y TypeScript te obliga a comprobarlo.
+- **`String()` mezcla valores:** `1` y `"1"` caen en el mismo grupo. Si importa, un `Map<T[K], T[]>`.
+- **`Object.groupBy` ya existe** (con `"lib": ["ES2024"]`): en un proyecto real, usa la función estándar.
+- **`Record<string, T[]>` dice que cualquier texto es clave,** pero `porTipo["natacion"]` no existe; `noUncheckedIndexedAccess` obliga a comprobarlo.
 
 </Callout>
 
@@ -582,8 +569,8 @@ Lees la firma de una función genérica de una librería (`map<U>`, `useState<S>
 
 ## Resumen
 
-- Un genérico `<T>` es un parámetro de tipo: la función recuerda el tipo de lo que recibe en lugar de perderlo (`any`) u ocultarlo (`unknown`).
-- TypeScript infiere `T` desde los argumentos; solo se escribe a mano cuando no hay pistas (`primero<string>([])`).
-- `T extends { id: string }` pone un mínimo sin perder el tipo completo; `<T = string>` da un valor por defecto.
-- Las interfaces y tipos también son genéricos: `Paginado<T>`, `Resultado<T>`.
-- `Promise<T>`, `Array<T>`, `Map<K, V>`, `useState<S>` y `collection<T>` son genéricos: el tipo entre `< >` protege todo lo que entra y sale.
+- `<T>` es un parámetro de tipo: la función recuerda el tipo en vez de perderlo (`any`) u ocultarlo (`unknown`).
+- `T` se infiere de los argumentos; a mano solo sin pistas.
+- `extends` pone un mínimo sin perder el tipo; `<T = string>`, un valor por defecto.
+- `Paginado<T>` y `Resultado<T>`: interfaces y tipos genéricos.
+- `Promise<T>`, `Map<K, V>`, `useState<S>` y `collection<T>` protegen lo que entra y sale.
