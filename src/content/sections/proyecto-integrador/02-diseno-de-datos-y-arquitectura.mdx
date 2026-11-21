@@ -1,0 +1,441 @@
+---
+sectionId: "P1.2"
+course: "P1"
+title: "Diseño de datos y arquitectura"
+order: 2
+minutes: 75
+summary: "Pasas de los requisitos de P1.1 a patrones de acceso, colecciones, índices, carpetas y ADR, y un script crea las colecciones con $jsonSchema y comprueba con explain que cada patrón usa su índice."
+---
+
+Con los requisitos escritos, falta decidir cómo se guardan los datos y dónde va el código. La regla: cada colección y cada índice señalan el patrón de acceso que los justifica.
+
+**Requisitos:** P1.1, I4 (patrones de acceso, _Extended Reference_ y `$jsonSchema`) y A8.4. Medido con MongoDB 8.2.6, el _driver_ 7.7 y Node 26.
+
+## Paso 1: los patrones de acceso
+
+**Qué es:** la lista de lecturas y escrituras que hará la app, cada una con el requisito de P1.1 del que sale y una frecuencia estimada. Es el método de I4.1, aplicado a la v2.
+
+**Cómo se usa:** una fila por patrón; si un requisito no produce ninguna, falta un patrón o sobra el requisito.
+
+| Patrón                                                 | Requisito              | Veces al día     |
+| ------------------------------------------------------ | ---------------------- | ---------------- |
+| P1: tareas pendientes de hoy, con nombre y color       | _Must_: vista Hoy      | 15 por usuario   |
+| P2: tareas de una semana, por día                      | _Should_: vista Semana | 4 por usuario    |
+| P3: crear, editar, completar o borrar una tarea propia | _Must_: tareas         | 13 por usuario   |
+| P4: listar las categorías propias                      | _Must_: categorías     | 0,2 por usuario  |
+| P5: cambiar el color de una categoría y de sus tareas  | _Must_: categorías     | 0,05 por usuario |
+| P6: tareas con el aviso vencido, de todos los usuarios | _Should_: Telegram     | 1440 en total    |
+| P7: tareas hechas por semana y categoría (agregación)  | _Should_: estadísticas | 0,3 por usuario  |
+| P8: buscar tareas por texto                            | _Should_: búsqueda     | 1 por usuario    |
+
+- **Todos los patrones de usuario empiezan por `userId`:** el _must_ «cada usuario ve solo lo suyo» no es solo un control en la ruta (P1.4), también es la primera parte de cada filtro y de cada índice.
+- **P6 no lo ejecuta ninguna persona:** es un proceso que recorre las tareas de todos cada minuto, y por eso es el patrón más frecuente de la app.
+
+<Callout type="risk">
+
+- **Los procesos no aparecen en las pantallas:** si haces la lista recorriendo la interfaz, P6 se queda fuera y el índice que necesita, también. Repasa también lo que se ejecuta solo: avisos, limpiezas, copias de seguridad.
+- **Las frecuencias son estimaciones:** sirven para ordenar, no para presumir de precisión. En P1.7, con la app en uso, compáralas con los registros y corrige el diseño si alguna se desvía un orden de magnitud.
+
+</Callout>
+
+## Paso 2: las colecciones
+
+**Qué es:** dos colecciones propias, `tareas` y `categorias`, más las que crea y gestiona Better Auth (`user`, `session`, `account` y `verification`, en P1.4). Cada campo de una tarea responde a un patrón:
+
+| Campo       | Tipo                                | Por qué                                                       |
+| ----------- | ----------------------------------- | ------------------------------------------------------------- |
+| `userId`    | texto                               | El id de Better Auth: primera parte de cada filtro de usuario |
+| `titulo`    | texto, de 1 a 200 caracteres        | P3                                                            |
+| `dia`       | texto `AAAA-MM-DD`                  | El día del usuario, no un instante (ADR 0001, Paso 5)         |
+| `hora`      | texto `HH:MM`, opcional             | Solo en las tareas con hora                                   |
+| `hecha`     | booleano                            | P1 filtra las pendientes; P7 cuenta las hechas                |
+| `categoria` | objeto con `id`, `nombre` y `color` | _Extended Reference_ (I4.3): P1 sin `$lookup`                 |
+| `avisarEn`  | fecha, opcional                     | El instante del aviso; se borra al enviarlo (P6)              |
+| `creada`    | fecha                               | Orden estable y auditoría                                     |
+
+**Cómo se usa:** para cada dato, el patrón que más lo lee decide si va embebido, referenciado o copiado.
+
+- **La categoría se copia en cada tarea:** P1 (15 al día) necesita su nombre y color; P5, que los cambia, ocurre 0,05 veces al día. Es la misma cuenta que en I4.1.
+- **Las preferencias (zona horaria, chat de Telegram) van en el `user` de Better Auth,** como campos adicionales: se leen en cada página, igual que en I4.1.
+
+<Callout type="risk">
+
+- **Copiar obliga a actualizar:** P5 tiene que cambiar el color en `categorias` y en todas las tareas de esa categoría. Si un día se olvida el segundo paso, falla el criterio de aceptación de P1.1; el test de P1.5 lo comprueba.
+- **Las colecciones de Better Auth no se diseñan aquí:** su forma la decide la librería y puede cambiar al actualizarla. No les pongas un `$jsonSchema` propio: un campo nuevo de una versión futura podría quedar rechazado.
+
+</Callout>
+
+## Paso 3: los índices
+
+**Qué es:** un índice acelera una lectura a cambio de trabajo en cada escritura y de memoria. Se crea uno por cada patrón frecuente que lo necesita, y ninguno «por si acaso».
+
+**Cómo se usa:** una fila por índice, con los patrones que lo usan; un patrón sin índice también se escribe, con su motivo.
+
+| Índice                                      | Patrones   | Por qué                                                               |
+| ------------------------------------------- | ---------- | --------------------------------------------------------------------- |
+| `userId` + `dia`, en `tareas`               | P1, P2, P7 | Igualdad en `userId` y rango en `dia`: lee solo los días pedidos      |
+| `avisarEn`, parcial, en `tareas`            | P6         | Solo entran las tareas con aviso pendiente: pequeño con muchas tareas |
+| `userId` + `nombre`, único, en `categorias` | P4         | Lista las del usuario y no deja repetir un nombre                     |
+| Ninguno en `categoria.id`                   | P5         | 0,05 al día: le basta con recorrer las tareas del usuario             |
+| Por decidir                                 | P8         | Atlas Search o un índice de texto: se decide en P1.6                  |
+
+- **`hecha` no está en el índice:** un usuario tiene unas pocas tareas al día y filtrarlas después cuesta casi nada. Sin ese campo, el mismo índice sirve a P1, P2 y P7.
+
+<Callout type="risk">
+
+- **Un índice sin patrón empeora la escritura más frecuente:** uno en `titulo` «por si acaso» se actualiza en cada P3 (13 al día por usuario) y no acelera ninguna lectura de la lista.
+- **El índice parcial solo sirve si la consulta implica su filtro:** `avisarEn` con `$lte` lo usa, porque un valor que se compara existe. Una consulta que no menciona `avisarEn` no puede usarlo.
+
+</Callout>
+
+## Paso 4: la estructura de carpetas
+
+**Qué es:** la organización por funcionalidades de A8.4, con una carpeta por grupo de requisitos de P1.1.
+
+**Cómo se usa:**
+
+```text
+src/
+├── features/
+│   ├── auth/          ← Better Auth y la sesión (P1.4)
+│   ├── tareas/        ← P1, P2, P3 (P1.5)
+│   ├── categorias/    ← P4, P5 (P1.5)
+│   ├── avisos/        ← P6: un proceso, no una página (P1.6)
+│   └── estadisticas/  ← P7 (P1.6)
+├── components/ui/
+├── lib/               ← mongo.ts, log.ts: sin lógica de negocio
+└── pages/             ← solo rutas
+scripts/
+└── crear-colecciones.ts
+docs/
+├── requisitos.md
+├── diseno.md
+└── adr/
+```
+
+- **Los requisitos se leen en el árbol:** cada _feature_ apunta a sus patrones, y la sección de P1 en la que se construye.
+- **P8 todavía no tiene carpeta:** la búsqueda irá en `tareas/` o en su propia _feature_ según lo que se decida en P1.6.
+
+<Callout type="risk">
+
+- **P5 cruza dos _features_:** cambiar un color toca `categorias` y `tareas`. Según la regla de A8.4, `categorias` llama a lo que ofrece `tareas/server.ts`, nunca a su repositorio directamente.
+- **Carpetas vacías para _should_ que quizá no lleguen:** el árbol es un plan; crea cada carpeta cuando empieces su funcionalidad. Una carpeta vacía en el repositorio parece trabajo hecho.
+
+</Callout>
+
+## Paso 5: los ADR iniciales
+
+**Qué es:** las decisiones caras de cambiar después, escritas antes de programar con el formato de A8.4. Para esta v2 hay tres: el día como texto (0001), la categoría copiada en la tarea (0002) y la organización por funcionalidades (0003).
+
+**Cómo se usa:** un archivo por decisión en `docs/adr/`. La primera, `docs/adr/0001-el-dia-como-texto.md`:
+
+```markdown
+# ADR-0001 · El día de una tarea se guarda como texto AAAA-MM-DD
+
+Estado: aceptado · Fecha: 2026-11-21
+
+## Contexto
+
+Una tarea pertenece a un día del calendario del usuario, no a un instante. La vista Hoy (P1, 15 veces al día) busca las tareas de ese día en la zona horaria del usuario, y P1.1 exige que una tarea de las 23:30 salga en su día.
+
+## Decisión
+
+El campo `dia` es un texto `AAAA-MM-DD` validado con `$jsonSchema`. Los instantes reales (`creada`, `avisarEn`) siguen siendo fechas.
+
+## Alternativas
+
+- Una fecha a las 00:00 UTC: en México, la tarea del 21 aparece el 20 por la tarde.
+- Una fecha a las 00:00 de la zona del usuario: si el usuario cambia de zona horaria, todas sus tareas se mueven de día.
+
+## Consecuencias
+
+- Los rangos funcionan como texto: `"2026-11-16" <= dia <= "2026-11-22"` es una semana, y usan el índice `{ userId: 1, dia: 1 }`.
+- Calcular «hoy» necesita la zona del usuario en cada petición: está en sus preferencias.
+- Las agregaciones por semana (P7) tienen que convertir el texto con `$dateFromString`.
+```
+
+- **Un ADR por decisión que costaría una migración:** cambiar `dia` con datos en producción obliga a convertir todas las tareas; elegir el nombre de un componente, no.
+
+<Callout type="risk">
+
+- **El ADR escrito después de programar justifica, no decide:** cuenta lo que salió y omite las alternativas, que es lo que más se olvida. Escríbelo antes de crear la colección.
+- **Las consecuencias negativas también se escriben:** la conversión de P7 parece un detalle hoy, y es lo primero que alguien tendría que saber antes de cambiar el campo.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe `docs/diseno.md` con los patrones de acceso (cada uno con su requisito), las colecciones, los índices con sus patrones, la estructura y la lista de ADR.
+2. Escribe `scripts/crear-colecciones.ts`: crea las colecciones con `$jsonSchema` y sus índices, y se puede ejecutar dos veces seguidas sin errores.
+3. Comprueba con otro _script_ que el esquema rechaza un documento inválido y, con `explain`, que cada patrón frecuente usa el índice previsto.
+
+</Callout>
+
+Solución. `docs/diseno.md` reúne las decisiones de los Pasos 1 a 5:
+
+```markdown
+# Planificador 2026 v2: diseño de datos y arquitectura
+
+Versión 1 · parte de `docs/requisitos.md` · revisión en P1.7, con datos de uso
+
+## Patrones de acceso
+
+| #   | Patrón                                     | Requisito            | Veces al día   | Índice                |
+| --- | ------------------------------------------ | -------------------- | -------------- | --------------------- |
+| P1  | Tareas pendientes de hoy, con su categoría | Must: vista Hoy      | 15 por usuario | `userId_dia`          |
+| P2  | Tareas de una semana                       | Should: vista Semana | 4 por usuario  | `userId_dia`          |
+| P3  | Crear, editar, completar o borrar          | Must: tareas         | 13 por usuario | `_id` + `userId`      |
+| P4  | Listar las categorías                      | Must: categorías     | 0,2            | `userId_nombre_unico` |
+| P5  | Cambiar el color de una categoría          | Must: categorías     | 0,05           | `userId_dia` (basta)  |
+| P6  | Avisos vencidos, de todos los usuarios     | Should: Telegram     | 1440 en total  | `avisos_pendientes`   |
+| P7  | Hechas por semana y categoría              | Should: estadísticas | 0,3            | `userId_dia`          |
+| P8  | Buscar por texto                           | Should: búsqueda     | 1              | Se decide en P1.6     |
+
+## Colecciones
+
+- `tareas`: un documento por tarea. Copia el nombre y el color de su categoría (ADR 0002). `dia` es texto `AAAA-MM-DD` (ADR 0001); `avisarEn` solo existe mientras hay un aviso pendiente.
+- `categorias`: nombre y color, únicos por usuario.
+- `user`, `session`, `account`, `verification`: de Better Auth. Las preferencias (zona horaria, chat de Telegram) son campos adicionales de `user`.
+
+El esquema exacto y los índices están en `scripts/crear-colecciones.ts`, que se ejecuta en cada despliegue.
+
+## Estructura
+
+Por funcionalidades (ADR 0003): `features/auth`, `tareas`, `categorias`, `avisos` y `estadisticas`; `lib/` sin lógica de negocio y `pages/` solo con rutas. Cambiar un color (P5) pasa de `categorias` a `tareas/server.ts`.
+
+## Decisiones
+
+- ADR 0001: el día de una tarea se guarda como texto `AAAA-MM-DD`.
+- ADR 0002: la tarea copia el nombre y el color de su categoría.
+- ADR 0003: el código se organiza por funcionalidades.
+```
+
+El _script_ se ejecuta en una carpeta con `npm install mongodb` y `"type": "module"` en `package.json`; el proyecto Astro llega en P1.3. `scripts/crear-colecciones.ts`:
+
+```ts
+// Archivo: scripts/crear-colecciones.ts
+// Crea o actualiza las colecciones del Planificador 2026 v2, con su $jsonSchema y sus índices.
+// Se puede ejecutar las veces que haga falta. Uso: node scripts/crear-colecciones.ts
+import { MongoClient, type Db, type Document, type IndexDescription } from "mongodb";
+
+const uri = process.env.MONGODB_URI;
+if (!uri) throw new Error("Falta MONGODB_URI");
+
+const DIA = "^\\d{4}-\\d{2}-\\d{2}$"; // AAAA-MM-DD: el día del usuario (ADR 0001)
+const HORA = "^([01]\\d|2[0-3]):[0-5]\\d$";
+const COLOR = "^#[0-9a-f]{6}$";
+
+interface Coleccion {
+  nombre: string;
+  esquema: Document;
+  indices: IndexDescription[];
+}
+
+const COLECCIONES: Coleccion[] = [
+  {
+    nombre: "categorias",
+    esquema: {
+      bsonType: "object",
+      required: ["userId", "nombre", "color"],
+      additionalProperties: false,
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+        color: { bsonType: "string", pattern: COLOR },
+      },
+    },
+    indices: [
+      // P4: las categorías de un usuario, sin nombres repetidos
+      { key: { userId: 1, nombre: 1 }, name: "userId_nombre_unico", unique: true },
+    ],
+  },
+  {
+    nombre: "tareas",
+    esquema: {
+      bsonType: "object",
+      required: ["userId", "titulo", "dia", "hecha", "categoria", "creada"],
+      additionalProperties: false,
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        titulo: { bsonType: "string", minLength: 1, maxLength: 200 },
+        dia: { bsonType: "string", pattern: DIA },
+        hora: { bsonType: "string", pattern: HORA },
+        hecha: { bsonType: "bool" },
+        // Extended Reference (ADR 0002): lo que P1 necesita de la categoría, sin $lookup
+        categoria: {
+          bsonType: "object",
+          required: ["id", "nombre", "color"],
+          additionalProperties: false,
+          properties: {
+            id: { bsonType: "objectId" },
+            nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+            color: { bsonType: "string", pattern: COLOR },
+          },
+        },
+        avisarEn: { bsonType: "date" }, // solo mientras haya un aviso pendiente
+        creada: { bsonType: "date" },
+      },
+    },
+    indices: [
+      // P1 Hoy, P2 Semana y P7 estadísticas: las tareas de un usuario por día
+      { key: { userId: 1, dia: 1 }, name: "userId_dia" },
+      // P6 avisos: solo entran las tareas con un aviso pendiente
+      {
+        key: { avisarEn: 1 },
+        name: "avisos_pendientes",
+        partialFilterExpression: { avisarEn: { $exists: true } },
+      },
+    ],
+  },
+];
+
+async function aplicar(db: Db, c: Coleccion) {
+  const opciones = {
+    validator: { $jsonSchema: c.esquema },
+    validationLevel: "strict",
+    validationAction: "error",
+  } as const;
+  const existe = (await db.listCollections({ name: c.nombre }).toArray()).length > 0;
+  if (existe) await db.command({ collMod: c.nombre, ...opciones });
+  else await db.createCollection(c.nombre, opciones);
+  const indices = await db.collection(c.nombre).createIndexes(c.indices);
+  console.log(
+    `${existe ? "actualizada" : "creada    "} ${c.nombre.padEnd(10)} índices: ${indices.join(", ")}`,
+  );
+}
+
+const client = new MongoClient(uri);
+try {
+  const db = client.db();
+  for (const c of COLECCIONES) await aplicar(db, c);
+} finally {
+  await client.close();
+}
+```
+
+```bash
+export MONGODB_URI="mongodb://localhost:27017/planificador"
+node scripts/crear-colecciones.ts
+node scripts/crear-colecciones.ts
+```
+
+```text
+creada     categorias índices: userId_nombre_unico
+creada     tareas     índices: userId_dia, avisos_pendientes
+actualizada categorias índices: userId_nombre_unico
+actualizada tareas     índices: userId_dia, avisos_pendientes
+```
+
+`scripts/probar-diseno.ts`:
+
+```ts
+// Archivo: scripts/probar-diseno.ts
+// Comprueba el diseño: el esquema rechaza datos malos y cada patrón usa el índice previsto.
+// Uso: node scripts/probar-diseno.ts (después de crear-colecciones.ts)
+import { MongoClient, MongoServerError, ObjectId, type Document } from "mongodb";
+
+const uri = process.env.MONGODB_URI;
+if (!uri) throw new Error("Falta MONGODB_URI");
+
+const client = new MongoClient(uri);
+try {
+  const tareas = client.db().collection("tareas");
+  const userId = "u_prueba";
+  const categoria = { id: new ObjectId(), nombre: "trabajo", color: "#0284c7" };
+  const tarea = (dia: string, titulo: string) => ({
+    userId,
+    titulo,
+    dia,
+    hecha: false,
+    categoria,
+    creada: new Date(),
+  });
+  await tareas.deleteMany({ userId });
+  await tareas.insertMany([
+    {
+      ...tarea("2026-11-21", "Llamar al dentista"),
+      hora: "23:30",
+      avisarEn: new Date("2026-11-22T05:15:00Z"),
+    },
+    tarea("2026-11-21", "Revisar el PR de avisos"),
+    tarea("2026-11-22", "Preparar la demo"),
+    tarea("2026-11-25", "Pagar el VPS"),
+  ]);
+
+  // 1. El esquema: un título vacío, un día con otro formato y un campo que no existe
+  try {
+    await tareas.insertOne({ ...tarea("21/11/2026", ""), color: "rojo" });
+  } catch (e) {
+    if (!(e instanceof MongoServerError)) throw e;
+    const reglas: Document[] = e.errInfo?.details?.schemaRulesNotSatisfied ?? [];
+    const campos = reglas.flatMap((r) => [
+      ...(r.propertiesNotSatisfied ?? []).map((p: Document) => p.propertyName),
+      ...(r.additionalProperties ?? []).map((p: string) => `${p} (sobra)`),
+    ]);
+    console.log(`rechazada (${e.code}): ${campos.join(", ")}`);
+  }
+
+  // 2. Los patrones: qué índice usa cada consulta y cuánto lee
+  async function plan(nombre: string, filtro: Document) {
+    const { queryPlanner, executionStats } = await tareas.find(filtro).explain("executionStats");
+    const indice = JSON.stringify(queryPlanner.winningPlan).match(/"indexName":"([^"]+)"/)?.[1];
+    const { totalDocsExamined: leidos, nReturned: devueltos } = executionStats;
+    console.log(
+      `${nombre.padEnd(14)} ${(indice ?? "COLLSCAN").padEnd(18)} ${leidos} leídos, ${devueltos} devueltos`,
+    );
+  }
+  await plan("P1 Hoy", { userId, dia: "2026-11-21", hecha: false });
+  await plan("P2 Semana", { userId, dia: { $gte: "2026-11-16", $lte: "2026-11-22" } });
+  await plan("P5 Recolorear", { userId, "categoria.id": categoria.id });
+  await plan("P6 Avisos", { avisarEn: { $lte: new Date("2026-11-22T05:15:00Z") } });
+  await plan("Sin patrón", { titulo: "Pagar el VPS" });
+
+  await tareas.deleteMany({ userId });
+} finally {
+  await client.close();
+}
+```
+
+```bash
+node scripts/probar-diseno.ts
+```
+
+```text
+rechazada (121): titulo, dia, color (sobra)
+P1 Hoy         userId_dia         2 leídos, 2 devueltos
+P2 Semana      userId_dia         3 leídos, 3 devueltos
+P5 Recolorear  userId_dia         4 leídos, 4 devueltos
+P6 Avisos      avisos_pendientes  1 leídos, 1 devueltos
+Sin patrón     COLLSCAN           4 leídos, 1 devueltos
+```
+
+- **`collMod` cuando la colección ya existe:** `createCollection` fallaría la segunda vez. Así el mismo _script_ crea la base de datos vacía y actualiza el esquema de una que ya tiene datos.
+- **El código 121 es «Document failed validation»:** los detalles dicen qué campos fallaron, incluido el que sobra por `additionalProperties: false`.
+- **P5 lee las 4 tareas del usuario y devuelve 4** porque aquí todas son de la misma categoría; con más categorías leería las mismas y devolvería menos. Es el coste aceptado en el Paso 3.
+- **«Sin patrón» hace `COLLSCAN`:** una consulta que no está en la lista no tiene índice, y eso es lo esperado.
+
+<Callout type="risk">
+
+- **Cambiar un índice con el mismo nombre falla:** si `userId_dia` pasa a incluir `hecha`, `createIndexes` responde `IndexKeySpecsConflict` (código 86). Bórralo antes con `dropIndex` o dale otro nombre.
+- **Con cuatro tareas, el planificador no tiene dónde equivocarse:** `explain` confirma qué índice se elige, no cuánto tarda con datos reales. Repite la prueba en P1.7 con un volumen parecido al de producción.
+
+</Callout>
+
+<Callout type="mastery">
+
+Cada colección e índice de tu proyecto responde a un patrón de acceso escrito, con su requisito y su frecuencia. Sabes crear las colecciones con su `$jsonSchema` desde un _script_ que se puede repetir, comprobar con `explain` que cada patrón usa su índice y dejar en un ADR por qué se decidió así.
+
+</Callout>
+
+## Resumen
+
+- Cada patrón de acceso sale de un requisito y lleva una frecuencia estimada.
+- Todos los filtros de usuario empiezan por `userId`, igual que sus índices.
+- Lo que se lee mucho y cambia poco se copia; lo que se lee poco no necesita índice.
+- La estructura por funcionalidades refleja los requisitos de P1.1.
+- Un ADR antes de programar, con alternativas y consecuencias negativas.
+- `explain` comprueba que cada patrón usa el índice previsto.
