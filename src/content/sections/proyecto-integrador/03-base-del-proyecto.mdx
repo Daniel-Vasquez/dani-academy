@@ -1,0 +1,566 @@
+---
+sectionId: "P1.3"
+course: "P1"
+title: "Base del proyecto"
+order: 3
+minutes: 90
+summary: "Montas el proyecto vacío pero completo: Astro con Node, TypeScript estricto, Tailwind v4 con tokens, astro:env, ESLint, Prettier, Vitest y CI, y compruebas que el build arranca y responde en /api/health."
+---
+
+Antes de la primera funcionalidad, el proyecto tiene que arrancar en producción y rechazar un _commit_ que rompa tipos, estilo o tests. Aquí lo montas vacío pero completo.
+
+**Requisitos:** P1.2, I8 (Vitest) y A7 (CI). Medido con Astro 7.4.13, Node 26, npm 11 y MongoDB 8.2.6 local en un Mac.
+
+## Paso 1: el repositorio
+
+**Qué es:** el proyecto Astro de la v2, creado desde la plantilla mínima, con las tres integraciones que fija P1.2: Node (un servidor propio, para Docker en el VPS de P1.8), React (las islas) y Tailwind v4.
+
+**Cómo se usa:**
+
+```bash
+npm create astro@latest planificador -- --template minimal --install --git --yes
+cd planificador
+npx astro add node react tailwind --yes
+```
+
+- **`--git` crea el repositorio con un primer _commit_,** `"Initial commit from Astro"`. El tuyo, el del ejercicio, será la base completa de esta sección.
+- **`node` en modo `standalone`:** `astro build` genera `dist/server/entry.mjs`, un servidor que arranca con `node`. Es lo que ejecutará el contenedor.
+
+<Callout type="risk">
+
+- **`astro add tailwind` propone importar `global.css` en `src/layouts/Layout.astro`, pero no crea el archivo:** la plantilla mínima no tiene _layout_. Si no lo escribes (Paso 3), las páginas salen sin estilos y no hay ningún error.
+- **`--yes` acepta todos los cambios de `astro add`,** incluidos los de `tsconfig.json`. Revisa `git diff` antes del primer _commit_: es el momento en que todavía sabes qué escribiste tú y qué la herramienta.
+
+</Callout>
+
+## Paso 2: TypeScript estricto
+
+**Qué es:** la configuración `strict` de Astro más `noUncheckedIndexedAccess`, comprobada con `astro check`, que revisa también los `.astro`.
+
+**Cómo se usa:** sustituye `tsconfig.json` e instala el comprobador y los tipos de Node.
+
+```jsonc
+// Archivo: tsconfig.json
+{
+  "extends": "astro/tsconfigs/strict",
+  "include": [".astro/types.d.ts", "**/*"],
+  "exclude": ["dist"],
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "noUncheckedIndexedAccess": true,
+    "paths": { "@/*": ["./src/*"] }
+  }
+}
+```
+
+```bash
+npm install -D @astrojs/check typescript @types/node@24
+```
+
+- **`noUncheckedIndexedAccess`:** `lista[0]` es `T | undefined`, como en tiempo de ejecución. Obliga a comprobar el primer elemento de una consulta vacía.
+- **`@/*` apunta a `src/`:** `import { db } from "@/lib/mongo"` sigue funcionando al mover un archivo de carpeta.
+
+<Callout type="risk">
+
+- **Sin `@types/node`, el _driver_ de MongoDB da un error que no lo menciona:**
+
+  ```text
+  src/lib/mongo.ts:11:60 - error ts(2345): Argument of type '{ serverSelectionTimeoutMS: number; }' is not assignable to parameter of type 'MongoClientOptions'.
+    Type '{ serverSelectionTimeoutMS: number; }' is missing the following properties from type 'MongoClientOptions': session, allowPartialTrustChain, ALPNProtocols, ca, and 21 more.
+
+  11   globalThis.__mongoClient ?? new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 5_000 });
+                                                                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  ```
+
+  Los tipos del _driver_ dependen de los de Node (`tls`, `net`). Con `@types/node` instalado, el error desaparece sin tocar el código.
+
+- **`@types/node` con la versión del servidor:** la 24, como el CI y el contenedor. Con unos tipos más nuevos, el editor aceptaría APIs que el servidor no tiene.
+
+</Callout>
+
+## Paso 3: Tailwind v4 con tokens
+
+**Qué es:** los colores del proyecto declarados una vez en `@theme`. Cada `--color-x` genera las utilidades `bg-x`, `text-x` y `border-x` (B7, I7).
+
+**Cómo se usa:** sustituye `src/styles/global.css` y crea el _layout_ y la portada provisional.
+
+```css
+/* Archivo: src/styles/global.css */
+@import "tailwindcss";
+
+/* Tokens: cada color tiene un nombre de uso, no de tono. Generan bg-fondo, text-texto, etc. */
+@theme {
+  --color-fondo: #f8fafc;
+  --color-superficie: #ffffff;
+  --color-texto: #0f172a;
+  --color-suave: #475569;
+  --color-acento: #0f766e;
+  --color-peligro: #be123c;
+
+  /* Las categorías por defecto del Planificador (B7) */
+  --color-trabajo: #0284c7;
+  --color-personal: #d97706;
+  --color-salud: #0d9488;
+  --color-estudio: #f25c76;
+}
+```
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+import "@/styles/global.css";
+
+interface Props {
+  title: string;
+}
+const { title } = Astro.props;
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} · Planificador</title>
+  </head>
+  <body class="min-h-screen bg-fondo text-texto antialiased">
+    <main class="mx-auto max-w-2xl px-4 py-10">
+      <slot />
+    </main>
+  </body>
+</html>
+```
+
+```astro
+---
+// Archivo: src/pages/index.astro
+import Base from "@/layouts/Base.astro";
+
+const categorias = [
+  { nombre: "Trabajo", clase: "bg-trabajo" },
+  { nombre: "Personal", clase: "bg-personal" },
+  { nombre: "Salud", clase: "bg-salud" },
+  { nombre: "Estudio", clase: "bg-estudio" },
+];
+---
+
+<Base title="Hoy">
+  <h1 class="text-3xl font-semibold">Planificador 2026 v2</h1>
+  <p class="mt-2 text-suave">La base del proyecto: todavía no hay tareas.</p>
+  <ul class="mt-6 flex flex-wrap gap-2">
+    {categorias.map((c) => (
+      <li class={`rounded-full px-3 py-1 text-sm font-medium text-white ${c.clase}`}>{c.nombre}</li>
+    ))}
+  </ul>
+</Base>
+```
+
+- **Nombres de uso, no de tono:** `text-suave` sigue siendo correcto si mañana el gris cambia; `text-slate-600` obligaría a buscarlo por todo el proyecto.
+
+<Callout type="risk">
+
+- **Una clase construida por partes no existe:** Tailwind busca clases completas en el código, así que `` `bg-${nombre}` `` no genera nada. Por eso cada categoría guarda su clase entera (`"bg-trabajo"`).
+- **Los colores que elige el usuario no pueden ser tokens:** P5 deja cambiar el color de una categoría, y ese valor llega de MongoDB en tiempo de ejecución. Se aplicará con `style`, y los tokens quedan para los colores de la interfaz.
+
+</Callout>
+
+## Paso 4: `astro:env`, MongoDB y `/api/health`
+
+**Qué es:** `astro:env` declara las variables de entorno con su tipo y su visibilidad. `access: "secret"` impide importarlas desde el cliente y no las escribe en el _build_.
+
+**Cómo se usa:** sustituye `astro.config.mjs`, crea `.env.example` y añade la conexión y una ruta de salud.
+
+```js
+// @ts-check
+// Archivo: astro.config.mjs
+import { defineConfig, envField } from "astro/config";
+import node from "@astrojs/node";
+import react from "@astrojs/react";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  output: "server", // todas las páginas son privadas salvo login y registro (P1.4)
+  adapter: node({ mode: "standalone" }), // un servidor Node, para Docker en el VPS (P1.8)
+  integrations: [react()],
+  vite: { plugins: [tailwindcss()] },
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "planificador" }),
+    },
+  },
+});
+```
+
+```bash
+# Archivo: .env.example
+# Copia este archivo como .env y rellena los valores. .env no se sube nunca al repositorio.
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=planificador
+```
+
+```ts
+// Archivo: src/lib/mongo.ts
+import { MongoClient, type Db } from "mongodb";
+import { MONGODB_DB, MONGODB_URI } from "astro:env/server";
+
+declare global {
+  var __mongoClient: MongoClient | undefined;
+}
+
+/** Un único cliente por proceso; en desarrollo sobrevive a las recargas de Vite (B5.2) */
+export const mongoClient: MongoClient =
+  globalThis.__mongoClient ?? new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 5_000 });
+if (import.meta.env.DEV) globalThis.__mongoClient = mongoClient;
+
+export const db: Db = mongoClient.db(MONGODB_DB);
+```
+
+```ts
+// Archivo: src/pages/api/health.ts
+// Responde 200 si el servidor llega a MongoDB, y 503 si no. Lo usarán Docker y la monitorización (P1.8).
+import type { APIRoute } from "astro";
+import { db } from "@/lib/mongo";
+
+export const GET: APIRoute = async () => {
+  try {
+    await db.command({ ping: 1 });
+    return Response.json({ ok: true, db: "up" }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    console.error("[health] MongoDB no responde", error);
+    return Response.json({ ok: false, db: "down" }, { status: 503 });
+  }
+};
+```
+
+```bash
+npm install mongodb
+npm run build
+PORT=4399 node dist/server/entry.mjs
+curl -s -w ' %{http_code}\n' localhost:4399/api/health
+```
+
+```text
+ 500
+```
+
+El servidor arranca, y la primera petición que usa la variable falla. En su registro:
+
+```text
+04:16:14 [@astrojs/node] Server listening on http://localhost:4399
+04:16:14 [ERROR] EnvInvalidVariables: The following environment variables defined in `env.schema` are invalid:
+
+- MONGODB_URI is missing
+```
+
+Con `cp .env.example .env` y el servidor arrancado con `--env-file`:
+
+```bash
+PORT=4399 node --env-file=.env dist/server/entry.mjs
+curl -s -w ' %{http_code}\n' localhost:4399/api/health
+```
+
+```text
+{"ok":true,"db":"up"} 200
+```
+
+Y con MongoDB parado, la respuesta tarda los 5 s de `serverSelectionTimeoutMS`:
+
+```text
+{"ok":false,"db":"down"} 503
+```
+
+- **`/api/health` distingue los tres casos:** 200 si funciona, 503 si falta la base de datos y 500 si falta la configuración. Docker y la monitorización de P1.8 lo usarán para saber si el contenedor está sano.
+
+<Callout type="risk">
+
+- **Los secretos se validan al usarlos, no al arrancar:** un servidor sin `MONGODB_URI` arranca y escucha, y falla con la primera petición. Por eso el despliegue tiene que comprobar `/api/health` después de arrancar, no solo que el proceso siga vivo.
+- **`node dist/server/entry.mjs` no lee `.env`:** `astro dev` sí, y por eso funciona en desarrollo. En producción, `--env-file=.env` o variables del entorno (las de Docker, en P1.8).
+
+</Callout>
+
+## Paso 5: ESLint, Prettier y Vitest
+
+**Qué es:** el _lint_ (errores probables), el formato (sin discusiones de estilo) y los tests unitarios, cada uno con su comando.
+
+**Cómo se usa:** instala las herramientas, crea sus configuraciones y el primer código con su test: el cálculo del día de ADR 0001.
+
+```bash
+npm install -D eslint @eslint/js typescript-eslint eslint-plugin-astro eslint-plugin-react-hooks globals
+npm install -D prettier prettier-plugin-astro prettier-plugin-tailwindcss vitest
+```
+
+```js
+// Archivo: eslint.config.js
+import js from "@eslint/js";
+import { defineConfig } from "eslint/config";
+import tseslint from "typescript-eslint";
+import astro from "eslint-plugin-astro";
+import reactHooks from "eslint-plugin-react-hooks";
+import globals from "globals";
+
+export default defineConfig(
+  { ignores: ["dist", ".astro", "node_modules", "playwright-report", "test-results"] },
+  js.configs.recommended,
+  tseslint.configs.recommended,
+  astro.configs.recommended,
+  {
+    files: ["**/*.tsx"],
+    plugins: { "react-hooks": reactHooks },
+    rules: reactHooks.configs.recommended.rules,
+  },
+  { languageOptions: { globals: { ...globals.browser, ...globals.node } } },
+);
+```
+
+`.prettierrc.json`:
+
+```json
+{
+  "printWidth": 100,
+  "plugins": ["prettier-plugin-astro", "prettier-plugin-tailwindcss"],
+  "overrides": [{ "files": "*.astro", "options": { "parser": "astro" } }],
+  "tailwindStylesheet": "./src/styles/global.css"
+}
+```
+
+`.prettierignore`:
+
+```gitignore
+dist/
+.astro/
+node_modules/
+package-lock.json
+```
+
+```ts
+// Archivo: vitest.config.ts
+/// <reference types="vitest/config" />
+import { getViteConfig } from "astro/config";
+
+// getViteConfig reutiliza la configuración de Astro: el alias @/ y los módulos astro:*
+export default getViteConfig({
+  test: { include: ["tests/unit/**/*.test.ts"] },
+});
+```
+
+```ts
+// Archivo: src/lib/dia.ts
+// El día de una tarea es texto AAAA-MM-DD en la zona del usuario (ADR 0001)
+
+/** "AAAA-MM-DD" del instante, en la zona horaria indicada */
+export function diaEn(instante: Date, zona: string): string {
+  return instante.toLocaleDateString("en-CA", { timeZone: zona });
+}
+```
+
+```ts
+// Archivo: tests/unit/dia.test.ts
+import { describe, expect, it } from "vitest";
+import { diaEn } from "@/lib/dia";
+
+describe("diaEn", () => {
+  it("una tarea de las 23:30 en México sigue en su día, aunque en UTC ya sea el siguiente", () => {
+    expect(diaEn(new Date("2026-11-22T05:30:00Z"), "America/Mexico_City")).toBe("2026-11-21");
+  });
+
+  it("el mismo instante es otro día en Madrid", () => {
+    expect(diaEn(new Date("2026-11-22T05:30:00Z"), "Europe/Madrid")).toBe("2026-11-22");
+  });
+});
+```
+
+```bash
+npm pkg set scripts.check="astro check" scripts.lint="eslint ." scripts.format="prettier --write ." scripts.format:check="prettier --check ." scripts.test="vitest" scripts.test:run="vitest run"
+npm run test:run
+```
+
+```text
+> planificador@0.0.1 test:run
+> vitest run
+
+04:13:54 [@astrojs/node] Enabling sessions with filesystem storage
+
+ RUN  v5.1.1 /mi-proyecto
+
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  04:13:54
+   Duration  75ms (transform 40%, tests 37%, import 17%, worker 5%)
+```
+
+- **`prettier-plugin-tailwindcss` ordena las clases** y lee los tokens de `global.css` (`tailwindStylesheet`), así que también ordena `bg-fondo` y los demás.
+- **El primer test es de una regla del dominio, no de la interfaz:** el borde de la medianoche es donde fallará la vista Hoy si alguien cambia `diaEn`.
+
+<Callout type="risk">
+
+- **El test usa instantes fijos:** con `new Date()`, el resultado dependería de la hora a la que se ejecute el CI, y fallaría algunas noches sin que nadie haya tocado el código.
+- **No añadas reglas de estilo a ESLint:** el formato es cosa de Prettier. Si los dos opinan sobre lo mismo, cada uno deshace lo que hace el otro y el CI falla por turnos.
+
+</Callout>
+
+## Paso 6: el CI inicial
+
+**Qué es:** un _workflow_ de GitHub Actions que ejecuta en cada _push_ y en cada PR lo mismo que tú en local (A7).
+
+**Cómo se usa:** crea `.github/workflows/ci.yml` y un _script_ `verify` con los mismos pasos.
+
+```yaml
+# Archivo: .github/workflows/ci.yml
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run check
+      - run: npm run test:run
+      - run: npm run build
+```
+
+```bash
+npm pkg set scripts.verify="npm run format:check && npm run lint && npm run check && npm run test:run && npm run build"
+```
+
+- **De lo más rápido a lo más lento:** un error de formato aparece en segundos, sin esperar al _build_.
+- **`concurrency` cancela la ejecución anterior** de la misma rama cuando llega otro _push_.
+
+<Callout type="risk">
+
+- **Un CI que nunca has visto en rojo no está comprobado:** rompe un tipo a propósito en una rama y mira que falle. Un paso mal escrito puede pasar siempre.
+- **Fija las versiones de lo que el CI descarga:** `node-version: 24`, no `latest`. La etiqueta flotante `mongo:8` dejó en rojo el CI de esta plataforma desde octubre sin cambiar una línea (A7, A8.5).
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Monta el proyecto con los Pasos 1 a 6.
+2. Pasa `npm run verify` sin errores y haz el _commit_ «Base del proyecto».
+3. Arranca el _build_ con `--env-file=.env` y comprueba que `/api/health` responde 200.
+4. Sube el repositorio a GitHub y comprueba que el CI queda en verde. Después, en una rama, rompe un tipo a propósito y comprueba que se pone en rojo.
+
+</Callout>
+
+Solución. `package.json` queda así:
+
+```json
+{
+  "name": "planificador",
+  "type": "module",
+  "version": "0.0.1",
+  "engines": {
+    "node": ">=22.23.4"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro",
+    "check": "astro check",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "verify": "npm run format:check && npm run lint && npm run check && npm run test:run && npm run build"
+  },
+  "dependencies": {
+    "@astrojs/node": "^11.1.14",
+    "@astrojs/react": "^7.1.9",
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "astro": "^7.4.13",
+    "mongodb": "^7.9.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^4.3.5",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.12",
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "eslint": "^10.15.0",
+    "eslint-plugin-astro": "^3.2.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.14.0",
+    "prettier": "^3.10.1",
+    "prettier-plugin-astro": "^1.1.2",
+    "prettier-plugin-tailwindcss": "^0.8.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.73.0",
+    "vitest": "^5.1.1"
+  }
+}
+```
+
+```bash
+npm run verify
+```
+
+Las líneas clave de la salida:
+
+```text
+All matched files use Prettier code style!
+Result (10 files):
+- 0 errors
+- 0 warnings
+- 0 hints
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+04:13:57 [build] Complete!
+```
+
+```bash
+git add -A
+git commit -m "Base del proyecto"
+git log --oneline
+```
+
+```text
+76ce604 Base del proyecto
+83d1b09 "Initial commit from Astro"
+```
+
+- **`.env` no aparece en el _commit_:** el `.gitignore` de la plantilla ya lo excluye. Compruébalo con `git status` antes de cada primer _commit_.
+- **El punto 4 depende de tu cuenta de GitHub:** el CI ejecuta exactamente los pasos de `verify`, así que lo que pasa en local debería pasar allí, salvo diferencias de entorno como la versión de Node.
+
+<Callout type="risk">
+
+- **El CI instala con `npm ci`,** que usa `package-lock.json` tal cual. Si no lo subes, el CI falla; si lo editas a mano, instala algo distinto de lo que probaste.
+- **Un proyecto vacío también se puede desplegar mal:** el _build_ no comprueba las variables secretas (Paso 4). El ensayo de arrancar el _build_ y llamar a `/api/health` es el que lo detecta.
+
+</Callout>
+
+<Callout type="mastery">
+
+Tu primer _commit_ ya pasa tipos, _lint_, formato, tests y _build_, en local con `npm run verify` y en el CI con los mismos pasos. Sabes arrancar el _build_ con sus variables y comprobar con `/api/health` que está sano, y sabes qué falla si falta la configuración o la base de datos.
+
+</Callout>
+
+## Resumen
+
+- `astro add node react tailwind` monta la pila; el _layout_ y los estilos los escribes tú.
+- TypeScript estricto con `noUncheckedIndexedAccess`, y `@types/node` con la versión del servidor.
+- Tokens con nombre de uso en `@theme`; los colores del usuario van con `style`.
+- `astro:env` valida los secretos al usarlos: `/api/health` lo comprueba tras arrancar.
+- `npm run verify` y el CI ejecutan los mismos pasos, de lo rápido a lo lento.

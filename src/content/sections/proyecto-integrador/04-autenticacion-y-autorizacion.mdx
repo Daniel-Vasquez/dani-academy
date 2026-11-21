@@ -1,0 +1,729 @@
+---
+sectionId: "P1.4"
+course: "P1"
+title: "Autenticación y autorización"
+order: 4
+minutes: 90
+summary: "Añades Better Auth con MongoDB, un middleware que cierra todo por defecto, registro e inicio de sesión, y una ruta que solo entrega cada tarea a su dueño, con tests E2E que fallan si quitas la protección."
+---
+
+La v2 es multiusuario: cada petición tiene que saber quién la hace, y cada dato, de quién es. Better Auth gestiona cuentas y sesiones; qué es público y qué ve cada usuario lo decides tú.
+
+**Requisitos:** P1.3, I5 (sesiones y autorización) e I8 (Playwright). Medido con Better Auth 1.7.27, Playwright 1.64 y MongoDB 8.2.6 local en un Mac.
+
+## Paso 1: Better Auth con MongoDB
+
+**Qué es:** la librería que guarda usuarios, contraseñas (con _hash_) y sesiones en MongoDB, y expone sus rutas bajo `/api/auth/`. La sesión viaja en una _cookie_ `HttpOnly` firmada con `BETTER_AUTH_SECRET`.
+
+**Cómo se usa:** instálala, declara sus dos variables en `astro.config.mjs` y crea la instancia y la ruta que la atiende.
+
+```bash
+npm install better-auth @better-auth/mongo-adapter
+```
+
+```js
+// @ts-check
+// Archivo: astro.config.mjs
+import { defineConfig, envField } from "astro/config";
+import node from "@astrojs/node";
+import react from "@astrojs/react";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  output: "server", // todas las páginas son privadas salvo login y registro (P1.4)
+  adapter: node({ mode: "standalone" }), // un servidor Node, para Docker en el VPS (P1.8)
+  integrations: [react()],
+  vite: { plugins: [tailwindcss()] },
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "planificador" }),
+      BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
+    },
+  },
+});
+```
+
+```bash
+# Archivo: .env.example
+# Copia este archivo como .env y rellena los valores. .env no se sube nunca al repositorio.
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=planificador
+# 32 caracteres aleatorios como mínimo: openssl rand -base64 32
+BETTER_AUTH_SECRET=
+# La URL pública de la app, con su puerto en local
+BETTER_AUTH_URL=http://localhost:4321
+```
+
+```ts
+// Archivo: src/features/auth/auth.ts
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { BETTER_AUTH_SECRET, BETTER_AUTH_URL } from "astro:env/server";
+import { db } from "@/lib/mongo";
+
+export const auth = betterAuth({
+  appName: "Planificador",
+  baseURL: BETTER_AUTH_URL,
+  secret: BETTER_AUTH_SECRET,
+  database: mongodbAdapter(db), // crea y usa las colecciones user, session, account y verification
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true, // tras registrarse, la sesión queda iniciada
+    minPasswordLength: 8,
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 30, // 30 días
+    updateAge: 60 * 60 * 24, // renueva la caducidad como mucho una vez al día
+  },
+});
+
+export type Sesion = typeof auth.$Infer.Session;
+```
+
+```ts
+// Archivo: src/pages/api/auth/[...all].ts
+// Todas las rutas de Better Auth: registro, inicio y cierre de sesión, sesión actual…
+import type { APIRoute } from "astro";
+import { auth } from "@/features/auth/auth";
+
+export const ALL: APIRoute = ({ request }) => auth.handler(request);
+```
+
+- **`mongodbAdapter(db)` sin el cliente:** el registro escribe el usuario y su cuenta en dos operaciones, sin transacción, y funciona con un MongoDB de un solo nodo. Si el tuyo es un _replica set_ (Atlas lo es), pasa también `{ client }`, como esta plataforma.
+- **`$Infer.Session`** da el tipo de la sesión con los campos que configures; lo usa el Paso 2.
+
+<Callout type="risk">
+
+- **`BETTER_AUTH_URL` tiene que coincidir con el origen exacto:** con `http://localhost:4399` configurado, una petición desde `http://127.0.0.1:4399` recibe esto, aunque sea la misma máquina:
+
+  ```text
+  HTTP/1.1 403 FORBIDDEN
+  {"message":"Invalid origin","code":"INVALID_ORIGIN"}
+  ```
+
+- **Cambiar `BETTER_AUTH_SECRET` cierra todas las sesiones:** con otro secreto, la _cookie_ de una sesión válida deja de reconocerse y `/api/auth/get-session` responde `null`. Guárdalo fuera del repositorio y no lo rotes sin avisar.
+
+</Callout>
+
+## Paso 2: el _middleware_, cerrado por defecto
+
+**Qué es:** el código que se ejecuta antes de cada página y cada ruta de la API. Carga la sesión en `Astro.locals` y deja pasar sin ella solo lo que figura en una lista corta.
+
+**Cómo se usa:** declara el tipo de `locals` y crea `src/middleware.ts`.
+
+```ts
+// Archivo: src/env.d.ts
+declare namespace App {
+  interface Locals {
+    user: import("@/features/auth/auth").Sesion["user"] | null;
+  }
+}
+```
+
+```ts
+// Archivo: src/middleware.ts
+// Todo es privado salvo lo que se declara público aquí
+import { defineMiddleware } from "astro:middleware";
+import { auth } from "@/features/auth/auth";
+
+const PAGINAS_DE_ACCESO = new Set(["/login", "/registro"]);
+const PREFIJOS_PUBLICOS = ["/api/auth/", "/api/health"];
+
+export const onRequest = defineMiddleware(async (ctx, next) => {
+  const { pathname, search } = ctx.url;
+  ctx.locals.user = null;
+  if (PREFIJOS_PUBLICOS.some((p) => pathname.startsWith(p))) return next();
+
+  const sesion = await auth.api.getSession({ headers: ctx.request.headers });
+  ctx.locals.user = sesion?.user ?? null;
+
+  if (PAGINAS_DE_ACCESO.has(pathname)) return ctx.locals.user ? ctx.redirect("/") : next();
+  if (ctx.locals.user) return next();
+
+  if (pathname.startsWith("/api/")) {
+    return Response.json({ error: "No autenticado" }, { status: 401 });
+  }
+  return ctx.redirect(`/login?redirect=${encodeURIComponent(pathname + search)}`);
+});
+```
+
+- **Páginas y API fallan distinto:** una página sin sesión redirige al login con la ruta de vuelta; una llamada a la API recibe un 401 en JSON, que el código del cliente puede tratar.
+- **Con sesión, login y registro llevan a la portada:** no tiene sentido volver a entrar.
+
+<Callout type="risk">
+
+- **Olvidar una ruta pública falla hacia el lado seguro:** la página pide sesión y lo notas enseguida. Lo peligroso es lo contrario, un prefijo demasiado amplio: `"/api/"` en la lista abriría la API entera.
+- **`getSession` consulta MongoDB en cada petición:** con pocos usuarios no se nota. La opción `cookieCache` de Better Auth guarda la sesión unos minutos en la _cookie_; se mide y se decide en P1.7.
+
+</Callout>
+
+## Paso 3: registro e inicio de sesión
+
+**Qué es:** dos páginas con un formulario y un `<script>` que llama al cliente de Better Auth. No necesitan React: Astro empaqueta el _script_ con sus `import`.
+
+**Cómo se usa:** crea el cliente, las dos páginas, y sustituye la portada para saludar y cerrar sesión.
+
+```ts
+// Archivo: src/features/auth/auth-client.ts
+// El cliente del navegador: llama a /api/auth/* en el mismo origen
+import { createAuthClient } from "better-auth/client";
+
+export const authClient = createAuthClient();
+```
+
+```astro
+---
+// Archivo: src/pages/registro.astro
+import Base from "@/layouts/Base.astro";
+---
+
+<Base title="Crear cuenta">
+  <h1 class="text-3xl font-semibold">Crear cuenta</h1>
+  <form id="registro" class="mt-6 grid gap-4">
+    <label class="grid gap-1">
+      Nombre
+      <input name="name" required autocomplete="name" class="rounded border px-3 py-2" />
+    </label>
+    <label class="grid gap-1">
+      Correo
+      <input
+        name="email"
+        type="email"
+        required
+        autocomplete="email"
+        class="rounded border px-3 py-2"
+      />
+    </label>
+    <label class="grid gap-1">
+      Contraseña (8 caracteres como mínimo)
+      <input
+        name="password"
+        type="password"
+        required
+        minlength="8"
+        autocomplete="new-password"
+        class="rounded border px-3 py-2"
+      />
+    </label>
+    <p id="error" role="alert" class="text-peligro"></p>
+    <button class="rounded bg-acento px-4 py-2 font-medium text-white">Crear cuenta</button>
+  </form>
+  <p class="mt-6 text-suave">
+    ¿Ya tienes cuenta?{" "}
+    <a href="/login" class="underline">
+      Entra
+    </a>
+  </p>
+</Base>
+
+<script>
+  import { authClient } from "@/features/auth/auth-client";
+
+  const form = document.querySelector<HTMLFormElement>("#registro")!;
+  form.addEventListener("submit", async (evento) => {
+    evento.preventDefault();
+    const datos = new FormData(form);
+    const { error } = await authClient.signUp.email({
+      name: String(datos.get("name")),
+      email: String(datos.get("email")),
+      password: String(datos.get("password")),
+    });
+    if (error) {
+      // El mismo mensaje exista o no el correo: no confirma quién tiene cuenta (I5)
+      document.querySelector("#error")!.textContent = "No se pudo crear la cuenta.";
+      return;
+    }
+    location.assign("/");
+  });
+</script>
+```
+
+```astro
+---
+// Archivo: src/pages/login.astro
+import Base from "@/layouts/Base.astro";
+---
+
+<Base title="Entrar">
+  <h1 class="text-3xl font-semibold">Entrar</h1>
+  <form id="login" class="mt-6 grid gap-4">
+    <label class="grid gap-1">
+      Correo
+      <input
+        name="email"
+        type="email"
+        required
+        autocomplete="email"
+        class="rounded border px-3 py-2"
+      />
+    </label>
+    <label class="grid gap-1">
+      Contraseña
+      <input
+        name="password"
+        type="password"
+        required
+        autocomplete="current-password"
+        class="rounded border px-3 py-2"
+      />
+    </label>
+    <p id="error" role="alert" class="text-peligro"></p>
+    <button class="rounded bg-acento px-4 py-2 font-medium text-white">Entrar</button>
+  </form>
+  <p class="mt-6 text-suave">
+    ¿No tienes cuenta?{" "}
+    <a href="/registro" class="underline">
+      Regístrate
+    </a>
+  </p>
+</Base>
+
+<script>
+  import { authClient } from "@/features/auth/auth-client";
+
+  /** Solo rutas de esta app: "//otro.sitio" o "https://…" serían una redirección abierta */
+  function destinoSeguro(valor: string | null): string {
+    return valor?.startsWith("/") && !valor.startsWith("//") ? valor : "/";
+  }
+
+  const form = document.querySelector<HTMLFormElement>("#login")!;
+  form.addEventListener("submit", async (evento) => {
+    evento.preventDefault();
+    const datos = new FormData(form);
+    const { error } = await authClient.signIn.email({
+      email: String(datos.get("email")),
+      password: String(datos.get("password")),
+    });
+    if (error) {
+      document.querySelector("#error")!.textContent = "Correo o contraseña incorrectos.";
+      return;
+    }
+    location.assign(destinoSeguro(new URLSearchParams(location.search).get("redirect")));
+  });
+</script>
+```
+
+```astro
+---
+// Archivo: src/pages/index.astro
+import Base from "@/layouts/Base.astro";
+
+const { user } = Astro.locals; // el middleware garantiza que hay sesión
+const categorias = [
+  { nombre: "Trabajo", clase: "bg-trabajo" },
+  { nombre: "Personal", clase: "bg-personal" },
+  { nombre: "Salud", clase: "bg-salud" },
+  { nombre: "Estudio", clase: "bg-estudio" },
+];
+---
+
+<Base title="Hoy">
+  <h1 class="text-3xl font-semibold">Planificador 2026 v2</h1>
+  <p class="mt-2 text-suave">Hola, {user?.name}. Todavía no hay tareas.</p>
+  <ul class="mt-6 flex flex-wrap gap-2">
+    {categorias.map((c) => (
+      <li class={`rounded-full px-3 py-1 text-sm font-medium text-white ${c.clase}`}>{c.nombre}</li>
+    ))}
+  </ul>
+  <button id="salir" class="mt-8 underline">
+    Cerrar sesión
+  </button>
+</Base>
+
+<script>
+  import { authClient } from "@/features/auth/auth-client";
+
+  document.querySelector("#salir")!.addEventListener("click", async () => {
+    await authClient.signOut();
+    location.assign("/login");
+  });
+</script>
+```
+
+- **`autocomplete` con `new-password` y `current-password`:** el gestor de contraseñas propone una nueva al registrarse y rellena la guardada al entrar.
+- **`role="alert"` en el mensaje de error:** un lector de pantalla lo anuncia al aparecer, y el test del Paso 5 lo encuentra por su rol.
+
+<Callout type="risk">
+
+- **La ruta de vuelta es una redirección abierta si no se comprueba:** sin `destinoSeguro`, `/login?redirect=//ejemplo.test` manda a otro sitio tras un inicio de sesión real, el anzuelo perfecto para un _phishing_. Solo valen rutas que empiezan por una barra.
+- **Los mensajes de error no confirman cuentas:** «Correo o contraseña incorrectos» y «No se pudo crear la cuenta» no dicen si el correo existe (I5). Un mensaje más preciso ayuda a quien prueba correos ajenos.
+
+</Callout>
+
+## Paso 4: autorización por dato
+
+**Qué es:** que cada usuario solo lea y cambie lo suyo. El `userId` sale de la sesión y va en el filtro de la consulta, nunca en el cuerpo ni en la URL.
+
+**Cómo se usa:** crea el repositorio de tareas con su primera función y la ruta que la usa. P1.5 completará el resto del CRUD.
+
+```ts
+// Archivo: src/features/tareas/tareas.repo.ts
+import { ObjectId } from "mongodb";
+import { db } from "@/lib/mongo";
+
+export interface Tarea {
+  _id: ObjectId;
+  userId: string;
+  titulo: string;
+  dia: string;
+  hora?: string;
+  hecha: boolean;
+  categoria: { id: ObjectId; nombre: string; color: string };
+  avisarEn?: Date;
+  creada: Date;
+}
+
+const tareas = db.collection<Tarea>("tareas");
+const ID = /^[0-9a-f]{24}$/i;
+
+/** La tarea, solo si es de ese usuario: el userId va en el filtro, no en una comprobación posterior */
+export async function buscarTarea(userId: string, id: string): Promise<Tarea | null> {
+  if (!ID.test(id)) return null;
+  return tareas.findOne({ _id: new ObjectId(id), userId });
+}
+```
+
+```ts
+// Archivo: src/pages/api/tareas/[id].ts
+import type { APIRoute } from "astro";
+import { buscarTarea } from "@/features/tareas/tareas.repo";
+
+export const GET: APIRoute = async ({ params, locals }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  const tarea = await buscarTarea(locals.user.id, params.id ?? "");
+  // 404 también si existe y es de otro: un 403 confirmaría que ese ID existe
+  if (!tarea) return Response.json({ error: "No encontrada" }, { status: 404 });
+  const { _id, titulo, dia, hecha } = tarea;
+  return Response.json({ id: _id.toHexString(), titulo, dia, hecha });
+};
+```
+
+- **El `userId` en el filtro, no en una comprobación posterior:** `findOne({ _id, userId })` no puede devolver una tarea ajena aunque la ruta olvide comprobar nada.
+
+<Callout type="risk">
+
+- **Comprobar después de leer depende de cada ruta:** `if (tarea.userId !== user.id)` funciona hasta que alguien escribe una ruta nueva sin esa línea. En el repositorio, la regla está en un solo sitio y ninguna ruta la puede saltar.
+- **Un ID mal formado rompe la consulta:** `new ObjectId("abc")` lanza un `BSONError`, y sin la expresión `ID` la ruta respondería 500 en lugar de 404. Valida la forma antes de convertir.
+
+</Callout>
+
+## Paso 5: el test E2E
+
+**Qué es:** un test de Playwright que construye la app, la arranca con una base de datos propia y recorre el flujo como un usuario: sin sesión, registro, login y acceso a una tarea ajena.
+
+**Cómo se usa:** instala Playwright y su navegador, crea la configuración, unas ayudas y el test.
+
+```bash
+npm install -D @playwright/test
+npx playwright install chromium
+npm pkg set scripts.test:e2e="playwright test"
+```
+
+```ts
+// Archivo: playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+const PUERTO = 4399;
+const URL = `http://localhost:${PUERTO}`; // el mismo origen que BETTER_AUTH_URL
+
+// Una base de datos propia para los tests: nunca la de desarrollo
+process.env.MONGODB_URI ??= "mongodb://localhost:27017";
+process.env.MONGODB_DB = "planificador_e2e";
+
+export default defineConfig({
+  testDir: "tests/e2e",
+  use: { baseURL: URL },
+  webServer: {
+    command: "npm run build && node dist/server/entry.mjs",
+    url: `${URL}/api/health`,
+    reuseExistingServer: false,
+    env: {
+      PORT: String(PUERTO),
+      MONGODB_URI: process.env.MONGODB_URI,
+      MONGODB_DB: process.env.MONGODB_DB,
+      BETTER_AUTH_URL: URL,
+      BETTER_AUTH_SECRET:
+        process.env.BETTER_AUTH_SECRET ?? "secreto-solo-para-tests-e2e-0123456789",
+    },
+  },
+});
+```
+
+```ts
+// Archivo: tests/e2e/ayudas.ts
+import { expect, type Page } from "@playwright/test";
+import { MongoClient, ObjectId } from "mongodb";
+
+export const CONTRASENA = "contrasena-de-prueba";
+
+/** Un correo distinto en cada test: así se pueden repetir sin limpiar la base de datos */
+export const correo = (quien: string) =>
+  `${quien}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}@planificador.test`;
+
+export async function registrar(page: Page, email: string) {
+  await page.goto("/registro");
+  await page.getByLabel("Nombre").fill("Prueba");
+  await page.getByLabel("Correo").fill(email);
+  await page.getByLabel("Contraseña").fill(CONTRASENA);
+  await page.getByRole("button", { name: "Crear cuenta" }).click();
+  await expect(page.getByRole("heading", { name: "Planificador 2026 v2" })).toBeVisible();
+}
+
+/** Inserta una tarea directamente en la base de datos de los tests y devuelve su id */
+export async function crearTarea(userId: string): Promise<string> {
+  const client = new MongoClient(process.env.MONGODB_URI!);
+  try {
+    const { insertedId } = await client
+      .db(process.env.MONGODB_DB)
+      .collection("tareas")
+      .insertOne({
+        userId,
+        titulo: "Llamar al dentista",
+        dia: "2026-11-21",
+        hecha: false,
+        categoria: { id: new ObjectId(), nombre: "Salud", color: "#0d9488" },
+        creada: new Date(),
+      });
+    return insertedId.toHexString();
+  } finally {
+    await client.close();
+  }
+}
+```
+
+```ts
+// Archivo: tests/e2e/auth.spec.ts
+import { expect, test } from "@playwright/test";
+import { CONTRASENA, correo, crearTarea, registrar } from "./ayudas";
+
+test("sin sesión, las páginas llevan al login y la API responde 401", async ({ page }) => {
+  await page.goto("/");
+  await expect(page).toHaveURL("/login?redirect=%2F");
+  const respuesta = await page.request.get("/api/tareas/0123456789abcdef01234567");
+  expect(respuesta.status()).toBe(401);
+});
+
+test("registro, cierre de sesión e inicio de sesión", async ({ page }) => {
+  const email = correo("ana");
+  await registrar(page, email);
+
+  await page.getByRole("button", { name: "Cerrar sesión" }).click();
+  await expect(page).toHaveURL("/login");
+
+  await page.getByLabel("Correo").fill(email);
+  await page.getByLabel("Contraseña").fill("otra-contrasena");
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Correo o contraseña incorrectos.");
+
+  await page.getByLabel("Contraseña").fill(CONTRASENA);
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page.getByRole("heading", { name: "Planificador 2026 v2" })).toBeVisible();
+});
+
+test("una tarea solo la ve su dueño: otro usuario recibe 404", async ({ browser }) => {
+  const ana = await browser.newPage(); // cada página, su propio contexto y sus cookies
+  await registrar(ana, correo("ana"));
+  const { user } = await (await ana.request.get("/api/auth/get-session")).json();
+  const id = await crearTarea(user.id);
+  expect((await ana.request.get(`/api/tareas/${id}`)).status()).toBe(200);
+
+  const beto = await browser.newPage();
+  await registrar(beto, correo("beto"));
+  expect((await beto.request.get(`/api/tareas/${id}`)).status()).toBe(404);
+});
+```
+
+```bash
+npx playwright test tests/e2e/auth.spec.ts --reporter=line
+```
+
+```text
+Running 3 tests using 1 worker
+
+[1/3] tests/e2e/auth.spec.ts:5:1 › sin sesión, las páginas llevan al login y la API responde 401
+[2/3] tests/e2e/auth.spec.ts:12:1 › registro, cierre de sesión e inicio de sesión
+[WebServer] 2026-11-21T10:17:22.506Z WARN [Better Auth]: Invalid password
+
+[3/3] tests/e2e/auth.spec.ts:29:1 › una tarea solo la ve su dueño: otro usuario recibe 404
+  3 passed (2.7s)
+```
+
+- **El aviso `Invalid password` es del test que se equivoca de contraseña a propósito:** Better Auth registra cada intento fallido, y ese registro servirá en P1.7.
+- **La tarea se inserta directamente en MongoDB:** todavía no existe la ruta para crearla (P1.5), y el test comprueba la autorización, no la creación.
+
+<Callout type="risk">
+
+- **Los tests usan su propia base de datos,** `planificador_e2e`. Contra la de desarrollo, cada ejecución dejaría usuarios de prueba mezclados con tus datos y algún test podría depender de ellos.
+- **Un correo distinto en cada test:** con un correo fijo, la segunda ejecución falla al registrarse porque la cuenta ya existe.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Crea `tests/e2e/sesion.spec.ts` con tres tests: tras cerrar sesión, la API vuelve a responder 401; con sesión, `/login` y `/registro` llevan a la portada; y el login no redirige fuera de la app.
+2. Añade al CI un trabajo `e2e` con MongoDB 8.2.
+3. Comprueba que cada test de seguridad falla si quitas la protección que vigila: el `userId` del filtro y `destinoSeguro`.
+
+</Callout>
+
+Solución. `tests/e2e/sesion.spec.ts`:
+
+```ts
+// Archivo: tests/e2e/sesion.spec.ts
+import { expect, test } from "@playwright/test";
+import { CONTRASENA, correo, crearTarea, registrar } from "./ayudas";
+
+test("al cerrar sesión, la API vuelve a responder 401", async ({ page }) => {
+  await registrar(page, correo("carla"));
+  const { user } = await (await page.request.get("/api/auth/get-session")).json();
+  const id = await crearTarea(user.id);
+  expect((await page.request.get(`/api/tareas/${id}`)).status()).toBe(200);
+
+  await page.getByRole("button", { name: "Cerrar sesión" }).click();
+  await expect(page).toHaveURL("/login");
+  expect((await page.request.get(`/api/tareas/${id}`)).status()).toBe(401);
+});
+
+test("con sesión, login y registro llevan a la portada", async ({ page }) => {
+  await registrar(page, correo("dani"));
+  for (const ruta of ["/login", "/registro"]) {
+    await page.goto(ruta);
+    await expect(page).toHaveURL("/");
+  }
+});
+
+test("el login no redirige fuera de la app", async ({ page }) => {
+  const email = correo("eva");
+  await registrar(page, email);
+  await page.getByRole("button", { name: "Cerrar sesión" }).click();
+  await expect(page).toHaveURL("/login"); // sin esperar, /login aún vería la sesión y llevaría a /
+
+  await page.goto("/login?redirect=//ejemplo.test");
+  await page.getByLabel("Correo").fill(email);
+  await page.getByLabel("Contraseña").fill(CONTRASENA);
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page).toHaveURL("/");
+});
+```
+
+Sustituye `.github/workflows/ci.yml`:
+
+```yaml
+# Archivo: .github/workflows/ci.yml
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run check
+      - run: npm run test:run
+      - run: npm run build
+
+  e2e:
+    needs: verify
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:8.2 # versión fija: una etiqueta flotante puede romper el CI sin cambiar nada
+        ports: ["27017:27017"]
+    env:
+      MONGODB_URI: mongodb://localhost:27017
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+```
+
+```bash
+npx playwright test --reporter=line
+```
+
+```text
+Running 6 tests using 2 workers
+
+[1/6] tests/e2e/sesion.spec.ts:5:1 › al cerrar sesión, la API vuelve a responder 401
+[2/6] tests/e2e/auth.spec.ts:5:1 › sin sesión, las páginas llevan al login y la API responde 401
+[3/6] tests/e2e/auth.spec.ts:12:1 › registro, cierre de sesión e inicio de sesión
+[4/6] tests/e2e/sesion.spec.ts:16:1 › con sesión, login y registro llevan a la portada
+[WebServer] 2026-11-21T10:17:32.896Z WARN [Better Auth]: Invalid password
+
+[5/6] tests/e2e/sesion.spec.ts:24:1 › el login no redirige fuera de la app
+[6/6] tests/e2e/auth.spec.ts:29:1 › una tarea solo la ve su dueño: otro usuario recibe 404
+  6 passed (2.4s)
+```
+
+Con `findOne({ _id: new ObjectId(id) })`, sin el `userId`:
+
+```text
+  1) tests/e2e/auth.spec.ts:29:1 › una tarea solo la ve su dueño: otro usuario recibe 404 ──────────
+
+    Error: expect(received).toBe(expected) // Object.is equality
+
+    Expected: 404
+    Received: 200
+
+      36 |   const beto = await browser.newPage();
+      37 |   await registrar(beto, correo("beto"));
+    > 38 |   expect((await beto.request.get(`/api/tareas/${id}`)).status()).toBe(404);
+         |                                                                  ^
+      39 | });
+```
+
+Y con `destinoSeguro` reducido a `return valor ?? "/";`, el navegador sale de la app:
+
+```text
+  1) tests/e2e/sesion.spec.ts:24:1 › el login no redirige fuera de la app ──────────────────────────
+
+    Error: expect(page).toHaveURL(expected) failed
+
+    Expected: "http://localhost:4399/"
+    Received: "chrome-error://chromewebdata/"
+    Timeout:  5000ms
+```
+
+- **El trabajo `e2e` no necesita _replica set_:** la configuración no pasa el cliente a Better Auth (Paso 1), así que un MongoDB de un nodo basta.
+- **El tercer test necesitó una corrección:** la primera versión pasaba incluso sin `destinoSeguro`. Tras pulsar «Cerrar sesión» iba a `/login` sin esperar, la sesión seguía viva y el _middleware_ la mandaba a la portada: el test nunca llegaba a probar la redirección. Esperar a `/login` lo arregló.
+
+<Callout type="risk">
+
+- **Un test de seguridad que no has visto fallar puede no probar nada:** como el tercero, puede pasar por un motivo distinto del que crees. Quita la protección una vez y comprueba que falla.
+- **En el CI, `BETTER_AUTH_SECRET` es el de los tests:** está escrito en `playwright.config.ts` y solo sirve para una base de datos desechable. El de producción no pasa nunca por el repositorio.
+
+</Callout>
+
+<Callout type="mastery">
+
+Ningún _endpoint_ privado responde sin sesión ni con el ID de otro usuario: el _middleware_ cierra todo por defecto y el repositorio filtra por el `userId` de la sesión. Tienes tests E2E del flujo completo y sabes que cada test de seguridad falla si quitas la protección que vigila.
+
+</Callout>
+
+## Resumen
+
+- Better Auth guarda usuarios y sesiones en MongoDB; `BETTER_AUTH_URL` debe coincidir con el origen.
+- El _middleware_ cierra todo por defecto: las páginas redirigen y la API responde 401.
+- La ruta de vuelta del login solo acepta rutas propias.
+- El `userId` sale de la sesión y va en el filtro del repositorio; lo ajeno es 404.
+- Cada test de seguridad se ha visto fallar sin su protección.
