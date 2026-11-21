@@ -7,15 +7,15 @@ minutes: 60
 summary: "Construyes tipos recorriendo las claves de otro, pones y quitas readonly y ?, renombras y filtras claves con as, y escribes DeepPartial y DeepReadonly que no rompen fechas, funciones ni arrays."
 ---
 
-En I1.3 usaste `Partial`, `Readonly` y `Record` para derivar tipos de una interfaz sin repetirla. Por dentro, los tres son **_mapped types_**: tipos que recorren las claves de otro tipo y construyen uno nuevo, clave a clave, como un `map` sobre las propiedades. Con ellos puedes sacar, de una sola interfaz, el tipo de sus errores de formulario, de sus campos tocados, de sus _getters_ o de sus claves numéricas, y que todos cambien solos cuando la interfaz cambia. En esta sección vas a escribir los tuyos, a manejar sus modificadores, a renombrar y filtrar claves y a construir versiones "profundas" que funcionan a cualquier nivel de anidación.
+`Partial`, `Readonly` y `Record` (I1.3) son **_mapped types_**: recorren las claves de un tipo y construyen otro, como un `map` sobre las propiedades. Con ellos sacas de una interfaz el tipo de sus errores, sus campos tocados o sus _getters_, y todos cambian solos con ella. Aquí escribes los tuyos, renombras y filtras claves y construyes versiones "profundas".
 
-**Lo que tendrás al terminar:** tipos derivados de `Entreno` y de unas preferencias de usuario, una función `ordenarPor` que solo acepta claves numéricas, y `DeepPartial` y `DeepReadonly` probados con una configuración anidada.
-
-**Requisitos:** la sección A1.1, con `src/a1/pruebas.ts` (`Igual` y `Afirmar`).
+**Requisitos:** A1.1, con `src/a1/pruebas.ts` (`Igual` y `Afirmar`).
 
 ## Paso 1: `{ [K in keyof T]: … }`
 
-Un _mapped type_ se lee así: "para cada clave `K` de las que hay en `keyof T`, una propiedad `K` cuyo tipo es…". Con `T[K]` (el acceso por índice de I1.2), el tipo de esa propiedad en el original. Crea `src/a1/06-mapped.ts`:
+**Qué es:** "para cada clave `K` de `keyof T`, una propiedad `K` cuyo tipo es…", con `T[K]` (I1.2) como el tipo original de esa propiedad.
+
+**Cómo se usa:** crea `src/a1/06-mapped.ts`.
 
 ```ts
 // Archivo: src/a1/06-mapped.ts
@@ -63,7 +63,7 @@ npm start -- src/a1/06-mapped.ts
 { minutos: [ 'Mínimo 1 minuto' ] } { tipo: true, minutos: true } { tipo: 'running', minutos: '45', km: '9' }
 ```
 
-- **`Copia<T>` da el mismo tipo:** recorre las claves y deja cada valor igual. `MiPartial` añade `?` a cada una y `MiReadonly`, `readonly`. Son las definiciones de TypeScript:
+- **`Copia<T>` da el mismo tipo;** `MiPartial` añade `?` y `MiReadonly`, `readonly`. Son las definiciones de TypeScript:
 
   ```ts
   type Partial<T> = {
@@ -77,10 +77,10 @@ npm start -- src/a1/06-mapped.ts
   };
   ```
 
-- **Lo interesante es cambiar el tipo del valor:** `Errores<Entreno>` tiene las mismas claves que `Entreno`, cada una con un `string[]`. Si mañana añades un campo a `Entreno`, el tipo de sus errores lo tiene sin que lo toques.
-- **Los `?` del original se conservan:** en `Tocados<Entreno>`, `km` y `notas` siguen siendo opcionales. Un _mapped type_ sobre `keyof T` copia los modificadores de cada propiedad.
+- **Lo útil es cambiar el valor:** `Errores<Entreno>` tiene las claves de `Entreno` con un `string[]` cada una, y un campo nuevo aparece solo.
+- **Los `?` del original se conservan:** en `Tocados<Entreno>`, `km` y `notas` siguen opcionales.
 
-Añade al final del archivo:
+Añade al final (y bórralo después):
 
 ```ts
 const sinMinutos: Tocados<Entreno> = { tipo: true };
@@ -92,11 +92,11 @@ src/a1/06-mapped.ts(36,7): error TS2741: Property 'minutos' is missing in type '
 src/a1/06-mapped.ts(37,55): error TS2322: Type 'number' is not assignable to type 'string'.
 ```
 
-Los dos tipos derivados exigen lo que deben: `minutos` es obligatorio (como en `Entreno`) y, en el formulario, un texto. Borra las dos líneas.
+- **Los derivados exigen lo que deben:** `minutos` es obligatorio y, en el formulario, un texto.
 
 <Callout type="risk">
 
-- **Los modificadores solo se copian con `keyof T` escrito dentro:** si las claves vienen de otro sitio, se pierden. Con este archivo de prueba, `npm run typecheck` no da ningún error, es decir, `km` **dejó de ser opcional**:
+- **Los modificadores solo se copian con `keyof T` escrito dentro:** con este archivo, `npm run typecheck` pasa, es decir, `km` **dejó de ser opcional**:
 
   ```ts
   // Archivo: src/a1/prueba-homomorfico.ts
@@ -114,15 +114,17 @@ Los dos tipos derivados exigen lo que deben: `minutos` es obligatorio (como en `
   type _pruebas = [Afirmar<Igual<NoHomomorfico, { tipo: boolean; minutos: boolean; km: boolean }>>]; // km obligatorio
   ```
 
-  `[K in keyof T]` se llama _homomórfico_ (conserva la forma del original); `[K in Claves]`, con las claves en un alias aparte, no lo es.
+  `[K in keyof T]` es _homomórfico_ (conserva la forma); `[K in Claves]`, con las claves en un alias, no.
 
-- **Un _mapped type_ no sustituye a una interfaz cuando el tipo es distinto de verdad:** úsalo cuando el nuevo tipo **depende** del original (sus errores, sus campos tocados). Si solo se parecen por casualidad, dos interfaces son más claras.
+- **Úsalo cuando el tipo nuevo depende del original;** si solo se parecen por casualidad, dos interfaces son más claras.
 
 </Callout>
 
 ## Paso 2: poner y quitar `readonly` y `?`
 
-Los modificadores se pueden **añadir** con `+` (que es lo que pasa si no escribes nada) y **quitar** con `-`. `-?` hace obligatoria cada propiedad; así es `Required`. `-readonly` permite reasignarlas, y TypeScript no trae un tipo para eso. Crea `src/a1/07-modificadores.ts`:
+**Qué es:** los modificadores se **añaden** con `+` (lo que pasa si no escribes nada) y se **quitan** con `-`: `-?` hace obligatoria cada propiedad (`Required`) y `-readonly` permite reasignar, algo que TypeScript no trae hecho.
+
+**Cómo se usa:** crea `src/a1/07-modificadores.ts`.
 
 ```ts
 // Archivo: src/a1/07-modificadores.ts
@@ -168,11 +170,11 @@ type _pruebas = [
 { tema: 'dark', recordatorio: '07:00', id: 'u2' }
 ```
 
-- **`Readonly<MiRequired<Preferencias>>`** describe unas preferencias completas (sin huecos, con los valores por defecto aplicados) y que nadie puede reasignar. Dos transformaciones encadenadas, sin escribir otra interfaz.
-- **`Mutable`** quita los `readonly`, para trabajar con una copia: el borrador puede cambiar su `id`, el original no.
-- **`completar` no necesita ningún `as`:** TypeScript sabe que el _spread_ de `PREDETERMINADAS` y luego `p` da un objeto con todas las propiedades.
+- **`Readonly<MiRequired<Preferencias>>`:** preferencias completas y no reasignables, encadenando dos transformaciones.
+- **`Mutable`** quita los `readonly` para una copia de trabajo: el borrador cambia su `id`; el original no.
+- **`completar` no necesita `as`:** el _spread_ de `PREDETERMINADAS` y `p` da todas las propiedades.
 
-Añade al final:
+Añade al final (y bórralo después):
 
 ```ts
 mias.tema = "light";
@@ -184,11 +186,9 @@ src/a1/07-modificadores.ts(38,6): error TS2540: Cannot assign to 'tema' because 
 src/a1/07-modificadores.ts(39,7): error TS2741: Property 'tema' is missing in type '{ id: string; recordatorio: string; }' but required in type 'Readonly<MiRequired<Preferencias>>'.
 ```
 
-Borra las dos líneas.
-
 <Callout type="risk">
 
-- **El tipo dice "siempre hay tema", pero un `undefined` explícito se cuela.** Con `completar({ id: "u4", tema: undefined })`, el código compila, y al ejecutarlo:
+- **Un `undefined` explícito se cuela:** `completar({ id: "u4", tema: undefined })` compila y da:
 
   ```text
   { tema: 'dark', recordatorio: '07:00', id: 'u1' }
@@ -196,21 +196,23 @@ Borra las dos líneas.
   tema: undefined
   ```
 
-  Para TypeScript, `tema?: "light" | "dark"` admite también `tema: undefined`, y ese `undefined` **sobrescribe** el valor por defecto en el _spread_. La opción `exactOptionalPropertyTypes` del `tsconfig.json` distingue "no está" de "está con `undefined`":
+  `tema?:` admite `tema: undefined`, que **sobrescribe** el valor por defecto en el _spread_. `exactOptionalPropertyTypes` distingue "no está" de "está con `undefined`":
 
   ```text
   src/a1/07-modificadores.ts(38,25): error TS2379: Argument of type '{ id: string; tema: undefined; }' is not assignable to parameter of type 'Preferencias' with 'exactOptionalPropertyTypes: true'. Consider adding 'undefined' to the types of the target's properties.
   ```
 
-  Es más estricta (y obliga a escribir `tema?: "light" | "dark" | undefined` donde de verdad quieras aceptar `undefined`), pero cierra este hueco.
+  Es más estricta (hay que escribir `| undefined` donde de verdad se acepte), pero cierra el hueco.
 
-- **`readonly` no existe al ejecutar:** es una comprobación del compilador. Un `as` o código en JavaScript puede modificar la propiedad (lo verás con `Object.freeze` en el ejercicio).
+- **`readonly` no existe al ejecutar:** un `as` o JavaScript la modifican (`Object.freeze`, en el ejercicio).
 
 </Callout>
 
 ## Paso 3: renombrar y filtrar claves con `as`
 
-Dentro de un _mapped type_, `as` cambia el **nombre** de cada clave: `[K in keyof T as NuevoNombre]`. Y si el nuevo nombre es `never`, la clave **desaparece**: así se filtran propiedades. Crea `src/a1/08-renombrar.ts`:
+**Qué es:** dentro de un _mapped type_, `as` cambia el **nombre** de cada clave: `[K in keyof T as NuevoNombre]`. Si el nombre es `never`, la clave **desaparece**: así se filtra.
+
+**Cómo se usa:** crea `src/a1/08-renombrar.ts`.
 
 ```ts
 // Archivo: src/a1/08-renombrar.ts
@@ -266,31 +268,24 @@ type _pruebas = [
 minutos: 40
 ```
 
-- **`` `get${Capitalize<string & K>}` ``** construye el nuevo nombre con una plantilla de texto: `"minutos"` pasa a `"getMinutos"`. Los _template literal types_ y `Capitalize` son la sección A1.3; aquí basta con saber que funcionan como una plantilla de JavaScript, pero con tipos.
-- **`AlCambiar<Entreno>`** da un aviso tipado por campo: `alCambiarMinutos` recibe un `number` y `alCambiarTipo`, uno de los tres tipos de entreno.
-- **`T[K] extends V ? K : never`** se queda con las claves cuyo valor encaja en `V` y convierte las demás en `never`. Es un tipo condicional (A1.1) dentro de un _mapped type_.
-- **`ClavesNumericas<Entreno>`** es `"minutos" | "km"`, y `ordenarPor` solo acepta esas: pedir otra clave es un error al compilar.
-
-Pruébalo, añadiendo `ordenarPor(entrenos, "tipo");` al final:
+- **`` `get${Capitalize<string & K>}` ``** convierte `"minutos"` en `"getMinutos"` con una plantilla de tipos (A1.3), y **`AlCambiar<Entreno>`** da un aviso tipado por campo (`alCambiarMinutos` recibe un `number`).
+- **`T[K] extends V ? K : never`** filtra por el tipo del valor: un condicional (A1.1) dentro de un _mapped type_.
+- **`ClavesNumericas<Entreno>` es `"minutos" | "km"`,** y `ordenarPor` solo acepta esas. Con `ordenarPor(entrenos, "tipo");` al final (bórralo después):
 
 ```text
 src/a1/08-renombrar.ts(48,22): error TS2345: Argument of type '"tipo"' is not assignable to parameter of type '"km" | "minutos"'.
 ```
 
-Borra la línea.
-
 <Callout type="risk">
 
-- **¿Por qué `string & K`?** `keyof T` puede incluir números y símbolos (`{ 0: "a" }`, `{ [Symbol.iterator]: … }`), y `Capitalize` solo acepta textos. Con `Capitalize<K>` a secas:
+- **`string & K`, porque `keyof T` puede incluir números y símbolos** y `Capitalize` solo acepta textos. Con `Capitalize<K>`:
 
   ```text
   src/a1/08-renombrar.ts(14,55): error TS2344: Type 'K' does not satisfy the constraint 'string'.
   ```
 
-  `string & K` se queda solo con las claves que son texto.
-
-- **Una propiedad opcional no es un `string`:** `SoloStrings<Entreno>` deja fuera `notas?`, porque su tipo es `string | undefined`, que no encaja en `string`. Por eso `ClavesNumericas` aplica antes `Required` (que quita los `?`): sin él, `km` no saldría.
-- **Dentro de `ordenarPor`, TypeScript no sabe que `a[clave]` es un número:** `T` es genérico y el filtro no llega a esa línea. Por eso el `Number(a[clave] ?? 0)`.
+- **Un opcional no es un `string`:** `SoloStrings<Entreno>` deja fuera `notas?` (`string | undefined`). Por eso `ClavesNumericas` aplica antes `Required`, o `km` no saldría.
+- **Dentro de `ordenarPor`, `a[clave]` no es un número para TypeScript:** el filtro no llega ahí, de ahí `Number(a[clave] ?? 0)`.
 
 </Callout>
 
@@ -304,7 +299,7 @@ Borra la línea.
 
 </Callout>
 
-Solución. La primera idea es aplicar el _mapped type_ a cada valor, recursivamente. `src/a1/09-ingenuo.ts`:
+Solución. La primera idea, aplicar el _mapped type_ a cada valor, en `src/a1/09-ingenuo.ts`:
 
 ```ts
 // Archivo: src/a1/09-ingenuo.ts
@@ -333,19 +328,17 @@ const raro: Parcial = { alGuardar: {}, ultimoCambio: {}, objetivo: { dias: [unde
 console.log(raro);
 ```
 
-`npm run typecheck` no da ningún error: las tres afirmaciones son ciertas, y el objeto de abajo compila.
+`npm run typecheck` pasa: las tres afirmaciones son ciertas y el objeto de abajo compila.
 
 ```text
 { alGuardar: {}, ultimoCambio: {}, objetivo: { dias: [ undefined ] } }
 ```
 
-La versión ingenua rompe tres cosas:
+- **Las funciones pasan a `{}`:** no hay propiedades que recorrer, y `alGuardar: {}` vale.
+- **Las fechas aceptan `{}`:** todos los métodos de `Date` se vuelven opcionales.
+- **Los arrays admiten huecos:** `dias` pasa a `(string | undefined)[]`.
 
-- **Las funciones se convierten en `{}`:** un _mapped type_ sobre un tipo de función no encuentra propiedades que recorrer, y `alGuardar: {}` es válido.
-- **Las fechas aceptan `{}`:** `DeepPartial<Date>` vuelve opcionales todos los métodos de `Date`, y un objeto vacío los cumple.
-- **Los arrays admiten huecos:** un _mapped type_ sobre un array transforma sus elementos, y `dias` pasa a ser `(string | undefined)[]`.
-
-La solución es parar la recursión en las **hojas** y tratar los arrays aparte. `src/a1/profundo.ts`:
+La solución, parar en las **hojas** y tratar los arrays aparte, `src/a1/profundo.ts`:
 
 ```ts
 // Archivo: src/a1/profundo.ts
@@ -365,7 +358,7 @@ export type DeepReadonly<T> = T extends Hoja
     : { readonly [K in keyof T]: DeepReadonly<T[K]> };
 ```
 
-Y la prueba, con una configuración anidada y una función que fusiona cambios, `src/a1/10-ejercicio.ts`:
+La prueba, con una configuración anidada y una función que fusiona cambios, `src/a1/10-ejercicio.ts`:
 
 ```ts
 // Archivo: src/a1/10-ejercicio.ts
@@ -447,7 +440,9 @@ npm start -- src/a1/10-ejercicio.ts
 }
 ```
 
-Solo cambiaron los minutos semanales y la hora del correo; el resto de la configuración se conserva. Ahora lo que no debe compilar. Añade al final:
+- **Solo cambian los minutos semanales y la hora del correo;** lo demás se conserva.
+
+Lo que no debe compilar, al final:
 
 ```ts
 CONFIG.notificaciones.email.activo = false;
@@ -466,10 +461,9 @@ src/a1/10-ejercicio.ts(54,30): error TS2322: Type 'string' is not assignable to 
 src/a1/10-ejercicio.ts(55,30): error TS2353: Object literal may only specify known properties, and 'minutos' does not exist in type '{ minutosSemana?: number | undefined; dias?: string[] | undefined; }'.
 ```
 
-- **`DeepReadonly` protege a cualquier profundidad:** el tercer nivel (`email.activo`) y el array (`dias`, ahora `readonly string[]`, sin `push`).
-- **`DeepPartial` sigue comprobando los tipos y los nombres:** los minutos como texto y una clave mal escrita (`minutos` en lugar de `minutosSemana`) son errores.
-- **El `Readonly` de TypeScript es superficial:** la última línea **compila**, y por eso no aparece en los errores. Solo protege `superficial.objetivo`, no lo que hay dentro.
-- **Los casos límite, en los tests:** la fecha sigue siendo `Date`, la función sigue siendo una función y el array se sustituye entero.
+- **`DeepReadonly` protege a cualquier nivel:** `email.activo` y el array `dias` (`readonly string[]`, sin `push`).
+- **`DeepPartial` comprueba tipos y nombres:** minutos como texto y `minutos` en vez de `minutosSemana` son errores.
+- **El `Readonly` de TypeScript es superficial:** la última línea compila y no sale en los errores. Las fechas siguen `Date`, las funciones, funciones, y el array se sustituye entero.
 
 ¿Y al ejecutar? `src/a1/11-freeze.ts`:
 
@@ -492,13 +486,13 @@ primer nivel: Cannot assign to read only property 'tema' of object '#<Object>'
 segundo nivel: 1
 ```
 
-`Object.freeze`, el equivalente de `readonly` al ejecutar, también es **superficial**: el primer nivel lanza un error, y el segundo se modifica sin queja. `DeepReadonly` protege mientras escribes el código; si necesitas que tampoco cambie al ejecutar, hay que congelar cada nivel.
+- **`Object.freeze` también es superficial:** el primer nivel lanza un error y el segundo cambia sin queja. Para que tampoco cambie al ejecutar, hay que congelar cada nivel.
 
 <Callout type="risk">
 
-- **Decide qué es una hoja en tu proyecto:** `Date` y las funciones casi siempre; también `Map`, `Set` o las clases con métodos, si las usas en la configuración. Un tipo profundo sin hojas recorre cosas que no debe.
-- **`fusionar` necesita tres conversiones de tipo (`as`)** porque trabaja con `unknown` por dentro. Es normal en una función genérica de este tipo: lo importante es que su **firma** sea exacta, y que esté probada (la salida de arriba).
-- **Los tipos recursivos sobre estructuras muy grandes ralentizan el editor:** aplica `DeepReadonly` a una configuración, no a la respuesta entera de una API con cientos de campos.
+- **Decide qué es una hoja:** `Date` y funciones casi siempre; también `Map`, `Set` o clases con métodos si los usas.
+- **`fusionar` necesita tres `as`** porque trabaja con `unknown` por dentro; lo importante es que su **firma** sea exacta y esté probada.
+- **Los tipos recursivos grandes ralentizan el editor:** `DeepReadonly` para una configuración, no para una respuesta de API de cientos de campos.
 
 </Callout>
 
@@ -510,8 +504,8 @@ Transformas cualquier tipo de objeto en otro sin repetirlo: recorres sus claves 
 
 ## Resumen
 
-- `{ [K in keyof T]: T[K] }` recorre las claves; cambia el tipo del valor para derivar errores, campos tocados o formularios.
-- Solo `[K in keyof T]` conserva los `?` y `readonly` del original.
-- `-?` quita los opcionales (`Required`), `-readonly` permite reasignar; `exactOptionalPropertyTypes` impide colar un `undefined` explícito.
-- `as` renombra claves (`` `get${Capitalize<string & K>}` ``) y, con `never`, las filtra.
-- `DeepPartial` y `DeepReadonly`: recursivos, con hojas (fechas, funciones) y arrays aparte. `Readonly` y `Object.freeze` son superficiales.
+- `{ [K in keyof T]: T[K] }` recorre las claves; cambiar el valor deriva errores, campos tocados o formularios.
+- Solo `[K in keyof T]` conserva `?` y `readonly`.
+- `-?` y `-readonly` los quitan; `exactOptionalPropertyTypes` frena el `undefined` explícito.
+- `as` renombra (`` `get${Capitalize<string & K>}` ``) y, con `never`, filtra.
+- `DeepPartial` y `DeepReadonly` con hojas y arrays aparte; `Readonly` y `Object.freeze` son superficiales.

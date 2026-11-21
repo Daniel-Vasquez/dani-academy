@@ -7,21 +7,21 @@ minutes: 60
 summary: "Reaccionas a cada cambio con watch(), comparas sondeo (618 ms de retraso y 3 450 consultas por hora) con change streams (10 ms), reanudas con resume tokens y rehaces los avisos del Planificador sin repetir ninguno."
 ---
 
-Los avisos de tu Planificador funcionan por **sondeo** (_polling_): cada cierto tiempo, una tarea pregunta a la base de datos "¿hay algo nuevo?". Casi siempre la respuesta es "no", y cada pregunta es una consulta. Y cuando hay algo nuevo, se entera tarde: hasta el siguiente sondeo. Los **_change streams_** le dan la vuelta: la aplicación abre un canal con MongoDB, y MongoDB le **avisa** de cada cambio en cuanto ocurre. En esta sección vas a ver qué entregan, a medir la diferencia con el sondeo, a no perder eventos cuando el proceso se cae y a rehacer los avisos del Planificador con todo eso.
+Los avisos del Planificador funcionan por **sondeo** (_polling_): una tarea pregunta "¿hay algo nuevo?" cada cierto tiempo, casi siempre para nada, y se entera tarde. Con los **_change streams_**, MongoDB **avisa** de cada cambio en cuanto ocurre. Aquí ves qué entregan, mides la diferencia, evitas perder eventos tras una caída y rehaces los avisos.
 
-**Lo que tendrás al terminar:** un proceso de avisos que escucha las tareas del Planificador, avisa por Telegram de las urgentes y de las terminadas, sigue donde lo dejó tras un reinicio y no repite ningún aviso.
-
-**Requisitos:** el proyecto `mongo-academy` con `src/a2/`, conectado a un _replica set_ (como en A2.1). En un MongoDB suelto, `watch()` no funciona:
+**Requisitos:** el proyecto `mongo-academy` con `src/a2/`, sobre un _replica set_ (A2.1). En un MongoDB suelto, `watch()` da:
 
 ```text
 Location40573: The $changeStream stage is only supported on replica sets
 ```
 
-Dos cosas de esta sección **no se han ejecutado contra servicios reales:** los avisos van a un servidor local que imita la API de Telegram (el código es el mismo; solo cambia la dirección), y los Atlas Triggers (Paso 4) solo existen en Atlas, así que se explican sin ejecutarlos.
+**Dos cosas no se han ejecutado contra servicios reales:** los avisos van a un servidor local que imita la API de Telegram (mismo código, otra dirección), y los Atlas Triggers (Paso 4) solo existen en Atlas.
 
 ## Paso 1: `watch()`
 
-`src/a2/16-watch.ts`:
+**Qué es:** `watch()` abre un canal por el que MongoDB entrega un **evento** por cada cambio de la colección. Por dentro lee el _oplog_, el registro que el _replica set_ usa para copiar cambios entre nodos; por eso lo necesita.
+
+**Cómo se usa:** crea `src/a2/16-watch.ts`.
 
 ```ts
 // Archivo: src/a2/16-watch.ts
@@ -83,21 +83,22 @@ update  cambios={"puntuacion":5} · fullDocument={"_id":"…","userId":"ana","cu
 delete  documentKey={"_id":"…"}
 ```
 
-- **Cada cambio llega como un evento**, con su `operationType` (`insert`, `update`, `delete`, `replace`…), la clave del documento (`documentKey`) y lo que cambió.
-- **En un `insert`, `fullDocument` es el documento nuevo.** En un `update`, `updateDescription.updatedFields` dice qué campos cambiaron; con `fullDocument: "updateLookup"`, el evento trae además el documento entero tal como quedó.
-- **En un `delete`, solo llega la clave:** el documento ya no existe. Si necesitas saber qué había, MongoDB puede guardar la versión anterior (`changeStreamPreAndPostImages` en la colección), a cambio de más espacio.
-- **Por dentro, MongoDB lee el _oplog_:** el registro de operaciones que el _replica set_ usa para copiar los cambios entre nodos. Por eso hace falta un _replica set_.
+- **Cada evento trae su `operationType`** (`insert`, `update`, `delete`, `replace`…), la clave (`documentKey`) y lo que cambió.
+- **En un `insert`, `fullDocument` es el documento;** en un `update`, `updateDescription.updatedFields` dice qué cambió y, con `fullDocument: "updateLookup"`, llega además el documento entero.
+- **En un `delete`, solo la clave:** para saber qué había, `changeStreamPreAndPostImages` en la colección, a cambio de espacio.
 
 <Callout type="risk">
 
-- **Cerrar el _stream_ interrumpe el `for await` con un error:** la primera versión de este _script_ terminaba con `MongoAPIError: ChangeStream is closed` al llamar a `stream.close()`. El `try`/`catch` que comprueba `stream.closed` distingue el cierre a propósito de un fallo de verdad.
-- **`updateLookup` busca el documento después del cambio:** si entre el cambio y la búsqueda hay otro, el `fullDocument` que llega ya incluye ese segundo cambio. Para saber exactamente qué cambió en cada evento, usa `updatedFields`.
+- **Cerrar el _stream_ interrumpe el `for await` con un error:** la primera versión acababa con `MongoAPIError: ChangeStream is closed`. El `catch` que mira `stream.closed` separa el cierre a propósito de un fallo.
+- **`updateLookup` busca el documento después:** si entretanto hubo otro cambio, `fullDocument` ya lo incluye. Para lo exacto de cada evento, `updatedFields`.
 
 </Callout>
 
 ## Paso 2: sondeo frente a _change stream_
 
-Lo mismo de las dos formas, a la vez: diez intentos a intervalos irregulares, y dos procesos que se enteran de cada uno. `src/a2/18-sondeo.ts`:
+**Qué es:** la misma tarea de las dos formas, a la vez, para comparar retraso y coste.
+
+**Cómo se usa:** diez intentos a intervalos irregulares y dos procesos que se enteran de cada uno, en `src/a2/18-sondeo.ts`:
 
 ```ts
 // Archivo: src/a2/18-sondeo.ts
@@ -170,20 +171,22 @@ change stream: 10 avisos · retraso medio 10 ms (máx. 16) · 1 stream abierto
 a este ritmo, el sondeo hace 3452 consultas por hora, haya novedades o no
 ```
 
-- **Con sondeo cada segundo, cada aviso llega unos 618 ms tarde de media** (hasta casi un segundo): lo que falte para el siguiente sondeo. Para reducirlo, hay que preguntar más a menudo, y entonces hay más consultas.
-- **Con el _change stream_, unos 10 ms:** lo que tarda MongoDB en entregar el evento.
-- **El sondeo hizo 11 consultas en 11,5 segundos, y casi todas sin novedades.** A ese ritmo, unas 3 450 consultas por hora, por cada proceso que sondea, haya o no haya cambios. El _change stream_ es una sola conexión abierta.
+- **Con sondeo cada segundo, unos 618 ms de retraso medio** (hasta casi un segundo): lo que falta para el siguiente. Reducirlo exige preguntar más.
+- **Con el _change stream_, unos 10 ms.**
+- **El sondeo hizo 11 consultas en 11,5 s,** casi todas vacías: unas 3 450 por hora y proceso, haya cambios o no. El _stream_ es una conexión.
 
 <Callout type="risk">
 
-- **Un _stream_ abierto ocupa una conexión todo el tiempo:** no lo abras por cada petición web. Va en un proceso de larga duración (un _worker_, como el del ejercicio), no en un _endpoint_ ni en una función _serverless_ que termina en segundos.
-- **Filtra en el _pipeline_ del _stream_,** no en tu código: con `$match`, MongoDB solo te envía los eventos que te interesan (el Paso 3 lo hace con los 5/5).
+- **Un _stream_ ocupa una conexión todo el tiempo:** va en un proceso de larga duración (un _worker_), no en un _endpoint_ ni en una función _serverless_.
+- **Filtra en el _pipeline_ del _stream_** con `$match`, y MongoDB solo envía lo que interesa (Paso 3).
 
 </Callout>
 
 ## Paso 3: no perder eventos, con _resume tokens_
 
-Cada evento trae en su `_id` un **_resume token_**: un marcador de su posición en el _oplog_. Si el proceso guarda el token del último evento que procesó, al reiniciar puede pedir "todo lo que pasó **después** de este" (`resumeAfter`). `src/a2/17-reanudar.ts`:
+**Qué es:** el `_id` de cada evento es un **_resume token_**, su posición en el _oplog_. Guardado tras procesar, permite pedir al reiniciar todo lo posterior con `resumeAfter`.
+
+**Cómo se usa:** crea `src/a2/17-reanudar.ts`.
 
 ```ts
 // Archivo: src/a2/17-reanudar.ts
@@ -263,36 +266,36 @@ await cliente.close();
 oplog: tamaño máximo 0.2 GB · ocupado 177 MB · cubre 0.4 horas
 ```
 
-1. **Funcionando, el `$match` deja pasar solo los 5/5:** el 3/5 de Dani no llega.
-2. **Sin el token, el reinicio pierde lo de mientras:** las dos evaluaciones de 5/5 que llegaron con el proceso caído no se avisan nunca.
-3. **Con el token, el reinicio recupera las dos** y sigue con la nueva.
-
-¿Y si el proceso está caído mucho tiempo? Solo se puede reanudar mientras el evento siga en el _oplog_, que tiene un tamaño fijo y descarta lo más antiguo. La última línea lo mide en este laboratorio: un _oplog_ de 0,2 GB que **solo cubre 0,4 horas**, porque los millones de documentos de A2.2 lo llenaron. En un clúster de producción, con escrituras normales, suele cubrir horas o días; míralo en el tuyo antes de decidir cuánto tiempo puede estar caído el proceso. (En este laboratorio no conseguí provocar el caso de un token ya descartado: tras unos 240 MB de escrituras más, el _oplog_ seguía conservando el evento, por encima de su tamaño nominal).
+- **Funcionando, el `$match` solo deja pasar los 5/5:** el 3/5 de Dani no llega.
+- **Sin token, el reinicio pierde lo de mientras:** dos 5/5 con el proceso caído no se avisan nunca. **Con token,** se recuperan y sigue con la nueva.
+- **Solo se reanuda mientras el evento siga en el _oplog_,** de tamaño fijo. Aquí, 0,2 GB que **cubren 0,4 horas** porque los millones de documentos de A2.2 lo llenaron; en producción suele cubrir horas o días. Mídelo en el tuyo. (No logré provocar un token descartado: tras unos 240 MB más, el evento seguía, por encima del tamaño nominal).
 
 <Callout type="risk">
 
-- **Guarda el token después de procesar el evento, no antes:** si lo guardas antes y el proceso se cae a mitad, al reiniciar ese evento se da por hecho y se pierde. Guardándolo después, en el peor caso se repite (y el ejercicio evita que el aviso se repita).
-- **Si el token ya no está en el _oplog_, el _stream_ no se puede reanudar:** el proceso tiene que darse cuenta y recuperarse por otro camino (por ejemplo, una consulta de lo que cambió desde la última fecha conocida). No lo ignores en silencio.
+- **Guarda el token después de procesar:** antes, una caída a mitad pierde el evento; después, como mucho se repite (y el ejercicio evita repetir el aviso).
+- **Un token fuera del _oplog_ no se reanuda:** detéctalo y recupera por otro camino (lo cambiado desde la última fecha). No lo ignores.
 
 </Callout>
 
 ## Paso 4: Atlas Triggers, la alternativa sin servidor
 
-Un _change stream_ necesita un proceso que esté siempre en marcha. Si tu app vive en Vercel, con funciones que duran segundos, no tienes dónde ponerlo. **Atlas Triggers** resuelve eso: en Atlas, un _Database Trigger_ se configura sobre una colección, con los tipos de operación y un filtro, y ejecuta una función de JavaScript alojada en el propio Atlas con cada evento. Por dentro es un _change stream_ que gestiona Atlas, incluido guardar dónde se quedó.
+**Qué es:** un _change stream_ necesita un proceso siempre en marcha, que una app en Vercel no tiene. Un _Database Trigger_ de Atlas se configura sobre una colección, con tipos de operación y filtro, y ejecuta una función alojada en Atlas con cada evento: un _change stream_ que Atlas gestiona, incluido el token.
 
-|                           | _Change stream_ propio                  | Atlas Trigger                       |
+**Cómo se usa:**
+
+| Aspecto                   | _Change stream_ propio                  | Atlas Trigger                       |
 | ------------------------- | --------------------------------------- | ----------------------------------- |
 | Dónde se ejecuta          | Tu proceso (un _worker_ en un servidor) | Atlas                               |
 | Guardar el _resume token_ | Tú (el ejercicio)                       | Atlas                               |
 | Funciona con              | Cualquier _replica set_                 | Solo Atlas                          |
 | Tu código                 | Tu lenguaje, tus dependencias           | Una función con el entorno de Atlas |
 
-Los Triggers **no se han ejecutado en este laboratorio**, porque solo existen en Atlas. Consulta la documentación de Atlas Triggers para configurarlos en tu clúster: la lógica de la función es la misma que `textoDelAviso` del ejercicio.
+- **No se han ejecutado aquí,** porque solo existen en Atlas: consulta su documentación. La lógica de la función es la de `textoDelAviso` del ejercicio.
 
 <Callout type="risk">
 
-- **Atlas puede suspender un Trigger:** por ejemplo, si no puede reanudarlo porque el evento ya salió del _oplog_. Revisa su estado en Atlas de vez en cuando, o un sistema de avisos puede dejar de avisar sin que nadie se entere.
-- **No hagas lo mismo con un Trigger y con tu _worker_ a la vez:** los avisos llegarían dos veces.
+- **Atlas puede suspender un Trigger** (por ejemplo, si el evento salió del _oplog_): revisa su estado, o los avisos se paran sin que nadie lo note.
+- **No uses Trigger y _worker_ a la vez:** los avisos llegarían dos veces.
 
 </Callout>
 
@@ -306,7 +309,7 @@ Los Triggers **no se han ejecutado en este laboratorio**, porque solo existen en
 
 </Callout>
 
-Solución. El proceso de avisos, `src/a2/avisos.ts`:
+Solución. El proceso, `src/a2/avisos.ts`:
 
 ```ts
 // Archivo: src/a2/avisos.ts
@@ -373,7 +376,7 @@ export async function arrancarAvisos(nombre: string): Promise<ChangeStream<Tarea
 }
 ```
 
-Y la prueba, con un Telegram falso que registra cada mensaje. `src/a2/19-ejercicio.ts`:
+La prueba, con un Telegram falso que registra cada mensaje, `src/a2/19-ejercicio.ts`:
 
 ```ts
 // Archivo: src/a2/19-ejercicio.ts
@@ -449,19 +452,15 @@ await cliente.close();
 4. Reiniciado desde un token viejo: 0 mensajes · eventos 4, avisos 0, repetidos descartados 3
 ```
 
-1. **Funcionando:** tres eventos (dos tareas nuevas y una terminada), dos avisos. La tarea de prioridad normal no avisa.
-2. **Caído:** se crea y se termina una tarea urgente sin nadie escuchando.
-3. **Reiniciado:** sigue desde el token guardado en `a2_cursores` y avisa de las dos cosas que pasaron mientras tanto.
-4. **Reiniciado desde un token viejo** (como si se hubiera caído justo antes de guardarlo): recibe otra vez cuatro eventos, pero los tres que ya se avisaron están en `a2_avisados` y se descartan. Ningún mensaje repetido.
-
-- **El token se guarda en MongoDB,** en la colección `a2_cursores`, con un nombre por proceso: así sobrevive a reinicios y despliegues.
-- **`a2_avisados` es la memoria de lo enviado,** con el propio token del evento como clave. Comprobarla antes de enviar hace que repetir un evento no repita el aviso.
-- **El orden importa:** enviar, apuntar el aviso y, al final, avanzar el token. Si el proceso se cae entre enviar y apuntar, ese aviso podría salir dos veces; es el caso más improbable, y es mejor que perder un aviso.
+- **Funcionando:** tres eventos y dos avisos; la tarea normal no avisa. **Caído:** una tarea urgente se crea y se termina sin nadie escuchando. **Reiniciado:** sigue desde el token de `a2_cursores` y avisa de las dos.
+- **Reiniciado desde un token viejo:** recibe otra vez cuatro eventos, pero los tres ya avisados están en `a2_avisados` (con el token como clave) y se descartan. Ningún repetido.
+- **El token vive en MongoDB,** con un nombre por proceso, y sobrevive a reinicios y despliegues.
+- **El orden importa:** enviar, apuntar y avanzar el token. Una caída entre enviar y apuntar podría repetir un aviso: el caso más improbable, y mejor que perder uno.
 
 <Callout type="risk">
 
-- **El _token_ de Telegram es un secreto:** va en una variable de entorno, nunca en el código ni en los registros (el Telegram falso lo oculta al mostrar la URL).
-- **Un proceso de avisos necesita vigilancia:** si se para, nadie recibe avisos y nadie se entera. Que registre cuándo procesó el último evento y que algo te avise si lleva demasiado tiempo sin hacerlo.
+- **El _token_ de Telegram es un secreto:** en una variable de entorno, nunca en código ni registros (el Telegram falso lo oculta en la URL).
+- **Un proceso de avisos necesita vigilancia:** que registre su último evento y que algo avise si lleva demasiado sin procesar.
 
 </Callout>
 
@@ -473,8 +472,8 @@ Reaccionas a cambios de la base de datos sin consultas periódicas: abres un _ch
 
 ## Resumen
 
-- `collection.watch(pipeline, { fullDocument: "updateLookup" })`: un evento por cada cambio, con `operationType`, `documentKey` y lo que cambió. Necesita un _replica set_.
-- Sondeo cada segundo: unos 618 ms de retraso y unas 3 450 consultas por hora. _Change stream_: unos 10 ms y una conexión.
-- _Resume token_ (`cambio._id`): guárdalo después de procesar; `resumeAfter` recupera lo perdido mientras siga en el _oplog_.
-- Idempotencia: un registro de avisos enviados, con el token como clave.
-- Atlas Triggers: el mismo mecanismo, gestionado por Atlas, para apps sin procesos permanentes.
+- `watch(pipeline, { fullDocument: "updateLookup" })`: un evento por cambio; necesita un _replica set_.
+- Sondeo cada segundo: unos 618 ms y 3 450 consultas por hora; _change stream_: unos 10 ms y una conexión.
+- _Resume token_ guardado tras procesar; `resumeAfter` recupera lo perdido mientras siga en el _oplog_.
+- Idempotencia con un registro de avisos, con el token como clave.
+- Atlas Triggers: lo mismo, gestionado por Atlas, para apps sin procesos permanentes.

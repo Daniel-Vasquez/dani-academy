@@ -7,15 +7,21 @@ minutes: 75
 summary: "Analizas con explain los índices reales de esta plataforma, consigues consultas covered, mides índices parciales, sparse y multiclave (y cómo un hint devuelve datos incompletos), y paginas un millón de documentos."
 ---
 
-En B5.6 aprendiste a leer un `explain`, la regla ESR y los índices TTL. Con eso se resuelve casi todo. Esta sección es para lo demás: decidir si un índice sobra o hace falta, que una consulta no tenga que leer ningún documento, los índices que solo indexan una parte de la colección (y las trampas que traen), cómo encontrar las consultas lentas y los índices que nadie usa, y por qué `skip` deja de servir cuando una lista crece.
+Con el `explain`, la regla ESR y los TTL de B5.6 se resuelve casi todo. Aquí, el resto: si un índice sobra, consultas que no leen documentos, índices de solo una parte de la colección, cómo encontrar lo lento y lo que nadie usa, y por qué `skip` deja de servir en listas largas.
 
-**Lo que tendrás al terminar:** un banco de pruebas con la forma de la colección `quiz_attempts` de esta plataforma, mediciones de cada tipo de índice y la paginación por cursor probada con un millón de documentos.
-
-**Requisitos:** el proyecto `mongo-academy`, con `src/a2/` de A2.1. Los números de esta sección son de un MongoDB 8.2 local, con todos los datos en memoria; en Atlas, los tiempos serán mayores, pero las proporciones se mantienen.
+**Requisitos:** el proyecto `mongo-academy` con `src/a2/` de A2.1. Los números son de un MongoDB 8.2 local con todo en memoria; en Atlas, los tiempos serán mayores y las proporciones, las mismas.
 
 ## Paso 1: `explain` a fondo, con los índices de esta plataforma
 
-Un banco de pruebas con la forma de `quiz_attempts`, y un ayudante que resume cada `explain` en una línea. `src/a2/banco.ts`:
+**Qué es:** tres números de `explain` y su relación.
+
+| Campo               | Qué cuenta                     | Lo ideal                          |
+| ------------------- | ------------------------------ | --------------------------------- |
+| `nReturned`         | Documentos devueltos           | Lo que pide la consulta           |
+| `totalKeysExamined` | Entradas del índice recorridas | Cerca de `nReturned`              |
+| `totalDocsExamined` | Documentos leídos              | Igual a `nReturned` (o 0, Paso 2) |
+
+**Cómo se usa:** un banco de pruebas con la forma de `quiz_attempts` y un resumen de `explain` en una línea, `src/a2/banco.ts`:
 
 ```ts
 // Archivo: src/a2/banco.ts
@@ -70,7 +76,7 @@ export function resumir(explicacion: Document): string {
 }
 ```
 
-Esta plataforma crea dos índices en `quiz_attempts` que se parecen mucho, en `scripts/db-setup.ts`: `{ userId, courseId, submittedAt }` y `{ userId, submittedAt }`. ¿Hacen falta los dos? Las dos consultas de su repositorio, con ninguno, con uno y con los dos. `src/a2/07-explain.ts`:
+La plataforma crea en `scripts/db-setup.ts` dos índices parecidos: `{ userId, courseId, submittedAt }` y `{ userId, submittedAt }`. ¿Hacen falta los dos? Sus dos consultas, con ninguno, uno o los dos, en `src/a2/07-explain.ts`:
 
 ```ts
 // Archivo: src/a2/07-explain.ts
@@ -118,29 +124,22 @@ npm start -- src/a2/07-explain.ts
   recientes:  LIMIT ← FETCH ← IXSCAN user_submittedAt · devueltos 20 · claves 20 · documentos 20 · 0 ms
 ```
 
-Los tres números que importan, y la relación entre ellos:
-
-| Campo               | Qué cuenta                     | Lo ideal                          |
-| ------------------- | ------------------------------ | --------------------------------- |
-| `nReturned`         | Documentos devueltos           | Lo que pide la consulta           |
-| `totalKeysExamined` | Entradas del índice recorridas | Cerca de `nReturned`              |
-| `totalDocsExamined` | Documentos leídos              | Igual a `nReturned` (o 0, Paso 2) |
-
-- **Sin índices, las dos consultas recorren los 200 000 documentos** para devolver 5 y 20 (`COLLSCAN`), y los ordenan en memoria (`SORT`).
-- **Con el primer índice, la consulta por curso es perfecta:** 5 claves, 5 documentos, 5 devueltos.
-- **Pero "los últimos intentos" sigue ordenando en memoria:** `{ userId, courseId, submittedAt }` sirve para encontrar los intentos de `u0042` (su prefijo `userId`), pero no están ordenados por fecha, porque el curso va en medio. Examina las 200 claves del usuario y ordena. Funciona, pero el coste crece con cada intento del usuario.
-- **Con el segundo índice, examina 20 claves para devolver 20.** El segundo índice de la plataforma no sobra: existe para esta consulta.
+- **Sin índices, recorren los 200 000 documentos** para devolver 5 y 20, y ordenan en memoria (`SORT`).
+- **Con el primero, la consulta por curso es perfecta** (5, 5, 5), pero **"los últimos intentos" sigue ordenando:** encuentra a `u0042` por el prefijo `userId`, pero el curso va en medio y la fecha no sale ordenada. 200 claves, y crece con cada intento.
+- **Con el segundo, 20 claves para 20.** No sobra: existe para esa consulta.
 
 <Callout type="risk">
 
-- **Un `SORT` en el plan es una señal:** MongoDB ordena en memoria, con un límite de 100 MB por consulta (el `memLimit` del plan). Por encima, este servidor pasa a ordenar en disco (su parámetro `allowDiskUseByDefault` vale `true`), mucho más lento. Un índice con el campo de orden en el sitio correcto (ESR, B5.6) lo evita.
-- **Los milisegundos de `explain` engañan con pocos datos:** 0 ms con 200 claves y con 20. Mira las claves y los documentos examinados: son los que crecen cuando crecen los datos.
+- **Un `SORT` en el plan es una señal:** ordena en memoria con un límite de 100 MB (`memLimit`), y por encima este servidor pasa a disco (`allowDiskUseByDefault: true`), mucho más lento. El campo de orden en su sitio (ESR, B5.6) lo evita.
+- **Con pocos datos, los milisegundos engañan:** 0 ms con 200 claves o con 20. Mira claves y documentos, que crecen con los datos.
 
 </Callout>
 
 ## Paso 2: consultas _covered_
 
-Si todo lo que una consulta filtra y devuelve está en el índice, MongoDB puede responder **sin leer ningún documento**. Se llama consulta **_covered_** (cubierta). `src/a2/08-cubiertas.ts`:
+**Qué es:** si todo lo que una consulta filtra y devuelve está en el índice, MongoDB responde **sin leer ningún documento**: una consulta **_covered_** (cubierta).
+
+**Cómo se usa:** crea `src/a2/08-cubiertas.ts`.
 
 ```ts
 // Archivo: src/a2/08-cubiertas.ts
@@ -177,21 +176,22 @@ solo campos del índice, sin _id    PROJECTION_COVERED ← IXSCAN user_course_su
 un campo que no está en el índice  PROJECTION_SIMPLE ← FETCH ← IXSCAN user_course_submittedAt · devueltos 200 · claves 200 · documentos 200 · 0 ms · media de 500: 0.31 ms
 ```
 
-- **Solo la tercera es _covered_:** `PROJECTION_COVERED` y **0 documentos** examinados. Todo sale del índice.
-- **Con `_id` no lo es,** aunque pidas solo campos del índice: `find` devuelve `_id` por defecto, y `_id` no está en este índice. Hay que excluirlo explícitamente (`_id: 0`).
-- **Un campo de más (`score`) obliga a leer los 200 documentos** (`FETCH`).
-- **La diferencia de tiempo aquí es pequeña** (0,41 frente a 0,25 ms), porque en este laboratorio todos los documentos están en memoria. Cuando la colección no cabe en memoria, cada documento leído puede ser una lectura de disco, y ahí la diferencia es grande.
+- **Solo la tercera es _covered_:** `PROJECTION_COVERED` y **0 documentos**.
+- **Con `_id` no lo es:** `find` lo devuelve por defecto y no está en el índice; hay que excluirlo (`_id: 0`). **Un campo de más (`score`)** obliga a leer los 200 (`FETCH`).
+- **Aquí la diferencia es pequeña** (0,41 frente a 0,25 ms) porque todo está en memoria; si la colección no cabe, cada documento puede ser una lectura de disco.
 
 <Callout type="risk">
 
-- **No añadas campos a un índice solo para que una consulta sea _covered_:** cada campo hace el índice más grande y más caro de mantener en cada escritura. Merece la pena en consultas muy frecuentes que devuelven pocos campos (un listado, un recuento).
-- **Con un índice multiclave (Paso 3), no pidas el campo de tipo array:** medido con `{ userId, etiquetas }`, devolver solo `userId` es _covered_ (0 documentos leídos); devolver también `etiquetas` obliga a leer los 200 documentos, porque el índice guarda cada etiqueta por separado y no el array entero.
+- **No engordes índices solo para cubrir consultas:** cada campo encarece todas las escrituras. Compensa en consultas muy frecuentes con pocos campos.
+- **Con un índice multiclave (Paso 3), no pidas el array:** con `{ userId, etiquetas }`, devolver `userId` es _covered_; con `etiquetas`, se leen los 200, porque el índice guarda cada etiqueta por separado.
 
 </Callout>
 
 ## Paso 3: índices parciales, _sparse_ y multiclave
 
-Tres tipos de índice para casos concretos, con sus trampas. `src/a2/09-especiales.ts`:
+**Qué es:** tres índices para casos concretos, con sus trampas. Uno **parcial** indexa solo lo que cumple `partialFilterExpression`; uno **multiclave**, una entrada por elemento de un array; uno **_sparse_**, solo los documentos que tienen el campo.
+
+**Cómo se usa:** crea `src/a2/09-especiales.ts`.
 
 ```ts
 // Archivo: src/a2/09-especiales.ts
@@ -303,24 +303,23 @@ await cliente.close();
    ordenar por etiquetas: sin hint 200001 de 200001 · con hint("etiquetas_sparse") 20000 de 200001
 ```
 
-**1. Parcial:** indexa solo los documentos que cumplen `partialFilterExpression`, aquí los aprobados (un tercio). Ocupa **1.336 KB frente a 3.584 KB** del índice completo. MongoDB lo usa cuando la consulta pide **exactamente** esa condición (`passed: true`): 68 claves para 67 resultados. Con un filtro que tú sabes equivalente pero que no es el mismo (`score >= 4`), MongoDB no puede garantizar que el índice tenga todos los documentos, y no lo elige. Forzarlo con `hint` es peor: recorre el índice entero (66 666 claves) y, en cuanto hay un intento con nota 5 sin aprobar, **devuelve 67 en lugar de 68, sin ningún error**. El documento que falta no está en el índice.
-
-**2. Multiclave:** un índice sobre un array crea una entrada **por cada elemento**, y `{ etiquetas: "examen" }` lo usa (`isMultiKey: true`). Pero un índice compuesto no puede tener **dos** campos de tipo array en el mismo documento: `cannot index parallel arrays`, en cuanto un documento tiene los dos.
-
-**3. _Sparse_:** indexa solo los documentos que **tienen** el campo (uno de cada diez): 176 KB. Su trampa es la misma que la del parcial: al ordenar, MongoDB no lo usa por su cuenta, porque le faltan documentos; forzado con `hint`, la consulta devuelve **20 000 de 200 001**. Hoy, un índice parcial con `{ campo: { $exists: true } }` hace lo mismo que `sparse`, y es más explícito.
-
-Y el TTL (B5.6) es otro índice especial: borra los documentos al caducar. Esta plataforma lo usa en `rate_limits`, para que cada ventana de límite de peticiones desaparezca sola.
+- **Parcial (los aprobados, un tercio):** 1.336 KB frente a 3.584 KB, y se usa si la consulta pide **exactamente** `passed: true` (68 claves para 67). Con `score >= 4`, que tú sabes equivalente, no lo elige; forzado con `hint`, recorre 66 666 claves y, con un 5 sin aprobar, **devuelve 67 en vez de 68, sin error**: ese documento no está en el índice.
+- **Multiclave:** `{ etiquetas: "examen" }` lo usa (`isMultiKey: true`), pero un compuesto no admite dos arrays en el mismo documento: `cannot index parallel arrays`.
+- **_Sparse_ (uno de cada diez):** 176 KB, con la misma trampa: al ordenar no se elige y, forzado, devuelve **20 000 de 200 001**. Hoy, un parcial con `{ campo: { $exists: true } }` hace lo mismo, más explícito.
+- **El TTL (B5.6) también es especial:** esta plataforma lo usa en `rate_limits` para que cada ventana desaparezca sola.
 
 <Callout type="risk">
 
-- **Nunca uses `hint` con un índice parcial o _sparse_ sin entenderlo:** el resultado puede estar incompleto, y nada avisa. `hint` es para depurar el planificador, no para el código de producción.
-- **Escribe en la consulta la misma condición del índice parcial:** si el índice es `{ passed: true }`, la consulta tiene que incluir `passed: true`, aunque otro campo lo implique. MongoDB no razona sobre tus datos.
+- **Nunca `hint` sobre un parcial o un _sparse_ sin entenderlo:** el resultado puede faltar entero sin aviso. `hint` es para depurar, no para producción.
+- **Escribe en la consulta la condición exacta del parcial:** `passed: true`, aunque otro campo lo implique. MongoDB no razona sobre tus datos.
 
 </Callout>
 
 ## Paso 4: el _profiler_ y los índices que nadie usa
 
-Para encontrar las consultas lentas de una app en marcha no hace falta adivinar: el **_profiler_** de MongoDB guarda en `system.profile` las operaciones que tardan más de `slowms`. Y `$indexStats` cuenta cuántas veces se ha usado cada índice. `src/a2/10-profiler.ts`:
+**Qué es:** el **_profiler_** guarda en `system.profile` las operaciones que superan `slowms`, y **`$indexStats`** cuenta los usos de cada índice.
+
+**Cómo se usa:** crea `src/a2/10-profiler.ts`.
 
 ```ts
 // Archivo: src/a2/10-profiler.ts
@@ -368,14 +367,14 @@ await cliente.close();
 2. Uso de los índices: user_submittedAt 20 · user_course_submittedAt 0 · _id_ 0 · course_score 0
 ```
 
-- **De 22 consultas, el _profiler_ recogió las 2 lentas**, con lo necesario para arreglarlas: el plan (`COLLSCAN`), el filtro y los documentos examinados (200 000 para devolver 20 y 1). La segunda es un `countDocuments`, que por dentro es un `aggregate`: su filtro está en el `$match`.
-- **`$indexStats` dice que `course_score` no se ha usado nunca:** ocupa espacio y ralentiza cada escritura sin ayudar a ninguna consulta. Es candidato a borrarse.
-- **En Atlas**, _Query Profiler_ y _Performance Advisor_ hacen este trabajo desde la interfaz: analizan las consultas lentas y sugieren índices. Lo que ofrece cada uno depende de tu plan; las ideas son las mismas que aquí.
+- **De 22 consultas, recogió las 2 lentas,** con plan (`COLLSCAN`), filtro y examinados (200 000 para 20 y 1). La segunda es un `countDocuments`, un `aggregate` por dentro con el filtro en su `$match`.
+- **`course_score` no se ha usado nunca:** ocupa y ralentiza escrituras sin ayudar. Candidato a borrarse.
+- **En Atlas,** _Query Profiler_ y _Performance Advisor_ lo hacen desde la interfaz, según tu plan.
 
 <Callout type="risk">
 
-- **Apaga el _profiler_ al terminar** (`profile: 0`): con `slowms` bajo, cada operación lenta escribe en `system.profile`, y eso también cuesta. En producción, se activa durante un tiempo o con `slowms` alto.
-- **Los contadores de `$indexStats` empiezan de cero cada vez que arranca el servidor:** un índice con 0 usos justo después de un reinicio no está necesariamente sin usar. Míralo tras días de tráfico normal, y piensa en los informes mensuales que solo se ejecutan una vez al mes.
+- **Apaga el _profiler_ al terminar** (`profile: 0`): escribir en `system.profile` también cuesta. En producción, un tiempo o con `slowms` alto.
+- **`$indexStats` vuelve a cero al reiniciar:** mira tras días de tráfico normal, y recuerda los informes mensuales.
 
 </Callout>
 
@@ -464,17 +463,15 @@ Con 5 intentos nuevos entre la página 1 y la 2:
   cursor: la página 2 repite 0
 ```
 
-- **Con `skip`, el coste crece con la página:** para la página 10 000, MongoDB recorre las 200 000 entradas anteriores y las descarta (34 ms); para la última, el millón entero (149 ms). `skip` no salta: cuenta.
-- **Por cursor, siempre 20 claves y unos 0,3 ms**, sea la página 1 o la 49 999. El filtro `_id < último` lleva al índice directamente al punto donde empieza la página.
-- **Los resultados son los mismos** en las cinco páginas comparadas.
-- **Con datos que cambian, `skip` repite:** cinco intentos nuevos al principio desplazan la lista, y la página 2 empieza con cinco de la página 1. El cursor sigue desde el último que viste, y no repite ninguno.
-
-El precio del cursor: no se puede saltar a "la página 2 500". Sirve para "siguiente" y "anterior", y para el _scroll_ infinito, que es lo que necesitan casi todas las listas largas.
+- **Con `skip`, el coste crece con la página:** la 10 000 recorre 200 000 entradas (34 ms) y la última, el millón (149 ms). `skip` no salta: cuenta.
+- **Por cursor, siempre 20 claves y unos 0,3 ms,** en la página 1 o en la 49 999: `_id < último` lleva al índice al punto exacto. Los resultados coinciden en las cinco páginas.
+- **Con datos que cambian, `skip` repite:** cinco intentos nuevos desplazan la lista y la página 2 empieza con cinco de la 1. El cursor sigue desde el último visto.
+- **El precio:** no se salta a "la página 2 500"; sirve para "siguiente", "anterior" y _scroll_ infinito, lo que casi todas las listas largas necesitan.
 
 <Callout type="risk">
 
-- **El cursor necesita un orden único:** `_id` lo es (y un `ObjectId` crece con el tiempo de creación). Si ordenas por un campo que se repite, como `submittedAt`, usa los dos en el orden y en el filtro (`submittedAt` y, si coincide, `_id`), o te saltarás o repetirás documentos con la misma fecha.
-- **El índice tiene que coincidir con el orden del cursor:** aquí, `{ userId, _id }` para `find({ userId, _id: { $lt } }).sort({ _id: -1 })`. Sin él, el cursor también recorrería la colección.
+- **El cursor necesita un orden único:** `_id` lo es. Con un campo repetido como `submittedAt`, usa los dos en orden y filtro, o saltarás o repetirás.
+- **El índice debe coincidir con el orden:** `{ userId, _id }` para `find({ userId, _id: { $lt } }).sort({ _id: -1 })`, o el cursor también recorre todo.
 
 </Callout>
 
@@ -486,9 +483,9 @@ Consigues que `totalDocsExamined` ≈ `nReturned` en tus consultas críticas: le
 
 ## Resumen
 
-- `explain`: devueltos, claves y documentos examinados. Un `SORT` o un `COLLSCAN` en una consulta frecuente es un índice que falta.
-- _Covered_: todo en el índice y `_id: 0`; 0 documentos leídos.
-- Parcial (indexa los que cumplen una condición) y _sparse_ (los que tienen el campo): más pequeños, y con `hint` pueden devolver resultados incompletos sin avisar.
-- Multiclave: una entrada por elemento del array; nunca dos arrays en el mismo índice compuesto.
-- _Profiler_ (`profile: 1`, `slowms`) para las consultas lentas; `$indexStats` para los índices sin uso.
-- Paginación por cursor: coste constante (20 claves en la página 1 y en la 49 999); `skip` recorre todo lo anterior y repite si los datos cambian.
+- `explain`: devueltos, claves y documentos; un `SORT` o `COLLSCAN` frecuente es un índice que falta.
+- _Covered_: todo en el índice y `_id: 0`, 0 documentos leídos.
+- Parcial y _sparse_: más pequeños, y con `hint` pueden devolver resultados incompletos.
+- Multiclave: una entrada por elemento; nunca dos arrays en un compuesto.
+- _Profiler_ para lo lento y `$indexStats` para lo que sobra.
+- Paginación por cursor: 20 claves en cualquier página; `skip` recorre todo y repite.

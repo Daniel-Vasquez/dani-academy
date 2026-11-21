@@ -7,19 +7,19 @@ minutes: 75
 summary: "Creas usuarios con el mínimo privilegio (y ves que readWrite puede borrar colecciones), haces un backup coherente con --oplog, lo restauras y lo verificas con dbHash, y lees las métricas que importan."
 ---
 
-Con A2.1 a A2.4, tu base de datos es correcta y rápida. Esta sección trata de que siga así cuando algo va mal: una contraseña filtrada, un `drop` por error, un disco que se rompe, una consulta que de pronto tarda diez veces más. Las defensas son pocas y concretas: que cada programa entre con un usuario que **solo** pueda lo que necesita, tener copias de seguridad **que se han restaurado** alguna vez, y mirar unas pocas métricas antes de que el problema lo encuentre un usuario.
-
-**Lo que tendrás al terminar:** usuarios con roles mínimos (incluido uno a medida), un _backup_ coherente de un servidor con escrituras en marcha, su restauración verificada con `dbHash`, las métricas clave de un MongoDB y el criterio para elegir entre MongoDB propio y Atlas.
+Esta sección trata de que la base de datos siga bien cuando algo va mal: una contraseña filtrada, un `drop` por error, un disco roto, una consulta diez veces más lenta. Las defensas son pocas y concretas: usuarios que **solo** puedan lo necesario, copias **que se han restaurado** y unas pocas métricas vigiladas antes de que el problema lo encuentre un usuario.
 
 **Requisitos:**
 
 - el proyecto `mongo-academy` con `src/a2/`;
-- las MongoDB Database Tools (`mongodump`, `mongorestore`), que instalaste en I6.6; en un Mac, el `.zip` para macOS de la misma página de descargas (aquí, la versión 100.13.0);
-- para el Paso 1, un MongoDB con la autenticación activada. El de este laboratorio es un segundo `mongod`, en el puerto 27210, arrancado con `--auth` y una carpeta de datos vacía. En Atlas la autenticación está siempre activada, y los usuarios se crean en _Database Access_.
+- las MongoDB Database Tools (`mongodump`, `mongorestore`) de I6.6; en un Mac, el `.zip` para macOS de la misma página (aquí, la 100.13.0);
+- para el Paso 1, un MongoDB con autenticación. Aquí, un segundo `mongod` en el puerto 27210, con `--auth` y datos vacíos. En Atlas siempre está activada, y los usuarios se crean en _Database Access_.
 
 ## Paso 1: usuarios y roles con el mínimo privilegio
 
-MongoDB trae **roles** predefinidos que se asignan por base de datos: `read` (leer), `readWrite` (leer y escribir), `dbAdmin` (índices, estadísticas), `root` (todo). El principio del **mínimo privilegio** dice: cada programa, con un usuario que solo pueda lo que necesita. Si la contraseña de la app se filtra, el daño se limita a lo que ese usuario podía hacer. `src/a2/20-roles.ts`:
+**Qué es:** MongoDB trae **roles** por base de datos: `read`, `readWrite`, `dbAdmin` (índices, estadísticas) y `root` (todo). El **mínimo privilegio**: cada programa con un usuario que solo pueda lo que necesita, para que una contraseña filtrada haga el menor daño posible.
+
+**Cómo se usa:** crea `src/a2/20-roles.ts`.
 
 ```ts
 // Archivo: src/a2/20-roles.ts
@@ -123,24 +123,23 @@ analitica:
 contraseña incorrecta: AuthenticationFailed: Authentication failed.
 ```
 
-- **Sin usuarios, la "excepción de _localhost_"** permite crear el primero desde el propio servidor; en cuanto existe, cualquier conexión sin credenciales es `Unauthorized`.
-- **`readWrite` en una base no da acceso a otras**, ni permite borrar la base entera ni crear usuarios.
-- **Pero `readWrite` sí permite borrar colecciones enteras:** `app_planificador` borró `copia` sin problema. Si la contraseña de la app se filtra, se puede vaciar cualquier colección de su base.
-- **Un rol propio cierra ese hueco:** `documentos` permite `find`, `insert`, `update` y `remove` (leer y escribir documentos), y nada más. `app_documentos` trabaja con normalidad, pero no puede borrar colecciones.
-- **`read`** es lo justo para informes, analítica… y copias de seguridad (Paso 2).
-
-Una regla más, que no se programa: **limita desde dónde se puede conectar.** En Atlas, la lista de IPs permitidas (_Network Access_); en un servidor propio, `bindIp` y el _firewall_ (I6.3). Una contraseña filtrada no sirve de nada desde una IP que no está en la lista.
+- **La "excepción de _localhost_"** permite crear el primer usuario desde el servidor; después, sin credenciales, todo es `Unauthorized`.
+- **`readWrite` no da acceso a otras bases** ni permite borrar la base o crear usuarios, **pero sí borrar colecciones enteras:** `app_planificador` borró `copia`.
+- **Un rol propio cierra el hueco:** `documentos` permite `find`, `insert`, `update` y `remove`, y nada más. **`read`** basta para informes, analítica y copias (Paso 2).
+- **Limita además desde dónde se conecta:** _Network Access_ en Atlas; `bindIp` y _firewall_ en un servidor propio (I6.3). Una contraseña filtrada no sirve desde una IP no permitida.
 
 <Callout type="risk">
 
-- **El rol propio impide crear índices:** sin `createIndex`, el _script_ de índices de la app (B5.6) tiene que ejecutarse con otro usuario. Es lo normal: los cambios de estructura, con un usuario de despliegue; el día a día, con el de la app.
-- **"Read and write to any database" en Atlas es `readWriteAnyDatabase`:** acceso a todas las bases del clúster. Esta plataforma usa un solo usuario así para desarrollo y producción, separando los entornos por base de datos; es una decisión consciente (menos usuarios que gestionar), con el precio de que una contraseña filtrada alcanza a todas las bases.
+- **El rol propio impide crear índices:** el _script_ de índices (B5.6) va con otro usuario. Estructura con el de despliegue; día a día, con el de la app.
+- **"Read and write to any database" de Atlas es `readWriteAnyDatabase`:** acceso a todas las bases del clúster. Un usuario así para varios entornos ahorra gestión, pero una contraseña filtrada alcanza a todas. Si lo eliges, que sea a conciencia.
 
 </Callout>
 
 ## Paso 2: copias de seguridad que se restauran
 
-En I6.6 hiciste un `mongodump` programado con `cron` y lo restauraste en otra base con `--nsFrom` y `--nsTo`. Aquí, tres pasos más: el tamaño real, verificar que lo restaurado es **idéntico** y la coherencia cuando hay escrituras durante la copia. Con la base del laboratorio, que incluye una colección de 1,5 millones de documentos:
+**Qué es:** más allá del `mongodump` con `cron` de I6.6: el tamaño real, comprobar que lo restaurado es **idéntico** y la coherencia si hay escrituras durante la copia.
+
+**Cómo se usa:** con la base del laboratorio, que incluye una colección de 1,5 millones de documentos:
 
 ```text
 $ mongodump --uri="$MONGODB_URI" --db=academy_lab --archive=academy.gz --gzip
@@ -155,7 +154,7 @@ $ mongorestore --uri="$MONGODB_URI" --archive=academy.gz --gzip --nsFrom="academ
   (17 s)
 ```
 
-1,59 millones de documentos en 15 MB comprimidos, dos segundos para copiar y 17 para restaurar (crear los índices y escribir con la espera del diario, A2.1). Pero "0 failed" no demuestra que los datos sean los mismos. `src/a2/21-verificar.ts` lo comprueba con `dbHash`, que calcula un _hash_ del contenido de cada colección:
+- **1,59 millones de documentos en 15 MB comprimidos:** 2 s para copiar y 17 para restaurar (índices y espera del diario, A2.1). Pero "0 failed" no demuestra que sean los mismos: `src/a2/21-verificar.ts` compara con `dbHash`, un _hash_ del contenido de cada colección:
 
 ```ts
 // Archivo: src/a2/21-verificar.ts
@@ -191,9 +190,9 @@ hash de toda la base: idéntico (05acf658feb8…)
 índices: 26 en el original · 26 en la restaurada
 ```
 
-Las 18 colecciones con el mismo _hash_ y los mismos 26 índices: la copia es **idéntica**.
+- **Las 18 colecciones con el mismo _hash_ y los 26 índices:** la copia es **idéntica**.
 
-**¿Y si alguien escribe mientras se hace la copia?** `mongodump` copia las colecciones una detrás de otra, cada una en un momento distinto. Con `--oplog` (solo para el servidor entero, en un _replica set_), guarda además lo que cambió mientras duraba la copia. Con un proceso insertando sin parar durante seis segundos:
+`mongodump` copia las colecciones una tras otra, cada una en un momento distinto; con **`--oplog`** (servidor entero, en un _replica set_) guarda también lo que cambió entretanto. Con un proceso insertando seis segundos:
 
 ```text
 $ mongodump --uri="$MONGODB_URI" --oplog --archive=todo.gz --gzip
@@ -202,7 +201,7 @@ writing captured oplog to
 	dumped 1061 oplog entries
 ```
 
-La colección que se estaba escribiendo se copió con 711 documentos, y se guardaron 1 061 entradas del _oplog_. Restaurado con `--oplogReplay` en otro servidor:
+Restaurado con `--oplogReplay` en otro servidor:
 
 ```text
 $ mongorestore --uri="$OTRO_SERVIDOR" --archive=todo.gz --gzip --oplogReplay
@@ -213,21 +212,22 @@ applied 1061 oplog entries
 a2_flujo restaurada: 1199 documentos · el último es n=1198 · sin huecos: true
 ```
 
-**1 199 documentos sin huecos, las 1 199 inserciones que hizo el proceso:** la copia es coherente hasta el final del volcado. Sin `--oplog`, esa colección habría quedado con 711, y otras colecciones en otros momentos.
-
-**¿Y los _backups_ de Atlas?** Los planes de pago dedicados hacen copias automáticas, que se restauran desde la interfaz de Atlas. El plan gratuito M0 no las incluye. Por eso esta plataforma hace las suyas con `npm run db:backup` (un _script_ con el _driver_, con un usuario de solo lectura) y comprueba que se pueden restaurar con `npm run db:restore-test`.
+- **1 199 documentos sin huecos, las 1 199 inserciones:** coherente hasta el final del volcado. Sin `--oplog`, esa colección se quedaría en 711 y otras, en otros momentos.
+- **Atlas hace copias automáticas en los planes de pago;** el M0 no. Por eso esta plataforma usa `npm run db:backup` (con un usuario de solo lectura) y lo comprueba con `npm run db:restore-test`.
 
 <Callout type="risk">
 
-- **`--oplogReplay` no admite filtros:** con `--nsInclude` para restaurar una sola colección, `mongorestore` responde `cannot use --oplogReplay with includes specified`. Una copia coherente se restaura entera, en un servidor aparte, y de ahí se saca lo que haga falta.
-- **Restaurar necesita permiso de escritura en la base de destino:** el ejercicio lo comprueba. El usuario de la app no puede restaurar en otra base, y no debería poder.
-- **Una copia en el mismo servidor no es una copia:** si el disco o la cuenta se pierden, se pierde con los datos. Guárdala fuera (otro servicio, otro equipo) y cífrala: contiene todos tus datos.
+- **`--oplogReplay` no admite filtros:** con `--nsInclude`, `cannot use --oplogReplay with includes specified`. Se restaura entera en otro servidor y se saca de ahí lo necesario.
+- **Restaurar exige escribir en la base de destino:** el usuario de la app no debería poder (lo comprueba el ejercicio).
+- **Una copia en el mismo servidor no es una copia:** guárdala fuera y cífrala; lleva todos tus datos.
 
 </Callout>
 
 ## Paso 3: las métricas que importan
 
-`serverStatus` devuelve cientos de contadores. Cuatro bastan para saber si un MongoDB va bien. `src/a2/22-metricas.ts`, alrededor de una carga de trabajo de unos segundos:
+**Qué es:** de los cientos de contadores de `serverStatus`, cuatro bastan para saber si un MongoDB va bien. Son acumulados desde el arranque: importa la **diferencia** entre dos momentos.
+
+**Cómo se usa:** `src/a2/22-metricas.ts`, alrededor de unos segundos de carga:
 
 ```ts
 // Archivo: src/a2/22-metricas.ts
@@ -293,19 +293,23 @@ caché ocupada: 821 MB de 7.5 GB
 | Latencia                | `opLatencies` (microsegundos)                                | Que no suba. Aquí, lecturas en 0,15 ms y escrituras en 4,41 ms: la espera del diario de A2.1 |
 | _Cache hit ratio_       | Páginas pedidas a la caché frente a páginas leídas del disco | Cerca del 100 %. Si baja, los datos que se usan ya no caben en memoria                       |
 
-- **Los contadores son acumulados desde que arrancó el servidor:** lo que importa es la **diferencia** entre dos momentos. Herramientas como `mongostat` (en las Database Tools) o los gráficos de Atlas hacen esa resta por ti.
-- **El _cache hit ratio_ fue del 97,42 %:** de casi 50 000 páginas pedidas, 1 289 hubo que leerlas del disco, sobre todo por el recorrido completo de la colección sin índice.
+- **`mongostat` y los gráficos de Atlas** hacen la resta por ti.
+- **_Cache hit ratio_ del 97,42 %:** de casi 50 000 páginas, 1 289 del disco, sobre todo por el recorrido sin índice.
 
 <Callout type="risk">
 
-- **Una métrica sin alerta no sirve de mucho:** nadie mira un gráfico a las tres de la mañana. Define umbrales (conexiones cerca del límite, latencia muy por encima de la habitual) y que te avisen.
-- **No te fíes de una sola foto:** una latencia alta durante un segundo puede ser un recorrido completo puntual. Lo preocupante es la tendencia.
+- **Una métrica sin alerta no sirve:** nadie mira un gráfico de madrugada. Umbrales (conexiones cerca del límite, latencia muy alta) y avisos.
+- **No te fíes de una foto:** un segundo de latencia alta puede ser un recorrido puntual; preocupa la tendencia.
 
 </Callout>
 
 ## Paso 4: MongoDB propio o Atlas
 
-|                                                         | MongoDB en tu servidor                                | Atlas                                     |
+**Qué es:** la elección de quién opera la base de datos.
+
+**Cómo se usa:**
+
+| Aspecto                                                 | MongoDB en tu servidor                                | Atlas                                     |
 | ------------------------------------------------------- | ----------------------------------------------------- | ----------------------------------------- |
 | Instalar, actualizar y aplicar parches de seguridad     | Tú                                                    | Atlas                                     |
 | _Replica set_ (tres nodos) y su recuperación si uno cae | Tú: tres servidores y su configuración                | Incluido                                  |
@@ -314,7 +318,7 @@ caché ocupada: 821 MB de 7.5 GB
 | Atlas Search, Triggers, Performance Advisor             | No (salvo componentes aparte)                         | Sí                                        |
 | Coste                                                   | El servidor, y sobre todo **tu tiempo**               | La cuota del plan; M0 gratis, con límites |
 
-La pregunta no es solo "cuánto cuesta el servidor": es **quién se despierta cuando algo falla**. Un MongoDB propio de un solo nodo es barato hasta el día en que el disco se rompe y no había copia probada. Para un proyecto personal o pequeño, el plan gratuito de Atlas más _backups_ propios (como esta plataforma) es un buen equilibrio; un servidor propio (A4) tiene sentido cuando necesitas control total o los costes de Atlas ya no compensan, y sabiendo todo lo que pasa a ser tuyo.
+- **La pregunta es quién se despierta cuando algo falla:** un MongoDB propio de un nodo es barato hasta que el disco se rompe sin copia probada. Para un proyecto pequeño, Atlas gratis más _backups_ propios (como esta plataforma); un servidor propio (A4), con control total o cuando Atlas no compensa, sabiendo lo que pasa a ser tuyo.
 
 ## Ejercicio práctico
 
@@ -326,7 +330,7 @@ La pregunta no es solo "cuánto cuesta el servidor": es **quién se despierta cu
 
 </Callout>
 
-Solución. Con el `mongod` de `--auth` recién arrancado, `src/a2/23-usuarios.ts` crea el administrador, los datos y tres usuarios, y guarda sus credenciales (de prueba) en un archivo **fuera de git**:
+Solución. Con el `mongod` con `--auth` recién arrancado, `src/a2/23-usuarios.ts` crea el administrador, los datos y tres usuarios, con sus credenciales (de prueba) en un archivo **fuera de git**:
 
 ```ts
 // Archivo: src/a2/23-usuarios.ts
@@ -369,7 +373,7 @@ console.log("usuarios creados: admin, analitica (read planificador), app_planifi
 usuarios creados: admin, analitica (read planificador), app_planificador (readWrite planificador), restaurador (readWrite planificador_restaurada)
 ```
 
-El _backup_, con el usuario de **analítica** (leer basta para copiar), y la restauración en otra base, primero con el usuario de la app y después con el de restaurar. Las URI salen de `.credenciales-a2.env` con `set -a; . ./.credenciales-a2.env; set +a`, sin escribirlas en la terminal:
+El _backup_ con el usuario de **analítica** (leer basta) y la restauración en otra base, primero con el de la app y después con el de restaurar. Las URI se cargan con `set -a; . ./.credenciales-a2.env; set +a`, sin escribirlas en la terminal:
 
 ```text
 $ mongodump --uri="$URI_ANALITICA" --db=planificador --archive=planificador.gz --gzip
@@ -382,7 +386,7 @@ restoring indexes for collection planificador_restaurada.tareas from metadata
 120 document(s) restored successfully. 0 document(s) failed to restore.
 ```
 
-Y la comprobación, `src/a2/24-comprobar.ts`:
+La comprobación, `src/a2/24-comprobar.ts`:
 
 ```ts
 // Archivo: src/a2/24-comprobar.ts
@@ -423,14 +427,14 @@ mismos documentos (con sus _id): true
 analitica leyendo la copia: Unauthorized
 ```
 
-- **El usuario de solo lectura basta para el _backup_:** el proceso de copias no necesita poder escribir, y si se filtra su contraseña, no puede borrar nada.
-- **El usuario de la app no puede restaurar en otra base:** `Unauthorized` en `planificador_restaurada`. Restaurar es una operación de mantenimiento, con su propio usuario.
-- **La copia es idéntica:** 120 tareas con los mismos `_id` y el mismo índice. Y el usuario de analítica no puede leerla: su permiso es sobre `planificador`, no sobre cualquier base.
+- **El usuario de solo lectura basta para copiar,** y si se filtra no puede borrar nada.
+- **El de la app no puede restaurar en otra base** (`Unauthorized`): restaurar es mantenimiento, con su propio usuario.
+- **La copia es idéntica** (120 tareas, mismos `_id` e índice), y analítica no puede leerla: su permiso es sobre `planificador`.
 
 <Callout type="risk">
 
-- **Las credenciales de los usuarios de prueba también son secretos:** el archivo tiene permisos `600` y está en `.gitignore`. En producción, van en el gestor de secretos de tu despliegue, nunca en el repositorio.
-- **Prueba la restauración con regularidad, no solo una vez:** un _backup_ que se restauró hace un año puede haber dejado de funcionar (una versión nueva, un usuario sin permisos, un disco lleno).
+- **Las credenciales de prueba también son secretos:** archivo `600` y en `.gitignore`. En producción, en el gestor de secretos del despliegue.
+- **Prueba la restauración con regularidad:** una que funcionó hace un año puede fallar hoy (otra versión, permisos, disco lleno).
 
 </Callout>
 
@@ -442,8 +446,8 @@ Has restaurado un _backup_ con éxito al menos una vez, y lo has verificado: cad
 
 ## Resumen
 
-- Mínimo privilegio: `read` para analítica y copias, `readWrite` (o un rol propio sin `dropCollection`) para la app, y solo desde IPs permitidas.
-- `mongodump --archive --gzip` y `mongorestore --nsFrom --nsTo`; `--oplog` y `--oplogReplay` para una copia coherente con escrituras en marcha.
-- Verifica con `dbHash`: mismo _hash_ en cada colección, mismos índices.
-- Métricas: conexiones, operaciones por segundo, latencia y _cache hit ratio_, siempre como diferencias entre dos momentos.
-- Atlas frente a un servidor propio: la diferencia es quién se ocupa de las copias, los parches y las caídas.
+- Mínimo privilegio: `read` para analítica y copias, `readWrite` o un rol sin `dropCollection` para la app, y solo desde IPs permitidas.
+- `mongodump --archive --gzip` y `mongorestore --nsFrom --nsTo`; `--oplog` y `--oplogReplay` con escrituras en marcha.
+- Verifica con `dbHash`: mismo _hash_ y mismos índices.
+- Conexiones, operaciones por segundo, latencia y _cache hit ratio_, como diferencias.
+- Atlas o servidor propio: quién se ocupa de copias, parches y caídas.

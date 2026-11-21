@@ -7,15 +7,15 @@ minutes: 60
 summary: "Construyes tipos de texto con plantillas, usas Uppercase y Capitalize, descubres que ${number} acepta 1e3 y 1.5, tipas los IDs de la plataforma como su expresión regular y escribes un bus de eventos tipado."
 ---
 
-Muchos textos de una app tienen formato: los IDs de esta plataforma (`B1`, `I8.12`), los nombres de los eventos (`progreso:marcado`), las rutas (`/cursos/testing`), las variables de entorno (`PUBLIC_NOMBRE_APP`). Para TypeScript, todos son `string`, y un `"B9.1"` o un `"progreso:marcdo"` pasan sin queja hasta que algo falla al ejecutar. Los **_template literal types_** son tipos de texto construidos con la misma sintaxis que las plantillas de JavaScript (`` `${a}-${b}` ``), y permiten que el compilador compruebe ese formato. En esta sección vas a construirlos, a medir hasta dónde llegan (y dónde se quedan cortos), y a tipar un sistema de eventos en el que el nombre del evento decide qué datos lleva.
+Los IDs (`B1`, `I8.12`), los eventos (`progreso:marcado`) o las variables de entorno tienen formato, pero para TypeScript son `string`, y un `"B9.1"` pasa hasta que algo falla al ejecutar. Los **_template literal types_** son tipos de texto con la sintaxis de las plantillas de JavaScript (`` `${a}-${b}` ``), y dejan que el compilador compruebe el formato. Aquí mides hasta dónde llegan y tipas un sistema de eventos.
 
-**Lo que tendrás al terminar:** los IDs de curso y de sección de la plataforma como tipos, que coinciden con su expresión regular; un bus de eventos tipado con `on`, `emit` y grupos de eventos, y el evento del navegador de esta plataforma, tipado sin conversiones.
-
-**Requisitos:** las secciones A1.1 y A1.2, con `src/a1/pruebas.ts`.
+**Requisitos:** A1.1 y A1.2, con `src/a1/pruebas.ts`.
 
 ## Paso 1: plantillas, combinaciones y mayúsculas
 
-Un _template literal type_ se escribe como una plantilla de JavaScript, pero con tipos dentro de `${}`. Si dentro hay uniones, el resultado tiene **todas las combinaciones**. Crea `src/a1/12-plantillas.ts`:
+**Qué es:** una plantilla con tipos dentro de `${}`. Con uniones dentro, el resultado tiene **todas las combinaciones**.
+
+**Cómo se usa:** crea `src/a1/12-plantillas.ts`.
 
 ```ts
 // Archivo: src/a1/12-plantillas.ts
@@ -65,12 +65,11 @@ npm start -- src/a1/12-plantillas.ts
 entreno:running:creado [ 'entreno', 'running', 'creado' ]
 ```
 
-- **Tres tipos de entreno por dos acciones dan seis eventos:** TypeScript multiplica las uniones. Escribirlas a mano sería repetirlas, y olvidarse una al añadir un tipo de entreno.
-- **`Uppercase`, `Lowercase`, `Capitalize` y `Uncapitalize`** son los cuatro tipos de texto que trae TypeScript. No se pueden escribir con lo que ya sabes: el compilador los implementa por dentro (en `lib.es5.d.ts` aparecen como `intrinsic`).
-- **`infer` dentro de una plantilla separa un texto:** `` `${infer Grupo}:${infer Resto}` `` captura lo que hay antes y después de los dos puntos. Con recursión (A1.1), `Partes` trocea el nombre entero, como un `split(":")` que se ejecuta al compilar.
-- **La función `evento` devuelve exactamente** `"entreno:running:creado"`, no un `string`: el tipo de retorno se calcula a partir de sus argumentos.
+- **Tres tipos de entreno por dos acciones dan seis eventos,** sin escribirlos ni olvidar uno al añadir un tipo.
+- **`Uppercase`, `Lowercase`, `Capitalize` y `Uncapitalize`** los implementa el compilador (`intrinsic` en `lib.es5.d.ts`).
+- **`` `${infer Grupo}:${infer Resto}` ``** separa un texto, y con recursión (A1.1) `Partes` es un `split(":")` al compilar. **`evento`** devuelve exactamente `"entreno:running:creado"`, no `string`.
 
-Añade al final:
+Añade al final (y bórralo después):
 
 ```ts
 const mal1: EventoEntreno = "entreno:natacion:creado";
@@ -82,25 +81,25 @@ src/a1/12-plantillas.ts(38,7): error TS2820: Type '"entreno:natacion:creado"' is
 src/a1/12-plantillas.ts(39,7): error TS2820: Type '"entreno:running:editado"' is not assignable to type '"entreno:fuerza:borrado" | "entreno:fuerza:creado" | "entreno:movilidad:borrado" | "entreno:movilidad:creado" | "entreno:running:borrado" | "entreno:running:creado"'. Did you mean '"entreno:running:creado"'?
 ```
 
-El error enumera los seis válidos y, como el texto se parece a uno de ellos, sugiere el más cercano (`Did you mean…?`). Borra las dos líneas.
+- **El error enumera los seis válidos** y sugiere el más parecido (`Did you mean…?`).
 
 <Callout type="risk">
 
-- **Las combinaciones crecen muy rápido:** tres uniones de diez miembros dan mil. Con TypeScript 7, una plantilla de 90.000 combinaciones todavía compila; con 100.000, da `error TS2590: Expression produces a union type that is too complex to represent`. Y bastante antes, el editor se vuelve lento. Para formatos abiertos (cualquier texto, cualquier número) usa `string` o `number` dentro de la plantilla, como en el Paso 2.
-- **El primer `infer` de una plantilla se queda con lo mínimo:** con `"a:b:c"`, `` `${infer A}:${infer B}` `` da `A = "a"` y `B = "b:c"` (se corta en los **primeros** dos puntos). Por eso `Partes` se llama a sí mismo con el resto.
+- **Las combinaciones crecen rápido:** en TypeScript 7, 90.000 compilan y 100.000 dan `error TS2590: Expression produces a union type that is too complex to represent`, y el editor se vuelve lento mucho antes. Para formatos abiertos, `string` o `number` dentro (Paso 2).
+- **El primer `infer` se queda con lo mínimo:** `"a:b:c"` da `A = "a"` y `B = "b:c"`. Por eso `Partes` se llama a sí mismo.
 
 </Callout>
 
 ## Paso 2: los IDs de la plataforma, como tipos
 
-Los IDs de esta plataforma tienen un formato fijo: un nivel (`B`, `I` o `A`) y un número del 1 al 8, o `P1`; y las secciones, el curso, un punto y el número de sección (`B1.3`, `I8.12`). La plataforma los comprueba **al ejecutar** con dos expresiones regulares, en `src/lib/constants.ts`:
+**Qué es:** un curso es un nivel (`B`, `I` o `A`) con un número del 1 al 8, o `P1`; una sección, el curso, un punto y su número (`B1.3`, `I8.12`). La plataforma lo comprueba **al ejecutar** en `src/lib/constants.ts`; en el código, son `string`.
 
 ```ts
 export const COURSE_ID_REGEX = /^([BIA][1-8]|P1)$/;
 export const SECTION_ID_REGEX = /^([BIA][1-8]|P1)\.\d{1,2}$/;
 ```
 
-Pero en el código son `string`. La primera idea para tiparlos es `` `${CursoId}.${number}` ``. Antes de usarla, mide qué acepta, frente a la expresión regular y frente a una versión que solo admite uno o dos dígitos:
+**Cómo se usa:** la idea obvia es `` `${CursoId}.${number}` ``. Medida frente a la expresión regular y a una versión de uno o dos dígitos:
 
 ```text
 texto         ${number}   SeccionId   regex
@@ -118,7 +117,9 @@ B9.1          rechaza     rechaza     rechaza
 P1.8          acepta      acepta      acepta
 ```
 
-**`${number}` acepta siete textos que no son IDs válidos:** `B1.1e3`, `B1.-2`, `B1.1.5`, `B1.0x1F`, `B1. 5` y `B1.123`. Para TypeScript, `${number}` significa "cualquier texto que JavaScript lea como un número", y `"1e3"`, `"-2"`, `"1.5"` o `"0x1F"` lo son. La versión con dígitos coincide con la expresión regular en los doce casos. Crea `src/a1/ids.ts`:
+- **`${number}` acepta siete textos inválidos** (`B1.1e3`, `B1.-2`, `B1.1.5`, `B1.0x1F`, `B1. 5`, `B1.123`…): significa "cualquier texto que JavaScript lea como número". La versión con dígitos coincide con la expresión regular en los doce casos.
+
+Crea `src/a1/ids.ts`:
 
 ```ts
 // Archivo: src/a1/ids.ts
@@ -150,7 +151,7 @@ export function cursoDe<S extends SeccionId>(seccion: S): CursoDe<S> {
 }
 ```
 
-Y úsalos, `src/a1/13-ids.ts`:
+Y úsalos en `src/a1/13-ids.ts`:
 
 ```ts
 // Archivo: src/a1/13-ids.ts
@@ -183,11 +184,10 @@ curso de I8.2: I8
 formato incorrecto: B1.1e3
 ```
 
-- **Un ID escrito en el código se comprueba al compilar:** `cursoDe("I8.2")` devuelve el tipo `"I8"`, sacado del propio texto con `` `${infer C extends CursoId}.${string}` ``. El `extends CursoId` dentro del `infer` restringe lo capturado: solo vale un curso.
-- **Un ID que llega de fuera (la URL, la base de datos) es un `string`**, y ningún tipo lo comprueba al ejecutar. `esSeccionId` usa la expresión regular y es un _type guard_ (B1.6): dentro del `if`, TypeScript ya lo trata como `SeccionId`.
-- **El tipo y la expresión regular describen lo mismo**, cada uno en su momento: el tipo al compilar, la expresión regular al ejecutar.
+- **Un ID escrito en el código se comprueba al compilar:** `cursoDe("I8.2")` devuelve `"I8"` con `` `${infer C extends CursoId}.${string}` `` (el `extends` restringe lo capturado).
+- **Un ID de fuera (URL, base de datos) es `string`:** `esSeccionId` usa la expresión regular y es un _type guard_ (B1.6); dentro del `if`, ya es `SeccionId`. El tipo describe el formato al compilar; la expresión regular, al ejecutar.
 
-Añade al final:
+Añade al final (y bórralo después):
 
 ```ts
 const mal: SeccionId[] = ["B1.1e3", "B1.-2", "B1.1.5", "B1.123", "B9.1", "X1.3"];
@@ -204,13 +204,11 @@ src/a1/13-ids.ts(24,74): error TS2322: Type '"X1.3"' is not assignable to type '
 src/a1/13-ids.ts(25,9): error TS2345: Argument of type '"B1"' is not assignable to parameter of type 'SeccionId'.
 ```
 
-Los seis IDs incorrectos y el curso pasado como sección son errores al compilar. Borra las dos líneas.
-
 <Callout type="risk">
 
-- **Un tipo no valida datos:** los IDs que llegan en una petición siguen necesitando la expresión regular (o un esquema de Zod con ella). El tipo solo protege lo que escribes en el código, y lo que ha pasado por `esSeccionId`.
-- **Si cambias el formato, cambia los dos:** el tipo y la expresión regular son dos descripciones del mismo formato y se pueden desincronizar. La tabla de arriba es un buen test: los mismos textos, con los dos.
-- **La versión con dígitos genera muchas combinaciones** (25 cursos × 110 números = 2.750). Está muy por debajo del límite, pero no la extiendas a tres dígitos sin medir cómo responde el editor.
+- **Un tipo no valida datos:** lo que llega en una petición sigue necesitando la expresión regular (o Zod con ella).
+- **Si cambias el formato, cambia los dos:** la tabla de arriba es un buen test, con los mismos textos en ambos.
+- **La versión con dígitos genera 2.750 combinaciones** (25 cursos × 110 números): lejos del límite, pero mide antes de pasar a tres dígitos.
 
 </Callout>
 
@@ -224,7 +222,7 @@ Los seis IDs incorrectos y el curso pasado como sección son errores al compilar
 
 </Callout>
 
-Solución. El catálogo de eventos es una interfaz: cada nombre, con su _payload_. `on` y `emit` usan su clave como genérico, y el tipo del _payload_ sale de `Eventos[E]` (acceso por índice, I1.2). `src/a1/eventos.ts`:
+Solución. El catálogo es una interfaz (nombre → _payload_), y `on` y `emit` sacan el _payload_ de `Eventos[E]` (I1.2). `src/a1/eventos.ts`:
 
 ```ts
 // Archivo: src/a1/eventos.ts
@@ -274,7 +272,7 @@ export function onGrupo<G extends Grupo>(grupo: G, manejador: (evento: EventosDe
 }
 ```
 
-Y en uso, `src/a1/14-ejercicio.ts`:
+En uso, `src/a1/14-ejercicio.ts`:
 
 ```ts
 // Archivo: src/a1/14-ejercicio.ts
@@ -313,11 +311,11 @@ type _pruebas = [
   (grupo progreso) progreso:marcado { seccion: 'A1.4', leida: true }
 ```
 
-- **Cada manejador recibe el _payload_ de su evento:** en `progreso:marcado`, `seccion` es un `SeccionId` y `leida` un `boolean`, sin conversiones ni comprobaciones.
-- **`EventosDe<G>` usa `Extract` (A1.1) con una plantilla:** se queda con los nombres que empiezan por `` `${G}:` ``. **`Grupo` saca la parte de antes de los dos puntos** con `infer`, y se distribuye sobre la unión de nombres. Si añades un evento `perfil:editado` al catálogo, `"perfil"` aparece como grupo sin tocar nada más.
-- **`on` devuelve la función para dejar de escuchar:** después de `dejar()`, el último `progreso:marcado` solo lo recibe el manejador del grupo.
+- **Cada manejador recibe el _payload_ de su evento,** sin conversiones: en `progreso:marcado`, `seccion` es un `SeccionId`.
+- **`EventosDe<G>`** usa `Extract` (A1.1) con `` `${G}:` ``, y **`Grupo`** saca con `infer` lo de antes de los dos puntos: un `perfil:editado` nuevo crea el grupo `"perfil"` solo.
+- **`on` devuelve la función para dejar de escuchar:** tras `dejar()`, el último evento solo lo recibe el grupo.
 
-Lo que no debe compilar. Añade al final:
+Lo que no debe compilar, al final:
 
 ```ts
 emit("progreso:marcado", { seccion: "A1.3" });
@@ -337,23 +335,23 @@ src/a1/14-ejercicio.ts(32,23): error TS2339: Property 'seccion' does not exist o
 src/a1/14-ejercicio.ts(33,9): error TS2345: Argument of type '"perfil"' is not assignable to parameter of type '"progreso" | "quiz" | "tema"'.
 ```
 
-Un _payload_ incompleto, un ID con formato incorrecto (con sugerencia), un tema que no existe, un evento que no existe, una propiedad de otro evento y un grupo que no existe: seis errores, todos al compilar.
+- **Seis errores al compilar:** _payload_ incompleto, ID mal formado (con sugerencia), tema inexistente, evento inexistente, propiedad de otro evento y grupo inexistente.
 
 <Callout type="risk">
 
-- **Dentro de `on` y `emit` hacen falta dos conversiones:** el `Map` guarda manejadores de eventos distintos, y TypeScript no puede relacionar cada clave con su tipo de manejador. Es el precio de un contenedor genérico. Lo que importa es que las **firmas** de `on` y `emit` son exactas, que es lo que usa el resto del código.
-- **`onGrupo` repite la lista de nombres**, porque los tipos no existen al ejecutar y no se puede recorrer una interfaz. `satisfies NombreEvento[]` detecta una errata en la lista, pero no un evento que falte. Si el catálogo crece, defínelo como un objeto real (con `as const`, I1.2) y saca el tipo de él.
+- **Dentro de `on` y `emit` hay dos conversiones:** el `Map` guarda manejadores distintos y TypeScript no relaciona clave y tipo. Lo importante son las **firmas** exactas.
+- **`onGrupo` repite la lista de nombres,** porque una interfaz no se recorre al ejecutar. `satisfies NombreEvento[]` detecta erratas, no ausencias. Si crece, un objeto real con `as const` (I1.2) y el tipo sacado de él.
 
 </Callout>
 
-Y la aplicación directa a esta plataforma. El botón "Marcar como leído" avisa al índice lateral con un evento del navegador, `da:section-read`, y el índice lo recibe así:
+En esta plataforma, "Marcar como leído" avisa al índice con el evento del navegador `da:section-read`, recibido con un `as`:
 
 ```ts
 document.addEventListener("da:section-read", (event) => {
   const { sectionId, read } = (event as CustomEvent<ReadDetail>).detail;
 ```
 
-El `as` está porque, para TypeScript, `da:section-read` es un evento desconocido. Pero los eventos del navegador también tienen un catálogo, `DocumentEventMap` (de ahí sale que `"click"` dé un `MouseEvent`), y se puede ampliar. `src/a1/15-dom.ts`:
+- **Para TypeScript es un evento desconocido,** pero el catálogo del navegador, `DocumentEventMap` (de donde sale que `"click"` sea un `MouseEvent`), se puede ampliar. `src/a1/15-dom.ts`:
 
 ```ts
 // Archivo: src/a1/15-dom.ts
@@ -385,7 +383,7 @@ export function avisar<K extends keyof DocumentEventMap>(tipo: K, detail: Detall
 export const marcarLeida = (sectionId: SeccionId) => avisar("da:section-read", { sectionId, read: true });
 ```
 
-`npm run typecheck`: sin errores. Para comprobar que funciona, añade al final:
+`npm run typecheck` pasa. Para comprobarlo, al final (y bórralo después):
 
 ```ts
 document.addEventListener("da:section-read", (event) => event.detail.seccion);
@@ -398,13 +396,13 @@ src/a1/15-dom.ts(29,70): error TS2339: Property 'seccion' does not exist on type
 src/a1/15-dom.ts(31,29): error TS2353: Object literal may only specify known properties, and 'seccion' does not exist in type '{ sectionId: SeccionId; read: boolean; }'.
 ```
 
-- **Al escuchar, `event.detail` tiene su tipo:** `seccion` no existe, y se detecta sin ningún `as`.
-- **Al avisar con `dispatchEvent` directamente, no se comprueba nada:** la segunda línea compila (por eso no sale en los errores), porque `dispatchEvent` acepta cualquier `Event`. La función `avisar` saca el tipo del `detail` del propio catálogo con `infer` (A1.1), y ahí sí da error.
+- **Al escuchar, `event.detail` tiene tipo:** `seccion` no existe, sin ningún `as`.
+- **`dispatchEvent` directo no comprueba nada** (acepta cualquier `Event`), y por eso la segunda línea compila. `avisar` saca el tipo del `detail` del catálogo con `infer` (A1.1), y ahí sí falla.
 
 <Callout type="risk">
 
-- **La ampliación es global:** vale en todos los archivos del proyecto (los del `include` del `tsconfig.json`), aunque ninguno importe `15-dom.ts`. Comprobado: un archivo aparte que solo escucha `da:section-read` también ve `event.detail.sectionId`. Ponla en un único sitio conocido, junto a los demás tipos globales del proyecto.
-- **El catálogo dice qué lleva el evento, pero no lo garantiza:** cualquier código que haga `dispatchEvent` a mano puede mandar otra cosa. Que todos los avisos pasen por `avisar` es una convención del proyecto.
+- **La ampliación es global:** vale en todo el `include` del `tsconfig.json`, aunque nadie importe `15-dom.ts` (comprobado). Ponla en un sitio conocido, con los demás tipos globales.
+- **El catálogo dice qué lleva el evento, no lo garantiza:** un `dispatchEvent` a mano puede mandar otra cosa. Que todo pase por `avisar` es una convención.
 
 </Callout>
 
@@ -416,9 +414,9 @@ El compilador detecta un ID con formato incorrecto: construyes tipos de texto co
 
 ## Resumen
 
-- `` `${A}-${B}` `` construye tipos de texto; con uniones, todas las combinaciones (cuidado con cuántas salen).
-- `Uppercase`, `Lowercase`, `Capitalize` y `Uncapitalize`, implementados por el compilador.
-- `` T extends `${infer A}:${infer B}` `` separa un texto; con recursión, entero.
-- `${number}` acepta cualquier texto numérico (`1e3`, `-2`, `1.5`, `0x1F`): para un formato exacto, uniones de dígitos.
-- Los tipos protegen el código; los datos de fuera siguen necesitando la expresión regular, con un _type guard_.
-- Un catálogo `interface Eventos { "grupo:nombre": Payload }` y `on<E extends keyof Eventos>`: el nombre decide el _payload_. `DocumentEventMap` se amplía igual.
+- `` `${A}-${B}` `` con uniones da todas las combinaciones (cuidado con cuántas).
+- `Uppercase`, `Lowercase`, `Capitalize` y `Uncapitalize`, del compilador.
+- `` `${infer A}:${infer B}` `` separa un texto; con recursión, entero.
+- `${number}` acepta `1e3`, `-2`, `1.5` o `0x1F`: para un formato exacto, uniones de dígitos.
+- Los tipos protegen el código; lo de fuera necesita la expresión regular con un _type guard_.
+- Un catálogo `interface Eventos` y `on<E extends keyof Eventos>`; `DocumentEventMap` se amplía igual.
