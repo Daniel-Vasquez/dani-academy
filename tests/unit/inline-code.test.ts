@@ -60,9 +60,19 @@ describe("splitInline", () => {
       .filter((f) => f.endsWith(".yaml"))
       .flatMap((f) => {
         const quiz = parse(readFileSync(`src/content/quizzes/${f}`, "utf8")) as {
-          questions: { prompt: string; options?: string[]; explanation?: string }[];
+          questions: {
+            prompt: string;
+            options?: string[];
+            explanation?: string;
+            rubric?: string[];
+          }[];
         };
-        return quiz.questions.flatMap((q) => [q.prompt, ...(q.options ?? []), q.explanation ?? ""]);
+        return quiz.questions.flatMap((q) => [
+          q.prompt,
+          ...(q.options ?? []),
+          q.explanation ?? "",
+          ...(q.rubric ?? []),
+        ]);
       });
     const sueltos = textos.filter((t) =>
       splitInline(t).some((p) => !p.code && p.text.includes("`")),

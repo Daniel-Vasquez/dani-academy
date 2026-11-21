@@ -39,21 +39,40 @@ const sections = defineCollection({
 const quizzes = defineCollection({
   // Un archivo por curso: b1.yaml, b2.yaml…
   loader: glob({ pattern: "*.yaml", base: "./src/content/quizzes" }),
-  schema: z.object({
-    course: reference("courses"),
-    passingScore: z.number().int().min(1).max(QUIZ_QUESTIONS).default(DEFAULT_PASSING_SCORE),
-    questions: z
-      .array(
-        z.object({
-          prompt: z.string(),
-          code: z.string().optional(),
-          options: z.array(z.string()).length(4),
-          answer: z.number().int().min(0).max(3),
-          explanation: z.string(),
-        }),
-      )
-      .length(QUIZ_QUESTIONS),
-  }),
+  // Dos modos (planificacion.md §8.5): "choice", 4 opciones con una correcta (el de todos los
+  // cursos, por defecto), y "self", preguntas abiertas que se autoevalúan con una rúbrica (P1)
+  schema: z.union([
+    z.object({
+      mode: z.literal("choice").default("choice"),
+      course: reference("courses"),
+      passingScore: z.number().int().min(1).max(QUIZ_QUESTIONS).default(DEFAULT_PASSING_SCORE),
+      questions: z
+        .array(
+          z.object({
+            prompt: z.string(),
+            code: z.string().optional(),
+            options: z.array(z.string()).length(4),
+            answer: z.number().int().min(0).max(3),
+            explanation: z.string(),
+          }),
+        )
+        .length(QUIZ_QUESTIONS),
+    }),
+    z.object({
+      mode: z.literal("self"),
+      course: reference("courses"),
+      passingScore: z.number().int().min(1).max(QUIZ_QUESTIONS).default(DEFAULT_PASSING_SCORE),
+      questions: z
+        .array(
+          z.object({
+            prompt: z.string(),
+            // Lo que debe contener una buena respuesta: cumple si cumple todos los puntos
+            rubric: z.array(z.string()).min(2).max(4),
+          }),
+        )
+        .length(QUIZ_QUESTIONS),
+    }),
+  ]),
 });
 
 export const collections = { courses, sections, quizzes };

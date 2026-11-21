@@ -4528,6 +4528,8 @@ y añade en la portada dos bloques al final: "Proyecto del curso" (tarjeta `bg-s
 
 ### 8.5 Evaluación de P1 (autoevaluación)
 
+> ✅ **Implementada en noviembre de 2026** (`src/content/quizzes/p1.yaml`, `src/components/quiz/SelfQuiz.tsx`). Diferencias con lo que sigue: el esquema es un `z.union` de los dos modos, y los YAML de opción múltiple no necesitan `mode`; `rubric` es una lista de 2 a 4 puntos y «Cumple» significa cumplirlos todos; la rúbrica se enseña tras escribir al menos 40 caracteres; y `submitQuiz` no recibe `mode`: lo lee de la evaluación y, en modo `self`, solo acepta 0 y 1.
+
 El temario define la evaluación de P1 como **reflexiva**: 5 preguntas abiertas autoevaluadas con rúbrica (0–1 punto cada una). Se implementa como variante del esquema de `quizzes` mediante una unión discriminada:
 
 ```ts

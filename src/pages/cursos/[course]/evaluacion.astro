@@ -3,6 +3,7 @@ import CourseLayout from "@/layouts/CourseLayout.astro";
 import Badge from "@/components/ui/Badge.astro";
 import ButtonLink from "@/components/ui/ButtonLink.astro";
 import Quiz from "@/components/quiz/Quiz";
+import SelfQuiz from "@/components/quiz/SelfQuiz";
 import { READING_WIDTH_CLASS } from "@/lib/constants";
 import { courseUrl, getCourseBySlug, getCourseSections, sectionUrl } from "@/lib/content";
 import { formatDateTime } from "@/lib/format";
@@ -12,6 +13,7 @@ import {
   getQuizAccess,
   getQuizByCourseId,
   toPublicQuestions,
+  toSelfQuestions,
 } from "@/server/services/quiz.service";
 
 const user = Astro.locals.user!;
@@ -27,7 +29,7 @@ const [sections, readIds, access, history] = await Promise.all([
   getQuizAccess(user.id, course.id),
   repos.quizAttempts.listByCourse(user.id, course.id, 5),
 ]);
-const { passingScore, questions } = quiz.data;
+const { passingScore, questions, mode } = quiz.data;
 ---
 
 <CourseLayout
@@ -49,19 +51,29 @@ const { passingScore, questions } = quiz.data;
         {course.data.title}
       </h1>
       <p class="mt-4 font-serif text-lg leading-relaxed text-muted">
-        {questions.length} preguntas. Se aprueba con {passingScore}/{questions.length}. Puedes
-        repetirla las veces que quieras; cada intento se guarda en tu progreso.
+        {mode === "self"
+          ? `${questions.length} preguntas abiertas sobre tu proyecto. Escribes cada respuesta, la comparas con su rúbrica y decides si la cumple. Se aprueba con ${passingScore}/${questions.length}.`
+          : `${questions.length} preguntas. Se aprueba con ${passingScore}/${questions.length}. Puedes repetirla las veces que quieras; cada intento se guarda en tu progreso.`}
       </p>
     </header>
 
-    {access.unlocked ? (
+    {access.unlocked && mode === "self" && (
+      <SelfQuiz
+        client:load
+        courseId={course.id}
+        courseHref={courseUrl(course)}
+        questions={toSelfQuestions(quiz)}
+      />
+    )}
+    {access.unlocked && mode === "choice" && (
       <Quiz
         client:load
         courseId={course.id}
         courseHref={courseUrl(course)}
         questions={toPublicQuestions(quiz)}
       />
-    ) : (
+    )}
+    {!access.unlocked && (
       <div class="rounded-2xl border border-warning/50 bg-warning/10 p-6">
         <h2 class="font-serif text-xl font-semibold">Evaluación bloqueada</h2>
         <p class="mt-2 text-sm text-muted">
