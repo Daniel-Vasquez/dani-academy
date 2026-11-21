@@ -1,0 +1,1496 @@
+---
+sectionId: "P1.5"
+course: "P1"
+title: "Funcionalidad principal"
+order: 5
+minutes: 120
+summary: "Construyes las tareas de Hoy de punta a punta: ruta, servicio y repositorio, validación con Zod, una isla de React que marca al instante y deshace si falla, y tests unitarios, de integración y E2E."
+---
+
+La funcionalidad _must_ de la v2 son las tareas de Hoy. Cada capa hace una cosa: la ruta traduce HTTP, el servicio aplica las reglas y el repositorio habla con MongoDB. Cada una se prueba donde es más barato.
+
+**Requisitos:** P1.4, I3.5 (capas), I2 (React) e I8 (tests). Medido con React 19.3, Zod 4.6, mongodb-memory-server 11.3 y MongoDB 8.2.6 local.
+
+## Paso 1: la hora del usuario
+
+**Qué es:** dos conversiones entre el instante (UTC) y el calendario del usuario. `diaEn` ya existía (P1.3); `instanteEn` hace lo contrario, y lo necesita el aviso de cada tarea (`avisarEn`, P1.2).
+
+**Cómo se usa:** sustituye `src/lib/dia.ts` y su test.
+
+```ts
+// Archivo: src/lib/dia.ts
+// El día de una tarea es texto AAAA-MM-DD en la zona del usuario (ADR 0001)
+
+/** "AAAA-MM-DD" del instante, en la zona horaria indicada */
+export function diaEn(instante: Date, zona: string): string {
+  return instante.toLocaleDateString("en-CA", { timeZone: zona });
+}
+
+/** Milisegundos que la zona va por delante de UTC en ese instante (negativo en América) */
+function desfase(instante: Date, zona: string): number {
+  const partes = new Intl.DateTimeFormat("en-US", {
+    timeZone: zona,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(instante);
+  const p = (tipo: string) => Number(partes.find((x) => x.type === tipo)?.value);
+  const comoUtc = Date.UTC(
+    p("year"),
+    p("month") - 1,
+    p("day"),
+    p("hour"),
+    p("minute"),
+    p("second"),
+  );
+  return comoUtc - Math.floor(instante.getTime() / 1000) * 1000;
+}
+
+/** El instante en que es "dia hora" en la zona: 23:30 del 21 en México son las 05:30 UTC del 22 */
+export function instanteEn(dia: string, hora: string, zona: string): Date {
+  const comoUtc = Date.parse(`${dia}T${hora}:00Z`);
+  let instante = comoUtc - desfase(new Date(comoUtc), zona);
+  // Segunda vuelta: si entre medias hay un cambio de horario, el desfase correcto es el del resultado
+  instante = comoUtc - desfase(new Date(instante), zona);
+  return new Date(instante);
+}
+```
+
+```ts
+// Archivo: tests/unit/dia.test.ts
+import { describe, expect, it } from "vitest";
+import { diaEn, instanteEn } from "@/lib/dia";
+
+describe("diaEn", () => {
+  it("una tarea de las 23:30 en México sigue en su día, aunque en UTC ya sea el siguiente", () => {
+    expect(diaEn(new Date("2026-11-22T05:30:00Z"), "America/Mexico_City")).toBe("2026-11-21");
+  });
+
+  it("el mismo instante es otro día en Madrid", () => {
+    expect(diaEn(new Date("2026-11-22T05:30:00Z"), "Europe/Madrid")).toBe("2026-11-22");
+  });
+});
+
+describe("instanteEn", () => {
+  it("las 23:30 del 21 en México son las 05:30 UTC del 22", () => {
+    expect(instanteEn("2026-11-21", "23:30", "America/Mexico_City").toISOString()).toBe(
+      "2026-11-22T05:30:00.000Z",
+    );
+  });
+
+  it("respeta el horario de verano: en Madrid, julio es UTC+2 y noviembre UTC+1", () => {
+    expect(instanteEn("2026-07-10", "09:00", "Europe/Madrid").toISOString()).toBe(
+      "2026-07-10T07:00:00.000Z",
+    );
+    expect(instanteEn("2026-11-10", "09:00", "Europe/Madrid").toISOString()).toBe(
+      "2026-11-10T08:00:00.000Z",
+    );
+  });
+
+  it("el día del cambio de hora: la 01:30 del 29 de marzo en Madrid aún es UTC+1", () => {
+    // A las 01:00 UTC, Madrid pasa de UTC+1 a UTC+2: la primera estimación cae al otro lado
+    expect(instanteEn("2026-03-29", "01:30", "Europe/Madrid").toISOString()).toBe(
+      "2026-03-29T00:30:00.000Z",
+    );
+    expect(instanteEn("2026-03-29", "03:30", "Europe/Madrid").toISOString()).toBe(
+      "2026-03-29T01:30:00.000Z",
+    );
+  });
+});
+```
+
+- **Sin librerías de fechas:** `Intl.DateTimeFormat` conoce todas las zonas y sus cambios de horario, y el desfase sale de comparar la misma hora leída en las dos zonas.
+
+<Callout type="risk">
+
+- **La segunda vuelta no sobra:** sin ella, la 01:30 del día del cambio de hora en Madrid sale una hora antes, porque la primera estimación cae al otro lado del cambio. El test lo detecta:
+
+  ```text
+  Expected: "2026-03-29T00:30:00.000Z"
+  Received: "2026-03-28T23:30:00.000Z"
+  ```
+
+- **`new Date("2026-11-21T23:30")` usa la zona del servidor:** sin `Z` ni desfase, JavaScript la interpreta en la hora local del proceso. En un VPS en UTC y en tu Mac en México, el mismo código daría instantes distintos.
+
+</Callout>
+
+## Paso 2: las colecciones, en un módulo
+
+**Qué es:** el `$jsonSchema` y los índices de P1.2, movidos a `src/lib/colecciones.ts`. Así los usan el _script_ de despliegue y los tests de integración, y los tests prueban el mismo esquema que producción.
+
+**Cómo se usa:** crea el módulo y sustituye el _script_ de P1.2 por uno que lo importa.
+
+```ts
+// Archivo: src/lib/colecciones.ts
+// El $jsonSchema y los índices de P1.2, en un módulo que usan el script y los tests de integración
+import type { Db, Document, IndexDescription } from "mongodb";
+
+const DIA = "^\\d{4}-\\d{2}-\\d{2}$"; // AAAA-MM-DD: el día del usuario (ADR 0001)
+const HORA = "^([01]\\d|2[0-3]):[0-5]\\d$";
+const COLOR = "^#[0-9a-f]{6}$";
+
+interface Coleccion {
+  nombre: string;
+  esquema: Document;
+  indices: IndexDescription[];
+}
+
+export const COLECCIONES: Coleccion[] = [
+  {
+    nombre: "categorias",
+    esquema: {
+      bsonType: "object",
+      required: ["userId", "nombre", "color"],
+      additionalProperties: false,
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+        color: { bsonType: "string", pattern: COLOR },
+      },
+    },
+    indices: [{ key: { userId: 1, nombre: 1 }, name: "userId_nombre_unico", unique: true }],
+  },
+  {
+    nombre: "tareas",
+    esquema: {
+      bsonType: "object",
+      required: ["userId", "titulo", "dia", "hecha", "categoria", "creada"],
+      additionalProperties: false,
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        titulo: { bsonType: "string", minLength: 1, maxLength: 200 },
+        dia: { bsonType: "string", pattern: DIA },
+        hora: { bsonType: "string", pattern: HORA },
+        hecha: { bsonType: "bool" },
+        categoria: {
+          bsonType: "object",
+          required: ["id", "nombre", "color"],
+          additionalProperties: false,
+          properties: {
+            id: { bsonType: "objectId" },
+            nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+            color: { bsonType: "string", pattern: COLOR },
+          },
+        },
+        avisarEn: { bsonType: "date" },
+        creada: { bsonType: "date" },
+      },
+    },
+    indices: [
+      { key: { userId: 1, dia: 1 }, name: "userId_dia" },
+      {
+        key: { avisarEn: 1 },
+        name: "avisos_pendientes",
+        partialFilterExpression: { avisarEn: { $exists: true } },
+      },
+    ],
+  },
+];
+
+/** Crea o actualiza cada colección con su esquema e índices; devuelve una línea por colección */
+export async function aplicarColecciones(db: Db): Promise<string[]> {
+  const resultado: string[] = [];
+  for (const c of COLECCIONES) {
+    const opciones = {
+      validator: { $jsonSchema: c.esquema },
+      validationLevel: "strict",
+      validationAction: "error",
+    } as const;
+    const existe = (await db.listCollections({ name: c.nombre }).toArray()).length > 0;
+    if (existe) await db.command({ collMod: c.nombre, ...opciones });
+    else await db.createCollection(c.nombre, opciones);
+    const indices = await db.collection(c.nombre).createIndexes(c.indices);
+    resultado.push(`${existe ? "actualizada" : "creada"}: ${c.nombre} (${indices.join(", ")})`);
+  }
+  return resultado;
+}
+```
+
+```ts
+// Archivo: scripts/crear-colecciones.ts
+// Uso: node --env-file=.env scripts/crear-colecciones.ts (en cada despliegue, antes de arrancar)
+import { MongoClient } from "mongodb";
+import { aplicarColecciones } from "../src/lib/colecciones.ts";
+
+const { MONGODB_URI, MONGODB_DB = "planificador" } = process.env;
+if (!MONGODB_URI) throw new Error("Falta MONGODB_URI");
+
+const client = new MongoClient(MONGODB_URI);
+try {
+  for (const linea of await aplicarColecciones(client.db(MONGODB_DB))) console.log(linea);
+} finally {
+  await client.close();
+}
+```
+
+```bash
+npm pkg set scripts.db:setup="node --env-file=.env scripts/crear-colecciones.ts"
+npm run db:setup
+```
+
+```text
+creada: categorias (userId_nombre_unico)
+creada: tareas (userId_dia, avisos_pendientes)
+```
+
+- **`../src/lib/colecciones.ts`, con la extensión:** Node ejecuta TypeScript directamente, pero no entiende el alias `@/`, que solo existe para Vite y TypeScript.
+
+<Callout type="risk">
+
+- **Un esquema distinto en los tests no prueba nada del real:** si los tests de integración crearan las colecciones a su manera, un campo que el `$jsonSchema` rechaza pasaría en los tests y fallaría en producción.
+- **El _script_ va antes de arrancar, en cada despliegue:** un índice nuevo que no se crea no da ningún error; solo hace lentas las consultas que lo esperaban.
+
+</Callout>
+
+## Paso 3: los repositorios
+
+**Qué es:** las funciones que hablan con MongoDB, una por patrón de acceso. Cada una lleva el `userId` en el filtro, y reciben la base de datos como parámetro para poder probarlas con otra.
+
+**Cómo se usa:** crea el repositorio de categorías y lo que ofrece su _feature_, y sustituye el de tareas de P1.4.
+
+```ts
+// Archivo: src/features/categorias/categorias.repo.ts
+import { ObjectId, type Db } from "mongodb";
+
+export interface Categoria {
+  _id: ObjectId;
+  userId: string;
+  nombre: string;
+  color: string;
+}
+
+/** Las cuatro con las que empieza cada usuario (B7) */
+export const POR_DEFECTO = [
+  { nombre: "Trabajo", color: "#0284c7" },
+  { nombre: "Personal", color: "#d97706" },
+  { nombre: "Salud", color: "#0d9488" },
+  { nombre: "Estudio", color: "#f25c76" },
+];
+
+const ID = /^[0-9a-f]{24}$/i;
+
+export function crearRepoCategorias(db: Db) {
+  const col = db.collection<Categoria>("categorias");
+  return {
+    listar: (userId: string) => col.find({ userId }).sort({ nombre: 1 }).toArray(),
+
+    buscar: (userId: string, id: string) =>
+      ID.test(id) ? col.findOne({ _id: new ObjectId(id), userId }) : Promise.resolve(null),
+
+    async crearPorDefecto(userId: string) {
+      await col.insertMany(POR_DEFECTO.map((c) => ({ ...c, _id: new ObjectId(), userId })));
+    },
+
+    cambiar: (userId: string, id: ObjectId, cambios: { nombre?: string; color?: string }) =>
+      col.findOneAndUpdate({ _id: id, userId }, { $set: cambios }, { returnDocument: "after" }),
+  };
+}
+
+export type RepoCategorias = ReturnType<typeof crearRepoCategorias>;
+```
+
+```ts
+// Archivo: src/features/categorias/server.ts
+// Lo que la feature ofrece al resto (A8.4)
+import { db } from "@/lib/mongo";
+import { crearRepoCategorias } from "./categorias.repo";
+
+export const repoCategorias = crearRepoCategorias(db);
+export type { Categoria, RepoCategorias } from "./categorias.repo";
+```
+
+```ts
+// Archivo: src/features/tareas/tareas.repo.ts
+import { ObjectId, type Db, type UpdateFilter } from "mongodb";
+
+export interface Tarea {
+  _id: ObjectId;
+  userId: string;
+  titulo: string;
+  dia: string;
+  hora?: string;
+  hecha: boolean;
+  categoria: { id: ObjectId; nombre: string; color: string };
+  avisarEn?: Date;
+  creada: Date;
+}
+
+const ID = /^[0-9a-f]{24}$/i;
+const filtro = (userId: string, id: string) =>
+  ID.test(id) ? { _id: new ObjectId(id), userId } : null;
+
+/** Todas las consultas llevan el userId en el filtro: no hay forma de leer una tarea ajena */
+export function crearRepoTareas(db: Db) {
+  const col = db.collection<Tarea>("tareas");
+  return {
+    async crear(datos: Omit<Tarea, "_id">): Promise<Tarea> {
+      const tarea = { ...datos, _id: new ObjectId() };
+      await col.insertOne(tarea);
+      return tarea;
+    },
+
+    // P1: índice userId_dia; las de sin hora, primero
+    delDia: (userId: string, dia: string) =>
+      col.find({ userId, dia }).sort({ hora: 1, creada: 1 }).toArray(),
+
+    buscar(userId: string, id: string) {
+      const f = filtro(userId, id);
+      return f ? col.findOne(f) : Promise.resolve(null);
+    },
+
+    actualizar(userId: string, id: string, cambios: UpdateFilter<Tarea>) {
+      const f = filtro(userId, id);
+      return f ? col.findOneAndUpdate(f, cambios, { returnDocument: "after" }) : null;
+    },
+
+    async borrar(userId: string, id: string): Promise<boolean> {
+      const f = filtro(userId, id);
+      return f ? (await col.deleteOne(f)).deletedCount === 1 : false;
+    },
+
+    // P5: la copia del nombre y el color en cada tarea (ADR 0002)
+    async recolorear(userId: string, categoria: { _id: ObjectId; nombre: string; color: string }) {
+      const { modifiedCount } = await col.updateMany(
+        { userId, "categoria.id": categoria._id },
+        { $set: { "categoria.nombre": categoria.nombre, "categoria.color": categoria.color } },
+      );
+      return modifiedCount;
+    },
+  };
+}
+
+export type RepoTareas = ReturnType<typeof crearRepoTareas>;
+```
+
+- **`crearRepoTareas(db)` en vez de importar `db`:** el repositorio de P1.4 importaba la conexión de `@/lib/mongo`, la de `MONGODB_URI`. Con la base de datos como parámetro, `server.ts` le pasa la real y el test, una en memoria.
+
+<Callout type="risk">
+
+- **Un ID mal formado se queda en el repositorio:** `filtro` devuelve `null` en lugar de lanzar el `BSONError` de `new ObjectId("abc")`, y la ruta responde 404 en lugar de 500.
+- **`findOneAndUpdate` devuelve el documento anterior por defecto:** sin `returnDocument: "after"`, la API respondería con la tarea sin el cambio que acaba de guardar, y la isla mostraría el estado viejo.
+
+</Callout>
+
+## Paso 4: el servicio y la validación
+
+**Qué es:** el servicio aplica las reglas (la categoría tiene que ser del usuario, el aviso se calcula 15 minutos antes, una tarea hecha no avisa) sin saber nada de HTTP. Zod valida lo que llega antes de que el servicio lo vea.
+
+**Cómo se usa:** crea el esquema, el error de «no encontrado», el servicio y el `server.ts` que lo conecta.
+
+```ts
+// Archivo: src/features/tareas/tarea.schema.ts
+import { z } from "zod";
+
+const id = z.string().regex(/^[0-9a-f]{24}$/i, "ID no válido");
+const titulo = z.string().trim().min(1, "El título no puede estar vacío").max(200);
+const dia = z.iso.date("Día no válido (AAAA-MM-DD)"); // también rechaza el 30 de febrero
+const hora = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Hora no válida (HH:MM)");
+
+export const nuevaTarea = z.object({ titulo, dia, hora: hora.optional(), categoriaId: id });
+
+export const cambioTarea = z
+  .object({ titulo, dia, hora: hora.nullable(), hecha: z.boolean(), categoriaId: id })
+  .partial()
+  .strict() // un campo desconocido, como userId, es un error y no se ignora
+  .refine((c) => Object.keys(c).length > 0, "No hay nada que cambiar");
+
+export type NuevaTarea = z.infer<typeof nuevaTarea>;
+export type CambioTarea = z.infer<typeof cambioTarea>;
+
+/** Lo que recibe el navegador: sin userId ni avisarEn, y con los ID como texto */
+export interface TareaVista {
+  id: string;
+  titulo: string;
+  dia: string;
+  hora?: string;
+  hecha: boolean;
+  categoria: { id: string; nombre: string; color: string };
+}
+```
+
+```ts
+// Archivo: src/lib/errores.ts
+/** No existe, o no es de este usuario: las dos cosas se responden igual (404) */
+export class NoEncontrado extends Error {}
+```
+
+```ts
+// Archivo: src/features/tareas/tareas.service.ts
+// Las reglas de las tareas, sin HTTP ni MongoDB: reciben los repositorios (y se prueban con ellos)
+import type { RepoCategorias } from "@/features/categorias/server";
+import { diaEn, instanteEn } from "@/lib/dia";
+import { NoEncontrado } from "@/lib/errores";
+import type { CambioTarea, NuevaTarea, TareaVista } from "./tarea.schema";
+import type { RepoTareas, Tarea } from "./tareas.repo";
+
+export const MINUTOS_DE_AVISO = 15;
+
+export interface Usuario {
+  id: string;
+  zonaHoraria: string;
+}
+
+/** Cuándo avisar: 15 min antes de la hora, y nunca si la tarea ya ha pasado o no tiene hora */
+export function calcularAviso(
+  t: { dia: string; hora?: string; hecha: boolean },
+  zona: string,
+  ahora: Date,
+): Date | undefined {
+  if (!t.hora || t.hecha) return undefined;
+  const instante = instanteEn(t.dia, t.hora, zona);
+  if (instante <= ahora) return undefined;
+  return new Date(instante.getTime() - MINUTOS_DE_AVISO * 60_000);
+}
+
+export function aVista(t: Tarea): TareaVista {
+  return {
+    id: t._id.toHexString(),
+    titulo: t.titulo,
+    dia: t.dia,
+    ...(t.hora && { hora: t.hora }),
+    hecha: t.hecha,
+    categoria: { ...t.categoria, id: t.categoria.id.toHexString() },
+  };
+}
+
+export function crearServicioTareas(repos: { tareas: RepoTareas; categorias: RepoCategorias }) {
+  const { tareas, categorias } = repos;
+
+  async function categoriaDe(usuario: Usuario, id: string) {
+    const c = await categorias.buscar(usuario.id, id);
+    if (!c) throw new NoEncontrado("Categoría no encontrada"); // también si es de otro usuario
+    return { id: c._id, nombre: c.nombre, color: c.color };
+  }
+
+  return {
+    async deHoy(usuario: Usuario, ahora = new Date()) {
+      return (await tareas.delDia(usuario.id, diaEn(ahora, usuario.zonaHoraria))).map(aVista);
+    },
+
+    async una(usuario: Usuario, id: string) {
+      const tarea = await tareas.buscar(usuario.id, id);
+      if (!tarea) throw new NoEncontrado("Tarea no encontrada");
+      return aVista(tarea);
+    },
+
+    async crear(usuario: Usuario, datos: NuevaTarea, ahora = new Date()) {
+      const { categoriaId, ...resto } = datos;
+      const base = { ...resto, hecha: false };
+      const avisarEn = calcularAviso(base, usuario.zonaHoraria, ahora);
+      const tarea = await tareas.crear({
+        ...base,
+        userId: usuario.id,
+        categoria: await categoriaDe(usuario, categoriaId),
+        ...(avisarEn && { avisarEn }),
+        creada: ahora,
+      });
+      return aVista(tarea);
+    },
+
+    async cambiar(usuario: Usuario, id: string, cambios: CambioTarea, ahora = new Date()) {
+      const actual = await tareas.buscar(usuario.id, id);
+      if (!actual) throw new NoEncontrado("Tarea no encontrada");
+
+      const { categoriaId, hora, ...resto } = cambios;
+      const final = {
+        ...actual,
+        ...resto,
+        hora: hora === null ? undefined : (hora ?? actual.hora),
+      };
+      const avisarEn = calcularAviso(final, usuario.zonaHoraria, ahora);
+
+      const $set: Partial<Tarea> = { ...resto, ...(final.hora && { hora: final.hora }) };
+      if (categoriaId) $set.categoria = await categoriaDe(usuario, categoriaId);
+      if (avisarEn) $set.avisarEn = avisarEn;
+      const $unset = {
+        ...(!final.hora && { hora: "" as const }),
+        ...(!avisarEn && { avisarEn: "" as const }),
+      };
+      // MongoDB rechaza un $set o un $unset vacíos: solo se envía el que tiene algo
+      const actualizada = await tareas.actualizar(usuario.id, id, {
+        ...(Object.keys($set).length > 0 && { $set }),
+        ...(Object.keys($unset).length > 0 && { $unset }),
+      });
+      if (!actualizada) throw new NoEncontrado("Tarea no encontrada");
+      return aVista(actualizada);
+    },
+
+    async borrar(usuario: Usuario, id: string) {
+      if (!(await tareas.borrar(usuario.id, id))) throw new NoEncontrado("Tarea no encontrada");
+    },
+  };
+}
+
+export type ServicioTareas = ReturnType<typeof crearServicioTareas>;
+```
+
+```ts
+// Archivo: src/features/tareas/server.ts
+// Lo que la feature ofrece al resto (A8.4): el servicio ya conectado a MongoDB
+import { repoCategorias } from "@/features/categorias/server";
+import { db } from "@/lib/mongo";
+import { crearRepoTareas } from "./tareas.repo";
+import { crearServicioTareas } from "./tareas.service";
+
+export const servicioTareas = crearServicioTareas({
+  tareas: crearRepoTareas(db),
+  categorias: repoCategorias,
+});
+export { cambioTarea, nuevaTarea, type TareaVista } from "./tarea.schema";
+```
+
+- **`ahora` es un parámetro con valor por defecto:** la ruta no lo pasa y usa la hora real; el test pasa una fija.
+- **`TareaVista` no lleva `userId` ni `avisarEn`:** el navegador recibe solo lo que pinta.
+
+<Callout type="risk">
+
+- **Sin `.strict()`, Zod descarta en silencio lo que no conoce:** `{ "titulo": "Pan", "hehca": true }` guardaría el título, y el cliente creería que también la ha marcado. Con `.strict()` es un 400 que señala el campo mal escrito.
+- **MongoDB rechaza un `$set` o un `$unset` vacíos:** completar una tarea sin hora solo tiene `$set`, y quitar la hora puede dejar el `$set` vacío. Por eso cada uno se envía solo si tiene algo.
+
+</Callout>
+
+## Paso 5: las rutas
+
+**Qué es:** las rutas traducen HTTP: leen la sesión, validan el cuerpo, llaman al servicio y convierten sus errores en códigos de estado. Auth crea además las categorías de cada usuario nuevo.
+
+**Cómo se usa:** crea las ayudas de HTTP y las rutas de tareas, y sustituye `auth.ts`.
+
+```ts
+// Archivo: src/lib/http.ts
+// Las traducciones entre HTTP y el resto: cuerpo validado con Zod y errores con su código
+import type { z } from "zod";
+import { NoEncontrado } from "@/lib/errores";
+
+/** El cuerpo JSON validado, o una respuesta 400 con el primer problema */
+export async function leerCuerpo<T>(
+  request: Request,
+  esquema: z.ZodType<T>,
+): Promise<T | Response> {
+  const json: unknown = await request.json().catch(() => undefined);
+  const r = esquema.safeParse(json);
+  if (r.success) return r.data;
+  const error = r.error.issues[0]?.message ?? "Datos no válidos";
+  return Response.json({ error }, { status: 400 });
+}
+
+export function responderError(error: unknown): Response {
+  if (error instanceof NoEncontrado) {
+    return Response.json({ error: error.message }, { status: 404 });
+  }
+  throw error; // lo inesperado sigue siendo un 500, con su traza en el registro
+}
+```
+
+```ts
+// Archivo: src/pages/api/tareas/index.ts
+import type { APIRoute } from "astro";
+import { nuevaTarea, servicioTareas } from "@/features/tareas/server";
+import { leerCuerpo, responderError } from "@/lib/http";
+
+export const GET: APIRoute = async ({ locals }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  return Response.json(await servicioTareas.deHoy(locals.user));
+};
+
+export const POST: APIRoute = async ({ locals, request }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  const datos = await leerCuerpo(request, nuevaTarea);
+  if (datos instanceof Response) return datos;
+  try {
+    return Response.json(await servicioTareas.crear(locals.user, datos), { status: 201 });
+  } catch (error) {
+    return responderError(error);
+  }
+};
+```
+
+```ts
+// Archivo: src/pages/api/tareas/[id].ts
+import type { APIRoute } from "astro";
+import { cambioTarea, servicioTareas } from "@/features/tareas/server";
+import { leerCuerpo, responderError } from "@/lib/http";
+
+export const GET: APIRoute = async ({ locals, params }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  try {
+    return Response.json(await servicioTareas.una(locals.user, params.id ?? ""));
+  } catch (error) {
+    return responderError(error);
+  }
+};
+
+export const PATCH: APIRoute = async ({ locals, params, request }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  const datos = await leerCuerpo(request, cambioTarea);
+  if (datos instanceof Response) return datos;
+  try {
+    return Response.json(await servicioTareas.cambiar(locals.user, params.id ?? "", datos));
+  } catch (error) {
+    return responderError(error);
+  }
+};
+
+export const DELETE: APIRoute = async ({ locals, params }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  try {
+    await servicioTareas.borrar(locals.user, params.id ?? "");
+    return new Response(null, { status: 204 });
+  } catch (error) {
+    return responderError(error);
+  }
+};
+```
+
+```ts
+// Archivo: src/features/auth/auth.ts
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { BETTER_AUTH_SECRET, BETTER_AUTH_URL } from "astro:env/server";
+import { repoCategorias } from "@/features/categorias/server";
+import { db } from "@/lib/mongo";
+
+export const auth = betterAuth({
+  appName: "Planificador",
+  baseURL: BETTER_AUTH_URL,
+  secret: BETTER_AUTH_SECRET,
+  database: mongodbAdapter(db), // crea y usa las colecciones user, session, account y verification
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true, // tras registrarse, la sesión queda iniciada
+    minPasswordLength: 8,
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 30, // 30 días
+    updateAge: 60 * 60 * 24, // renueva la caducidad como mucho una vez al día
+  },
+  user: {
+    // Preferencias dentro del usuario (P1.2): se leen en cada página junto con la sesión
+    additionalFields: {
+      zonaHoraria: {
+        type: "string",
+        required: true,
+        defaultValue: "America/Mexico_City",
+        input: false, // el registro no puede elegirla: se cambiará desde Ajustes
+      },
+    },
+  },
+  databaseHooks: {
+    user: {
+      create: {
+        // Cada usuario nuevo empieza con las cuatro categorías de B7
+        after: async (user) => repoCategorias.crearPorDefecto(user.id),
+      },
+    },
+  },
+});
+
+export type Sesion = typeof auth.$Infer.Session;
+```
+
+- **`zonaHoraria` con `input: false`:** Better Auth la guarda en el usuario con su valor por defecto y la incluye en la sesión, y el registro no puede fijarla desde fuera.
+
+<Callout type="risk">
+
+- **`responderError` vuelve a lanzar lo que no conoce:** si convirtiera todo en un 400, un fallo de MongoDB parecería un error del usuario y no quedaría rastro en el registro. Lo inesperado tiene que ser un 500.
+- **El _hook_ `after` no va en la misma transacción que el registro:** si falla al crear las categorías, el usuario existe sin ellas y no puede crear tareas. Con más usuarios, conviene que la pantalla Hoy las cree si faltan.
+
+</Callout>
+
+## Paso 6: la isla con actualización optimista
+
+**Qué es:** `useOptimistic` (React 19) muestra el cambio en cuanto el usuario lo hace, antes de que el servidor responda. Si la petición falla, al acabar la transición la vista vuelve al estado real.
+
+**Cómo se usa:** crea la isla y sustituye la portada, que carga los datos en el servidor y se los pasa.
+
+```tsx
+// Archivo: src/features/tareas/components/ListaHoy.tsx
+import { useOptimistic, useState, useTransition, type FormEvent } from "react";
+import type { TareaVista } from "../tarea.schema";
+
+interface Props {
+  dia: string;
+  inicial: TareaVista[];
+  categorias: { id: string; nombre: string }[];
+}
+
+async function enviar(url: string, method: string, cuerpo: unknown): Promise<TareaVista> {
+  const r = await fetch(url, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(cuerpo),
+  });
+  if (!r.ok) throw new Error(((await r.json()) as { error: string }).error);
+  return r.json();
+}
+
+export default function ListaHoy({ dia, inicial, categorias }: Props) {
+  const [tareas, setTareas] = useState(inicial);
+  // Lo que se ve: el estado real más los cambios que aún esperan respuesta del servidor
+  const [visibles, marcar] = useOptimistic(tareas, (lista, { id, hecha }: TareaVista) =>
+    lista.map((t) => (t.id === id ? { ...t, hecha } : t)),
+  );
+  const [, startTransition] = useTransition();
+  const [error, setError] = useState("");
+
+  function alternar(tarea: TareaVista) {
+    setError("");
+    startTransition(async () => {
+      marcar({ ...tarea, hecha: !tarea.hecha }); // se ve marcada al instante
+      try {
+        const guardada = await enviar(`/api/tareas/${tarea.id}`, "PATCH", { hecha: !tarea.hecha });
+        // Tras un await, la actualización necesita su propia transición (React 19)
+        startTransition(() =>
+          setTareas((l) => l.map((t) => (t.id === guardada.id ? guardada : t))),
+        );
+      } catch {
+        setError("No se pudo guardar el cambio."); // al acabar la transición, vuelve el estado real
+      }
+    });
+  }
+
+  async function crear(evento: FormEvent<HTMLFormElement>) {
+    evento.preventDefault();
+    const form = evento.currentTarget;
+    const datos = new FormData(form);
+    setError("");
+    try {
+      const nueva = await enviar("/api/tareas", "POST", {
+        titulo: datos.get("titulo"),
+        dia,
+        ...(datos.get("hora") && { hora: datos.get("hora") }),
+        categoriaId: datos.get("categoriaId"),
+      });
+      setTareas((l) => [...l, nueva]);
+      form.reset();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+
+  return (
+    <section className="mt-8">
+      <form onSubmit={crear} className="grid gap-2 sm:grid-cols-[1fr_auto_auto_auto]">
+        <input
+          name="titulo"
+          aria-label="Nueva tarea"
+          placeholder="Nueva tarea"
+          className="rounded border px-3 py-2"
+        />
+        <input name="hora" type="time" aria-label="Hora" className="rounded border px-3 py-2" />
+        <select name="categoriaId" aria-label="Categoría" className="rounded border px-3 py-2">
+          {categorias.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.nombre}
+            </option>
+          ))}
+        </select>
+        <button className="rounded bg-acento px-4 py-2 font-medium text-white">Añadir</button>
+      </form>
+      <p role="alert" className="mt-2 min-h-6 text-peligro">
+        {error}
+      </p>
+      <ul className="mt-2 divide-y rounded border bg-superficie">
+        {visibles.map((t) => (
+          <li key={t.id} className="flex items-center gap-3 px-3 py-2">
+            <input
+              type="checkbox"
+              checked={t.hecha}
+              onChange={() => alternar(t)}
+              aria-label={`Hecha: ${t.titulo}`}
+            />
+            <span
+              className="size-3 rounded-full"
+              style={{ backgroundColor: t.categoria.color }} // el color lo elige el usuario: no es un token
+              title={t.categoria.nombre}
+            />
+            <span className={t.hecha ? "text-suave line-through" : ""}>{t.titulo}</span>
+            {t.hora && <span className="ml-auto text-sm text-suave">{t.hora}</span>}
+          </li>
+        ))}
+        {visibles.length === 0 && <li className="px-3 py-2 text-suave">Nada para hoy.</li>}
+      </ul>
+    </section>
+  );
+}
+```
+
+```astro
+---
+// Archivo: src/pages/index.astro
+import Base from "@/layouts/Base.astro";
+import ListaHoy from "@/features/tareas/components/ListaHoy";
+import { repoCategorias } from "@/features/categorias/server";
+import { servicioTareas } from "@/features/tareas/server";
+import { diaEn } from "@/lib/dia";
+
+const user = Astro.locals.user!; // el middleware garantiza que hay sesión
+const dia = diaEn(new Date(), user.zonaHoraria);
+const [tareas, categorias] = await Promise.all([
+  servicioTareas.deHoy(user),
+  repoCategorias.listar(user.id),
+]);
+---
+
+<Base title="Hoy">
+  <h1 class="text-3xl font-semibold">Planificador 2026 v2</h1>
+  <p class="mt-2 text-suave">
+    Hola, {user.name}. Hoy es {dia}.
+  </p>
+  <ListaHoy
+    client:load
+    dia={dia}
+    inicial={tareas}
+    categorias={categorias.map((c) => ({ id: c._id.toHexString(), nombre: c.nombre }))}
+  />
+  <button id="salir" class="mt-8 underline">
+    Cerrar sesión
+  </button>
+</Base>
+
+<script>
+  import { authClient } from "@/features/auth/auth-client";
+
+  document.querySelector("#salir")!.addEventListener("click", async () => {
+    await authClient.signOut();
+    location.assign("/login");
+  });
+</script>
+```
+
+- **Solo marcar es optimista; crear, no:** al marcar, el resultado es seguro casi siempre. Una tarea nueva puede rechazarse (título vacío) y necesita el ID del servidor, así que espera la respuesta.
+- **El color va en `style`:** lo elige el usuario y llega de MongoDB, como se decidió en P1.3.
+
+<Callout type="risk">
+
+- **Tras un `await`, la actualización necesita su propio `startTransition`:** React 19 no puede asociar a la transición original lo que ocurre después de una espera, y la documentación de React pide envolverlo otra vez. Sin hacerlo, esa actualización se trata como urgente, fuera de la transición.
+- **La primera carga viene del servidor:** la isla recibe `inicial` ya renderizado, sin una petición más al hidratar. Si la isla pidiera los datos al montarse, la página mostraría primero una lista vacía.
+
+</Callout>
+
+## Paso 7: los tests de cada capa
+
+**Qué es:** unitarios para las reglas puras (Paso 1), de integración para servicio, repositorio y esquema juntos contra un MongoDB en memoria, y E2E para el recorrido en el navegador.
+
+**Cómo se usa:** instala el servidor en memoria, amplía la configuración de Vitest y crea los tests. La de Playwright aplica ahora el esquema a su base de datos antes de arrancar.
+
+```bash
+npm install -D mongodb-memory-server
+```
+
+```ts
+// Archivo: vitest.config.ts
+/// <reference types="vitest/config" />
+import { getViteConfig } from "astro/config";
+
+// getViteConfig reutiliza la configuración de Astro: el alias @/ y los módulos astro:*
+export default getViteConfig({
+  test: {
+    include: ["tests/{unit,integration}/**/*.test.ts"],
+    hookTimeout: 120_000, // la primera vez, mongodb-memory-server descarga el binario de MongoDB
+  },
+});
+```
+
+```ts
+// Archivo: tests/integration/mongo.ts
+// Un MongoDB en memoria por archivo de tests, con el mismo $jsonSchema e índices que producción
+import { MongoClient, type Db } from "mongodb";
+import { MongoMemoryServer } from "mongodb-memory-server";
+import { afterAll, beforeAll, beforeEach } from "vitest";
+import { aplicarColecciones } from "@/lib/colecciones";
+
+let servidor: MongoMemoryServer;
+let client: MongoClient;
+export let db: Db;
+
+beforeAll(async () => {
+  servidor = await MongoMemoryServer.create();
+  client = await MongoClient.connect(servidor.getUri());
+  db = client.db("test");
+});
+
+beforeEach(async () => {
+  await db.dropDatabase();
+  await aplicarColecciones(db);
+});
+
+afterAll(async () => {
+  await client?.close();
+  await servidor?.stop();
+});
+```
+
+```ts
+// Archivo: tests/integration/tareas.test.ts
+import { ObjectId } from "mongodb";
+import { describe, expect, it } from "vitest";
+import { crearRepoCategorias } from "@/features/categorias/categorias.repo";
+import { crearRepoTareas } from "@/features/tareas/tareas.repo";
+import { crearServicioTareas } from "@/features/tareas/tareas.service";
+import { NoEncontrado } from "@/lib/errores";
+import { db } from "./mongo";
+
+const ana = { id: "ana", zonaHoraria: "America/Mexico_City" };
+const beto = { id: "beto", zonaHoraria: "America/Mexico_City" };
+const AHORA = new Date("2026-11-21T18:00:00Z"); // las 12:00 del 21 en México
+
+async function preparar() {
+  const categorias = crearRepoCategorias(db);
+  const tareas = crearRepoTareas(db);
+  await categorias.crearPorDefecto(ana.id);
+  await categorias.crearPorDefecto(beto.id);
+  const [estudio] = await categorias.listar(ana.id); // por nombre: Estudio, Personal, Salud, Trabajo
+  return {
+    servicio: crearServicioTareas({ tareas, categorias }),
+    tareas,
+    categoriaId: estudio!._id.toHexString(),
+  };
+}
+
+describe("servicio de tareas", () => {
+  it("crea la tarea con la copia de su categoría y el aviso 15 min antes", async () => {
+    const { servicio, tareas, categoriaId } = await preparar();
+    const t = await servicio.crear(
+      ana,
+      { titulo: "Dentista", dia: "2026-11-21", hora: "23:30", categoriaId },
+      AHORA,
+    );
+    expect(t.categoria).toEqual({ id: categoriaId, nombre: "Estudio", color: "#f25c76" });
+    const guardada = await tareas.buscar(ana.id, t.id);
+    expect(guardada?.avisarEn?.toISOString()).toBe("2026-11-22T05:15:00.000Z");
+  });
+
+  it("deHoy usa el día del usuario: a las 23:50 en México, las del 21 siguen siendo de hoy", async () => {
+    const { servicio, categoriaId } = await preparar();
+    await servicio.crear(ana, { titulo: "Hoy", dia: "2026-11-21", categoriaId }, AHORA);
+    await servicio.crear(ana, { titulo: "Mañana", dia: "2026-11-22", categoriaId }, AHORA);
+    const hoy = await servicio.deHoy(ana, new Date("2026-11-22T05:50:00Z"));
+    expect(hoy.map((t) => t.titulo)).toEqual(["Hoy"]);
+  });
+
+  it("al completarla desaparece el aviso, y al desmarcarla vuelve", async () => {
+    const { servicio, tareas, categoriaId } = await preparar();
+    const { id } = await servicio.crear(
+      ana,
+      { titulo: "Dentista", dia: "2026-11-21", hora: "23:30", categoriaId },
+      AHORA,
+    );
+    await servicio.cambiar(ana, id, { hecha: true }, AHORA);
+    expect((await tareas.buscar(ana.id, id))?.avisarEn).toBeUndefined();
+    await servicio.cambiar(ana, id, { hecha: false }, AHORA);
+    expect((await tareas.buscar(ana.id, id))?.avisarEn).toBeInstanceOf(Date);
+  });
+
+  it("quitar la hora quita también el aviso", async () => {
+    const { servicio, tareas, categoriaId } = await preparar();
+    const { id } = await servicio.crear(
+      ana,
+      { titulo: "Dentista", dia: "2026-11-21", hora: "23:30", categoriaId },
+      AHORA,
+    );
+    const t = await servicio.cambiar(ana, id, { hora: null }, AHORA);
+    expect(t.hora).toBeUndefined();
+    const guardada = await tareas.buscar(ana.id, id);
+    expect(guardada).not.toHaveProperty("hora");
+    expect(guardada).not.toHaveProperty("avisarEn");
+  });
+
+  it("otro usuario no puede leer, cambiar ni borrar la tarea, ni usar una categoría ajena", async () => {
+    const { servicio, categoriaId } = await preparar();
+    const { id } = await servicio.crear(
+      ana,
+      { titulo: "Privada", dia: "2026-11-21", categoriaId },
+      AHORA,
+    );
+    await expect(servicio.una(beto, id)).rejects.toBeInstanceOf(NoEncontrado);
+    await expect(servicio.cambiar(beto, id, { hecha: true })).rejects.toBeInstanceOf(NoEncontrado);
+    await expect(servicio.borrar(beto, id)).rejects.toBeInstanceOf(NoEncontrado);
+    await expect(
+      servicio.crear(beto, { titulo: "Con categoría ajena", dia: "2026-11-21", categoriaId }),
+    ).rejects.toBeInstanceOf(NoEncontrado);
+    expect((await servicio.una(ana, id)).hecha).toBe(false);
+  });
+
+  it("el $jsonSchema rechaza lo que el servicio nunca debería escribir", async () => {
+    const { tareas } = await preparar();
+    await expect(
+      tareas.crear({
+        userId: "ana",
+        titulo: "",
+        dia: "21/11/2026",
+        hecha: false,
+        categoria: { id: new ObjectId(), nombre: "X", color: "rojo" },
+        creada: AHORA,
+      }),
+    ).rejects.toThrow("Document failed validation");
+  });
+});
+```
+
+```ts
+// Archivo: playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+const PUERTO = 4399;
+const URL = `http://localhost:${PUERTO}`; // el mismo origen que BETTER_AUTH_URL
+
+// Una base de datos propia para los tests: nunca la de desarrollo
+process.env.MONGODB_URI ??= "mongodb://localhost:27017";
+process.env.MONGODB_DB = "planificador_e2e";
+
+export default defineConfig({
+  testDir: "tests/e2e",
+  use: { baseURL: URL },
+  webServer: {
+    // El mismo $jsonSchema e índices que producción, en la base de datos de los tests
+    command: "npm run build && node scripts/crear-colecciones.ts && node dist/server/entry.mjs",
+    url: `${URL}/api/health`,
+    reuseExistingServer: false,
+    env: {
+      PORT: String(PUERTO),
+      MONGODB_URI: process.env.MONGODB_URI,
+      MONGODB_DB: process.env.MONGODB_DB,
+      BETTER_AUTH_URL: URL,
+      BETTER_AUTH_SECRET:
+        process.env.BETTER_AUTH_SECRET ?? "secreto-solo-para-tests-e2e-0123456789",
+    },
+  },
+});
+```
+
+```ts
+// Archivo: tests/e2e/tareas.spec.ts
+import { expect, test } from "@playwright/test";
+import { correo, registrar } from "./ayudas";
+
+test("crear una tarea y completarla en Hoy; sigue hecha al recargar", async ({ page }) => {
+  await registrar(page, correo("fer"));
+  await page.getByLabel("Nueva tarea").fill("Comprar pan");
+  await page.getByLabel("Categoría").selectOption({ label: "Personal" });
+  await page.getByRole("button", { name: "Añadir" }).click();
+
+  const hecha = page.getByLabel("Hecha: Comprar pan");
+  await hecha.check();
+  await expect(page.getByText("Comprar pan")).toHaveClass(/line-through/);
+  await page.reload();
+  await expect(hecha).toBeChecked();
+});
+
+test("la marca se ve al instante y, si el servidor falla, se deshace", async ({ page }) => {
+  await registrar(page, correo("gil"));
+  await page.getByLabel("Nueva tarea").fill("Llamar al banco");
+  await page.getByRole("button", { name: "Añadir" }).click();
+
+  // El servidor tarda 1 s y responde 500
+  await page.route("**/api/tareas/*", async (ruta) => {
+    if (ruta.request().method() !== "PATCH") return ruta.continue();
+    await new Promise((r) => setTimeout(r, 1_000));
+    await ruta.fulfill({ status: 500, json: { error: "Error del servidor" } });
+  });
+  const casilla = page.getByLabel("Hecha: Llamar al banco");
+  await casilla.click();
+  await expect(casilla).toBeChecked({ timeout: 500 }); // antes de la respuesta
+  await expect(page.getByRole("alert")).toHaveText("No se pudo guardar el cambio.");
+  await expect(casilla).not.toBeChecked();
+});
+
+test("un título vacío no se guarda y se explica por qué", async ({ page }) => {
+  await registrar(page, correo("hugo"));
+  await page.getByRole("button", { name: "Añadir" }).click();
+  await expect(page.getByRole("alert")).toHaveText("El título no puede estar vacío");
+});
+```
+
+```bash
+npx vitest run
+npx playwright test tests/e2e/tareas.spec.ts --reporter=line
+```
+
+```text
+04:59:40 [@astrojs/node] Enabling sessions with filesystem storage
+
+ RUN  v5.1.1 /mi-proyecto
+
+
+ Test Files  2 passed (2)
+      Tests  11 passed (11)
+   Start at  04:59:40
+   Duration  1.13s (tests 90%, import 7%, transform 4%)
+
+Running 3 tests using 1 worker
+
+[1/3] tests/e2e/tareas.spec.ts:5:1 › crear una tarea y completarla en Hoy; sigue hecha al recargar
+[2/3] tests/e2e/tareas.spec.ts:18:1 › la marca se ve al instante y, si el servidor falla, se deshace
+[3/3] tests/e2e/tareas.spec.ts:36:1 › un título vacío no se guarda y se explica por qué
+  3 passed (3.6s)
+```
+
+- **El servidor falso de `page.route` tarda un segundo:** así el test ve la marca antes de la respuesta, que es lo que hace `useOptimistic`, y después ve cómo se deshace.
+
+<Callout type="risk">
+
+- **Un test de autorización tiene que fallar sin la autorización:** con `filtro` sin el `userId`, el de «otro usuario» falla, y sin `useOptimistic`, el E2E de la marca dice `Expected: checked` y `Received: unchecked`. Comprueba las dos cosas una vez.
+- **La base de datos se vacía antes de cada test** (`dropDatabase` en `beforeEach`): si un test dependiera de lo que dejó otro, el orden de ejecución decidiría si pasa.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Completa el _must_ de categorías de P1.1: `PATCH /api/categorias/:id` cambia el nombre o el color, y todas sus tareas lo muestran (P5).
+2. Un nombre repetido responde 409, y la categoría de otro usuario, 404.
+3. Escribe los tests de integración de las tres cosas.
+
+</Callout>
+
+Solución. Añade el error de conflicto y su traducción a HTTP:
+
+```ts
+// Archivo: src/lib/errores.ts
+/** No existe, o no es de este usuario: las dos cosas se responden igual (404) */
+export class NoEncontrado extends Error {}
+
+/** Choca con algo que ya existe, como un nombre repetido (409) */
+export class Conflicto extends Error {}
+```
+
+```ts
+// Archivo: src/lib/http.ts
+// Las traducciones entre HTTP y el resto: cuerpo validado con Zod y errores con su código
+import type { z } from "zod";
+import { Conflicto, NoEncontrado } from "@/lib/errores";
+
+/** El cuerpo JSON validado, o una respuesta 400 con el primer problema */
+export async function leerCuerpo<T>(
+  request: Request,
+  esquema: z.ZodType<T>,
+): Promise<T | Response> {
+  const json: unknown = await request.json().catch(() => undefined);
+  const r = esquema.safeParse(json);
+  if (r.success) return r.data;
+  const error = r.error.issues[0]?.message ?? "Datos no válidos";
+  return Response.json({ error }, { status: 400 });
+}
+
+export function responderError(error: unknown): Response {
+  if (error instanceof NoEncontrado) {
+    return Response.json({ error: error.message }, { status: 404 });
+  }
+  if (error instanceof Conflicto) {
+    return Response.json({ error: error.message }, { status: 409 });
+  }
+  throw error; // lo inesperado sigue siendo un 500, con su traza en el registro
+}
+```
+
+El esquema del cambio, y lo que ofrece la _feature_ de categorías:
+
+```ts
+// Archivo: src/features/categorias/categoria.schema.ts
+import { z } from "zod";
+
+export const cambioCategoria = z
+  .object({
+    nombre: z.string().trim().min(1, "El nombre no puede estar vacío").max(40),
+    // "#0284C7" también vale: se guarda en minúsculas, como pide el $jsonSchema
+    color: z
+      .string()
+      .toLowerCase()
+      .regex(/^#[0-9a-f]{6}$/, "Color no válido (#rrggbb)"),
+  })
+  .partial()
+  .strict()
+  .refine((c) => Object.keys(c).length > 0, "No hay nada que cambiar");
+
+export type CambioCategoria = z.infer<typeof cambioCategoria>;
+```
+
+```ts
+// Archivo: src/features/categorias/server.ts
+// Lo que la feature ofrece al resto (A8.4)
+import { db } from "@/lib/mongo";
+import { crearRepoCategorias } from "./categorias.repo";
+
+export const repoCategorias = crearRepoCategorias(db);
+export type { Categoria, RepoCategorias } from "./categorias.repo";
+export { cambioCategoria, type CambioCategoria } from "./categoria.schema";
+```
+
+La operación toca categorías y tareas. La orquesta el servicio de tareas, que ya depende de categorías (al revés crearía una dependencia circular). Sustituye el servicio de tareas (`tareas.service.ts`):
+
+```ts
+// Archivo: src/features/tareas/tareas.service.ts
+// Las reglas de las tareas, sin HTTP ni MongoDB: reciben los repositorios (y se prueban con ellos)
+import { MongoServerError } from "mongodb";
+import type { CambioCategoria, RepoCategorias } from "@/features/categorias/server";
+import { diaEn, instanteEn } from "@/lib/dia";
+import { Conflicto, NoEncontrado } from "@/lib/errores";
+import type { CambioTarea, NuevaTarea, TareaVista } from "./tarea.schema";
+import type { RepoTareas, Tarea } from "./tareas.repo";
+
+export const MINUTOS_DE_AVISO = 15;
+
+export interface Usuario {
+  id: string;
+  zonaHoraria: string;
+}
+
+/** Cuándo avisar: 15 min antes de la hora, y nunca si la tarea ya ha pasado o no tiene hora */
+export function calcularAviso(
+  t: { dia: string; hora?: string; hecha: boolean },
+  zona: string,
+  ahora: Date,
+): Date | undefined {
+  if (!t.hora || t.hecha) return undefined;
+  const instante = instanteEn(t.dia, t.hora, zona);
+  if (instante <= ahora) return undefined;
+  return new Date(instante.getTime() - MINUTOS_DE_AVISO * 60_000);
+}
+
+export function aVista(t: Tarea): TareaVista {
+  return {
+    id: t._id.toHexString(),
+    titulo: t.titulo,
+    dia: t.dia,
+    ...(t.hora && { hora: t.hora }),
+    hecha: t.hecha,
+    categoria: { ...t.categoria, id: t.categoria.id.toHexString() },
+  };
+}
+
+export function crearServicioTareas(repos: { tareas: RepoTareas; categorias: RepoCategorias }) {
+  const { tareas, categorias } = repos;
+
+  async function categoriaDe(usuario: Usuario, id: string) {
+    const c = await categorias.buscar(usuario.id, id);
+    if (!c) throw new NoEncontrado("Categoría no encontrada"); // también si es de otro usuario
+    return { id: c._id, nombre: c.nombre, color: c.color };
+  }
+
+  return {
+    async deHoy(usuario: Usuario, ahora = new Date()) {
+      return (await tareas.delDia(usuario.id, diaEn(ahora, usuario.zonaHoraria))).map(aVista);
+    },
+
+    async una(usuario: Usuario, id: string) {
+      const tarea = await tareas.buscar(usuario.id, id);
+      if (!tarea) throw new NoEncontrado("Tarea no encontrada");
+      return aVista(tarea);
+    },
+
+    async crear(usuario: Usuario, datos: NuevaTarea, ahora = new Date()) {
+      const { categoriaId, ...resto } = datos;
+      const base = { ...resto, hecha: false };
+      const avisarEn = calcularAviso(base, usuario.zonaHoraria, ahora);
+      const tarea = await tareas.crear({
+        ...base,
+        userId: usuario.id,
+        categoria: await categoriaDe(usuario, categoriaId),
+        ...(avisarEn && { avisarEn }),
+        creada: ahora,
+      });
+      return aVista(tarea);
+    },
+
+    async cambiar(usuario: Usuario, id: string, cambios: CambioTarea, ahora = new Date()) {
+      const actual = await tareas.buscar(usuario.id, id);
+      if (!actual) throw new NoEncontrado("Tarea no encontrada");
+
+      const { categoriaId, hora, ...resto } = cambios;
+      const final = {
+        ...actual,
+        ...resto,
+        hora: hora === null ? undefined : (hora ?? actual.hora),
+      };
+      const avisarEn = calcularAviso(final, usuario.zonaHoraria, ahora);
+
+      const $set: Partial<Tarea> = { ...resto, ...(final.hora && { hora: final.hora }) };
+      if (categoriaId) $set.categoria = await categoriaDe(usuario, categoriaId);
+      if (avisarEn) $set.avisarEn = avisarEn;
+      const $unset = {
+        ...(!final.hora && { hora: "" as const }),
+        ...(!avisarEn && { avisarEn: "" as const }),
+      };
+      // MongoDB rechaza un $set o un $unset vacíos: solo se envía el que tiene algo
+      const actualizada = await tareas.actualizar(usuario.id, id, {
+        ...(Object.keys($set).length > 0 && { $set }),
+        ...(Object.keys($unset).length > 0 && { $unset }),
+      });
+      if (!actualizada) throw new NoEncontrado("Tarea no encontrada");
+      return aVista(actualizada);
+    },
+
+    async borrar(usuario: Usuario, id: string) {
+      if (!(await tareas.borrar(usuario.id, id))) throw new NoEncontrado("Tarea no encontrada");
+    },
+
+    /** P5: cambia la categoría y la copia que guarda cada una de sus tareas (ADR 0002) */
+    async cambiarCategoria(usuario: Usuario, id: string, cambios: CambioCategoria) {
+      const actual = await categorias.buscar(usuario.id, id);
+      if (!actual) throw new NoEncontrado("Categoría no encontrada");
+      try {
+        const categoria = await categorias.cambiar(usuario.id, actual._id, cambios);
+        if (!categoria) throw new NoEncontrado("Categoría no encontrada");
+        const tareasActualizadas = await tareas.recolorear(usuario.id, categoria);
+        const { nombre, color } = categoria;
+        return { id: categoria._id.toHexString(), nombre, color, tareasActualizadas };
+      } catch (error) {
+        // 11000: el índice único userId_nombre_unico ya tiene ese nombre para este usuario
+        if (error instanceof MongoServerError && error.code === 11000) {
+          throw new Conflicto("Ya tienes una categoría con ese nombre");
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+export type ServicioTareas = ReturnType<typeof crearServicioTareas>;
+```
+
+```ts
+// Archivo: src/pages/api/categorias/[id].ts
+import type { APIRoute } from "astro";
+import { cambioCategoria } from "@/features/categorias/server";
+import { servicioTareas } from "@/features/tareas/server";
+import { leerCuerpo, responderError } from "@/lib/http";
+
+export const PATCH: APIRoute = async ({ locals, params, request }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  const datos = await leerCuerpo(request, cambioCategoria);
+  if (datos instanceof Response) return datos;
+  try {
+    return Response.json(
+      await servicioTareas.cambiarCategoria(locals.user, params.id ?? "", datos),
+    );
+  } catch (error) {
+    return responderError(error);
+  }
+};
+```
+
+```ts
+// Archivo: tests/integration/categorias.test.ts
+import { describe, expect, it } from "vitest";
+import { cambioCategoria } from "@/features/categorias/categoria.schema";
+import { crearRepoCategorias } from "@/features/categorias/categorias.repo";
+import { crearRepoTareas } from "@/features/tareas/tareas.repo";
+import { crearServicioTareas } from "@/features/tareas/tareas.service";
+import { Conflicto, NoEncontrado } from "@/lib/errores";
+import { db } from "./mongo";
+
+const ana = { id: "ana", zonaHoraria: "America/Mexico_City" };
+const beto = { id: "beto", zonaHoraria: "America/Mexico_City" };
+
+async function preparar() {
+  const categorias = crearRepoCategorias(db);
+  const servicio = crearServicioTareas({ tareas: crearRepoTareas(db), categorias });
+  await categorias.crearPorDefecto(ana.id);
+  await categorias.crearPorDefecto(beto.id);
+  const id = async (u: string, nombre: string) =>
+    (await categorias.listar(u)).find((c) => c.nombre === nombre)!._id.toHexString();
+  const salud = await id(ana.id, "Salud");
+  for (const titulo of ["Dentista", "Correr", "Médico"]) {
+    await servicio.crear(ana, { titulo, dia: "2026-11-21", categoriaId: salud });
+  }
+  await servicio.crear(ana, {
+    titulo: "Informe",
+    dia: "2026-11-21",
+    categoriaId: await id(ana.id, "Trabajo"),
+  });
+  await servicio.crear(beto, {
+    titulo: "Gimnasio",
+    dia: "2026-11-21",
+    categoriaId: await id(beto.id, "Salud"),
+  });
+  return { servicio, salud };
+}
+
+describe("cambiar una categoría (P5)", () => {
+  it("el nuevo color llega a todas sus tareas, y solo a las suyas", async () => {
+    const { servicio, salud } = await preparar();
+    const r = await servicio.cambiarCategoria(
+      ana,
+      salud,
+      cambioCategoria.parse({ color: "#16A34A" }),
+    );
+    expect(r).toMatchObject({ nombre: "Salud", color: "#16a34a", tareasActualizadas: 3 });
+
+    const colores = (await servicio.deHoy(ana, new Date("2026-11-21T18:00:00Z"))).map(
+      (t) => `${t.titulo} ${t.categoria.color}`,
+    );
+    expect(colores).toEqual([
+      "Dentista #16a34a",
+      "Correr #16a34a",
+      "Médico #16a34a",
+      "Informe #0284c7",
+    ]);
+    const deBeto = await servicio.deHoy(beto, new Date("2026-11-21T18:00:00Z"));
+    expect(deBeto[0]?.categoria.color).toBe("#0d9488");
+  });
+
+  it("un nombre repetido es un conflicto, y nada cambia", async () => {
+    const { servicio, salud } = await preparar();
+    await expect(
+      servicio.cambiarCategoria(ana, salud, { nombre: "Trabajo" }),
+    ).rejects.toBeInstanceOf(Conflicto);
+    const hoy = await servicio.deHoy(ana, new Date("2026-11-21T18:00:00Z"));
+    expect(hoy.filter((t) => t.categoria.nombre === "Salud")).toHaveLength(3);
+  });
+
+  it("la categoría de otro usuario no se puede cambiar", async () => {
+    const { servicio, salud } = await preparar();
+    await expect(
+      servicio.cambiarCategoria(beto, salud, { color: "#000000" }),
+    ).rejects.toBeInstanceOf(NoEncontrado);
+  });
+});
+```
+
+```bash
+npx vitest run
+```
+
+```text
+04:59:50 [@astrojs/node] Enabling sessions with filesystem storage
+
+ RUN  v5.1.1 /mi-proyecto
+
+
+ Test Files  3 passed (3)
+      Tests  14 passed (14)
+   Start at  04:59:50
+   Duration  1.52s (tests 91%, import 6%, transform 2%)
+```
+
+- **`tareasActualizadas: 3`:** las tres tareas de Salud de Ana; la de Trabajo y la de Beto no cambian.
+- **`#16A34A` se guarda como `#16a34a`:** Zod lo pasa a minúsculas antes de comprobarlo, que es lo que exige el `$jsonSchema`.
+
+<Callout type="risk">
+
+- **Dos escrituras sin transacción:** si el proceso muere entre cambiar la categoría y recolorear sus tareas, quedan con el color viejo. Repetir el mismo `PATCH` lo arregla, porque las dos operaciones se pueden repetir sin efectos extra; con un _replica set_, una transacción lo evitaría.
+- **El conflicto lo detecta el índice único, no una consulta previa:** comprobar antes si el nombre existe deja un hueco entre la comprobación y la escritura. El error 11000 llega en la misma operación.
+
+</Callout>
+
+<Callout type="mastery">
+
+La funcionalidad principal funciona de punta a punta con tests: rutas delgadas, un servicio con las reglas, repositorios que filtran por usuario, validación con Zod y con `$jsonSchema`, y una isla que responde al instante y se corrige si el servidor falla. Cada capa tiene sus tests, y los de seguridad se han visto fallar sin su protección.
+
+</Callout>
+
+## Resumen
+
+- `instanteEn` convierte la hora del usuario en un instante, con dos vueltas por el cambio de horario.
+- El esquema vive en un módulo que usan el despliegue y los tests de integración.
+- Ruta, servicio y repositorio: HTTP, reglas y MongoDB, cada uno por separado.
+- Zod con `.strict()` en la entrada; `$jsonSchema` como última barrera.
+- `useOptimistic` marca al instante y deshace si falla; crear espera al servidor.
+- Unitarios, integración con MongoDB en memoria y E2E, cada uno donde es más barato.

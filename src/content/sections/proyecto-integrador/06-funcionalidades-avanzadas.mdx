@@ -1,0 +1,1366 @@
+---
+sectionId: "P1.6"
+course: "P1"
+title: "Funcionalidades avanzadas"
+order: 6
+minutes: 120
+summary: "Añades tres should de la v2: estadísticas con una agregación, avisos por Telegram que un cron envía una sola vez aunque coincidan dos ejecuciones, y búsqueda con un índice de texto, cada uno con sus tests."
+---
+
+Las estadísticas, los avisos a una hora y la búsqueda piden más que un CRUD. Cada uno usa una pieza avanzada de MongoDB: una agregación, una operación atómica sobre un índice parcial y un índice de texto.
+
+**Requisitos:** P1.5, I4.4, I4.5 y A2. Medido con MongoDB 8.2.6 local y un Telegram falso: no se ha llamado a la API real.
+
+## Paso 1: estadísticas con una agregación
+
+**Qué es:** P7, las tareas hechas por semana y categoría, calculadas en MongoDB con un _pipeline_ (I4.4) en lugar de traer todas las tareas a Node.
+
+**Cómo se usa:** crea el repositorio de la _feature_, lo que ofrece al resto y la página. El _layout_ gana un menú para las páginas privadas.
+
+```ts
+// Archivo: src/features/estadisticas/estadisticas.repo.ts
+import type { Db } from "mongodb";
+
+export interface FilaSemana {
+  semana: string; // el lunes de esa semana, AAAA-MM-DD
+  categoria: string;
+  color: string;
+  hechas: number;
+}
+
+export function crearRepoEstadisticas(db: Db) {
+  const tareas = db.collection("tareas");
+  return {
+    /** P7: tareas hechas por semana (de lunes a domingo) y categoría, desde un día */
+    hechasPorSemana: (userId: string, desde: string) =>
+      tareas
+        .aggregate<FilaSemana>([
+          // Igualdad en userId y rango en dia: usa el índice userId_dia
+          { $match: { userId, dia: { $gte: desde }, hecha: true } },
+          {
+            $group: {
+              _id: {
+                // dia es texto (ADR 0001): se convierte a fecha solo para agrupar
+                semana: {
+                  $dateTrunc: {
+                    date: { $dateFromString: { dateString: "$dia" } },
+                    unit: "week",
+                    startOfWeek: "monday",
+                  },
+                },
+                categoria: "$categoria.id", // por id: un cambio de nombre no parte el grupo
+              },
+              categoria: { $last: "$categoria.nombre" },
+              color: { $last: "$categoria.color" },
+              hechas: { $sum: 1 },
+            },
+          },
+          { $sort: { "_id.semana": -1, hechas: -1, categoria: 1 } },
+          {
+            $project: {
+              _id: 0,
+              semana: { $dateToString: { date: "$_id.semana", format: "%Y-%m-%d" } },
+              categoria: 1,
+              color: 1,
+              hechas: 1,
+            },
+          },
+        ])
+        .toArray(),
+  };
+}
+```
+
+```ts
+// Archivo: src/features/estadisticas/server.ts
+import { db } from "@/lib/mongo";
+import { crearRepoEstadisticas } from "./estadisticas.repo";
+
+export const repoEstadisticas = crearRepoEstadisticas(db);
+export type { FilaSemana } from "./estadisticas.repo";
+```
+
+```astro
+---
+// Archivo: src/pages/estadisticas.astro
+import Base from "@/layouts/Base.astro";
+import { repoEstadisticas } from "@/features/estadisticas/server";
+import { diaEn } from "@/lib/dia";
+
+const user = Astro.locals.user!;
+const SEMANAS = 8;
+const desde = diaEn(new Date(Date.now() - SEMANAS * 7 * 86_400_000), user.zonaHoraria);
+const filas = await repoEstadisticas.hechasPorSemana(user.id, desde);
+---
+
+<Base title="Estadísticas" nav>
+  <h1 class="text-3xl font-semibold">Estadísticas</h1>
+  <p class="mt-2 text-suave">
+    Tareas hechas por semana y categoría, en las últimas {SEMANAS} semanas.
+  </p>
+  {filas.length === 0 ? (
+    <p class="mt-6 text-suave">Todavía no hay tareas hechas.</p>
+  ) : (
+    <table class="mt-6 w-full text-left">
+      <thead>
+        <tr class="border-b">
+          <th class="py-2">Semana</th>
+          <th class="py-2">Categoría</th>
+          <th class="py-2 text-right">Hechas</th>
+        </tr>
+      </thead>
+      <tbody>
+        {filas.map((f) => (
+          <tr class="border-b">
+            <td class="py-2">{f.semana}</td>
+            <td class="py-2">
+              <span
+                class="mr-2 inline-block size-3 rounded-full"
+                style={{ backgroundColor: f.color }}
+              />
+              {f.categoria}
+            </td>
+            <td class="py-2 text-right">{f.hechas}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )}
+</Base>
+```
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+import "@/styles/global.css";
+
+interface Props {
+  title: string;
+  nav?: boolean; // el menú, solo en las páginas privadas
+}
+const { title, nav = false } = Astro.props;
+const enlaces = [
+  { href: "/", texto: "Hoy" },
+  { href: "/estadisticas", texto: "Estadísticas" },
+  { href: "/ajustes", texto: "Ajustes" },
+];
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} · Planificador</title>
+  </head>
+  <body class="min-h-screen bg-fondo text-texto antialiased">
+    {nav && (
+      <nav class="mx-auto flex max-w-2xl gap-4 px-4 pt-6 text-sm">
+        {enlaces.map((e) => (
+          <a
+            href={e.href}
+            aria-current={Astro.url.pathname === e.href ? "page" : undefined}
+            class="underline-offset-4 aria-[current=page]:font-semibold aria-[current=page]:underline"
+          >
+            {e.texto}
+          </a>
+        ))}
+      </nav>
+    )}
+    <main class="mx-auto max-w-2xl px-4 py-10">
+      <slot />
+    </main>
+  </body>
+</html>
+```
+
+Y en `src/pages/index.astro`, la portada usa el menú: `<Base title="Hoy" nav>`.
+
+- **`$dateTrunc` con `startOfWeek: "monday"`:** agrupa de lunes a domingo; el valor por defecto empieza en domingo.
+- **Se agrupa por `categoria.id` y se muestra el último nombre:** si el usuario renombra una categoría, sus semanas anteriores no se parten en dos filas.
+
+<Callout type="risk">
+
+- **El `$match` va primero, con `userId` y `dia`:** así usa el índice `userId_dia` y el resto del _pipeline_ trabaja solo con las tareas de un usuario. Un `$match` después del `$group` recorrería las de todos.
+- **Se agrupa por el día planificado, no por cuándo se completó:** una tarea del lunes marcada el miércoles cuenta en la semana del lunes. Si importa cuándo se hizo, hace falta un campo `hechaEn`, y es una decisión para el ADR.
+
+</Callout>
+
+## Paso 2: _cron_, no _change streams_
+
+**Qué es:** la decisión de cómo enviar un aviso a una hora. Un _change stream_ (A2) avisa cuando un documento cambia, pero un aviso no depende de un cambio: depende de que llegue una hora.
+
+**Cómo se usa:** cada minuto, un _cron_ llama a una ruta protegida de la app, que envía los avisos vencidos usando el índice parcial `avisos_pendientes` de P1.2.
+
+| Opción                          | A favor                                           | En contra                                                                          |
+| ------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| _Change streams_                | Reacciona al instante a cada cambio               | No sabe de horas; necesita _replica set_ y un proceso siempre escuchando           |
+| Un `setInterval` en el servidor | Sin piezas nuevas                                 | Vive en el proceso web: cada instancia, y cada recarga en desarrollo, arranca otro |
+| _Cron_ que llama a una ruta     | La app tal cual, con un único reloj fuera de ella | Hasta un minuto de retraso; la ruta necesita su propio secreto                     |
+
+- **El _cron_ lo programa P1.8 en el VPS:** aquí basta con la ruta y una forma de llamarla a mano.
+
+<Callout type="risk">
+
+- **Un aviso tiene que llegar una vez, aunque coincidan dos ejecuciones:** si una tarda más de un minuto, la siguiente empieza antes de que acabe. El Paso 4 lo resuelve con una operación atómica, y el test del Paso 5 lo comprueba.
+- **Un minuto de retraso es parte del diseño:** el aviso sale 15 minutos antes, así que llegar a los 14 no incumple nada. Si el requisito fuera «a la hora exacta», el _cron_ no bastaría.
+
+</Callout>
+
+## Paso 3: vincular Telegram
+
+**Qué es:** el usuario abre `t.me/<bot>?start=<código>` y pulsa «Iniciar». El bot recibe `/start <código>` y la app guarda su chat. El código dice qué usuario es y hasta cuándo vale, y va firmado para que nadie fabrique uno ajeno.
+
+**Cómo se usa:** declara las variables, crea el código firmado y el cliente de la Bot API, guarda el chat en el usuario y muestra el enlace en Ajustes.
+
+```js
+// @ts-check
+// Archivo: astro.config.mjs
+import { defineConfig, envField } from "astro/config";
+import node from "@astrojs/node";
+import react from "@astrojs/react";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  output: "server", // todas las páginas son privadas salvo login y registro (P1.4)
+  adapter: node({ mode: "standalone" }), // un servidor Node, para Docker en el VPS (P1.8)
+  integrations: [react()],
+  vite: { plugins: [tailwindcss()] },
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "planificador" }),
+      BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
+      // Avisos (P1.6): sin token, la app funciona y los avisos quedan desactivados
+      CRON_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      TELEGRAM_BOT_TOKEN: envField.string({ context: "server", access: "secret", optional: true }),
+      TELEGRAM_BOT_USUARIO: envField.string({
+        context: "server",
+        access: "public",
+        optional: true,
+      }),
+      TELEGRAM_API_URL: envField.string({
+        context: "server",
+        access: "public",
+        url: true,
+        default: "https://api.telegram.org",
+      }),
+    },
+  },
+});
+```
+
+```bash
+# Archivo: .env.example
+# Copia este archivo como .env y rellena los valores. .env no se sube nunca al repositorio.
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=planificador
+# 32 caracteres aleatorios como mínimo: openssl rand -base64 32
+BETTER_AUTH_SECRET=
+# La URL pública de la app, con su puerto en local
+BETTER_AUTH_URL=http://localhost:4321
+# Quien llama a /api/avisos/ejecutar (el cron) envía este secreto: openssl rand -base64 32
+CRON_SECRET=
+# De @BotFather. Sin token, los avisos por Telegram quedan desactivados
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_BOT_USUARIO=
+```
+
+```ts
+// Archivo: src/features/avisos/vinculo.ts
+// El código del enlace t.me/<bot>?start=<código>: dice qué usuario es, hasta cuándo vale, y va firmado.
+// Telegram solo admite A-Z, a-z, 0-9, _ y - en ese parámetro, y 64 caracteres como máximo.
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const VALIDEZ_MS = 15 * 60_000;
+
+const firma = (texto: string, secreto: string) =>
+  createHmac("sha256", secreto)
+    .update(`vinculo-telegram:${texto}`) // otro propósito, otra firma, aunque el secreto se comparta
+    .digest("base64url")
+    .replaceAll("_", "") // el _ separa las partes del código
+    .slice(0, 22);
+
+export function crearCodigo(userId: string, secreto: string, ahora = Date.now()): string {
+  const cuerpo = `${userId}_${(ahora + VALIDEZ_MS).toString(36)}`;
+  return `${cuerpo}_${firma(cuerpo, secreto)}`;
+}
+
+/** El userId si el código es auténtico y no ha caducado; si no, null */
+export function leerCodigo(codigo: string, secreto: string, ahora = Date.now()): string | null {
+  const [userId, caduca, recibida, ...sobra] = codigo.split("_");
+  if (!userId || !caduca || !recibida || sobra.length > 0) return null;
+  const esperada = firma(`${userId}_${caduca}`, secreto);
+  const igual =
+    recibida.length === esperada.length &&
+    timingSafeEqual(Buffer.from(recibida), Buffer.from(esperada));
+  if (!igual || parseInt(caduca, 36) < ahora) return null;
+  return userId;
+}
+```
+
+```ts
+// Archivo: src/features/avisos/telegram.ts
+// Las dos llamadas a la Bot API que usa la app: https://core.telegram.org/bots/api
+
+export interface Actualizacion {
+  update_id: number;
+  message?: { chat: { id: number }; text?: string };
+}
+
+export function crearTelegram({ url, token }: { url: string; token: string }) {
+  async function llamar<T>(metodo: string, cuerpo: object): Promise<T> {
+    const r = await fetch(`${url}/bot${token}/${metodo}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(cuerpo),
+      signal: AbortSignal.timeout(10_000), // una API lenta no puede bloquear la ejecución entera
+    });
+    const datos = (await r.json()) as { ok: boolean; result: T; description?: string };
+    if (!datos.ok) throw new Error(`Telegram ${metodo}: ${datos.description}`);
+    return datos.result;
+  }
+
+  return {
+    enviar: (chatId: string, texto: string) =>
+      llamar("sendMessage", { chat_id: chatId, text: texto }),
+    /** Los mensajes recibidos desde offset; los anteriores quedan confirmados y no vuelven */
+    actualizaciones: (offset: number) =>
+      llamar<Actualizacion[]>("getUpdates", { offset, timeout: 0, allowed_updates: ["message"] }),
+  };
+}
+
+export type Telegram = ReturnType<typeof crearTelegram>;
+```
+
+```ts
+// Archivo: src/features/auth/auth.ts
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { BETTER_AUTH_SECRET, BETTER_AUTH_URL } from "astro:env/server";
+import { repoCategorias } from "@/features/categorias/server";
+import { db } from "@/lib/mongo";
+
+export const auth = betterAuth({
+  appName: "Planificador",
+  baseURL: BETTER_AUTH_URL,
+  secret: BETTER_AUTH_SECRET,
+  database: mongodbAdapter(db), // crea y usa las colecciones user, session, account y verification
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true, // tras registrarse, la sesión queda iniciada
+    minPasswordLength: 8,
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 30, // 30 días
+    updateAge: 60 * 60 * 24, // renueva la caducidad como mucho una vez al día
+  },
+  user: {
+    // Preferencias dentro del usuario (P1.2): se leen en cada página junto con la sesión
+    additionalFields: {
+      zonaHoraria: {
+        type: "string",
+        required: true,
+        defaultValue: "America/Mexico_City",
+        input: false, // el registro no puede elegirla: se cambiará desde Ajustes
+      },
+      // Lo escribe el servicio de avisos al vincular (P1.6), nunca el usuario
+      telegramChatId: { type: "string", required: false, input: false },
+    },
+  },
+  databaseHooks: {
+    user: {
+      create: {
+        // Cada usuario nuevo empieza con las cuatro categorías de B7
+        after: async (user) => repoCategorias.crearPorDefecto(user.id),
+      },
+    },
+  },
+});
+
+export type Sesion = typeof auth.$Infer.Session;
+```
+
+```astro
+---
+// Archivo: src/pages/ajustes.astro
+import Base from "@/layouts/Base.astro";
+import { enlaceDeVinculo } from "@/features/avisos/server";
+
+const user = Astro.locals.user!;
+const enlace = user.telegramChatId ? null : enlaceDeVinculo(user.id); // caduca en 15 min
+---
+
+<Base title="Ajustes" nav>
+  <h1 class="text-3xl font-semibold">Ajustes</h1>
+  <h2 class="mt-8 text-xl font-semibold">Avisos por Telegram</h2>
+  {user.telegramChatId ? (
+    <p class="mt-2">Vinculado: recibirás un aviso 15 minutos antes de cada tarea con hora.</p>
+  ) : enlace ? (
+    <p class="mt-2">
+      <a href={enlace} class="underline" rel="noopener">
+        Abrir el bot y vincular Telegram
+      </a>
+      <span class="block text-sm text-suave">El enlace caduca en 15 minutos.</span>
+    </p>
+  ) : (
+    <p class="mt-2 text-suave">Los avisos no están configurados en este servidor.</p>
+  )}
+</Base>
+```
+
+- **`getUpdates` en vez de un _webhook_:** el _webhook_ necesita una URL pública con HTTPS, que no existe hasta P1.8. Leer las actualizaciones en cada ejecución del _cron_ funciona también en local.
+- **Sin `TELEGRAM_BOT_TOKEN`, la app funciona igual:** Ajustes dice que los avisos no están configurados y la ruta del _cron_ responde 503.
+
+<Callout type="risk">
+
+- **Un enlace de vínculo sin caducidad es una llave permanente:** quien lo encuentre en un historial vincula su chat y recibe tus avisos. Por eso caduca a los 15 minutos y la firma cubre también la caducidad.
+- **El parámetro `start` admite 64 caracteres de `A-Z`, `a-z`, `0-9`, `_` y `-`:** por eso la firma es `base64url` recortada y sin `_`, el separador. El test del Paso 5 comprueba que cabe.
+
+</Callout>
+
+## Paso 4: enviar los avisos
+
+**Qué es:** el servicio que, en cada ejecución, lee los `/start` recibidos y envía los avisos vencidos. Cada aviso se **reclama** quitando su `avisarEn` en la misma operación que lo encuentra.
+
+**Cómo se usa:** crea el servicio, lo que ofrece la _feature_ y la ruta del _cron_, y abre esa ruta en el _middleware_.
+
+```ts
+// Archivo: src/features/avisos/avisos.service.ts
+import { ObjectId, type Db } from "mongodb";
+import type { Tarea } from "@/features/tareas/tareas.repo";
+import { leerCodigo } from "./vinculo";
+import type { Telegram } from "./telegram";
+
+interface UsuarioConTelegram {
+  _id: ObjectId; // la colección user de Better Auth guarda el id como ObjectId
+  telegramChatId?: string;
+}
+
+export function crearServicioAvisos(deps: { db: Db; telegram: Telegram; secreto: string }) {
+  const { db, telegram, secreto } = deps;
+  const tareas = db.collection<Tarea>("tareas");
+  const usuarios = db.collection<UsuarioConTelegram>("user");
+  // En memoria: tras un reinicio, Telegram reenvía lo de las últimas 24 h, y vincular es idempotente
+  let offset = 0;
+
+  return {
+    /** Lee los /start <código> recibidos por el bot y guarda el chat de cada usuario */
+    async vincularPendientes(): Promise<number> {
+      let vinculados = 0;
+      for (const a of await telegram.actualizaciones(offset)) {
+        offset = a.update_id + 1;
+        const chatId = a.message?.chat.id;
+        const texto = a.message?.text ?? "";
+        if (!chatId || !texto.startsWith("/start ")) continue;
+
+        const userId = leerCodigo(texto.slice("/start ".length).trim(), secreto);
+        if (!userId || !ObjectId.isValid(userId)) {
+          await telegram.enviar(
+            String(chatId),
+            "El enlace no es válido o ha caducado. Genera otro en Ajustes.",
+          );
+          continue;
+        }
+        await usuarios.updateOne(
+          { _id: new ObjectId(userId) },
+          { $set: { telegramChatId: String(chatId) } },
+        );
+        await telegram.enviar(
+          String(chatId),
+          "Listo: te avisaré aquí 15 minutos antes de cada tarea con hora.",
+        );
+        vinculados++;
+      }
+      return vinculados;
+    },
+
+    /** P6: envía los avisos vencidos, como mucho `maximo` por ejecución */
+    async enviarVencidos(ahora = new Date(), maximo = 100): Promise<number> {
+      let enviados = 0;
+      for (let i = 0; i < maximo; i++) {
+        // Reclamar quitando avisarEn, en una sola operación atómica (índice avisos_pendientes):
+        // dos ejecuciones a la vez nunca se llevan la misma tarea
+        const tarea = await tareas.findOneAndUpdate(
+          { avisarEn: { $lte: ahora } },
+          { $unset: { avisarEn: "" } },
+          { sort: { avisarEn: 1 } },
+        );
+        if (!tarea) break;
+        const usuario = await usuarios.findOne({ _id: new ObjectId(tarea.userId) });
+        if (!usuario?.telegramChatId) continue; // sin Telegram vinculado: no hay a quién avisar
+        try {
+          await telegram.enviar(usuario.telegramChatId, `⏰ ${tarea.hora} · ${tarea.titulo}`);
+          enviados++;
+        } catch (error) {
+          console.error("[avisos] No se pudo enviar", tarea._id.toHexString(), error);
+        }
+      }
+      return enviados;
+    },
+  };
+}
+
+export type ServicioAvisos = ReturnType<typeof crearServicioAvisos>;
+```
+
+```ts
+// Archivo: src/features/avisos/server.ts
+import {
+  BETTER_AUTH_SECRET,
+  TELEGRAM_API_URL,
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_BOT_USUARIO,
+} from "astro:env/server";
+import { db } from "@/lib/mongo";
+import { crearServicioAvisos } from "./avisos.service";
+import { crearTelegram } from "./telegram";
+import { crearCodigo } from "./vinculo";
+
+/** null si no hay bot configurado: la app funciona igual, sin avisos */
+export const servicioAvisos = TELEGRAM_BOT_TOKEN
+  ? crearServicioAvisos({
+      db,
+      telegram: crearTelegram({ url: TELEGRAM_API_URL, token: TELEGRAM_BOT_TOKEN }),
+      secreto: BETTER_AUTH_SECRET,
+    })
+  : null;
+
+/** El enlace que abre el bot con el código de este usuario, o null si no hay bot */
+export function enlaceDeVinculo(userId: string): string | null {
+  if (!TELEGRAM_BOT_USUARIO) return null;
+  return `https://t.me/${TELEGRAM_BOT_USUARIO}?start=${crearCodigo(userId, BETTER_AUTH_SECRET)}`;
+}
+```
+
+```ts
+// Archivo: src/pages/api/avisos/ejecutar.ts
+// La llama el cron cada minuto: curl -X POST -H "Authorization: Bearer $CRON_SECRET" …
+import { createHash, timingSafeEqual } from "node:crypto";
+import type { APIRoute } from "astro";
+import { CRON_SECRET } from "astro:env/server";
+import { servicioAvisos } from "@/features/avisos/server";
+
+/** Compara en tiempo constante: con === el tiempo de respuesta delataría cuántos caracteres aciertan */
+function autorizado(cabecera: string | null): boolean {
+  const resumen = (texto: string) => createHash("sha256").update(texto).digest();
+  return timingSafeEqual(resumen(cabecera ?? ""), resumen(`Bearer ${CRON_SECRET}`));
+}
+
+export const POST: APIRoute = async ({ request }) => {
+  if (!autorizado(request.headers.get("authorization"))) {
+    return Response.json({ error: "No autorizado" }, { status: 401 });
+  }
+  if (!servicioAvisos) return Response.json({ error: "Telegram no configurado" }, { status: 503 });
+  const vinculados = await servicioAvisos.vincularPendientes();
+  const enviados = await servicioAvisos.enviarVencidos();
+  return Response.json({ vinculados, enviados });
+};
+```
+
+```ts
+// Archivo: src/middleware.ts
+// Todo es privado salvo lo que se declara público aquí
+import { defineMiddleware } from "astro:middleware";
+import { auth } from "@/features/auth/auth";
+
+const PAGINAS_DE_ACCESO = new Set(["/login", "/registro"]);
+// /api/avisos/ejecutar no tiene sesión: la protege su propio secreto (CRON_SECRET)
+const PREFIJOS_PUBLICOS = ["/api/auth/", "/api/health", "/api/avisos/ejecutar"];
+
+export const onRequest = defineMiddleware(async (ctx, next) => {
+  const { pathname, search } = ctx.url;
+  ctx.locals.user = null;
+  if (PREFIJOS_PUBLICOS.some((p) => pathname.startsWith(p))) return next();
+
+  const sesion = await auth.api.getSession({ headers: ctx.request.headers });
+  ctx.locals.user = sesion?.user ?? null;
+
+  if (PAGINAS_DE_ACCESO.has(pathname)) return ctx.locals.user ? ctx.redirect("/") : next();
+  if (ctx.locals.user) return next();
+
+  if (pathname.startsWith("/api/")) {
+    return Response.json({ error: "No autenticado" }, { status: 401 });
+  }
+  return ctx.redirect(`/login?redirect=${encodeURIComponent(pathname + search)}`);
+});
+```
+
+- **Como mucho, una entrega:** si Telegram falla después de reclamar el aviso, el aviso se pierde y queda en el registro. Reenviarlo podría duplicarlo, y para un recordatorio es peor recibirlo dos veces que perder uno de vez en cuando.
+- **La ruta pública es exacta, `/api/avisos/ejecutar`:** un prefijo como `/api/avisos/` abriría también cualquier ruta futura bajo él (P1.4).
+
+<Callout type="risk">
+
+- **Buscar y después marcar no es atómico:** con un `findOne` y un `updateOne` separados, dos ejecuciones encuentran la misma tarea antes de que ninguna la marque. En el test de concurrencia del Paso 5, así se enviaron 34 avisos de 20 tareas.
+- **El secreto del _cron_ se compara en tiempo constante:** con `===`, la respuesta tarda un poco más cuantos más caracteres iniciales aciertan, y eso permite adivinarlo poco a poco. `timingSafeEqual` sobre los dos resúmenes tarda siempre lo mismo.
+
+</Callout>
+
+## Paso 5: probarlo sin llamar a Telegram
+
+**Qué es:** tests unitarios del código firmado, de integración del servicio con un Telegram falso en memoria, y un E2E con un Telegram falso por HTTP, que comprueba también las peticiones reales a la Bot API.
+
+**Cómo se usa:** crea los tests y añade a la configuración de Playwright el Telegram falso y el secreto del _cron_.
+
+```ts
+// Archivo: tests/unit/vinculo.test.ts
+import { describe, expect, it } from "vitest";
+import { crearCodigo, leerCodigo } from "@/features/avisos/vinculo";
+
+const SECRETO = "secreto-de-prueba-0123456789-0123456789";
+const USER = "6b017886aed965d84d0ee99f";
+const AHORA = Date.parse("2026-11-21T18:00:00Z");
+
+describe("código de vínculo con Telegram", () => {
+  it("cabe en el parámetro start de Telegram: 64 caracteres de A-Z, a-z, 0-9, _ y -", () => {
+    const codigo = crearCodigo(USER, SECRETO, AHORA);
+    expect(codigo).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
+    expect(leerCodigo(codigo, SECRETO, AHORA)).toBe(USER);
+  });
+
+  it("caduca a los 15 minutos", () => {
+    const codigo = crearCodigo(USER, SECRETO, AHORA);
+    expect(leerCodigo(codigo, SECRETO, AHORA + 14 * 60_000)).toBe(USER);
+    expect(leerCodigo(codigo, SECRETO, AHORA + 16 * 60_000)).toBeNull();
+  });
+
+  it("no se puede fabricar para otro usuario ni alargar su caducidad", () => {
+    const [, caduca, firma] = crearCodigo(USER, SECRETO, AHORA).split("_");
+    expect(leerCodigo(`6b017886aed965d84d0ee000_${caduca}_${firma}`, SECRETO, AHORA)).toBeNull();
+    expect(leerCodigo(`${USER}_zzzzzzzzz_${firma}`, SECRETO, AHORA)).toBeNull();
+    expect(leerCodigo(crearCodigo(USER, "otro-secreto", AHORA), SECRETO, AHORA)).toBeNull();
+  });
+});
+```
+
+```ts
+// Archivo: tests/integration/estadisticas.test.ts
+import { describe, expect, it } from "vitest";
+import { crearRepoCategorias } from "@/features/categorias/categorias.repo";
+import { crearRepoEstadisticas } from "@/features/estadisticas/estadisticas.repo";
+import { crearRepoTareas } from "@/features/tareas/tareas.repo";
+import { crearServicioTareas } from "@/features/tareas/tareas.service";
+import { db } from "./mongo";
+
+const ana = { id: "ana", zonaHoraria: "America/Mexico_City" };
+
+describe("estadísticas (P7)", () => {
+  it("cuenta las hechas por semana de lunes a domingo y por categoría", async () => {
+    const categorias = crearRepoCategorias(db);
+    const servicio = crearServicioTareas({ tareas: crearRepoTareas(db), categorias });
+    await categorias.crearPorDefecto(ana.id);
+    const id = async (nombre: string) =>
+      (await categorias.listar(ana.id)).find((c) => c.nombre === nombre)!._id.toHexString();
+    const [trabajo, salud] = [await id("Trabajo"), await id("Salud")];
+
+    const tareas: [string, string, boolean][] = [
+      ["2026-11-09", trabajo, true], // lunes
+      ["2026-11-15", trabajo, true], // domingo: misma semana que el lunes 9
+      ["2026-11-16", trabajo, true], // lunes: semana siguiente
+      ["2026-11-18", salud, true],
+      ["2026-11-19", salud, true],
+      ["2026-11-20", salud, false], // pendiente: no cuenta
+      ["2026-10-01", salud, true], // antes de "desde": no cuenta
+    ];
+    for (const [dia, categoriaId, hecha] of tareas) {
+      const t = await servicio.crear(ana, { titulo: "Tarea", dia, categoriaId });
+      if (hecha) await servicio.cambiar(ana, t.id, { hecha: true });
+    }
+
+    expect(await crearRepoEstadisticas(db).hechasPorSemana(ana.id, "2026-11-01")).toEqual([
+      { semana: "2026-11-16", categoria: "Salud", color: "#0d9488", hechas: 2 },
+      { semana: "2026-11-16", categoria: "Trabajo", color: "#0284c7", hechas: 1 },
+      { semana: "2026-11-09", categoria: "Trabajo", color: "#0284c7", hechas: 2 },
+    ]);
+  });
+});
+```
+
+```ts
+// Archivo: tests/integration/avisos.test.ts
+import { ObjectId } from "mongodb";
+import { describe, expect, it } from "vitest";
+import { crearServicioAvisos } from "@/features/avisos/avisos.service";
+import type { Actualizacion, Telegram } from "@/features/avisos/telegram";
+import { crearCodigo } from "@/features/avisos/vinculo";
+import { crearRepoCategorias } from "@/features/categorias/categorias.repo";
+import { crearRepoTareas } from "@/features/tareas/tareas.repo";
+import { crearServicioTareas } from "@/features/tareas/tareas.service";
+import { db } from "./mongo";
+
+const SECRETO = "secreto-de-prueba-0123456789-0123456789";
+const CREADA = new Date("2026-11-21T18:00:00Z"); // las 12:00 en México
+
+/** Un Telegram falso: guarda lo que se envía y devuelve las actualizaciones que se le den */
+function telegramFalso(pendientes: Actualizacion[] = []) {
+  const enviados: { chatId: string; texto: string }[] = [];
+  const telegram: Telegram = {
+    enviar: async (chatId, texto) => void enviados.push({ chatId, texto }),
+    actualizaciones: async (offset) => pendientes.filter((a) => a.update_id >= offset),
+  };
+  return { telegram, enviados };
+}
+
+async function usuario(chatId?: string) {
+  const _id = new ObjectId();
+  await db
+    .collection("user")
+    .insertOne({ _id, name: "Ana", ...(chatId && { telegramChatId: chatId }) });
+  const u = { id: _id.toHexString(), zonaHoraria: "America/Mexico_City" };
+  const categorias = crearRepoCategorias(db);
+  await categorias.crearPorDefecto(u.id);
+  const [categoria] = await categorias.listar(u.id);
+  const tareas = crearServicioTareas({ tareas: crearRepoTareas(db), categorias });
+  const crear = (titulo: string, hora: string) =>
+    tareas.crear(
+      u,
+      { titulo, dia: "2026-11-21", hora, categoriaId: categoria!._id.toHexString() },
+      CREADA,
+    );
+  return { u, crear };
+}
+
+describe("avisos (P6)", () => {
+  it("vincula con un código válido y rechaza uno falso", async () => {
+    const { u } = await usuario();
+    const { telegram, enviados } = telegramFalso([
+      {
+        update_id: 1,
+        message: { chat: { id: 111 }, text: `/start ${crearCodigo(u.id, SECRETO)}` },
+      },
+      { update_id: 2, message: { chat: { id: 222 }, text: `/start ${u.id}_zzzz_falsa` } },
+    ]);
+    const avisos = crearServicioAvisos({ db, telegram, secreto: SECRETO });
+
+    expect(await avisos.vincularPendientes()).toBe(1);
+    const guardado = await db.collection("user").findOne({ _id: new ObjectId(u.id) });
+    expect(guardado?.telegramChatId).toBe("111");
+    expect(enviados.map((e) => e.chatId)).toEqual(["111", "222"]);
+    expect(await avisos.vincularPendientes()).toBe(0); // el offset ya las confirmó
+  });
+
+  it("envía solo los vencidos, una sola vez, y solo a quien tiene Telegram", async () => {
+    const { crear } = await usuario("111");
+    const sinTelegram = await usuario();
+    await crear("Dentista", "13:00"); // aviso a las 12:45 en México
+    await crear("Cena", "21:00"); // aviso a las 20:45
+    await sinTelegram.crear("Correr", "13:00");
+    const { telegram, enviados } = telegramFalso();
+    const avisos = crearServicioAvisos({ db, telegram, secreto: SECRETO });
+    const a = new Date("2026-11-21T18:50:00Z"); // las 12:50 en México
+
+    expect(await avisos.enviarVencidos(a)).toBe(1);
+    expect(enviados).toEqual([{ chatId: "111", texto: "⏰ 13:00 · Dentista" }]);
+    expect(await avisos.enviarVencidos(a)).toBe(0); // ya reclamado: no se repite
+  });
+
+  it("dos ejecuciones a la vez no envían el mismo aviso dos veces", async () => {
+    const { crear } = await usuario("111");
+    for (let i = 0; i < 20; i++) await crear(`Tarea ${i}`, "13:00");
+    const { telegram, enviados } = telegramFalso();
+    const avisos = crearServicioAvisos({ db, telegram, secreto: SECRETO });
+    const a = new Date("2026-11-21T18:50:00Z");
+
+    const [x, y] = await Promise.all([avisos.enviarVencidos(a), avisos.enviarVencidos(a)]);
+    expect(x + y).toBe(20);
+    expect(new Set(enviados.map((e) => e.texto)).size).toBe(20);
+  });
+});
+```
+
+```ts
+// Archivo: playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+const PUERTO = 4399;
+const URL = `http://localhost:${PUERTO}`; // el mismo origen que BETTER_AUTH_URL
+
+// Una base de datos propia para los tests: nunca la de desarrollo
+process.env.MONGODB_URI ??= "mongodb://localhost:27017";
+process.env.MONGODB_DB = "planificador_e2e";
+// Secretos desechables, solo para esta base de datos de pruebas
+process.env.CRON_SECRET = "cron-solo-para-tests-e2e-0123456789-abcdef";
+
+export default defineConfig({
+  testDir: "tests/e2e",
+  use: { baseURL: URL },
+  webServer: {
+    // El mismo $jsonSchema e índices que producción, en la base de datos de los tests
+    command: "npm run build && node scripts/crear-colecciones.ts && node dist/server/entry.mjs",
+    url: `${URL}/api/health`,
+    reuseExistingServer: false,
+    env: {
+      PORT: String(PUERTO),
+      MONGODB_URI: process.env.MONGODB_URI,
+      MONGODB_DB: process.env.MONGODB_DB,
+      BETTER_AUTH_URL: URL,
+      BETTER_AUTH_SECRET: "secreto-solo-para-tests-e2e-0123456789",
+      CRON_SECRET: process.env.CRON_SECRET,
+      // Un Telegram falso que levanta tests/e2e/avisos.spec.ts: nunca se llama al real
+      TELEGRAM_API_URL: "http://localhost:4398",
+      TELEGRAM_BOT_TOKEN: "token-de-prueba",
+      TELEGRAM_BOT_USUARIO: "planificador_pruebas_bot",
+    },
+  },
+});
+```
+
+```ts
+// Archivo: tests/e2e/avisos.spec.ts
+import { createServer, type Server } from "node:http";
+import { expect, test } from "@playwright/test";
+import { correo, registrar } from "./ayudas";
+
+// Un Telegram falso en el puerto 4398: entrega las actualizaciones de la cola y guarda lo enviado
+const cola: object[] = [];
+const enviados: { chat_id: string; text: string }[] = [];
+let servidor: Server;
+
+test.beforeAll(async () => {
+  servidor = createServer(async (req, res) => {
+    let cuerpo = "";
+    for await (const trozo of req) cuerpo += trozo;
+    const metodo = req.url?.split("/").pop();
+    if (metodo === "sendMessage") enviados.push(JSON.parse(cuerpo));
+    const result = metodo === "getUpdates" ? cola.splice(0) : true;
+    res.setHeader("content-type", "application/json").end(JSON.stringify({ ok: true, result }));
+  });
+  await new Promise<void>((ok) => servidor.listen(4398, ok));
+});
+test.afterAll(() => servidor.close());
+
+/** Día y hora en México dentro de `minutos` */
+function dentroDe(minutos: number) {
+  const f = new Date(Date.now() + minutos * 60_000);
+  const zona = { timeZone: "America/Mexico_City" };
+  const dia = f.toLocaleDateString("en-CA", zona);
+  const hora = f.toLocaleTimeString("en-GB", { ...zona, hour: "2-digit", minute: "2-digit" });
+  return { dia, hora };
+}
+
+test("vincular Telegram desde Ajustes y recibir el aviso de una tarea", async ({ page }) => {
+  const ejecutar = () =>
+    page.request.post("/api/avisos/ejecutar", {
+      headers: { authorization: `Bearer ${process.env.CRON_SECRET}` },
+    });
+  expect((await page.request.post("/api/avisos/ejecutar")).status()).toBe(401);
+
+  await registrar(page, correo("ines"));
+  // Una tarea dentro de 10 min: su aviso (15 min antes) ya ha vencido
+  const categoriaId = await page.getByLabel("Categoría").inputValue();
+  const { dia, hora } = dentroDe(10);
+  const creada = await page.request.post("/api/tareas", {
+    data: { titulo: "Llamar a mamá", dia, hora, categoriaId },
+  });
+  expect(creada.status()).toBe(201);
+
+  await page.goto("/ajustes");
+  const enlace = page.getByRole("link", { name: "Abrir el bot y vincular Telegram" });
+  const codigo = new URL((await enlace.getAttribute("href"))!).searchParams.get("start");
+  cola.push({ update_id: 1, message: { chat: { id: 4242 }, text: `/start ${codigo}` } });
+
+  expect(await (await ejecutar()).json()).toEqual({ vinculados: 1, enviados: 1 });
+  expect(enviados.map((e) => `${e.chat_id} ${e.text}`)).toEqual([
+    "4242 Listo: te avisaré aquí 15 minutos antes de cada tarea con hora.",
+    `4242 ⏰ ${hora} · Llamar a mamá`,
+  ]);
+  expect(await (await ejecutar()).json()).toEqual({ vinculados: 0, enviados: 0 });
+
+  await page.reload();
+  await expect(page.getByText("Vinculado: recibirás un aviso")).toBeVisible();
+});
+```
+
+```bash
+npx vitest run tests/unit/vinculo.test.ts tests/integration/estadisticas.test.ts tests/integration/avisos.test.ts
+npx playwright test tests/e2e/avisos.spec.ts --reporter=line
+```
+
+```text
+04:59:52 [@astrojs/node] Enabling sessions with filesystem storage
+
+ RUN  v5.1.1 /mi-proyecto
+
+
+ Test Files  3 passed (3)
+      Tests  7 passed (7)
+   Start at  04:59:52
+   Duration  1.17s (tests 88%, import 8%, transform 4%)
+
+Running 1 test using 1 worker
+
+[1/1] tests/e2e/avisos.spec.ts:33:1 › vincular Telegram desde Ajustes y recibir el aviso de una tarea
+  1 passed (1.6s)
+```
+
+Con el reclamo hecho en dos pasos (`findOne` y después `updateOne`):
+
+```text
+ FAIL  tests/integration/avisos.test.ts > avisos (P6) > dos ejecuciones a la vez no envían el mismo aviso dos veces
+AssertionError: expected 34 to be 20 // Object.is equality
+
+- Expected
++ Received
+
+- 20
++ 34
+
+ ❯ tests/integration/avisos.test.ts:86:19
+```
+
+- **El E2E recorre lo que hará un usuario:** abre Ajustes, toma el código del enlace, el bot recibe `/start`, el _cron_ se ejecuta dos veces y la segunda no envía nada.
+- **La tarea vence «dentro de 10 minutos»:** su aviso, 15 minutos antes, ya ha pasado, así que la primera ejecución lo envía sin esperar.
+
+<Callout type="risk">
+
+- **El Telegram falso solo imita lo que conoces de la API:** prueba que la app hace las peticiones que crees, no que Telegram las acepte. Antes de P1.8, crea un bot real con @BotFather y vincúlalo una vez a mano.
+- **Los tests no deben llamar nunca a la API real:** con el token de un bot real en el CI, cada ejecución enviaría mensajes de verdad. `TELEGRAM_API_URL` apunta al falso, y el token es de mentira.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Añade el tercer _should_, la búsqueda (P8): `GET /api/tareas?q=texto` devuelve las tareas del usuario cuyo título contiene esas palabras.
+2. Usa un índice de texto en español, y escribe tests que muestren qué encuentra y qué no.
+3. Compara el resultado con el criterio de P1.1, «tolerante a errores de escritura», y decide qué hacer.
+
+</Callout>
+
+Solución. El índice, en `src/lib/colecciones.ts`:
+
+```ts
+// Archivo: src/lib/colecciones.ts
+// El $jsonSchema y los índices de P1.2, en un módulo que usan el script y los tests de integración
+import type { Db, Document, IndexDescription } from "mongodb";
+
+const DIA = "^\\d{4}-\\d{2}-\\d{2}$"; // AAAA-MM-DD: el día del usuario (ADR 0001)
+const HORA = "^([01]\\d|2[0-3]):[0-5]\\d$";
+const COLOR = "^#[0-9a-f]{6}$";
+
+interface Coleccion {
+  nombre: string;
+  esquema: Document;
+  indices: IndexDescription[];
+}
+
+export const COLECCIONES: Coleccion[] = [
+  {
+    nombre: "categorias",
+    esquema: {
+      bsonType: "object",
+      required: ["userId", "nombre", "color"],
+      additionalProperties: false,
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+        color: { bsonType: "string", pattern: COLOR },
+      },
+    },
+    indices: [{ key: { userId: 1, nombre: 1 }, name: "userId_nombre_unico", unique: true }],
+  },
+  {
+    nombre: "tareas",
+    esquema: {
+      bsonType: "object",
+      required: ["userId", "titulo", "dia", "hecha", "categoria", "creada"],
+      additionalProperties: false,
+      properties: {
+        _id: { bsonType: "objectId" },
+        userId: { bsonType: "string", minLength: 1 },
+        titulo: { bsonType: "string", minLength: 1, maxLength: 200 },
+        dia: { bsonType: "string", pattern: DIA },
+        hora: { bsonType: "string", pattern: HORA },
+        hecha: { bsonType: "bool" },
+        categoria: {
+          bsonType: "object",
+          required: ["id", "nombre", "color"],
+          additionalProperties: false,
+          properties: {
+            id: { bsonType: "objectId" },
+            nombre: { bsonType: "string", minLength: 1, maxLength: 40 },
+            color: { bsonType: "string", pattern: COLOR },
+          },
+        },
+        avisarEn: { bsonType: "date" },
+        creada: { bsonType: "date" },
+      },
+    },
+    indices: [
+      { key: { userId: 1, dia: 1 }, name: "userId_dia" },
+      {
+        key: { avisarEn: 1 },
+        name: "avisos_pendientes",
+        partialFilterExpression: { avisarEn: { $exists: true } },
+      },
+      // P8: búsqueda por palabras del título, siempre dentro de las tareas de un usuario
+      {
+        key: { userId: 1, titulo: "text" },
+        name: "userId_titulo_texto",
+        default_language: "spanish",
+      },
+    ],
+  },
+];
+
+/** Crea o actualiza cada colección con su esquema e índices; devuelve una línea por colección */
+export async function aplicarColecciones(db: Db): Promise<string[]> {
+  const resultado: string[] = [];
+  for (const c of COLECCIONES) {
+    const opciones = {
+      validator: { $jsonSchema: c.esquema },
+      validationLevel: "strict",
+      validationAction: "error",
+    } as const;
+    const existe = (await db.listCollections({ name: c.nombre }).toArray()).length > 0;
+    if (existe) await db.command({ collMod: c.nombre, ...opciones });
+    else await db.createCollection(c.nombre, opciones);
+    const indices = await db.collection(c.nombre).createIndexes(c.indices);
+    resultado.push(`${existe ? "actualizada" : "creada"}: ${c.nombre} (${indices.join(", ")})`);
+  }
+  return resultado;
+}
+```
+
+El repositorio y el servicio ganan una función cada uno. Sustituye el repositorio de tareas (`tareas.repo.ts`):
+
+```ts
+// Archivo: src/features/tareas/tareas.repo.ts
+import { ObjectId, type Db, type UpdateFilter } from "mongodb";
+
+export interface Tarea {
+  _id: ObjectId;
+  userId: string;
+  titulo: string;
+  dia: string;
+  hora?: string;
+  hecha: boolean;
+  categoria: { id: ObjectId; nombre: string; color: string };
+  avisarEn?: Date;
+  creada: Date;
+}
+
+const ID = /^[0-9a-f]{24}$/i;
+const filtro = (userId: string, id: string) =>
+  ID.test(id) ? { _id: new ObjectId(id), userId } : null;
+
+/** Todas las consultas llevan el userId en el filtro: no hay forma de leer una tarea ajena */
+export function crearRepoTareas(db: Db) {
+  const col = db.collection<Tarea>("tareas");
+  return {
+    async crear(datos: Omit<Tarea, "_id">): Promise<Tarea> {
+      const tarea = { ...datos, _id: new ObjectId() };
+      await col.insertOne(tarea);
+      return tarea;
+    },
+
+    // P1: índice userId_dia; las de sin hora, primero
+    delDia: (userId: string, dia: string) =>
+      col.find({ userId, dia }).sort({ hora: 1, creada: 1 }).toArray(),
+
+    buscar(userId: string, id: string) {
+      const f = filtro(userId, id);
+      return f ? col.findOne(f) : Promise.resolve(null);
+    },
+
+    actualizar(userId: string, id: string, cambios: UpdateFilter<Tarea>) {
+      const f = filtro(userId, id);
+      return f ? col.findOneAndUpdate(f, cambios, { returnDocument: "after" }) : null;
+    },
+
+    async borrar(userId: string, id: string): Promise<boolean> {
+      const f = filtro(userId, id);
+      return f ? (await col.deleteOne(f)).deletedCount === 1 : false;
+    },
+
+    // P8: índice userId_titulo_texto; userId tiene que ir con igualdad para poder usarlo
+    buscarTexto: (userId: string, texto: string) =>
+      col
+        .find({ userId, $text: { $search: texto } })
+        .sort({ puntuacion: { $meta: "textScore" } })
+        .limit(20)
+        .toArray(),
+
+    // P5: la copia del nombre y el color en cada tarea (ADR 0002)
+    async recolorear(userId: string, categoria: { _id: ObjectId; nombre: string; color: string }) {
+      const { modifiedCount } = await col.updateMany(
+        { userId, "categoria.id": categoria._id },
+        { $set: { "categoria.nombre": categoria.nombre, "categoria.color": categoria.color } },
+      );
+      return modifiedCount;
+    },
+  };
+}
+
+export type RepoTareas = ReturnType<typeof crearRepoTareas>;
+```
+
+Sustituye el servicio de tareas (`tareas.service.ts`):
+
+```ts
+// Archivo: src/features/tareas/tareas.service.ts
+// Las reglas de las tareas, sin HTTP ni MongoDB: reciben los repositorios (y se prueban con ellos)
+import { MongoServerError } from "mongodb";
+import type { CambioCategoria, RepoCategorias } from "@/features/categorias/server";
+import { diaEn, instanteEn } from "@/lib/dia";
+import { Conflicto, NoEncontrado } from "@/lib/errores";
+import type { CambioTarea, NuevaTarea, TareaVista } from "./tarea.schema";
+import type { RepoTareas, Tarea } from "./tareas.repo";
+
+export const MINUTOS_DE_AVISO = 15;
+
+export interface Usuario {
+  id: string;
+  zonaHoraria: string;
+}
+
+/** Cuándo avisar: 15 min antes de la hora, y nunca si la tarea ya ha pasado o no tiene hora */
+export function calcularAviso(
+  t: { dia: string; hora?: string; hecha: boolean },
+  zona: string,
+  ahora: Date,
+): Date | undefined {
+  if (!t.hora || t.hecha) return undefined;
+  const instante = instanteEn(t.dia, t.hora, zona);
+  if (instante <= ahora) return undefined;
+  return new Date(instante.getTime() - MINUTOS_DE_AVISO * 60_000);
+}
+
+export function aVista(t: Tarea): TareaVista {
+  return {
+    id: t._id.toHexString(),
+    titulo: t.titulo,
+    dia: t.dia,
+    ...(t.hora && { hora: t.hora }),
+    hecha: t.hecha,
+    categoria: { ...t.categoria, id: t.categoria.id.toHexString() },
+  };
+}
+
+export function crearServicioTareas(repos: { tareas: RepoTareas; categorias: RepoCategorias }) {
+  const { tareas, categorias } = repos;
+
+  async function categoriaDe(usuario: Usuario, id: string) {
+    const c = await categorias.buscar(usuario.id, id);
+    if (!c) throw new NoEncontrado("Categoría no encontrada"); // también si es de otro usuario
+    return { id: c._id, nombre: c.nombre, color: c.color };
+  }
+
+  return {
+    async deHoy(usuario: Usuario, ahora = new Date()) {
+      return (await tareas.delDia(usuario.id, diaEn(ahora, usuario.zonaHoraria))).map(aVista);
+    },
+
+    async buscar(usuario: Usuario, texto: string) {
+      return (await tareas.buscarTexto(usuario.id, texto)).map(aVista);
+    },
+
+    async una(usuario: Usuario, id: string) {
+      const tarea = await tareas.buscar(usuario.id, id);
+      if (!tarea) throw new NoEncontrado("Tarea no encontrada");
+      return aVista(tarea);
+    },
+
+    async crear(usuario: Usuario, datos: NuevaTarea, ahora = new Date()) {
+      const { categoriaId, ...resto } = datos;
+      const base = { ...resto, hecha: false };
+      const avisarEn = calcularAviso(base, usuario.zonaHoraria, ahora);
+      const tarea = await tareas.crear({
+        ...base,
+        userId: usuario.id,
+        categoria: await categoriaDe(usuario, categoriaId),
+        ...(avisarEn && { avisarEn }),
+        creada: ahora,
+      });
+      return aVista(tarea);
+    },
+
+    async cambiar(usuario: Usuario, id: string, cambios: CambioTarea, ahora = new Date()) {
+      const actual = await tareas.buscar(usuario.id, id);
+      if (!actual) throw new NoEncontrado("Tarea no encontrada");
+
+      const { categoriaId, hora, ...resto } = cambios;
+      const final = {
+        ...actual,
+        ...resto,
+        hora: hora === null ? undefined : (hora ?? actual.hora),
+      };
+      const avisarEn = calcularAviso(final, usuario.zonaHoraria, ahora);
+
+      const $set: Partial<Tarea> = { ...resto, ...(final.hora && { hora: final.hora }) };
+      if (categoriaId) $set.categoria = await categoriaDe(usuario, categoriaId);
+      if (avisarEn) $set.avisarEn = avisarEn;
+      const $unset = {
+        ...(!final.hora && { hora: "" as const }),
+        ...(!avisarEn && { avisarEn: "" as const }),
+      };
+      // MongoDB rechaza un $set o un $unset vacíos: solo se envía el que tiene algo
+      const actualizada = await tareas.actualizar(usuario.id, id, {
+        ...(Object.keys($set).length > 0 && { $set }),
+        ...(Object.keys($unset).length > 0 && { $unset }),
+      });
+      if (!actualizada) throw new NoEncontrado("Tarea no encontrada");
+      return aVista(actualizada);
+    },
+
+    async borrar(usuario: Usuario, id: string) {
+      if (!(await tareas.borrar(usuario.id, id))) throw new NoEncontrado("Tarea no encontrada");
+    },
+
+    /** P5: cambia la categoría y la copia que guarda cada una de sus tareas (ADR 0002) */
+    async cambiarCategoria(usuario: Usuario, id: string, cambios: CambioCategoria) {
+      const actual = await categorias.buscar(usuario.id, id);
+      if (!actual) throw new NoEncontrado("Categoría no encontrada");
+      try {
+        const categoria = await categorias.cambiar(usuario.id, actual._id, cambios);
+        if (!categoria) throw new NoEncontrado("Categoría no encontrada");
+        const tareasActualizadas = await tareas.recolorear(usuario.id, categoria);
+        const { nombre, color } = categoria;
+        return { id: categoria._id.toHexString(), nombre, color, tareasActualizadas };
+      } catch (error) {
+        // 11000: el índice único userId_nombre_unico ya tiene ese nombre para este usuario
+        if (error instanceof MongoServerError && error.code === 11000) {
+          throw new Conflicto("Ya tienes una categoría con ese nombre");
+        }
+        throw error;
+      }
+    },
+  };
+}
+
+export type ServicioTareas = ReturnType<typeof crearServicioTareas>;
+```
+
+```ts
+// Archivo: src/pages/api/tareas/index.ts
+import type { APIRoute } from "astro";
+import { nuevaTarea, servicioTareas } from "@/features/tareas/server";
+import { leerCuerpo, responderError } from "@/lib/http";
+
+/** Las de hoy, o las que coinciden con ?q= (de 2 a 100 caracteres) */
+export const GET: APIRoute = async ({ locals, url }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  const q = url.searchParams.get("q")?.trim();
+  if (q === undefined) return Response.json(await servicioTareas.deHoy(locals.user));
+  if (q.length < 2 || q.length > 100) {
+    return Response.json({ error: "Escribe de 2 a 100 caracteres" }, { status: 400 });
+  }
+  return Response.json(await servicioTareas.buscar(locals.user, q));
+};
+
+export const POST: APIRoute = async ({ locals, request }) => {
+  if (!locals.user) return Response.json({ error: "No autenticado" }, { status: 401 });
+  const datos = await leerCuerpo(request, nuevaTarea);
+  if (datos instanceof Response) return datos;
+  try {
+    return Response.json(await servicioTareas.crear(locals.user, datos), { status: 201 });
+  } catch (error) {
+    return responderError(error);
+  }
+};
+```
+
+```ts
+// Archivo: tests/integration/busqueda.test.ts
+import { describe, expect, it } from "vitest";
+import { crearRepoCategorias } from "@/features/categorias/categorias.repo";
+import { crearRepoTareas } from "@/features/tareas/tareas.repo";
+import { crearServicioTareas } from "@/features/tareas/tareas.service";
+import { db } from "./mongo";
+
+const ana = { id: "ana", zonaHoraria: "America/Mexico_City" };
+const beto = { id: "beto", zonaHoraria: "America/Mexico_City" };
+
+async function preparar() {
+  const categorias = crearRepoCategorias(db);
+  const servicio = crearServicioTareas({ tareas: crearRepoTareas(db), categorias });
+  for (const u of [ana, beto]) await categorias.crearPorDefecto(u.id);
+  const crear = async (u: typeof ana, titulo: string) => {
+    const [c] = await categorias.listar(u.id);
+    await servicio.crear(u, { titulo, dia: "2026-11-21", categoriaId: c!._id.toHexString() });
+  };
+  await crear(ana, "Llamar al dentista");
+  await crear(ana, "Pagar la factura del dentista y del médico");
+  await crear(ana, "Comprar pan");
+  await crear(beto, "Dentista de Beto");
+  return servicio;
+}
+
+const titulos = async (servicio: Awaited<ReturnType<typeof preparar>>, q: string) =>
+  (await servicio.buscar(ana, q)).map((t) => t.titulo);
+
+describe("búsqueda por texto (P8)", () => {
+  it("encuentra palabras enteras, sin mirar las tareas de otro usuario", async () => {
+    const servicio = await preparar();
+    expect((await titulos(servicio, "dentista")).sort()).toEqual([
+      "Llamar al dentista",
+      "Pagar la factura del dentista y del médico",
+    ]);
+  });
+
+  it("en español, el plural y las tildes no importan", async () => {
+    const servicio = await preparar();
+    expect(await titulos(servicio, "dentistas")).toHaveLength(2);
+    expect(await titulos(servicio, "medico")).toEqual([
+      "Pagar la factura del dentista y del médico",
+    ]);
+  });
+
+  it("no tolera errores de escritura ni encuentra trozos de palabra", async () => {
+    const servicio = await preparar();
+    expect(await titulos(servicio, "dentsta")).toEqual([]);
+    expect(await titulos(servicio, "dent")).toEqual([]);
+  });
+});
+```
+
+```bash
+npm run db:setup
+npx vitest run tests/integration/busqueda.test.ts
+```
+
+```text
+> planificador@0.0.1 db:setup
+> node --env-file=.env scripts/crear-colecciones.ts
+
+actualizada: categorias (userId_nombre_unico)
+actualizada: tareas (userId_dia, avisos_pendientes, userId_titulo_texto)
+
+04:59:56 [@astrojs/node] Enabling sessions with filesystem storage
+
+ RUN  v5.1.1 /mi-proyecto
+
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  04:59:56
+   Duration  837ms (tests 90%, import 8%, transform 1%)
+```
+
+- **El índice empieza por `userId`:** en un índice de texto compuesto, los campos anteriores al de texto tienen que ir con igualdad en la consulta. Así cada búsqueda solo recorre las tareas de un usuario.
+- **«dentistas» encuentra «dentista» y «medico» encuentra «médico»:** el idioma español reduce cada palabra a su raíz, y el índice ignora las tildes.
+- **«dentsta» y «dent» no encuentran nada:** el índice de texto compara palabras enteras, sin tolerancia a errores. El criterio de P1.1 no se cumple.
+
+<Callout type="risk">
+
+- **Un requisito incumplido se decide, no se esconde:** Atlas Search tolera errores de escritura, pero necesita un servicio que este despliegue no tiene, y añadirlo es una decisión de arquitectura. La otra salida es cambiar el criterio en `docs/requisitos.md` y dejar el motivo en un ADR.
+- **Solo cabe un índice de texto por colección:** si mañana quieres buscar también en notas, hay que rehacer este con los dos campos. Elige bien qué campos entran.
+
+</Callout>
+
+<Callout type="mastery">
+
+Aplicas conceptos avanzados de MongoDB a casos reales: una agregación que usa el índice y agrupa por semana, una operación atómica sobre un índice parcial para que un aviso salga una sola vez aunque coincidan dos ejecuciones, y un índice de texto con sus límites medidos. Cada uno tiene tests, y los avisos se prueban sin llamar a Telegram.
+
+</Callout>
+
+## Resumen
+
+- Estadísticas: `$match` con el índice primero, `$group` por semana con `$dateTrunc`.
+- Un aviso depende de una hora, no de un cambio: _cron_ y no _change streams_.
+- El enlace de Telegram lleva usuario, caducidad y firma.
+- Reclamar con `findOneAndUpdate` hace que cada aviso salga una sola vez.
+- Telegram falso en los tests: nunca la API real.
+- El índice de texto no tolera errores de escritura: medirlo obliga a decidir.
