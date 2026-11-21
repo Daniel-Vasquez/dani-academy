@@ -7,24 +7,24 @@ minutes: 90
 summary: "Conectas con node-postgres y ves una inyección SQL borrar una tabla, corriges los tipos que llegan mal, defines el esquema con Drizzle y sus migraciones, y llevas el repositorio de evaluaciones a PostgreSQL."
 ---
 
-Hasta ahora has hablado con PostgreSQL desde `psql`. Una aplicación lo hace desde su código, y ahí aparecen problemas que `psql` no tiene: cómo pasar los datos de la petición sin abrir la puerta a una inyección SQL, qué tipo de JavaScript llega por cada tipo de PostgreSQL, cómo mantener el esquema de la base de datos al día con el código y cuántas conexiones abre cada instancia de tu app. En esta sección vas a conectar con el _driver_ `pg`, después vas a usar **Drizzle ORM**, que describe las tablas en TypeScript y genera las migraciones, y terminarás con el repositorio de evaluaciones de esta plataforma funcionando sobre PostgreSQL con la misma interfaz que el de MongoDB (I3.5).
+Desde el código de una app aparecen problemas que `psql` no tiene: la inyección SQL, los tipos que llegan a JavaScript, las migraciones y las conexiones de cada instancia. Aquí conectas con `pg`, pasas a **Drizzle ORM** y terminas con el repositorio de evaluaciones de la plataforma sobre PostgreSQL, con la misma interfaz que el de MongoDB (I3.5).
 
-**Lo que tendrás al terminar:** un proyecto `pg-ts` con un _pool_ de conexiones, el esquema de las evaluaciones en Drizzle con dos migraciones aplicadas, y el repositorio de evaluaciones en MongoDB y en PostgreSQL pasando los mismos 5 tests.
-
-**Requisitos:** las secciones A3.1–A3.3 (PostgreSQL 18), I3.5 (repositorios inyectados) y Node 24 o superior, que ejecuta TypeScript sin compilar.
+**Requisitos:** A3.1–A3.3 (PostgreSQL 18), I3.5 (repositorios inyectados) y Node 24 o superior, que ejecuta TypeScript sin compilar.
 
 ## Paso 1: conectar con `pg` y no concatenar SQL nunca
 
-La aplicación no debe conectarse como `postgres`, que puede hacerlo todo. Crea un rol propio, con contraseña, y una base para esta sección (cambia la clave):
+**Qué es:** el _driver_ `pg` con un _pool_ de conexiones y **consultas parametrizadas** (`$1`), donde el SQL y los datos viajan por separado.
+
+**Cómo se usa:** la app no se conecta como `postgres`. Un rol propio con contraseña y una base para la sección (cambia la clave):
 
 ```bash
 sudo -u postgres psql -c "CREATE ROLE academy_app LOGIN PASSWORD 'cambia-esta-clave'"
 sudo -u postgres psql -c "CREATE DATABASE academia_ts OWNER academy_app"
 ```
 
-La conexión llega por TCP (`localhost:5432`), con contraseña, y PostgreSQL 18 la comprueba con `scram-sha-256` sin tocar nada. Si PostgreSQL está en Docker, publica el puerto con `-p 5432:5432` (A3.1). Si está en una VM, reenvía el 5432 a tu equipo: Lima, por ejemplo, lo hace solo.
+- **La conexión va por TCP (`localhost:5432`) con contraseña,** comprobada con `scram-sha-256` en PostgreSQL 18. Con Docker, publica el puerto (A3.1); en una VM, reenvía el 5432 (Lima lo hace solo).
 
-Crea el proyecto, en tu equipo:
+El proyecto, en tu equipo:
 
 ```bash
 mkdir pg-ts && cd pg-ts
@@ -41,7 +41,7 @@ mkdir pg-ts && cd pg-ts
 }
 ```
 
-Guárdalo como `package.json`, instala las dependencias y crea `tsconfig.json`:
+Guárdalo como `package.json`, instala y crea `tsconfig.json`:
 
 ```bash
 npm install pg drizzle-orm
@@ -70,13 +70,13 @@ npm install -D drizzle-kit typescript @types/pg @types/node
 }
 ```
 
-Y `.env`, que nunca se sube al repositorio, con la URL de conexión:
+Y `.env`, que nunca se sube:
 
 ```bash
 DATABASE_URL=postgres://academy_app:cambia-esta-clave@localhost:5432/academia_ts
 ```
 
-Node ejecuta los `.ts` quitando los tipos, sin compilar. Por eso los `import` llevan la extensión `.ts` y `tsconfig.json` tiene `allowImportingTsExtensions`. El _pool_ de conexiones vive en un archivo propio, `src/db.ts`:
+Node quita los tipos sin compilar, así que los `import` llevan `.ts` (`allowImportingTsExtensions`). El _pool_, en `src/db.ts`:
 
 ```ts
 // Archivo: src/db.ts
@@ -89,7 +89,7 @@ if (!url) throw new Error("Falta DATABASE_URL (¿has creado el .env?)");
 export const pool = new pg.Pool({ connectionString: url, max: 10 });
 ```
 
-`src/01-conectar.ts` conecta y busca un usuario por correo de dos formas: pegando el texto en el SQL y pasándolo como parámetro:
+`src/01-conectar.ts` busca un usuario por correo pegando el texto en el SQL y pasándolo como parámetro:
 
 ```ts
 // Archivo: src/01-conectar.ts
@@ -156,20 +156,22 @@ entrada: x'; DROP TABLE usuarios; --
 ¿Sigue existiendo la tabla usuarios? null
 ```
 
-- **Con `$1`, el SQL y los datos viajan por separado:** PostgreSQL recibe la consulta ya analizada y el valor aparte, así que `x' OR '1'='1` es solo un correo que no existe. No hay forma de que un dato se convierta en SQL.
-- **Concatenando, el dato se convierte en SQL:** `x' OR '1'='1` cierra la comilla y añade una condición que siempre se cumple, y devuelve los tres usuarios.
-- **Y puede ejecutar más de una sentencia:** sin parámetros, `pg` usa el protocolo simple de PostgreSQL, que acepta varias sentencias separadas por `;`. La tercera entrada borró la tabla `usuarios` (`to_regclass` devuelve `null`). El error que se ve llega **después** del daño: con dos sentencias, `pg` devuelve un _array_ de resultados sin `rows`.
+- **Con `$1`, `x' OR '1'='1` es solo un correo que no existe:** PostgreSQL recibe la consulta ya analizada y el valor aparte.
+- **Concatenando, el dato se vuelve SQL:** cierra la comilla, añade una condición siempre cierta y devuelve los tres usuarios.
+- **Y ejecuta más de una sentencia:** sin parámetros, `pg` usa el protocolo simple, que acepta varias separadas por `;`. La tercera entrada borró la tabla `usuarios` (`to_regclass` da `null`), y el error llegó **después** del daño: con dos sentencias, `pg` devuelve un _array_ sin `rows`.
 
 <Callout type="risk">
 
-- **Ningún dato de la petición va dentro del texto del SQL:** ni del formulario, ni de la URL, ni de la cabecera, ni de la base de datos. Ni siquiera "ya validado": el día que cambie la validación, el agujero aparece. Si necesitas variar algo que no es un valor (el nombre de una columna para ordenar), elige entre una lista cerrada en tu código, nunca el texto tal cual.
-- **El rol de la aplicación, con lo justo:** `academy_app` es dueño solo de su base. Si una inyección se cuela, el daño se limita a lo que ese rol puede hacer. Con el usuario `postgres`, podría borrar cualquier base del servidor.
+- **Ningún dato va dentro del texto del SQL,** ni "ya validado". Para variar algo que no es un valor (la columna de orden), elige de una lista cerrada en tu código.
+- **El rol de la app, con lo justo:** `academy_app` solo es dueño de su base; con `postgres`, una inyección borraría cualquier base del servidor.
 
 </Callout>
 
 ## Paso 2: los tipos que llegan mal a JavaScript
 
-`pg` convierte cada valor según su tipo de PostgreSQL. `src/02-tipos.ts` consulta un valor de cada tipo y lo ejecuta en dos zonas horarias:
+**Qué es:** `pg` convierte cada valor según su tipo de PostgreSQL, y algunos llegan de forma inesperada.
+
+**Cómo se usa:** `src/02-tipos.ts`, un valor de cada tipo, en dos zonas horarias:
 
 ```ts
 // Archivo: src/02-tipos.ts
@@ -233,12 +235,11 @@ text_array    array   ["B1","I3"]
 TZ=Europe/Madrid: date '2026-10-01' llega como el día 2026-09-30
 ```
 
-- **`count(*)` llega como _string_ (`"3"`):** `count` devuelve `bigint`, que puede superar el entero exacto más grande de JavaScript (2^53), y `pg` no se arriesga. `"3" + 1` da `"31"`.
-- **`numeric` también llega como _string_ (`"4.5"`):** a propósito, para no perder decimales. Es el tipo del dinero (A3.1).
-- **`date` llega como un `Date` a medianoche de la zona horaria de Node:** en Ciudad de México, medianoche son las 06:00 UTC y el día no cambia; en Madrid, medianoche son las 22:00 UTC **del día anterior**, y `toISOString()` dice 30 de septiembre. El mismo código da días distintos según dónde corra el servidor.
-- **`timestamptz` sí es fiable:** es un instante, y llega como el `Date` de ese instante en cualquier zona.
+- **`count(*)` llega como _string_ (`"3"`):** `bigint` puede superar 2^53 y `pg` no se arriesga. `"3" + 1` da `"31"`. **`numeric` también (`"4.5"`),** para no perder decimales.
+- **`date` llega como medianoche de la zona de Node:** en Madrid son las 22:00 UTC **del día anterior** y `toISOString()` dice 30 de septiembre. El mismo código da días distintos según el servidor.
+- **`timestamptz` es fiable:** el mismo instante en cualquier zona.
 
-Los dos primeros se arreglan una vez, al crear el _pool_. Sustituye `src/db.ts`:
+Se arreglan una vez, en el _pool_. Sustituye `src/db.ts`:
 
 ```ts
 // Archivo: src/db.ts
@@ -289,21 +290,21 @@ text_array    array   ["B1","I3"]
 TZ=Europe/Madrid: date '2026-10-01' llega como el día 2026-10-01
 ```
 
-El día ya es el mismo en las dos zonas, y `count(*)` es un número. Fíjate en `bigint_grande`: `9007199254740993` se ha convertido en `9007199254740992`, porque supera 2^53. Por eso el _parser_ de `bigint` sirve para contadores, pero no para cualquier columna `bigint`.
+- **El día coincide en las dos zonas y `count(*)` es un número,** pero `9007199254740993` llega como `9007199254740992`: el _parser_ de `bigint` vale para contadores, no para cualquier columna `bigint`.
 
 <Callout type="risk">
 
-- **Los _parsers_ son globales:** `pg.types.setTypeParser` cambia la conversión para todo el proceso, también para otras librerías que usen `pg`. Regístralos en un solo sitio (`db.ts`) y antes de la primera consulta.
-- **Con un `bigint` de verdad, usa `BigInt` o déjalo como texto:** un `id` de una tabla con miles de millones de filas no cabe en un `number`. Drizzle (Paso 3) declara cada columna `bigint` con `mode: "number"` o `mode: "bigint"`, y tienes que elegir.
-- **`float8` tiene los errores de siempre:** `0.1 + 0.2` da `0.30000000000000004`, igual que en JavaScript. Para cantidades exactas, `numeric`.
+- **Los _parsers_ son globales:** `pg.types.setTypeParser` afecta a todo el proceso. Regístralos en `db.ts`, antes de la primera consulta.
+- **Un `bigint` de verdad, como `BigInt` o texto:** Drizzle (Paso 3) obliga a elegir `mode: "number"` o `mode: "bigint"`.
+- **`float8` da `0.30000000000000004`,** como JavaScript. Para cantidades exactas, `numeric`.
 
 </Callout>
 
 ## Paso 3: el esquema en TypeScript con Drizzle
 
-Escribir SQL a mano en cada consulta tiene dos problemas: nada comprueba que `user_id` exista o sea un texto, y los tipos de las filas hay que escribirlos aparte. **Drizzle ORM** describe las tablas en TypeScript, y de ese esquema salen los tipos de las filas, las consultas tipadas y las migraciones. A diferencia de otros ORM, sus consultas se parecen mucho al SQL que generan.
+**Qué es:** **Drizzle ORM** describe las tablas en TypeScript, y de ahí salen los tipos de las filas, las consultas tipadas y las migraciones. Sus consultas se parecen mucho al SQL que generan.
 
-El esquema de las evaluaciones, con la misma forma que la colección `quiz_attempts` de la plataforma y las restricciones que en MongoDB vivían en el validador (`db-setup.ts`). `src/schema.ts`:
+**Cómo se usa:** el esquema de las evaluaciones, con la forma de `quiz_attempts` y las restricciones del validador de MongoDB (`db-setup.ts`), en `src/schema.ts`:
 
 ```ts
 // Archivo: src/schema.ts
@@ -348,7 +349,7 @@ export type QuizAttemptRow = typeof quizAttempts.$inferSelect;
 export type NewQuizAttempt = typeof quizAttempts.$inferInsert;
 ```
 
-`drizzle-kit` es la herramienta de línea de comandos que compara el esquema con las migraciones anteriores y escribe el SQL que falta. `drizzle.config.ts`:
+`drizzle-kit` compara el esquema con las migraciones anteriores y escribe el SQL que falta. `drizzle.config.ts`:
 
 ```ts
 // Archivo: drizzle.config.ts
@@ -374,7 +375,7 @@ quiz_attempts 9 columns 2 indexes 0 fks
 [✓] Your SQL migration file ➜ drizzle/0000_evaluaciones.sql 🚀
 ```
 
-`drizzle/0000_evaluaciones.sql`, el SQL que acaba de escribir:
+`drizzle/0000_evaluaciones.sql`:
 
 ```sql
 CREATE TABLE "quiz_attempts" (
@@ -396,7 +397,7 @@ CREATE INDEX "quiz_attempts_user_course_submitted" ON "quiz_attempts" USING btre
 CREATE INDEX "quiz_attempts_user_submitted" ON "quiz_attempts" USING btree ("user_id","submitted_at" DESC NULLS LAST);
 ```
 
-Revisa siempre el SQL antes de aplicarlo: es lo que va a ejecutarse en tu base de datos. Después, `migrate` aplica las migraciones pendientes, y `src/04-ver-migraciones.ts` comprueba qué ha quedado:
+Revisa el SQL antes de aplicarlo. `migrate` aplica lo pendiente y `src/04-ver-migraciones.ts` comprueba qué quedó:
 
 ```text
 $ npx drizzle-kit migrate
@@ -436,19 +437,22 @@ quiz_attempts_user_course_submitted    USING btree (user_id, course_id, submitte
 quiz_attempts_user_submitted           USING btree (user_id, submitted_at DESC NULLS LAST)
 ```
 
-Drizzle guarda las migraciones aplicadas en la tabla `drizzle.__drizzle_migrations`, con el _hash_ de cada archivo. Y en los índices hay un detalle que vas a necesitar en el Paso 5: `t.submittedAt.desc()` se ha convertido en `DESC NULLS LAST`.
+- **Drizzle registra lo aplicado en `drizzle.__drizzle_migrations`,** con el _hash_ de cada archivo.
+- **`t.submittedAt.desc()` se ha convertido en `DESC NULLS LAST`:** importará en el Paso 5.
 
 <Callout type="risk">
 
-- **El esquema de TypeScript no es la base de datos:** lo que manda es lo que hay en PostgreSQL. Si alguien cambia una tabla a mano, el esquema miente y Drizzle no se entera. Todos los cambios, por migraciones.
-- **`drizzle-kit push` aplica el esquema sin migración:** es cómodo en un prototipo, pero no deja rastro ni se puede revisar, y en una base con datos puede proponer borrar una columna para crear otra. En cualquier base que importe, `generate` y `migrate`.
-- **Un `CHECK` escrito con `` sql`…` `` no lo comprueba TypeScript:** la expresión regular de `course_id_valido` es texto. Si tiene un error, lo verás al aplicar la migración, no al compilar.
+- **Manda lo que hay en PostgreSQL, no el esquema de TypeScript:** un cambio a mano hace mentir al esquema. Todo, por migraciones.
+- **`drizzle-kit push` no deja rastro** y en una base con datos puede proponer borrar una columna. Fuera de prototipos, `generate` y `migrate`.
+- **Un `CHECK` con `` sql`…` `` es texto:** un error en la expresión regular de `course_id_valido` aparece al migrar, no al compilar.
 
 </Callout>
 
 ## Paso 4: consultas con Drizzle, y el SQL que generan
 
-`src/orm.ts` crea Drizzle sobre el mismo _pool_ de `pg`:
+**Qué es:** consultas tipadas sobre el mismo _pool_; `toSQL()` enseña el SQL generado y `EXPLAIN` dice si es rápido.
+
+**Cómo se usa:** `src/orm.ts`:
 
 ```ts
 // Archivo: src/orm.ts
@@ -551,12 +555,11 @@ intentos por curso: [ { courseId: 'A3', intentos: 1 } ]
 score = 9: new row for relation "quiz_attempts" violates check constraint "score_en_rango"
 ```
 
-- **Los nombres de TypeScript y los de la tabla, cada uno en su sitio:** escribes `userId` y Drizzle genera `"user_id"`, y la fila vuelve con `userId`. El tipo de cada campo sale del esquema: `answers` es `number[]`, y `submittedAt`, `Date`.
-- **`toSQL()` enseña el SQL y sus parámetros:** todos los valores van como `$1`, `$2`, `$3`, también el `limit`. Drizzle nunca concatena valores.
-- **`` sql`…` `` para lo que Drizzle no expresa:** cada `${…}` también se convierte en un parámetro, así que la inyección vuelve a ser solo un texto (`count: 0`). Lo que sí es peligroso es `sql.raw()`, que pega el texto tal cual: úsalo solo con texto que escribes tú.
-- **Las restricciones siguen en la base de datos:** TypeScript acepta `score: 9` (es un número), pero el `CHECK` lo rechaza. Los tipos ayudan a escribir bien el código, y las restricciones protegen los datos.
+- **Escribes `userId` y Drizzle genera `"user_id"`;** cada campo tiene el tipo del esquema (`answers` es `number[]`, `submittedAt` es `Date`).
+- **Todos los valores van como `$1`, `$2`, `$3`,** también el `limit`. En `` sql`…` ``, cada `${…}` es un parámetro, así que la inyección es solo texto (`count: 0`). El peligro es `sql.raw()`, que pega el texto tal cual.
+- **TypeScript acepta `score: 9` y el `CHECK` lo rechaza:** los tipos ayudan al código; las restricciones protegen los datos.
 
-Que el SQL sea correcto no significa que sea rápido. `src/04-plan.ts` llena la tabla con 70 000 intentos, uno de ellos de un usuario que repite 20 000 veces la evaluación de A3, y pide sus 5 últimos con `EXPLAIN ANALYZE`, como en A3.3:
+`src/04-plan.ts` llena la tabla con 70 000 intentos (uno de un usuario que repite 20 000 veces A3) y pide sus 5 últimos con `EXPLAIN ANALYZE` (A3.3):
 
 ```ts
 // Archivo: src/04-plan.ts
@@ -613,24 +616,22 @@ Planning Time: 0.166 ms
 Execution Time: 2.555 ms
 ```
 
-Hay un índice `(user_id, course_id, submitted_at DESC NULLS LAST)` hecho justo para esta consulta, y aun así PostgreSQL lee las 20 000 filas del usuario y las **ordena** (`Sort`) para quedarse con 5. El motivo está en las dos líneas de SQL:
-
-- **La consulta pide `order by "submitted_at" desc`:** en PostgreSQL, `DESC` significa `DESC NULLS FIRST` (los nulos primero).
-- **El índice está en `DESC NULLS LAST`:** Drizzle añade `NULLS LAST` a todas las columnas de un índice si no le dices otra cosa.
-
-Los dos órdenes no coinciden, así que el índice sirve para encontrar las filas del usuario, pero no para entregarlas ordenadas. Da igual que la columna sea `NOT NULL`: el planificador compara el orden del índice con el de la consulta, no los datos.
+- **Con un índice `(user_id, course_id, submitted_at DESC NULLS LAST)`, PostgreSQL lee las 20 000 filas y las ordena (`Sort`).** La consulta pide `desc`, que en PostgreSQL es `DESC NULLS FIRST`, y Drizzle añade `NULLS LAST` a los índices.
+- **Los órdenes no coinciden:** el índice encuentra las filas, pero no las entrega ordenadas. Da igual que la columna sea `NOT NULL`: el planificador compara órdenes, no datos.
 
 <Callout type="risk">
 
-- **Comprueba con `EXPLAIN` las consultas que genera el ORM:** el SQL de Drizzle es correcto y legible, pero los detalles (como el orden de los nulos) se ven en el plan, no en el código TypeScript. Haz con `toSQL()` y `EXPLAIN ANALYZE` lo que hiciste en A3.3.
-- **Con pocas filas, el fallo no se nota:** con 8 intentos por usuario y curso, ordenar no cuesta nada, y este problema habría pasado todas las pruebas. Mide con el volumen que tendrá la tabla en producción, o con el peor usuario.
-- **`select()` sin columnas trae todas:** como `SELECT *`. Para listados, pide solo lo que vas a mostrar, como la consulta del punto 2.
+- **Pasa el SQL del ORM por `EXPLAIN`:** detalles como el orden de los nulos solo se ven en el plan.
+- **Con pocas filas no se nota:** con 8 intentos por usuario habría pasado todas las pruebas. Mide con el volumen real o el peor usuario.
+- **`select()` sin columnas trae todas,** como `SELECT *`: en listados, solo lo que se muestra.
 
 </Callout>
 
 ## Paso 5: una migración para arreglarlo
 
-El arreglo es declarar el índice con el mismo orden que la consulta. En `src/schema.ts`, cambia los dos índices (el resto del archivo no cambia):
+**Qué es:** declarar el índice con el mismo orden que la consulta y generar la migración.
+
+**Cómo se usa:** en `src/schema.ts`, cambia los dos índices (el resto igual):
 
 ```ts
 // Archivo: src/schema.ts
@@ -677,8 +678,6 @@ export type QuizAttemptRow = typeof quizAttempts.$inferSelect;
 export type NewQuizAttempt = typeof quizAttempts.$inferInsert;
 ```
 
-`drizzle-kit generate` detecta el cambio y escribe la segunda migración:
-
 ```text
 $ npx drizzle-kit generate --name indices-nulls-first
 No config path provided, using default 'drizzle.config.ts'
@@ -716,7 +715,7 @@ quiz_attempts_user_course_submitted    USING btree (user_id, course_id, submitte
 quiz_attempts_user_submitted           USING btree (user_id, submitted_at DESC)
 ```
 
-`NULLS FIRST` es lo que significa `DESC` en PostgreSQL, así que el índice queda como `submitted_at DESC`. La misma consulta, sin tocar una línea de ella:
+La misma consulta, sin tocarla:
 
 ```text
 $ node --env-file=.env src/04-plan.ts
@@ -730,7 +729,8 @@ Planning Time: 0.210 ms
 Execution Time: 0.025 ms
 ```
 
-De 2,6 ms a 0,025 ms: _Index Scan_, sin `Sort`, y se detiene a las 5 filas. Si vuelves a ejecutar `generate` sin cambiar el esquema, no crea nada:
+- **`NULLS FIRST` es lo que significa `DESC`,** y el índice queda como `submitted_at DESC`: de 2,6 a 0,025 ms, _Index Scan_ sin `Sort` que para en 5 filas.
+- **Sin cambios en el esquema, `generate` no crea nada:**
 
 ```text
 $ npx drizzle-kit generate
@@ -744,15 +744,17 @@ No schema changes, nothing to migrate 😴
 
 <Callout type="risk">
 
-- **Drizzle aplica las migraciones por fecha, no por nombre:** guarda en `created_at` el momento en que se **generó** cada migración y, al migrar, solo aplica las que son más recientes que la última aplicada (está en `node_modules/drizzle-orm/pg-core/dialect.js`). Si dos personas generan migraciones en ramas distintas y la más antigua se fusiona después, **se salta sin avisar**. Genera las migraciones de una en una, en la rama principal, o vuelve a generarlas tras fusionar.
-- **`migrate` aplica todas las pendientes en una sola transacción:** también está en `dialect.js`. Si una falla, no se aplica ninguna, y eso es bueno. Pero esta migración borra y crea los índices con la tabla bloqueada para escribir, y con millones de filas eso son segundos o minutos. `CREATE INDEX CONCURRENTLY`, que no bloquea, no sirve dentro de una migración de Drizzle: PostgreSQL responde `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. En una tabla grande en producción, haz ese cambio a mano con `psql`, fuera de `migrate`.
-- **No edites una migración ya aplicada:** Drizzle compara el _hash_ y la tabla ya tiene el cambio. Para corregir algo, una migración nueva.
+- **Drizzle aplica migraciones por fecha de generación:** solo las más recientes que la última aplicada (`node_modules/drizzle-orm/pg-core/dialect.js`). Una más antigua fusionada después **se salta sin avisar**: genéralas de una en una en la rama principal.
+- **`migrate` usa una sola transacción:** si una falla, ninguna se aplica, pero los índices se recrean con la tabla bloqueada, y `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`. En una tabla grande, ese cambio a mano con `psql`.
+- **No edites una migración aplicada:** Drizzle compara el _hash_. Para corregir, una nueva.
 
 </Callout>
 
 ## Paso 6: el _pool_ de conexiones en _serverless_
 
-Cada conexión a PostgreSQL es un proceso del servidor, y el servidor admite un número limitado (`max_connections`, 100 por defecto, con 3 reservadas para superusuarios). Un _pool_ abre unas pocas conexiones y las reutiliza entre peticiones. El error típico en _serverless_ es crear el _pool_ dentro del _handler_: cada invocación abre los suyos y no los cierra. `src/06-pool.ts` lanza 120 peticiones a la vez de las dos formas:
+**Qué es:** cada conexión es un proceso del servidor, con un límite (`max_connections`, 100, con 3 para superusuarios). Un _pool_ abre pocas y las reutiliza. El error típico en _serverless_: crear el _pool_ dentro del _handler_.
+
+**Cómo se usa:** `src/06-pool.ts` lanza 120 peticiones a la vez de las dos formas:
 
 ```ts
 // Archivo: src/06-pool.ts
@@ -828,19 +830,16 @@ Pool compartido (max: 10):
   pico de conexiones: 10
 ```
 
-- **Un _pool_ por petición:** las primeras 96 consiguen conexión y las 24 siguientes reciben `remaining connection slots are reserved for roles with the SUPERUSER attribute`: el servidor está lleno. Y las 96 conexiones **siguen abiertas** al terminar, hasta que cada _pool_ se cierre. En _serverless_ eso no pasa nunca de forma explícita: se quedan hasta que la plataforma congela o destruye la instancia.
-- **Un _pool_ compartido de 10:** las 120 terminan bien, con un pico de exactamente 10 conexiones. Las peticiones que no tienen conexión libre esperan su turno: 12 tandas de 0,2 s, unos 2,4 s.
-
-En una app de Astro en Vercel, como esta plataforma, el _pool_ se crea **fuera** del _handler_, en un módulo (como `src/db.ts`), y cada instancia de la función lo reutiliza entre invocaciones. Es lo mismo que hace `src/lib/mongo.ts` con MongoDB. Dos ajustes más:
-
-- **`attachDatabasePool(pool)` de `@vercel/functions`:** admite el _pool_ de `pg` (sus tipos lo listan, junto con MongoDB y otros) y mantiene viva la instancia hasta que el _pool_ cierra las conexiones inactivas, según su `idleTimeoutMillis`. Es lo que la plataforma hace con MongoDB desde la Tanda 10.
-- **Un _pooler_ delante de PostgreSQL:** con muchas instancias a la vez, ni un _pool_ por instancia basta (100 instancias × 10 conexiones). Los servicios gestionados (Neon, Supabase) ofrecen una URL "pooled" con PgBouncer delante, que reparte pocas conexiones reales entre muchas instancias.
+- **Un _pool_ por petición:** 96 conectan y 24 reciben `remaining connection slots are reserved for roles with the SUPERUSER attribute`. Y las 96 **siguen abiertas**: en _serverless_, hasta que la plataforma congela o destruye la instancia.
+- **Un _pool_ compartido de 10:** las 120 terminan, con un pico de 10 conexiones, en 12 tandas de 0,2 s (unos 2,4 s).
+- **En Astro en Vercel, el _pool_ va fuera del _handler_,** en un módulo como `src/db.ts`, igual que `src/lib/mongo.ts`. `attachDatabasePool(pool)` de `@vercel/functions` admite el de `pg` y mantiene viva la instancia hasta cerrar las inactivas (`idleTimeoutMillis`), como hace la plataforma con MongoDB.
+- **Con muchas instancias, un _pooler_:** 100 instancias × 10 conexiones no caben. Neon y Supabase dan una URL "pooled" con PgBouncer.
 
 <Callout type="risk">
 
-- **Nunca `new Pool()` dentro de una función que se ejecuta por petición:** ni en un _endpoint_, ni en una Action, ni en un servicio. Un único módulo lo crea, y todo lo demás lo importa.
-- **Ajusta `max` a lo que tu servidor aguanta:** con `max: 10` y 10 instancias, son 100 conexiones, todo el servidor. Calcula `max` × instancias posibles y deja margen para las migraciones y para ti.
-- **Con un _pooler_ en modo transacción, cuidado con el estado de la sesión:** cada transacción puede ir por una conexión distinta, así que `SET` de sesión, las tablas temporales o las sentencias preparadas con nombre (`.prepare()` de Drizzle) pueden fallar o mezclarse entre clientes, salvo que el _pooler_ las admita. Las consultas normales de Drizzle con `pg` usan sentencias sin nombre y funcionan.
+- **Nunca `new Pool()` por petición** (_endpoint_, Action o servicio): un módulo lo crea y el resto lo importa.
+- **`max` × instancias posibles, con margen:** con `max: 10` y 10 instancias, el servidor entero.
+- **Un _pooler_ en modo transacción mezcla el estado de sesión:** `SET`, tablas temporales y `.prepare()` de Drizzle pueden fallar. Las consultas normales de Drizzle con `pg` funcionan.
 
 </Callout>
 
@@ -854,7 +853,7 @@ En una app de Astro en Vercel, como esta plataforma, el _pool_ se crea **fuera**
 
 </Callout>
 
-Solución. La clave es que el contrato no hable de ninguna base de datos. `src/repositories/tipos.ts`:
+Solución. El contrato no habla de ninguna base de datos. `src/repositories/tipos.ts`:
 
 ```ts
 // Archivo: src/repositories/tipos.ts
@@ -889,7 +888,7 @@ export interface QuizAttemptsRepo {
 }
 ```
 
-El repositorio de MongoDB de la plataforma, contra ese contrato. Cambian dos cosas: la proyección sin `_id` (el dominio no lo conoce) y la copia en `insert` (`insertOne` añade `_id` al objeto que recibe). `src/repositories/quiz-attempts.mongo.ts`:
+El de MongoDB, contra ese contrato: proyección sin `_id` (el dominio no lo conoce) y copia en `insert` (`insertOne` añade `_id` al objeto). `src/repositories/quiz-attempts.mongo.ts`:
 
 ```ts
 // Archivo: src/repositories/quiz-attempts.mongo.ts
@@ -937,7 +936,7 @@ export function createQuizAttemptsRepo(db: Db): QuizAttemptsRepo {
 }
 ```
 
-Y el de Drizzle. Cada etapa de la agregación de MongoDB tiene su equivalente en SQL: `$sum: 1` es `count()`, `$max` es `max()` o `bool_or()` para el booleano, y "el primero tras ordenar por fecha" (`$first`) es el primer elemento de `array_agg(… ORDER BY submitted_at DESC)`. `src/repositories/quiz-attempts.drizzle.ts`:
+El de Drizzle: `$sum: 1` es `count()`, `$max` es `max()` o `bool_or()`, y `$first` tras ordenar es el primer elemento de `array_agg(… ORDER BY submitted_at DESC)`. `src/repositories/quiz-attempts.drizzle.ts`:
 
 ```ts
 // Archivo: src/repositories/quiz-attempts.drizzle.ts
@@ -1005,7 +1004,7 @@ export function createQuizAttemptsRepo(db: Database): QuizAttemptsRepo {
 }
 ```
 
-Los tests no saben qué base de datos tienen detrás: reciben una función que prepara un repositorio vacío. Son los dos de `tests/integration/quiz-attempts.repo.test.ts` de la plataforma y tres más. `tests/contrato.ts`:
+Los tests reciben una función que prepara un repositorio vacío: los dos de `tests/integration/quiz-attempts.repo.test.ts` y tres más. `tests/contrato.ts`:
 
 ```ts
 // Archivo: tests/contrato.ts
@@ -1086,7 +1085,7 @@ export function contratoQuizAttempts(nombre: string, preparar: () => Promise<Qui
 }
 ```
 
-`tests/quiz-attempts.test.ts` ejecuta el contrato contra MongoDB (en memoria, como en I8.4) y contra PostgreSQL:
+`tests/quiz-attempts.test.ts` lo ejecuta contra MongoDB (en memoria, I8.4) y PostgreSQL:
 
 ```ts
 // Archivo: tests/quiz-attempts.test.ts
@@ -1166,7 +1165,9 @@ $ npm test -- --reporter=verbose
    Duration  1.01s (tests 76%, import 23%, transform 1%)
 ```
 
-Los 5 casos pasan con las dos bases de datos: para la plataforma, cambiar de MongoDB a PostgreSQL sería cambiar `createQuizAttemptsRepo(db)` en `src/server/repositories/index.ts`, y nada más. Para comprobar que el contrato de verdad vigila, rompe a propósito la nota del último intento con `max(score)` en lugar de `array_agg`:
+- **Los 5 casos pasan con las dos bases:** para la plataforma, cambiar sería tocar `createQuizAttemptsRepo(db)` en `src/server/repositories/index.ts`, y nada más.
+
+Para comprobar que el contrato vigila, rompe la nota del último intento con `max(score)` en vez de `array_agg`:
 
 ```text
 $ npm test
@@ -1212,13 +1213,13 @@ AssertionError: expected { courseId: 'B1', attempts: 3, …(4) } to deeply equal
    Duration  781ms (tests 70%, import 29%, transform 1%)
 ```
 
-Solo falla el test que tiene que fallar, y dice qué valor esperaba: la nota más alta (5) no es la del último intento (2).
+- **Solo falla el test que debe,** con lo esperado: la nota más alta (5) no es la del último intento (2).
 
 <Callout type="risk">
 
-- **El contrato es tan bueno como sus tests:** con solo los dos tests originales, un repositorio de PostgreSQL que devolviera también el `id` de la fila habría pasado. Por eso hay un test que exige exactamente los campos del dominio.
-- **Las dos bases ordenan distinto en los empates:** si dos intentos tienen la misma fecha, MongoDB y PostgreSQL pueden devolverlos en un orden diferente, y ningún test de este contrato lo vería. Si importa, añade un segundo criterio de orden (`id`) en los dos.
-- **`TRUNCATE` en `beforeEach` necesita una base propia para los tests:** nunca apuntes los tests a la base de desarrollo, ni mucho menos a la de producción. Aquí es `academia_ts`, que solo existe para esto.
+- **El contrato es tan bueno como sus tests:** con los dos originales, un repositorio que devolviera también el `id` habría pasado; un test exige los campos exactos.
+- **Los empates se ordenan distinto en cada base,** y ningún test lo ve: añade `id` como segundo criterio en las dos.
+- **`TRUNCATE` en `beforeEach` exige una base solo para tests** (`academia_ts`), nunca la de desarrollo ni la de producción.
 
 </Callout>
 
@@ -1230,9 +1231,9 @@ Conectas con PostgreSQL desde TypeScript con un único _pool_ y consultas parame
 
 ## Resumen
 
-- Los datos de la petición van siempre como parámetros (`$1`). Concatenados, una entrada puede leer todo o borrar una tabla.
-- `pg` entrega `bigint` y `numeric` como texto, y `date` como medianoche local: corrígelo una vez en `db.ts`.
-- Drizzle describe las tablas en TypeScript: de ahí salen los tipos, las consultas y las migraciones, que se generan, se revisan y se aplican.
-- Comprueba con `EXPLAIN` el SQL del ORM: el orden de los nulos de un índice de Drizzle no coincidía con su propio `orderBy`.
-- En _serverless_, un único _pool_ por instancia, creado fuera del _handler_, y un _pooler_ cuando hay muchas instancias.
-- Un repositorio con un contrato sin base de datos se puede cambiar de MongoDB a PostgreSQL con los mismos tests.
+- Los datos, siempre como parámetros (`$1`): concatenados, una entrada leyó todo y borró una tabla.
+- `bigint` y `numeric` llegan como texto y `date` como medianoche local: se corrige en `db.ts`.
+- Drizzle: tipos, consultas y migraciones desde el esquema; se generan, se revisan y se aplican.
+- `EXPLAIN` sobre el SQL del ORM: el orden de nulos del índice no coincidía con su `orderBy`.
+- En _serverless_, un _pool_ por instancia fuera del _handler_, y un _pooler_ con muchas instancias.
+- Un repositorio con contrato neutro cambia de MongoDB a PostgreSQL con los mismos tests.

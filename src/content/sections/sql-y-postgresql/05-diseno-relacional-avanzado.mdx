@@ -7,15 +7,15 @@ minutes: 90
 summary: "Con el temario real, comparas un array con una tabla N:M, mides qué cuesta desnormalizar con un trigger y con vistas materializadas, eliges entre cascada y borrado lógico, y proteges las lecturas con RLS."
 ---
 
-En A3.1 llevaste a PostgreSQL el esquema de Dani Academy, normalizado: cada dato en un solo sitio, con claves ajenas que lo unen. Es el punto de partida correcto, pero no la última palabra. Una app real necesita relaciones de muchos a muchos con datos propios, consultas de panel que agregan miles de filas en cada visita, una forma de borrar que no destruya lo que no debe y, si varias personas comparten la base de datos, que cada una vea solo lo suyo. Cada una de esas decisiones tiene un coste, y en esta sección vas a medirlo sobre el temario real de esta plataforma: cuándo **normalizar**, cuándo **desnormalizar**, y cómo hacerlo sin que los datos se contradigan.
+El esquema normalizado de A3.1 es el punto de partida, no la última palabra: una app real necesita relaciones N:M con datos propios, paneles que agregan miles de filas, un borrado que no destruya de más y que cada persona vea solo lo suyo. Aquí mides sobre el temario real de esta plataforma cuándo **normalizar**, cuándo **desnormalizar** y cómo hacerlo sin contradicciones.
 
-**Lo que tendrás al terminar:** el temario de Dani Academy con sus prerrequisitos como relación N:M y consultas recursivas, un contador mantenido por un _trigger_ (y la razón para quitarlo), vistas materializadas para el panel de administración, borrado lógico con índices parciales, y RLS en las lecturas.
-
-**Requisitos:** las secciones A3.1 (el esquema de la base `academia`, de su ejercicio) y A3.3 (índices). Todos los archivos se ejecutan desde `pg-lab` con `sudo -u postgres psql -X -d academia -f archivo.sql`.
+**Requisitos:** A3.1 (la base `academia` de su ejercicio) y A3.3 (índices). Todo se ejecuta desde `pg-lab` con `sudo -u postgres psql -X -d academia -f archivo.sql`.
 
 ## Paso 1: el temario real, en el esquema de A3.1
 
-`exportar-temario.mjs` saca de esta plataforma los cursos (con sus prerrequisitos, de `courses.json`) y las secciones (de los `.mdx`). Ejecútalo donde tengas el repositorio y deja los dos CSV en `pg-lab/datos/`:
+**Qué es:** los cursos (con prerrequisitos, de `courses.json`) y las secciones (de los `.mdx`) de esta plataforma, más 2000 usuarios de prueba, en el esquema de A3.1.
+
+**Cómo se usa:** ejecuta `exportar-temario.mjs` donde tengas el repositorio y deja los dos CSV en `pg-lab/datos/`:
 
 ```js
 // Archivo: exportar-temario.mjs
@@ -59,7 +59,7 @@ node exportar-temario.mjs ../dani-academy/src/content
 24 cursos y 99 secciones exportados a datos/
 ```
 
-`50-datos.sql` los carga en el esquema de A3.1 y genera 2000 usuarios, sus lecturas y sus intentos. Empieza borrando lo que crean los pasos de esta sección, así que sirve también para volver a empezar:
+`50-datos.sql` los carga y genera usuarios, lecturas e intentos. Empieza borrando lo que crean los pasos siguientes, así que sirve para volver a empezar:
 
 ```sql
 -- Archivo: 50-datos.sql
@@ -151,11 +151,20 @@ ANALYZE
 (1 row)
 ```
 
-Las 99 secciones reales entran sin un error: cumplen todas las reglas que pusiste en A3.1 (el formato del id, que la sección sea de su curso, el orden único y los minutos entre 10 y 240).
+- **Las 99 secciones reales entran sin error:** cumplen las reglas de A3.1 (formato del id, sección de su curso, orden único, minutos entre 10 y 240).
+
+<Callout type="risk">
+
+- **`50-datos.sql` borra lo de esta sección:** ejecútalo solo en `academia`, la base de práctica, nunca en una con datos que quieras conservar.
+- **El CSV es una foto del temario:** si cambian los `.mdx`, el número de secciones cambia. Vuelve a exportar antes de comparar con estos resultados.
+
+</Callout>
 
 ## Paso 2: relaciones N:M, con una tabla intermedia
 
-Cada curso tiene prerrequisitos, y cada curso puede ser prerrequisito de varios: es una relación de muchos a muchos, y además de una tabla **consigo misma**. Hay dos formas de guardarla: un _array_ en la propia fila de cada curso, o una tabla intermedia con una fila por cada "curso requiere curso". `51-prerrequisitos.sql` prueba las dos:
+**Qué es:** los prerrequisitos son una relación de muchos a muchos de una tabla **consigo misma**. Se guarda como _array_ en cada fila o como tabla intermedia con una fila por cada "curso requiere curso".
+
+**Cómo se usa:** `51-prerrequisitos.sql` prueba las dos:
 
 ```sql
 -- Archivo: 51-prerrequisitos.sql
@@ -290,13 +299,13 @@ ROLLBACK
 (9 rows)
 ```
 
-- **El _array_ acepta cualquier cosa:** `I9` no existe y entra sin protestar, como `"JavaScript"` o `"Todo el temario"`. Para una lista que solo se lee con su fila (las etiquetas de un artículo, los tipos de entreno de un usuario), un _array_ con un índice GIN basta.
-- **La tabla intermedia protege la relación:** la clave ajena rechaza `I9`, el `CHECK` rechaza que un curso se requiera a sí mismo, y la clave primaria rechaza repetir un prerrequisito. Ninguna de las tres es posible con un _array_: PostgreSQL no tiene claves ajenas sobre los elementos de un _array_.
-- **Y decide qué pasa al borrar:** `A4` no se puede borrar porque `A6` lo necesita (`requiere_id` no tiene `ON DELETE`, así que es `NO ACTION`, que actúa como una restricción). Borrar `A6`, que nadie necesita, se lleva sus dos prerrequisitos (`ON DELETE CASCADE` en `curso_id`): de 35 relaciones a 33.
-- **El texto libre no es una relación:** "JavaScript" no es un curso de la plataforma, así que no puede ir en una tabla con clave ajena. Se queda en otra columna, `conocimientos_previos`. Mezclar los dos en el mismo _array_ era el problema de fondo.
-- **`WITH RECURSIVE` recorre la relación entera:** la primera parte (los prerrequisitos directos de `A8`) se une con la segunda, que sigue cada prerrequisito hacia atrás hasta que no quedan más. A8 depende de 9 cursos, y B1 está a 4 saltos por el camino más largo, al que se llega por 6 caminos distintos.
+- **El _array_ acepta cualquier cosa:** `I9`, `"JavaScript"` o `"Todo el temario"`. Para listas que solo se leen con su fila (etiquetas, tipos de entreno), un _array_ con GIN basta.
+- **La tabla intermedia protege la relación:** la clave ajena rechaza `I9`, el `CHECK` que un curso se requiera a sí mismo y la clave primaria los repetidos. Nada de eso existe sobre elementos de un _array_.
+- **Y decide qué pasa al borrar:** `A4` no se borra porque `A6` lo necesita (`NO ACTION`); borrar `A6` se lleva sus dos prerrequisitos (`CASCADE`): de 35 relaciones a 33.
+- **El texto libre no es una relación:** "JavaScript" no es un curso y va en `conocimientos_previos`. Mezclarlos en un _array_ era el problema de fondo.
+- **`WITH RECURSIVE` recorre la relación entera:** los prerrequisitos directos de `A8` se unen con cada uno hacia atrás. A8 depende de 9 cursos, y B1 está a 4 saltos por el camino más largo, al que llegan 6 caminos.
 
-Una tabla N:M se consulta en las dos direcciones, y cada una necesita su índice. `52-direccion.sql` lo mide con `lecturas`, la tabla intermedia entre usuarios y secciones de A3.1:
+Cada dirección de una N:M necesita su índice. `52-direccion.sql`, con `lecturas` (usuarios ↔ secciones):
 
 ```sql
 -- Archivo: 52-direccion.sql
@@ -359,19 +368,21 @@ CREATE INDEX
 (9 rows)
 ```
 
-La clave primaria `(usuario_id, seccion_id)` responde "qué ha leído este usuario" (_Index Only Scan_, 0,07 ms), pero no "quién ha leído esta sección", que lee las 59 304 lecturas (1,6 ms). Con un índice sobre `seccion_id`, 0,23 ms. Por eso `curso_prerrequisitos` tiene un índice en `requiere_id`.
+- **La clave `(usuario_id, seccion_id)` responde "qué leyó este usuario"** (0,07 ms), no "quién leyó esta sección": recorre 59 304 lecturas (1,6 ms). Con índice en `seccion_id`, 0,23 ms. Por eso `curso_prerrequisitos` indexa `requiere_id`.
 
 <Callout type="risk">
 
-- **Un índice de expresión solo se usa con la misma expresión:** el índice único de A3.1 es sobre `lower(email)`. Con `WHERE email = …`, PostgreSQL lee los 2000 usuarios; con `WHERE lower(email) = …`, usa el índice. Es la regla de las funciones de A3.3.
-- **Una consulta recursiva sin final no termina nunca:** si alguien crea un ciclo (A requiere B y B requiere A), `WITH RECURSIVE` da vueltas hasta agotar la memoria. Añade `CYCLE id SET hay_ciclo USING camino` (PostgreSQL 14+) o limita la profundidad (`WHERE c.nivel < 20`) en cualquier recursión sobre datos que escriben usuarios.
-- **`array || 'texto'` no añade un elemento:** PostgreSQL interpreta `'I9'` como un _array_ literal y responde `malformed array literal`. Para añadir un elemento, `array_append`.
+- **Un índice de expresión exige la misma expresión:** con `lower(email)`, `WHERE email = …` lee los 2000 usuarios (la regla de A3.3).
+- **Una recursión con ciclo no termina:** si A requiere B y B requiere A, agota la memoria. `CYCLE id SET hay_ciclo USING camino` (PostgreSQL 14+) o un límite de profundidad.
+- **`array || 'texto'` no añade un elemento:** da `malformed array literal`. Usa `array_append`.
 
 </Callout>
 
 ## Paso 3: desnormalizar un contador con un _trigger_
 
-El panel enseña, de cada curso, cuántas secciones lleva leídas el usuario. Normalizado, eso es contar sus lecturas en cada visita. **Desnormalizar** es guardar el número ya contado y mantenerlo al día cada vez que cambian las lecturas. La forma de que no se desincronice es un _trigger_: una función que PostgreSQL ejecuta en cada `INSERT` o `DELETE`, dentro de la misma transacción. `53-contador.sql` lo construye y mide lo que gana y lo que cuesta:
+**Qué es:** **desnormalizar** es guardar ya contadas las secciones leídas por curso, en vez de contarlas en cada visita. Un _trigger_ (una función que PostgreSQL ejecuta en cada `INSERT` o `DELETE`, en la misma transacción) lo mantiene al día.
+
+**Cómo se usa:** `53-contador.sql` lo construye y mide:
 
 ```sql
 -- Archivo: 53-contador.sql
@@ -524,24 +535,25 @@ DROP FUNCTION
 DROP TABLE
 ```
 
-- **Coherente, de verdad:** el contador coincide con contar (0 diferencias) al crearlo, después de borrar las 596 lecturas de A3.1 y después del borrado en cascada de un usuario. Como el _trigger_ va en la misma transacción, o se guardan la lectura y el contador, o ninguno.
-- **Lo que gana:** el panel de un usuario pasa de 0,045 ms (contando sus 38 lecturas con la clave primaria) a 0,023 ms. Nadie notará la diferencia.
-- **Lo que cuesta:** las mismas 14 144 lecturas nuevas tardan 267 ms con el _trigger_ y 125 ms sin él. Cada escritura cuesta el doble, y las lecturas son lo que más se escribe en la plataforma.
-- **Y tiene un agujero:** `TRUNCATE` no ejecuta los _triggers_ de fila. Tras vaciar `lecturas`, el contador sigue diciendo 58 675.
-
-**Decisión: no compensa**, y el archivo termina quitándolo. Desnormalizar tiene sentido cuando la cuenta es cara (muchas filas, muchas tablas) y se lee mucho más de lo que se escribe. Aquí la cuenta ya es barata gracias al índice, y se escribe en cada lectura.
+- **Coherente:** 0 diferencias con contar, al crearlo, tras borrar las 596 lecturas de A3.1 y tras la cascada de un usuario. Misma transacción: o se guardan los dos o ninguno.
+- **Gana poco:** el panel de un usuario pasa de 0,045 ms (38 lecturas por la clave primaria) a 0,023 ms.
+- **Cuesta el doble en cada escritura:** 14 144 lecturas nuevas tardan 267 ms con el _trigger_ y 125 sin él, en la tabla que más se escribe.
+- **Tiene un agujero:** `TRUNCATE` no ejecuta _triggers_ de fila; tras vaciar `lecturas`, el contador sigue en 58 675.
+- **Decisión: no compensa,** y el archivo lo quita. Desnormalizar sirve cuando contar es caro y se lee mucho más de lo que se escribe; aquí el índice ya abarata la cuenta.
 
 <Callout type="risk">
 
-- **Un _trigger_ hace más lenta cada escritura, también las que no ves:** cada `INSERT` en `lecturas` hace ahora otro `INSERT … ON CONFLICT` en `progreso_cursos`. Con cargas masivas o muchas escrituras a la vez, se nota, y dos lecturas del mismo usuario y curso se bloquean entre sí por la misma fila del contador (A3.3, Paso 5).
-- **Cada camino que cambia los datos tiene que pasar por el _trigger_:** `TRUNCATE`, un `ALTER TABLE … DISABLE TRIGGER` para una carga rápida o una restauración que lo desactiva lo dejan desfasado sin ningún error. Si desnormalizas, ten una consulta que compruebe la coherencia (como `:comprobar`) y ejecútala de vez en cuando.
-- **El _trigger_ no se ve en el código de la aplicación:** quien lea `INSERT INTO lecturas` en TypeScript no sabe que también se escribe otra tabla. Documéntalo junto al esquema, y en las migraciones (A3.4).
+- **El _trigger_ ralentiza cada escritura,** y dos lecturas del mismo usuario y curso se bloquean por la misma fila del contador (A3.3, Paso 5).
+- **Todo camino debe pasar por él:** `TRUNCATE`, `DISABLE TRIGGER` o una restauración lo desfasan sin error. Ten una consulta de coherencia (`:comprobar`) y ejecútala de vez en cuando.
+- **No se ve desde la app:** quien lea `INSERT INTO lecturas` no sabe que se escribe otra tabla. Documéntalo con el esquema y las migraciones (A3.4).
 
 </Callout>
 
 ## Paso 4: vistas y vistas materializadas
 
-Hay consultas que sí son caras: las del panel de administración, que agregan las lecturas e intentos de **todos** los usuarios. `54-vistas.sql` define las estadísticas de cada curso como vista y como vista materializada:
+**Qué es:** una **vista** es un nombre para una consulta; una **vista materializada** guarda su resultado. Sirven para consultas caras, como las del panel de administración sobre **todos** los usuarios.
+
+**Cómo se usa:** `54-vistas.sql` define las estadísticas de cada curso de las dos formas:
 
 ```sql
 -- Archivo: 54-vistas.sql
@@ -641,24 +653,25 @@ Time: 32.533 ms
 Timing is off.
 ```
 
-- **Una vista no guarda nada:** es un nombre para una consulta, y cada `SELECT` la vuelve a calcular entera (4,6 ms). Sirve para no repetir la consulta en cada sitio, no para ir más rápido.
-- **Una vista materializada guarda el resultado:** leerla cuesta lo que leer 24 filas (0,13 ms), unas 35 veces menos.
-- **A cambio, se queda desfasada:** tras 1439 lecturas nuevas de B1.1, la vista dice 6168 y la materializada sigue diciendo 4729 hasta que se ejecuta `REFRESH` (32 ms), que la vuelve a calcular entera.
-- **`REFRESH … CONCURRENTLY`:** el `REFRESH` normal bloquea las lecturas de la vista mientras dura; `CONCURRENTLY` no, porque calcula el resultado nuevo aparte y cambia solo las filas distintas. Para saber qué fila es qué, necesita un índice único sin `WHERE`, y sin él da error.
-
-Cuándo refrescar depende de cuánto desfase admite quien la lee: un panel de administración puede ir con datos de hace una hora (un `REFRESH` programado, por ejemplo con la extensión `pg_cron` o con una tarea de la app); el progreso que ve cada usuario después de marcar una sección, no.
+- **La vista recalcula en cada `SELECT`** (4,6 ms): evita repetir la consulta, no acelera.
+- **La materializada se lee como 24 filas** (0,13 ms), unas 35 veces menos.
+- **Pero se desfasa:** tras 1439 lecturas nuevas de B1.1, la vista dice 6168 y la materializada sigue en 4729 hasta el `REFRESH` (32 ms), que recalcula entera.
+- **`REFRESH … CONCURRENTLY`** no bloquea las lecturas: calcula aparte y cambia solo las filas distintas. Exige un índice único sin `WHERE`.
+- **El ritmo de refresco depende del desfase admisible:** un panel de administración aguanta una hora (`pg_cron` o una tarea de la app); el progreso de un usuario tras marcar una sección, no.
 
 <Callout type="risk">
 
-- **Una vista materializada desfasada no avisa:** responde con los datos del último `REFRESH`, sin indicar de cuándo son. Si el desfase importa, guarda en otra tabla la hora del último refresco y muéstrala junto al dato.
-- **`REFRESH` recalcula entera la consulta:** con millones de filas puede tardar minutos y cargar la base de datos. No lo ejecutes en cada petición ni en cada escritura: entonces tendrías el coste de la consulta en cada escritura, que es peor que no materializar.
-- **`CONCURRENTLY` hace más trabajo:** además de calcular el resultado, lo compara fila a fila con el anterior. Con 24 filas tardó lo mismo (32 ms), pero con vistas grandes se nota. Úsalo cuando la vista se lee mientras se refresca; si no, el normal basta.
+- **Un desfase no avisa:** guarda la hora del último refresco y muéstrala junto al dato.
+- **`REFRESH` no va en cada petición ni escritura:** con millones de filas tarda minutos, y tendrías el coste de la consulta en cada escritura.
+- **`CONCURRENTLY` hace más trabajo** (compara fila a fila): con 24 filas, los mismos 32 ms. Úsalo si se lee mientras se refresca.
 
 </Callout>
 
 ## Paso 5: borrar en cascada, prohibirlo o marcarlo como borrado
 
-Qué pasa con los datos de alguien cuando se borra es una decisión de diseño, no un detalle. `55-borrado.sql` prueba las tres opciones:
+**Qué es:** qué pasa con los datos de alguien al borrarlo es una decisión de diseño.
+
+**Cómo se usa:** `55-borrado.sql` prueba las tres opciones:
 
 ```sql
 -- Archivo: 55-borrado.sql
@@ -737,11 +750,11 @@ CREATE VIEW
 (1 row)
 ```
 
-- **En cascada:** borrar a `u42` se lleva sus 38 lecturas y sus 4 intentos, sin dejar ninguna huérfana. Es lo correcto cuando los datos solo tienen sentido con su dueño, y cuando alguien pide que borres los suyos.
-- **Prohibido:** un curso con secciones no se puede borrar (A3.1). Un `DELETE` mal escrito no se lleva las 8 secciones de B1 ni las lecturas que cuelgan de ellas.
-- **Borrado lógico:** `borrado_en` marca la fila en lugar de borrarla, y se puede deshacer. Pero rompe dos cosas que antes funcionaban solas:
-  - **El correo único:** la persona no puede volver a registrarse con su correo, porque la fila borrada sigue ahí. El arreglo es un índice único **parcial**, solo para las filas no borradas.
-  - **Cada consulta tiene que acordarse de filtrar:** la tabla tiene 2000 filas y una está borrada. La vista `usuarios_activos` ayuda, pero las 34 lecturas del usuario borrado siguen contando en cualquier estadística que no pase por ella.
+- **En cascada:** borrar a `u42` se lleva sus 38 lecturas y 4 intentos, sin huérfanas. Para datos que solo tienen sentido con su dueño, y cuando alguien pide borrar los suyos.
+- **Prohibido:** un curso con secciones no se borra (A3.1); un `DELETE` mal escrito no se lleva las 8 secciones de B1.
+- **Borrado lógico:** `borrado_en` marca la fila y se puede deshacer, pero rompe dos cosas:
+  - **El correo único:** la fila sigue y la persona no puede volver a registrarse. El arreglo es un índice único **parcial**, solo para las no borradas.
+  - **Cada consulta debe filtrar:** la vista `usuarios_activos` ayuda, pero las 34 lecturas del borrado cuentan en cualquier estadística que no pase por ella.
 
 | `ON DELETE`                            | Al borrar la fila referenciada        | Para qué                                                                   |
 | -------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------- |
@@ -751,15 +764,17 @@ CREATE VIEW
 
 <Callout type="risk">
 
-- **El índice parcial solo se usa si la consulta repite su condición:** desde este paso, el índice del correo es `WHERE borrado_en IS NULL`, y buscar con `WHERE lower(email) = …` a secas ya no lo usa. Lo verás en el ejercicio: un _Seq Scan_ sobre los 2000 usuarios. Las consultas por correo tienen que añadir `AND borrado_en IS NULL`, o ir por la vista.
-- **Un borrado lógico no es un borrado:** el nombre y el correo siguen en la base de datos, en las copias de seguridad y en cualquier exportación. Si la persona pide que borres sus datos, márcala y además anonimiza lo personal (`nombre`, `email`), o bórrala de verdad.
-- **`CASCADE` también borra en cadena lo que no esperabas:** si `lecturas` tuviera a su vez tablas con `CASCADE`, un solo `DELETE` de un usuario podría vaciar media base de datos. Antes de añadir un `CASCADE`, mira qué tablas cuelgan de la que borras.
+- **El índice parcial exige repetir su condición:** buscar por `lower(email)` sin `AND borrado_en IS NULL` hace un _Seq Scan_ de 2000 usuarios (ejercicio). Añádela o usa la vista.
+- **Un borrado lógico no es un borrado:** nombre y correo siguen en la base, las copias y las exportaciones. Si piden borrar sus datos, anonimiza (`nombre`, `email`) o borra de verdad.
+- **`CASCADE` encadena:** con más tablas en cascada debajo, un `DELETE` podría vaciar media base. Mira qué cuelga antes de añadirlo.
 
 </Callout>
 
 ## Paso 6: Row Level Security, la autorización en la base de datos
 
-En esta plataforma, cada servicio filtra por el `userId` de la sesión: `setSectionRead` y `submitQuiz` lo reciben de `locals.user`, nunca de la petición. Si un día alguien escribe una consulta sin ese filtro, se ven los datos de todos. **Row Level Security** (RLS) pone la regla en la propia tabla: una política decide qué filas puede ver y escribir cada conexión, y se aplica a todas las consultas, se acuerde el código o no. `56-rls.sql` la prueba con un rol de aplicación que no es superusuario ni dueño de las tablas:
+**Qué es:** aquí cada servicio filtra por el `userId` de `locals.user` (`setSectionRead`, `submitQuiz`); una consulta sin ese filtro vería los datos de todos. **Row Level Security** (RLS) pone en la tabla una política que decide qué filas ve y escribe cada conexión, en todas las consultas.
+
+**Cómo se usa:** `56-rls.sql`, con un rol de aplicación que no es superusuario ni dueño:
 
 ```sql
 -- Archivo: 56-rls.sql
@@ -972,17 +987,16 @@ ROLLBACK
 RESET
 ```
 
-- **La aplicación dice quién es el usuario:** RLS no conoce las sesiones de Better Auth. En cada transacción, la app guarda el id en una variable propia (`app.usuario_id`) con `set_config(…, true)`, que es `SET LOCAL`: dura hasta el `COMMIT` o el `ROLLBACK`.
-- **`USING` filtra lo que se ve y `WITH CHECK` lo que se escribe:** `u42` ve sus 38 lecturas de las 60 114, y una lectura a nombre de otro usuario da `new row violates row-level security policy`.
-- **Falla cerrado:** sin identificar a nadie, la política compara con `NULL` y no se ve ninguna fila.
-- **Pero hay que tratar la cadena vacía:** cuando la variable ya se usó en la conexión, al terminar la transacción no vuelve a `NULL`, sino a `''`, y `''::uuid` da `invalid input syntax for type uuid`. Cada petición sin usuario fallaría. `nullif(…, '')` lo convierte en `NULL`.
-- **Sin coste:** la política se convierte en una condición más, y la clave primaria la resuelve (_Index Only Scan_, 0,014 ms).
+- **La app dice quién es el usuario:** RLS no conoce Better Auth. En cada transacción guarda el id en `app.usuario_id` con `set_config(…, true)`, que es `SET LOCAL` (hasta `COMMIT` o `ROLLBACK`).
+- **`USING` filtra lo que se ve y `WITH CHECK` lo que se escribe:** `u42` ve 38 de 60 114 lecturas, y escribir a nombre de otro da `new row violates row-level security policy`.
+- **Falla cerrado:** sin usuario, se compara con `NULL` y no se ve nada. **Pero** una variable ya usada vuelve a `''`, y `''::uuid` da `invalid input syntax for type uuid`; `nullif(…, '')` lo arregla.
+- **Sin coste:** la política es una condición más (_Index Only Scan_, 0,014 ms).
 
 <Callout type="risk">
 
-- **`SET` sin `LOCAL` se queda en la conexión:** tras la petición de `u42`, la siguiente que reutiliza la misma conexión del _pool_ (A3.4) ve sus 38 lecturas sin haber dicho quién es. Con un _pool_ o un _pooler_, usa siempre `set_config(…, true)` dentro de una transacción, nunca `SET` de sesión.
-- **Las vistas se saltan RLS por defecto:** una vista se ejecuta con los permisos de su dueño. Aquí el dueño es `postgres`, que se salta las políticas, y a través de la vista `u42` vio las 60 114 lecturas. Crea las vistas sobre tablas con RLS con `security_invoker = true` (PostgreSQL 15+), que usa los permisos de quien consulta. Las vistas materializadas no tienen esa opción (lo verás en el ejercicio).
-- **El dueño de la tabla y los superusuarios no pasan por la política:** si la aplicación se conecta como `postgres` o como dueña de la tabla, RLS no hace nada. Para que también se aplique al dueño, `ALTER TABLE … FORCE ROW LEVEL SECURITY`. Y la aplicación, siempre con su propio rol (A3.4).
+- **`SET` sin `LOCAL` se queda en la conexión:** la siguiente petición del _pool_ (A3.4) vería las 38 lecturas de `u42`. Siempre `set_config(…, true)` en una transacción.
+- **Las vistas se saltan RLS:** se ejecutan como su dueño (`postgres`), y `u42` vio las 60 114. Usa `security_invoker = true` (PostgreSQL 15+); las materializadas no lo tienen (ejercicio).
+- **El dueño y los superusuarios no pasan por la política:** `FORCE ROW LEVEL SECURITY` para el dueño, y la app con su propio rol (A3.4).
 
 </Callout>
 
@@ -1202,16 +1216,16 @@ RESET
 REVOKE
 ```
 
-- **Etiquetas como tabla N:M, no como _array_:** el nombre de una etiqueta cambia una vez en `etiquetas` y lo ven todos los cursos, una etiqueta mal escrita no entra (clave ajena) y borrar una etiqueta se lleva sus asignaciones (`CASCADE` en los dos lados: sin curso o sin etiqueta, la asignación no tiene sentido).
-- **"Todas las etiquetas" es una división relacional:** se filtran las asignaciones de las etiquetas pedidas, se agrupan por curso y se quedan los cursos que tienen tantas como etiquetas había en la lista (`HAVING count(*) = 2`). Solo A8 tiene React y Astro a la vez.
-- **El panel de un usuario no compensa materializarlo:** 0,38 ms en vivo frente a 0,33 ms desde la vista, casi todo en buscar al usuario por correo (el _Seq Scan_ del índice parcial del Paso 5). A cambio, la vista estaría desfasada: quien marca una sección como leída no lo vería hasta el siguiente `REFRESH`, que cuesta 251 ms.
-- **El panel de administración, sí:** el progreso medio por etiqueta, sobre todos los usuarios, cuesta 167 ms en vivo y 0,18 ms desde la vista materializada, unas 900 veces menos, y nadie necesita ese dato al segundo. Refrescarla después de `panel_progreso` cuesta 21 ms.
+- **Etiquetas como tabla N:M:** un nombre cambia en un sitio, una mal escrita no entra (clave ajena) y borrarla se lleva sus asignaciones (`CASCADE` en los dos lados).
+- **"Todas las etiquetas" es una división relacional:** filtrar las asignaciones pedidas, agrupar por curso y quedarse con los que tienen tantas como la lista (`HAVING count(*) = 2`). Solo A8 tiene React y Astro.
+- **El panel de un usuario no compensa:** 0,38 ms en vivo frente a 0,33 desde la vista, casi todo en buscar por correo (el _Seq Scan_ del Paso 5), y quien marca una sección no lo vería hasta un `REFRESH` de 251 ms.
+- **El de administración, sí:** el progreso medio por etiqueta cuesta 167 ms en vivo y 0,18 ms desde la vista materializada, unas 900 veces menos, y nadie lo necesita al segundo. Refrescarla tras `panel_progreso`, 21 ms.
 
 <Callout type="risk">
 
-- **Una vista materializada no aplica RLS:** guarda el resultado calculado por su dueño, con los datos de todos. Si la aplicación pudiera leer `panel_progreso`, `u42` vería a 1999 usuarios. Nunca des `SELECT` sobre una vista materializada con datos de usuarios al rol de la aplicación. Si la app la necesita, consúltala desde una función que filtre, o materializa solo datos agregados sin usuarios, como `progreso_por_etiqueta`.
-- **Una vista materializada que lee de otra hereda su desfase:** `progreso_por_etiqueta` lee de `panel_progreso`, así que hay que refrescarlas en orden. Al revés, la segunda calcularía sobre los datos viejos de la primera.
-- **La división relacional depende de que no haya duplicados:** `HAVING count(*) = 2` funciona porque la clave primaria impide asignar dos veces la misma etiqueta a un curso. Sin esa clave, una etiqueta repetida contaría dos veces.
+- **Una vista materializada no aplica RLS:** guarda los datos de todos, y con `SELECT` sobre `panel_progreso`, `u42` vería a 1999 usuarios. No la des al rol de la app; usa una función que filtre o materializa solo agregados sin usuarios, como `progreso_por_etiqueta`.
+- **Una materializada sobre otra hereda su desfase:** refresca en orden (`panel_progreso` y luego `progreso_por_etiqueta`).
+- **La división relacional exige no duplicados:** `HAVING count(*) = 2` funciona porque la clave primaria impide repetir etiqueta.
 
 </Callout>
 
@@ -1223,9 +1237,9 @@ Decides cómo guardar cada relación (un _array_ si solo se lee con su fila, una
 
 ## Resumen
 
-- Una relación N:M con integridad va en una tabla intermedia, con una clave primaria compuesta y un índice para cada dirección. Un _array_ basta para listas que no necesitan claves ajenas.
-- `WITH RECURSIVE` recorre relaciones de una tabla consigo misma, como los prerrequisitos.
-- Desnormalizar con un _trigger_ mantiene un dato coherente, pero encarece cada escritura y `TRUNCATE` lo desincroniza: solo compensa si la cuenta es cara y se lee mucho.
-- Una vista no guarda nada; una vista materializada guarda el resultado, se lee muy rápido y se queda desfasada hasta el `REFRESH`.
-- El borrado lógico necesita índices únicos parciales y que cada consulta filtre; `CASCADE` borra lo que depende de la fila.
-- RLS filtra cada consulta por usuario con una variable de transacción (`SET LOCAL`), pero las vistas y las vistas materializadas pueden saltársela.
+- N:M con integridad: tabla intermedia, clave compuesta e índice por dirección; un _array_ para listas sin claves ajenas.
+- `WITH RECURSIVE` recorre relaciones de una tabla consigo misma.
+- Un _trigger_ mantiene un contador coherente, pero duplica el coste de escribir y `TRUNCATE` lo desfasa.
+- Vista: no guarda nada. Materializada: rápida y desfasada hasta el `REFRESH`.
+- Borrado lógico: índices únicos parciales y filtrar siempre; `CASCADE` borra lo dependiente.
+- RLS con `SET LOCAL` por transacción; las vistas y materializadas pueden saltársela.

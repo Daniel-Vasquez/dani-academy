@@ -7,15 +7,15 @@ minutes: 75
 summary: "Con los datos reales de I4.5 en PostgreSQL, caes en las trampas de LEFT JOIN y NOT IN, usas CTE y funciones de ventana para el último de cada grupo, indexas jsonb y reproduces el panel de progreso con la misma salida."
 ---
 
-En B4.3 escribiste `JOIN`, `LEFT JOIN` y `GROUP BY` para calcular el progreso de un usuario. Con eso se responde casi todo, pero las preguntas de una app real piden más: "la **última** evaluación de cada curso", "cuánto ha mejorado respecto al intento anterior", "la media de los últimos siete días". Y con consultas más largas aparecen trampas que devuelven resultados incorrectos **sin ningún error**. En esta sección vas a usar los mismos datos del panel de progreso de I4.5 (69 159 lecturas y 3 038 evaluaciones, exportados de MongoDB), a caer en esas trampas a propósito, a resolver "el último de cada grupo" con funciones de ventana, y a reproducir en SQL el panel de I4.5 con exactamente la misma salida.
+Con `JOIN` y `GROUP BY` (B4.3) se responde casi todo, pero una app pide "la **última** evaluación de cada curso", "cuánto mejoró" o "la media de siete días", y las consultas largas traen trampas que dan resultados incorrectos **sin error**. Aquí, con los datos del panel de I4.5 (69 159 lecturas y 3 038 evaluaciones), caes en esas trampas, resuelves "el último de cada grupo" y reproduces el panel en SQL con la misma salida.
 
-**Lo que tendrás al terminar:** los datos de I4.5 en una base `progreso` de PostgreSQL, una consulta de cada técnica (subconsultas, CTE, funciones de ventana, `jsonb`) y el panel de progreso en una sola consulta SQL, comparado con la agregación de MongoDB.
-
-**Requisitos:** la sección A3.1 (PostgreSQL y la carpeta `pg-lab`), y los datos de I4.5 en tu MongoDB (`mongo-academy`), con las MongoDB Database Tools de A2.5.
+**Requisitos:** A3.1 (PostgreSQL y `pg-lab`) y los datos de I4.5 en `mongo-academy`, con las Database Tools de A2.5.
 
 ## Paso 1: los datos de I4.5, en PostgreSQL
 
-`mongoexport` saca una colección a CSV, y `\copy` la carga en una tabla. Crea `exportar.sh` en `pg-lab`, con `MONGODB_URI` apuntando a la base de `mongo-academy` (`…/academy_lab`):
+**Qué es:** `mongoexport` saca una colección a CSV y `\copy` la carga en una tabla.
+
+**Cómo se usa:** crea `exportar.sh` en `pg-lab`, con `MONGODB_URI` apuntando a `…/academy_lab`:
 
 ```sh
 #!/bin/sh
@@ -94,18 +94,20 @@ ANALYZE
 (1 row)
 ```
 
-Las 69 159 lecturas entraron sin ningún error, también la clave primaria `(usuario_id, seccion_id)`: en MongoDB no había ninguna lectura repetida. Si la hubiera habido, el `\copy` entero habría fallado, y lo habrías descubierto al migrar.
+- **Las 69 159 lecturas entraron sin errores,** con la clave primaria `(usuario_id, seccion_id)`: no había repetidas. Si las hubiera, el `\copy` entero habría fallado, y lo descubrirías al migrar.
 
 <Callout type="risk">
 
-- **`\copy` carga desde tu equipo y `COPY` desde el servidor:** `\copy` (con barra) es de `psql`, lee el archivo donde está `psql` y lo envía. `COPY` sin barra lo lee el propio servidor, y en un servicio gestionado no tiene acceso a tus archivos.
-- **Un CSV no tiene tipos:** `fecha` llega como texto ISO y PostgreSQL lo convierte al tipo de la columna. Si una fila trae un formato raro, el `\copy` se detiene en esa línea y dice cuál es. Revisa las fechas y los booleanos al exportar.
+- **`\copy` lee desde tu equipo; `COPY`, desde el servidor,** que en un servicio gestionado no ve tus archivos.
+- **Un CSV no tiene tipos:** la fecha llega como texto ISO y se convierte; una fila rara detiene el `\copy` en su línea. Revisa fechas y booleanos al exportar.
 
 </Callout>
 
 ## Paso 2: las trampas de `JOIN`, y `HAVING`
 
-`11-joins.sql`, con el progreso de `u_00007`:
+**Qué es:** dos formas de que un `LEFT JOIN` dé un número que parece bueno y no lo es, y `HAVING`, que filtra grupos.
+
+**Cómo se usa:** `11-joins.sql`, con el progreso de `u_00007`:
 
 ```sql
 -- Archivo: 11-joins.sql
@@ -200,20 +202,22 @@ LIMIT 5;
 (5 rows)
 ```
 
-- **Trampa 1: un `LEFT JOIN` con el filtro en el `WHERE` deja de serlo.** El `LEFT JOIN` rellena con `NULL` los cursos sin lecturas, y el `WHERE l.usuario_id = 'u_00007'` descarta justo esas filas (`NULL` no es igual a nada). Resultado: 12 cursos, como un `JOIN` normal. Con el filtro **en el `ON`**, los 24.
-- **Trampa 2: `count(*)` cuenta la fila vacía.** En B1, que `u_00007` no ha empezado, `count(*)` dice 1, porque el `LEFT JOIN` produjo una fila (llena de `NULL`). `count(l.seccion_id)` cuenta solo los valores que no son `NULL`: 0.
-- **`HAVING` filtra grupos, después de agrupar:** "los cursos con más de 300 personas" no se puede escribir en el `WHERE`, porque el número de personas no existe hasta que se agrupa.
+- **Trampa 1, el filtro en el `WHERE` anula el `LEFT JOIN`:** los cursos sin lecturas tienen `NULL`, y `WHERE l.usuario_id = 'u_00007'` los descarta. 12 cursos, como un `JOIN`; con el filtro **en el `ON`**, los 24.
+- **Trampa 2, `count(*)` cuenta la fila vacía:** B1, sin empezar, da 1; `count(l.seccion_id)` solo cuenta lo que no es `NULL`: 0.
+- **`HAVING` filtra después de agrupar:** "más de 300 personas" no existe hasta agrupar, así que no cabe en el `WHERE`.
 
 <Callout type="risk">
 
-- **Ninguna de las dos trampas da error:** devuelven un número que parece correcto. Comprueba siempre un caso que conozcas (un curso sin empezar debería dar 0) antes de fiarte de una consulta con `LEFT JOIN`.
-- **`count(DISTINCT …)` es caro con muchos datos:** tiene que recordar cada valor distinto. En una tabla de millones de filas, una agregación previa por usuario suele ser mucho más rápida.
+- **Ninguna trampa da error:** comprueba un caso conocido (un curso sin empezar da 0) antes de fiarte de un `LEFT JOIN`.
+- **`count(DISTINCT …)` es caro con muchos datos:** recuerda cada valor. Una agregación previa por usuario suele ser más rápida.
 
 </Callout>
 
 ## Paso 3: subconsultas y CTE
 
-`12-subconsultas.sql`:
+**Qué es:** una **subconsulta** es una consulta dentro de otra; un **CTE** (`WITH`) pone nombre a cada paso para leer de arriba abajo.
+
+**Cómo se usa:** `12-subconsultas.sql`:
 
 ```sql
 -- Archivo: 12-subconsultas.sql
@@ -291,20 +295,22 @@ FROM avance;
 (1 row)
 ```
 
-- **Una subconsulta es una consulta dentro de otra:** en el `HAVING`, `(SELECT secciones FROM cursos WHERE id = 'B1')` trae el número de secciones de B1 para compararlo. 21 personas han terminado B1.
-- **`NOT IN` y `NOT EXISTS` coinciden… hasta que hay un `NULL`.** Con un solo `NULL` en la subconsulta, `NOT IN` devuelve **0 cursos** en lugar de 20. `x NOT IN (a, b, NULL)` significa "x no es a, ni b, ni NULL", y comparar con `NULL` da "desconocido", nunca "verdadero". `NOT EXISTS` no tiene ese problema.
-- **Un CTE (`WITH`) pone nombre a cada paso:** `leidas` y luego `avance`, leídos de arriba abajo, en lugar de subconsultas anidadas que se leen de dentro afuera. `count(*) FILTER (WHERE …)` cuenta según una condición sin escribir tres consultas.
+- **En el `HAVING`,** `(SELECT secciones FROM cursos WHERE id = 'B1')` trae las secciones de B1: 21 personas lo terminaron.
+- **`NOT IN` y `NOT EXISTS` coinciden hasta un `NULL`:** con uno solo, `NOT IN` devuelve **0 cursos** en vez de 20, porque comparar con `NULL` da "desconocido", nunca "verdadero". `NOT EXISTS` no falla.
+- **Con `WITH`, `leidas` y luego `avance`** se leen en orden, y `count(*) FILTER (WHERE …)` cuenta por condición sin tres consultas.
 
 <Callout type="risk">
 
-- **Usa `NOT EXISTS` en lugar de `NOT IN` con subconsultas:** basta con que la columna admita `NULL`, o que un `LEFT JOIN` dentro de la subconsulta los produzca, para que `NOT IN` devuelva vacío sin avisar.
-- **Un CTE no es una caché:** PostgreSQL puede calcularlo como una subconsulta más, y optimizarlo con el resto. Si lo usas varias veces y quieres que se calcule una sola, existe `WITH … AS MATERIALIZED`.
+- **`NOT EXISTS` mejor que `NOT IN`:** basta una columna con `NULL`, o un `LEFT JOIN` dentro, para que `NOT IN` devuelva vacío.
+- **Un CTE no es una caché:** PostgreSQL puede integrarlo en la consulta. Para calcularlo una vez, `WITH … AS MATERIALIZED`.
 
 </Callout>
 
 ## Paso 4: funciones de ventana
 
-Una **función de ventana** calcula sobre un grupo de filas (la "ventana") **sin agruparlas**: cada fila sigue en el resultado, con un valor más. `OVER (PARTITION BY … ORDER BY …)` define la ventana. `13-ventanas.sql`:
+**Qué es:** una **función de ventana** calcula sobre un grupo de filas **sin agruparlas**: cada fila sigue, con un valor más. `OVER (PARTITION BY … ORDER BY …)` define la ventana.
+
+**Cómo se usa:** `13-ventanas.sql`:
 
 ```sql
 -- Archivo: 13-ventanas.sql
@@ -415,15 +421,13 @@ SET
 (10 rows)
 ```
 
-- **"El último de cada grupo" con `ROW_NUMBER`:** numera las evaluaciones de cada curso de la más reciente a la más antigua, y `rn = 1` se queda con la última. Es la pregunta de la "última evaluación" del panel de I4.5, que en MongoDB necesitaba un `$lookup` con `$sort` y `$limit: 1` por cada curso.
-- **`DISTINCT ON`** es la forma corta de PostgreSQL (no existe en otros motores): la primera fila de cada `curso_id` según el `ORDER BY`. Mismo resultado.
-- **`ROW_NUMBER`, `RANK` y `DENSE_RANK` con empates:** dos personas empatan con 61 lecturas. `ROW_NUMBER` les da 2 y 3 (desempata como pueda); `RANK`, las dos 2 y salta al 4; `DENSE_RANK`, las dos 2 y sigue con el 3.
-- **`LAG`** trae el valor de la fila anterior de la ventana: el segundo intento de B2 mejoró 2 puntos. El primero no tiene anterior (`NULL`).
-- **La media móvil de 7 días** es una ventana de filas (`ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`): cada día, la media de él y los seis anteriores.
+- **"El último de cada grupo" con `ROW_NUMBER`:** numera cada curso de la más reciente a la más antigua y `rn = 1` se queda con la última; en MongoDB era un `$lookup` con `$sort` y `$limit: 1` por curso. **`DISTINCT ON`**, exclusivo de PostgreSQL, da lo mismo más corto.
+- **Con empates** (dos personas con 61 lecturas): `ROW_NUMBER` da 2 y 3, `RANK` 2 y 2 y salta al 4, `DENSE_RANK` 2 y 2 y sigue con el 3.
+- **`LAG`** trae la fila anterior: el segundo intento de B2 mejoró 2 puntos (el primero, `NULL`). **La media móvil de 7 días** es `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`.
 
 <Callout type="risk">
 
-- **El día depende de la zona horaria:** las lecturas se guardaron a medianoche UTC, y con la conexión en México, `::date` las pone en el día anterior:
+- **El día depende de la zona horaria:** a medianoche UTC, con la conexión en México, `::date` da el día anterior:
 
   ```text
   SET
@@ -439,15 +443,25 @@ SET
   (1 row)
   ```
 
-  Para agrupar por día, escribe la zona explícitamente (`AT TIME ZONE 'America/Mexico_City'`), como hizo I4.5 con `$dateTrunc`. Si no, el resultado depende de la configuración de quien ejecuta la consulta.
+  Agrupa con `AT TIME ZONE 'America/Mexico_City'`, como `$dateTrunc` en I4.5; si no, depende de quién ejecute.
 
-- **No se puede usar una función de ventana en el `WHERE`:** se calcula después. Por eso `rn = 1` va en una consulta exterior (el CTE `numeradas`).
+- **Una función de ventana no va en el `WHERE`,** que se calcula antes: `rn = 1` va en la consulta exterior (`numeradas`).
 
 </Callout>
 
 ## Paso 5: `jsonb` y sus índices
 
-`14-jsonb.sql`, con 100 000 usuarios con preferencias de forma libre:
+**Qué es:** operadores para consultar documentos dentro de una columna, y un índice **GIN** para acelerarlos.
+
+| Operador | Qué hace                     | Ejemplo                            |
+| -------- | ---------------------------- | ---------------------------------- |
+| `->`     | Saca una clave, como `jsonb` | `prefs -> 'avisos'`                |
+| `->>`    | Saca una clave, como texto   | `prefs -> 'avisos' ->> 'telegram'` |
+| `#>>`    | Sigue una ruta               | `prefs #>> '{favoritos,0}'`        |
+| `?`      | ¿Tiene esta clave?           | `prefs ? 'zona'`                   |
+| `@>`     | ¿Contiene este documento?    | `prefs @> '{"tema": "dark"}'`      |
+
+**Cómo se usa:** `14-jsonb.sql`, con 100 000 usuarios con preferencias libres:
 
 ```sql
 -- Archivo: 14-jsonb.sql
@@ -577,22 +591,13 @@ CREATE INDEX
 (1 row)
 ```
 
-| Operador | Qué hace                     | Ejemplo                            |
-| -------- | ---------------------------- | ---------------------------------- |
-| `->`     | Saca una clave, como `jsonb` | `prefs -> 'avisos'`                |
-| `->>`    | Saca una clave, como texto   | `prefs -> 'avisos' ->> 'telegram'` |
-| `#>>`    | Sigue una ruta               | `prefs #>> '{favoritos,0}'`        |
-| `?`      | ¿Tiene esta clave?           | `prefs ? 'zona'`                   |
-| `@>`     | ¿Contiene este documento?    | `prefs @> '{"tema": "dark"}'`      |
-
-- **Sin índice, la consulta recorre las 100 000 filas** (`Seq Scan`, 7,6 ms).
-- **Con un índice GIN, la misma consulta con `@>` lo usa** (`Bitmap Index Scan`, 2,2 ms). `jsonb_path_ops` es la variante más pequeña, pensada para `@>`.
-- **Con `->> =` el resultado es el mismo (6 666), pero el índice GIN no se usa:** vuelve el `Seq Scan`. Un índice GIN sobre `jsonb` sirve para `@>` (y, con la variante por defecto, para `?`), no para comparar un valor extraído. Para eso, un índice de expresión: `CREATE INDEX ON preferencias ((prefs ->> 'tema'))`.
+- **Sin índice, `Seq Scan` de 100 000 filas** (7,6 ms); **con GIN y `@>`,** `Bitmap Index Scan` (2,2 ms). `jsonb_path_ops` es la variante más pequeña, para `@>`.
+- **Con `->> =` sale lo mismo (6 666), pero sin usar el GIN:** vuelve el `Seq Scan`. Para comparar un valor extraído, un índice de expresión: `CREATE INDEX ON preferencias ((prefs ->> 'tema'))`.
 
 <Callout type="risk">
 
-- **Escribe las consultas sobre `jsonb` en la forma que el índice entiende:** dos consultas equivalentes pueden tener planes muy distintos. Comprueba con `EXPLAIN` (A3.3) que la tuya usa el índice.
-- **`jsonb_set` reescribe el documento entero:** cambiar una clave no es más barato que cambiar la fila. Si un campo se actualiza muy a menudo, merece ser una columna.
+- **Escribe la consulta en la forma que el índice entiende:** dos equivalentes pueden tener planes opuestos. Compruébalo con `EXPLAIN` (A3.3).
+- **`jsonb_set` reescribe el documento entero:** un campo que cambia a menudo merece ser columna.
 
 </Callout>
 
@@ -671,25 +676,23 @@ sudo -u postgres psql -X -d progreso -tA -f 15-ejercicio.sql
   Total: 46 de 134 secciones (34.3 %)
 ```
 
-Comparado con la salida de `npm start -- src/i4/05-ejercicio.ts` en MongoDB (sin su primera línea, la del tiempo), con `diff`: **idénticas**. Los mismos 14 cursos, en el mismo orden, con las mismas notas y fechas, y el mismo total de 46 de 134 secciones.
+- **Con `diff` frente a `npm start -- src/i4/05-ejercicio.ts` (sin su línea de tiempo), idénticas:** los mismos 14 cursos, orden, notas y fechas, y 46 de 134 secciones.
+- **`leidas` y `ultima` son agregaciones independientes** que `avance` une a los cursos con dos `LEFT JOIN`; en MongoDB, cada una era un `$lookup` por curso. "El último de cada grupo" es un `DISTINCT ON` (Paso 4).
+- **El total va sobre todos los cursos y la tabla sobre los empezados,** unidos con `UNION ALL`, como el `$facet` de I4.5.
 
-- **`leidas` y `ultima` son dos agregaciones independientes**, una por tabla, y `avance` las une a los cursos con dos `LEFT JOIN`. En MongoDB, cada una era un `$lookup` con _pipeline_ que se ejecuta **por cada curso**.
-- **"El último de cada grupo" es un `DISTINCT ON`** (o un `ROW_NUMBER`, Paso 4).
-- **El total se calcula sobre todos los cursos** (`avance`), y la tabla solo sobre los empezados: dos partes unidas con `UNION ALL`, como el `$facet` de I4.5.
-
-El tiempo, 20 ejecuciones de cada una, en el mismo equipo:
+20 ejecuciones de cada una, en el mismo equipo:
 
 ```text
 PostgreSQL: mediana 0.2 ms (mín. 0.2, máx. 0.4) en 20 ejecuciones
 MongoDB:    mediana 1.8 ms (mín. 1.6, máx. 2.3) en 20 ejecuciones
 ```
 
-Las dos son muy rápidas con estos datos, y la diferencia **no** dice que PostgreSQL sea nueve veces más rápido: `psql` se conectaba por un _socket_ local dentro de la máquina virtual y devolvía texto; Node, por TCP, y convertía el resultado a objetos de JavaScript. Lo comparable es que las dos responden en milisegundos con índices sobre el usuario. La comparación cuidadosa, con las dos desde TypeScript, es A3.6.
+- **Esto no dice que PostgreSQL sea nueve veces más rápido:** `psql` usaba un _socket_ local y devolvía texto; Node, TCP y objetos de JavaScript. Lo comparable: las dos responden en milisegundos con índices por usuario. La comparación cuidadosa, desde TypeScript, es A3.6.
 
 <Callout type="risk">
 
-- **Formatear en SQL es posible, pero no es lo habitual:** aquí sirve para comparar con `diff`. En una app, la consulta devuelve columnas y el formato (fechas en español, `✓`) lo pone la interfaz.
-- **El orden de las filas solo está garantizado con `ORDER BY`:** sin él, PostgreSQL puede devolver las filas en cualquier orden, y el mismo `diff` fallaría un día sin que nada haya cambiado.
+- **Formatear en SQL sirve aquí para el `diff`;** en una app, la consulta devuelve columnas y la interfaz formatea.
+- **Sin `ORDER BY`, el orden no está garantizado:** el mismo `diff` podría fallar un día sin cambios.
 
 </Callout>
 
@@ -701,9 +704,9 @@ Usas una función de ventana para resolver "el último de cada grupo": `ROW_NUMB
 
 ## Resumen
 
-- `mongoexport --type=csv` y `\copy … WITH (FORMAT csv, HEADER true)`: los datos de MongoDB en PostgreSQL.
-- En un `LEFT JOIN`, el filtro de la tabla de la derecha va en el `ON`; y se cuenta con `count(columna)`, no con `count(*)`.
-- `NOT EXISTS` en lugar de `NOT IN`: un solo `NULL` hizo que `NOT IN` devolviera 0 filas en lugar de 20.
-- CTE (`WITH`) para leer la consulta de arriba abajo; `FILTER (WHERE …)` para contar por condición.
-- Ventanas: `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG` y medias móviles. Agrupa por día con la zona horaria explícita.
-- `jsonb`: `->`, `->>`, `?`, `@>`. Un índice GIN sirve para `@>`, no para `->> =`.
+- `mongoexport --type=csv` y `\copy … WITH (FORMAT csv, HEADER true)` llevan los datos a PostgreSQL.
+- En un `LEFT JOIN`, el filtro va en el `ON`, y se cuenta con `count(columna)`.
+- `NOT EXISTS` mejor que `NOT IN`: un `NULL` dejó `NOT IN` en 0 filas.
+- CTE para leer de arriba abajo; `FILTER (WHERE …)` para contar por condición.
+- `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG` y medias móviles; los días, con zona explícita.
+- `jsonb`: un GIN sirve para `@>`, no para `->> =`.

@@ -7,15 +7,13 @@ minutes: 75
 summary: "Instalas PostgreSQL 18 y usas psql, mides sus tipos (integer que se desborda, numeric exacto, timestamptz, uuidv7, jsonb, arrays) y llevas el esquema de B4 a PostgreSQL con restricciones que rechazan diez errores."
 ---
 
-En B4 aprendiste SQL con SQLite: una base de datos en un archivo, perfecta para empezar, pero con tipos flexibles (acepta `'hola'` en una columna `INTEGER`) y sin fechas de verdad. **PostgreSQL** es la base de datos relacional de código abierto más usada en aplicaciones web: un servidor al que se conectan tus programas, con tipos estrictos, fechas con zona horaria, JSON indexable, arrays y restricciones que hacen cumplir las reglas del modelo. En este curso la vas a usar para poder comparar con criterio con MongoDB. En esta sección vas a instalarla, a conocer su cliente `psql`, a medir sus tipos de datos y a llevar el modelo de Dani Academy de B4 a PostgreSQL, con todas sus reglas.
+SQLite (B4) acepta `'hola'` en un `INTEGER` y no tiene fechas de verdad. **PostgreSQL**, la base de datos relacional libre más usada en la web, es un servidor con tipos estrictos, fechas con zona, JSON indexable, arrays y restricciones que hacen cumplir el modelo. Aquí la instalas, mides sus tipos y llevas el modelo de Dani Academy de B4 a PostgreSQL, para comparar después con MongoDB.
 
-**Lo que tendrás al terminar:** PostgreSQL 18 funcionando, una carpeta `pg-lab` con los archivos `.sql` de la sección, y el esquema de Dani Academy en PostgreSQL, que rechaza por sí solo diez formas distintas de datos incorrectos.
-
-**Requisitos:** el curso B4 (SQL básico y el modelo de Dani Academy, con su `esquema.sql`).
+**Requisitos:** B4 (SQL básico y el modelo de Dani Academy, con su `esquema.sql`).
 
 ## Paso 1: instalar PostgreSQL y conectar con `psql`
 
-Hay tres formas habituales de tener PostgreSQL en tu equipo:
+**Qué es:** tres formas de tenerlo en tu equipo, y **`psql`**, su cliente de terminal, cuyas órdenes que empiezan por `\` son de `psql`, no de SQL.
 
 | Forma                  | Comando                                                                               | Cuándo                                                                       |
 | ---------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
@@ -23,7 +21,7 @@ Hay tres formas habituales de tener PostgreSQL en tu equipo:
 | Instalación nativa     | Homebrew en Mac (`postgresql@` y la versión), `sudo apt install postgresql` en Ubuntu | Si no usas Docker                                                            |
 | Un servicio gestionado | Neon, Supabase… (Paso 4)                                                              | Para no instalar nada, o para compartir la base con un despliegue            |
 
-Este laboratorio usa la **instalación nativa en Ubuntu 26.04**, en la máquina virtual de I6, con `sudo apt install postgresql` (no se ha probado con Docker). `apt` instala el servidor, lo arranca como servicio de `systemd` (I6.4) y crea el usuario de base de datos `postgres`, con el que se conecta el resto de la sección:
+**Cómo se usa:** este laboratorio usa la **instalación nativa en Ubuntu 26.04**, en la máquina de I6 (no se probó con Docker). `apt` instala el servidor, lo arranca con `systemd` (I6.4) y crea el usuario de base de datos `postgres`:
 
 ```text
 $ psql --version
@@ -34,7 +32,7 @@ $ sudo -u postgres psql -c "select version();"
 PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1) on aarch64-unknown-linux-gnu, compiled by gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0, 64-bit
 ```
 
-**`psql`** es el cliente de la terminal. Con Docker, `docker exec -it pg psql -U postgres`; con la instalación nativa de Ubuntu, `sudo -u postgres psql`. Dentro, las órdenes que empiezan por `\` son de `psql`, no de SQL:
+Con Docker se entra con `docker exec -it pg psql -U postgres`; en Ubuntu, con `sudo -u postgres psql`.
 
 | Orden                    | Qué hace                                                                   |
 | ------------------------ | -------------------------------------------------------------------------- |
@@ -47,7 +45,7 @@ PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1) on aarch64-unknown-linux-gnu, com
 | `\?` y `\h CREATE TABLE` | Ayuda de `psql` y de SQL                                                   |
 | `\q`                     | Sale                                                                       |
 
-Crea las dos bases de la sección (una de pruebas y la del ejercicio) y la carpeta de trabajo:
+Las dos bases de la sección y la carpeta de trabajo:
 
 ```bash
 sudo -u postgres createdb academy_lab
@@ -55,24 +53,26 @@ sudo -u postgres createdb academia
 mkdir pg-lab && cd pg-lab
 ```
 
-Cada archivo de la sección se ejecuta con `psql -f`. Los errores no detienen el archivo, y `psql` dice en qué línea ocurrió cada uno (`psql:01-tipos.sql:6: ERROR: …`):
+Cada archivo se ejecuta con `psql -f`; los errores no lo detienen y dicen su línea (`psql:01-tipos.sql:6: ERROR: …`):
 
 ```bash
 sudo -u postgres psql -X -d academy_lab -f 01-tipos.sql
 ```
 
-(Con Docker, `docker exec -i pg psql -U postgres -X -d academy_lab < 01-tipos.sql`, con la diferencia de que los errores dicen `<stdin>` en lugar del nombre del archivo).
+- **Con Docker,** `docker exec -i pg psql -U postgres -X -d academy_lab < 01-tipos.sql`, y los errores dicen `<stdin>` en vez del archivo.
 
 <Callout type="risk">
 
-- **El usuario `postgres` es el superusuario:** puede hacerlo todo, en todas las bases. Está bien para aprender en tu equipo; una aplicación nunca debería conectarse con él (lo mismo que con `root` en MongoDB, A2.5). En A3.4 conectarás desde TypeScript con un usuario propio.
-- **Con Docker, `-p 5432:5432` publica el puerto en tu equipo:** si tu equipo está en una red pública y la contraseña es `dev`, cualquiera en esa red puede entrar. Para practicar, `-p 127.0.0.1:5432:5432` lo limita a tu propio equipo.
+- **`postgres` es el superusuario:** vale para aprender en tu equipo, nunca para una app (como `root` en MongoDB, A2.5). En A3.4, un usuario propio.
+- **Con Docker, `-p 5432:5432` publica el puerto:** en una red pública y con contraseña `dev`, cualquiera entra. `-p 127.0.0.1:5432:5432` lo limita a tu equipo.
 
 </Callout>
 
 ## Paso 2: los tipos de datos
 
-En SQLite, los tipos son orientativos. En PostgreSQL, cada columna tiene un tipo y la base lo hace cumplir. Crea `01-tipos.sql`:
+**Qué es:** cada columna tiene un tipo y PostgreSQL lo hace cumplir, a diferencia de SQLite.
+
+**Cómo se usa:** crea `01-tipos.sql`.
 
 ```sql
 -- Archivo: 01-tipos.sql
@@ -241,15 +241,17 @@ LINE 1: SELECT 'hola'::integer;
 
 <Callout type="risk">
 
-- **Convertir a `varchar(10)` recorta sin avisar:** `'Entregar el informe'::varchar(10)` da `'Entregar e'`, sin error. En cambio, **insertar** un texto demasiado largo en una columna `varchar(200)` sí es un error (lo verás en el Paso 3). Por eso muchas guías de PostgreSQL recomiendan `text` con un `CHECK (length(…) <= n)`, que se comporta igual en los dos casos.
-- **Usa siempre `timestamptz`, no `timestamp`:** el nombre engaña, porque `timestamptz` no guarda la zona horaria, sino el instante en UTC, y lo muestra en la zona de la conexión. `timestamp` sin zona es la causa de casi todos los errores de horas: dos servidores en zonas distintas interpretan la misma fila de forma distinta.
-- **`jsonb` no es un sustituto de las columnas:** sirve para lo que de verdad no tiene forma fija (preferencias, metadatos). Lo que tiene forma conocida va en columnas, con sus tipos y restricciones.
+- **Convertir a `varchar(10)` recorta sin avisar** (`'Entregar e'`), pero **insertar** algo demasiado largo en `varchar(200)` es un error (Paso 3). Por eso se recomienda `text` con `CHECK (length(…) <= n)`, igual en los dos casos.
+- **Siempre `timestamptz`:** guarda el instante en UTC y lo muestra en la zona de la conexión. `timestamp` sin zona causa casi todos los errores de horas entre servidores.
+- **`jsonb` no sustituye a las columnas:** para preferencias o metadatos sin forma fija; lo conocido, en columnas con tipo y restricciones.
 
 </Callout>
 
 ## Paso 3: restricciones, que la base de datos diga que no
 
-Las restricciones son reglas que PostgreSQL comprueba en cada escritura. Si una no se cumple, la escritura entera se rechaza. Crea `02-restricciones.sql`:
+**Qué es:** reglas que PostgreSQL comprueba en cada escritura; si una no se cumple, la escritura entera se rechaza.
+
+**Cómo se usa:** crea `02-restricciones.sql`.
 
 ```sql
 -- Archivo: 02-restricciones.sql
@@ -389,23 +391,26 @@ DELETE 1
 | `FOREIGN KEY` (`REFERENCES`) | Una fila que apunta a algo que no existe              | `violates foreign key constraint "entrenos_usuario_id_fkey"`          |
 | `PRIMARY KEY`                | Ids repetidos o vacíos                                | Es `NOT NULL` + `UNIQUE`                                              |
 
-- **Un `CHECK` puede comparar varias columnas:** `tipo = 'running' OR km IS NULL` es la regla de los km de tu app de entrenos (I3), escrita en la base de datos. Ningún programa, ni uno con un error, puede saltársela.
-- **`GENERATED ALWAYS AS IDENTITY`** numera los entrenos solo, y no deja escribir el `id` a mano (`cannot insert a non-DEFAULT value into column "id"`). Es la forma moderna; la antigua, `serial`, sí deja.
-- **`UNIQUE` distingue mayúsculas:** `Ana@Example.com` entra aunque ya exista `ana@example.com`. Un índice único sobre `lower(email)` lo impide.
-- **`ON DELETE CASCADE`** borra los entrenos al borrar a su usuario. Sin él, borrar un usuario con entrenos sería un error, que es lo que conviene para otras relaciones (el ejercicio).
+- **Un `CHECK` compara varias columnas:** `tipo = 'running' OR km IS NULL` es la regla de los km de I3, en la base de datos; ningún programa se la salta.
+- **`GENERATED ALWAYS AS IDENTITY`** numera solo y no deja escribir el `id` (`cannot insert a non-DEFAULT value into column "id"`); el antiguo `serial` sí deja.
+- **`UNIQUE` distingue mayúsculas:** `Ana@Example.com` entra junto a `ana@example.com`; un índice único sobre `lower(email)` lo impide.
+- **`ON DELETE CASCADE`** borra los entrenos con su usuario; sin él, borrar sería un error, lo que conviene para otras relaciones (ejercicio).
 
 <Callout type="risk">
 
-- **Los intentos fallidos también gastan números:** en los errores, los entrenos rechazados llevan los `id` 3 y 4. Los números de una columna `IDENTITY` no se devuelven si la inserción falla, así que **habrá huecos**. Un `id` no es un contador de cuántos hay.
-- **Pon nombre a las restricciones que vayas a ver a menudo:** PostgreSQL inventa nombres como `entrenos_check`. Con `CONSTRAINT solo_running_lleva_km CHECK (…)`, el error dice qué regla se incumplió, y la app puede traducirlo a un mensaje para el usuario.
+- **Los intentos fallidos gastan números:** los entrenos rechazados llevaban los `id` 3 y 4. `IDENTITY` deja huecos: un `id` no cuenta cuántos hay.
+- **Nombra las restricciones frecuentes:** con `CONSTRAINT solo_running_lleva_km CHECK (…)`, el error dice qué regla falló y la app puede traducirlo.
 
 </Callout>
 
 ## Paso 4: servicios gestionados
 
-Igual que Atlas con MongoDB, hay servicios que te dan un PostgreSQL sin instalar nada: **Neon** y **Supabase** son dos de los más conocidos, con planes gratuitos. Te dan una cadena de conexión con la forma `postgresql://usuario:contraseña@servidor/base?sslmode=require`, que es lo único que cambia respecto a tu base local: el SQL de esta sección funciona igual. Supabase añade alrededor autenticación, almacenamiento de archivos y una API generada a partir de las tablas; Neon se centra en la base de datos (y permite crear copias de una base para probar cambios). Revisa los límites del plan gratuito de cada uno antes de elegir.
+**Qué es:** como Atlas con MongoDB, **Neon** y **Supabase** (con planes gratuitos) dan un PostgreSQL sin instalar nada, con una cadena `postgresql://usuario:contraseña@servidor/base?sslmode=require`. Solo cambia eso; el SQL es el mismo.
 
-En este laboratorio **no se ha usado ninguno**: todo es local. Las mismas preguntas de A2.5 sirven para elegir: quién hace las copias, quién aplica los parches y qué pasa si el servicio cae.
+**Cómo se usa:**
+
+- **Supabase añade autenticación, archivos y una API** generada desde las tablas; **Neon** se centra en la base y permite copias para probar cambios. Revisa sus planes gratuitos.
+- **No se ha usado ninguno en este laboratorio,** todo es local. Se eligen con las preguntas de A2.5: quién hace las copias, quién aplica los parches y qué pasa si el servicio cae.
 
 ## Ejercicio práctico
 
@@ -417,7 +422,7 @@ En este laboratorio **no se ha usado ninguno**: todo es local. Las mismas pregun
 
 </Callout>
 
-Solución. `03-esquema.sql`, que se ejecuta en la base `academia`:
+Solución. `03-esquema.sql`, en la base `academia`:
 
 ```sql
 -- Archivo: 03-esquema.sql
@@ -489,13 +494,10 @@ CREATE INDEX
 (5 rows)
 ```
 
-Lo que cambia respecto al `esquema.sql` de B4:
-
-- **Los ids de usuario son `uuid` con `uuidv7()`:** no revelan cuántos usuarios hay (un `1, 2, 3…` sí) y, a diferencia de `gen_random_uuid()`, se ordenan por fecha de creación, lo que favorece al índice.
-- **Los ids de curso y de sección comprueban su formato** con la misma expresión regular que la plataforma (`~` es "cumple la expresión regular"), y una sección solo puede pertenecer al curso de su propio id.
-- **Las fechas son `timestamptz` con `now()` por defecto**, no texto ISO como en SQLite.
-- **`respuestas` es un array** de cinco números, comprobado con `cardinality`.
-- **Borrar un usuario borra sus lecturas e intentos** (`ON DELETE CASCADE`); **borrar un curso con secciones está prohibido** (sin `CASCADE`), porque perder un curso entero por un `DELETE` mal escrito sería mucho peor.
+- **Ids de usuario `uuid` con `uuidv7()`:** no revelan cuántos hay (un `1, 2, 3…` sí) y se ordenan por creación, lo que favorece al índice.
+- **Los ids de curso y sección comprueban su formato** con la expresión regular de la plataforma (`~`), y una sección solo pertenece al curso de su id.
+- **Fechas `timestamptz` con `now()`,** no texto ISO como en SQLite, y **`respuestas` es un array** de cinco, comprobado con `cardinality`.
+- **Borrar un usuario borra sus lecturas e intentos** (`CASCADE`); **borrar un curso con secciones está prohibido,** porque perderlo entero por un `DELETE` mal escrito sería peor.
 
 Las pruebas, `04-pruebas.sql`:
 
@@ -593,12 +595,12 @@ DELETE 1
 (1 row)
 ```
 
-Diez formas de romper el modelo, y diez errores: un curso que no existe en el temario, una sección asignada al curso equivocado, dos secciones con el mismo orden, el mismo correo con otras mayúsculas, un correo sin `@`, una lectura repetida, una lectura de una sección que no existe, una nota de 6, un intento con cuatro respuestas y borrar un curso con secciones. Y el borrado de la usuaria se lleva sus lecturas e intentos, como debe.
+- **Diez formas de romper el modelo y diez errores:** curso fuera del temario, sección en otro curso, orden repetido, correo repetido con mayúsculas, correo sin `@`, lectura repetida, lectura de una sección inexistente, nota de 6, intento con cuatro respuestas y borrar un curso con secciones. Y borrar a la usuaria se lleva sus lecturas e intentos.
 
 <Callout type="risk">
 
-- **La expresión regular del correo es una comprobación mínima:** que tenga `@` y un punto en el dominio. Validar un correo de verdad es enviarle un mensaje; la base solo impide los errores evidentes.
-- **Una restricción que añades a una tabla con datos se comprueba sobre los que ya hay:** si alguna fila no la cumple, `ALTER TABLE … ADD CONSTRAINT` falla. Con muchos datos, `NOT VALID` permite añadirla solo para las filas nuevas, y validar las antiguas después.
+- **La expresión regular del correo es mínima** (`@` y un punto en el dominio): validar de verdad es enviar un mensaje.
+- **Una restricción nueva se comprueba sobre los datos existentes:** si alguno no la cumple, `ADD CONSTRAINT` falla. Con muchos datos, `NOT VALID` y validar después.
 
 </Callout>
 
@@ -610,8 +612,8 @@ La base de datos impide por sí sola datos inconsistentes: eliges el tipo justo 
 
 ## Resumen
 
-- PostgreSQL es un servidor: Docker, instalación nativa o un servicio gestionado (Neon, Supabase). `psql` es su cliente, con órdenes `\l`, `\dt`, `\d`, `\x`.
-- Tipos medidos: `integer` se desborda en 2 147 483 647, `numeric` es exacto, `boolean` no acepta `si`, `timestamptz` guarda instantes, `uuidv7()` crece con el tiempo, `jsonb` normaliza.
-- `NOT NULL`, `UNIQUE`, `CHECK`, `FOREIGN KEY` y `PRIMARY KEY` rechazan la escritura entera si no se cumplen.
-- `UNIQUE` distingue mayúsculas: índice único sobre `lower(email)`. `IDENTITY` deja huecos.
-- El esquema de B4 en PostgreSQL rechazó las diez pruebas de datos incorrectos.
+- PostgreSQL es un servidor (Docker, nativo o gestionado), con `psql` y sus `\l`, `\dt`, `\d`, `\x`.
+- `integer` se desborda en 2 147 483 647, `numeric` es exacto, `boolean` no acepta `si`, `timestamptz` guarda instantes, `uuidv7()` crece con el tiempo y `jsonb` normaliza.
+- `NOT NULL`, `UNIQUE`, `CHECK`, `FOREIGN KEY` y `PRIMARY KEY` rechazan la escritura entera.
+- `UNIQUE` distingue mayúsculas (`lower(email)`); `IDENTITY` deja huecos.
+- El esquema de B4 rechazó las diez pruebas de datos incorrectos.
