@@ -7,15 +7,15 @@ minutes: 75
 summary: "Creas un servidor Ubuntu de práctica con Lima, un usuario deploy con sudo, lees y cambias permisos rwx en octal, das acceso por grupo a la carpeta de la app y gestionas paquetes con apt."
 ---
 
-Un servidor lo comparten varios usuarios y programas: tú, el usuario con el que se ejecuta la app, el servidor web, la base de datos. Linux decide qué puede hacer cada uno con **usuarios, grupos y permisos**, y casi todos los fallos de "no funciona en el servidor" (y muchos de seguridad) tienen que ver con ellos: un `.env` que lee cualquiera, una app que no puede escribir sus registros, un _script_ que no se puede ejecutar. En esta sección vas a crear tu servidor de práctica, un usuario para desplegar, y vas a leer y cambiar permisos hasta que `-rw-r--r--` te diga, de un vistazo, quién puede hacer qué. También instalarás programas con `apt`.
-
-**Lo que tendrás al terminar:** un servidor Ubuntu en tu Mac, el usuario `deploy` con `sudo`, la carpeta `/opt/entrenos` con permisos de grupo y soltura con `chmod`, `chown` y `apt`.
+Un servidor lo comparten varios usuarios y programas, y Linux decide qué puede hacer cada uno con **usuarios, grupos y permisos**. Casi todo "no funciona en el servidor" (y mucho de seguridad) viene de ahí: un `.env` que lee cualquiera, una app que no puede escribir, un _script_ que no se ejecuta. Aquí creas tu servidor de práctica y un usuario para desplegar, y lees y cambias permisos hasta entender `-rw-r--r--` de un vistazo.
 
 **Requisitos:** I6.1, un Mac con Apple Silicon o Intel, unos 3 GB libres y [Homebrew](https://brew.sh).
 
 ## Paso 1: tu servidor de práctica con Lima
 
-Para practicar sin miedo a romper nada (ni pagar) necesitas un Linux de verdad. Un contenedor de Docker no sirve: no tiene `systemd` (I6.4) ni _firewall_ (I6.5). **Lima** crea una máquina virtual con Ubuntu dentro de tu Mac, gratis y desde la terminal:
+**Qué es:** **Lima** crea una máquina virtual con Ubuntu dentro de tu Mac, gratis y desde la terminal: un Linux de verdad para romper sin miedo. Un contenedor de Docker no sirve: no tiene `systemd` (I6.4) ni _firewall_ (I6.5).
+
+**Cómo se usa:**
 
 ```bash
 brew install lima
@@ -25,29 +25,31 @@ limactl start academy
 limactl shell academy
 ```
 
-- **`--set '.mounts=[]'`:** por defecto, Lima comparte tu carpeta personal del Mac con la máquina virtual. Así no: lo que hagas dentro del servidor no puede tocar tus archivos.
-- **`.networks=[{"vzNAT":true}]`:** da al servidor una IP propia en una red interna con tu Mac (`192.168.64.x`). La usarás en I6.5 para comprobar el _firewall_ desde fuera.
-- **`limactl shell academy`** abre una terminal **dentro** del servidor. El indicador cambia y estás en Ubuntu: todo lo que escribas a partir de aquí, hasta `exit`, se ejecuta allí.
-
-En la medición, el servidor es Ubuntu 26.04 LTS. Lima crea un usuario con tu mismo nombre del Mac y con `sudo` sin contraseña (en las salidas aparece como `tu-usuario`). En un VPS real, el primer acceso suele ser como `root`, y lo primero que se hace es justo lo de este paso: crear otro usuario y dejar de usar `root`.
+- **`--set '.mounts=[]'`** no comparte tu carpeta del Mac: nada del servidor puede tocar tus archivos.
+- **`.networks=[{"vzNAT":true}]`** da al servidor una IP propia (`192.168.64.x`), que usarás en I6.5.
+- **`limactl shell academy`** abre una terminal **dentro**: hasta `exit`, todo se ejecuta en Ubuntu (26.04 LTS en la medición). Lima crea un usuario como el tuyo con `sudo` sin contraseña (`tu-usuario` en las salidas); un VPS suele empezar como `root`, y lo primero es lo del Paso 2.
 
 <Callout type="risk">
 
-- **Cuando acabes el curso, bórralo:** `limactl stop academy` lo apaga y `limactl delete academy` lo elimina con su disco. Mientras está encendido usa 2 GB de RAM.
-- **Mira siempre en qué terminal estás:** el indicador dice si estás en tu Mac o en el servidor. Un `sudo` en el sitio equivocado es el error más fácil de cometer en este curso.
+- **Bórralo al acabar el curso:** `limactl stop academy` lo apaga y `limactl delete academy` lo elimina; encendido usa 2 GB de RAM.
+- **Mira en qué terminal estás:** un `sudo` en el sitio equivocado es el error más fácil de este curso.
 
 </Callout>
 
 ## Paso 2: usuarios, grupos, `root` y `sudo`
 
-Cada usuario tiene un número (UID), un grupo principal y, opcionalmente, otros grupos. **`root`** (UID 0) puede hacer cualquier cosa, sin ninguna comprobación de permisos. Por eso no se trabaja con él: se trabaja con un usuario normal que usa **`sudo`** para las tareas de administración, una a una y quedando registradas. Crea el usuario con el que desplegarás la app:
+**Qué es:** cada usuario tiene un número (UID), un grupo principal y otros grupos. **`root`** (UID 0) puede todo sin comprobaciones, así que no se trabaja con él: se usa un usuario normal con **`sudo`**, una tarea cada vez y con registro.
+
+**Cómo se usa:** crea el usuario para desplegar.
 
 ```bash
 sudo adduser --disabled-password --comment "" deploy
 sudo passwd deploy
 ```
 
-`--disabled-password` crea el usuario sin contraseña para entrar (en I6.3 entrará por SSH con una clave). `passwd` le pone una contraseña, que es la que pedirá `sudo`: escríbela dos veces, larga y distinta de cualquier otra. Comprobado en el servidor:
+- **`--disabled-password`** lo crea sin contraseña para entrar (en I6.3, por SSH con clave), y **`passwd`** le pone la que pedirá `sudo`: larga y distinta de cualquier otra.
+
+Comprobado en el servidor:
 
 ```text
 $ whoami
@@ -76,23 +78,21 @@ $ sudo ls -a /root
 .ssh
 ```
 
-- **`id`** da el UID, el grupo principal y los demás grupos. `systemd-journal` permite al usuario de Lima leer los registros del sistema (I6.4).
-- **`usermod -aG sudo deploy`** añade `deploy` al grupo `sudo`. La `-a` (_append_) es crucial: sin ella, `-G` **sustituye** todos sus grupos por los indicados.
-- **`sudo -l -U deploy`** lista qué puede hacer con `sudo`: `(ALL : ALL) ALL`, cualquier comando como cualquier usuario.
-- **`/root` es de `root`:** sin `sudo`, ni siquiera se puede listar.
-- **`/etc/passwd`** guarda los usuarios (`getent passwd deploy`): nombre, UID 1001, GID 1001, carpeta personal y _shell_. La contraseña no está ahí: está, cifrada, en `/etc/shadow`, que solo lee `root`.
+- **`id`** da UID, grupo y grupos (`systemd-journal` deja leer los registros, I6.4). **`usermod -aG sudo deploy`** añade el grupo `sudo`; sin la `-a`, `-G` **sustituye** todos los grupos.
+- **`sudo -l -U deploy`** muestra `(ALL : ALL) ALL`; **`/root`** no se puede ni listar sin `sudo`.
+- **`/etc/passwd`** guarda nombre, UID 1001, GID 1001, carpeta y _shell_; la contraseña, cifrada, está en `/etc/shadow`, que solo lee `root`.
 
 <Callout type="risk">
 
-- **`usermod -G` sin `-a` es un clásico:** `sudo usermod -G docker deploy` deja a `deploy` **solo** en `docker`, sin `sudo`. Si ese era tu único usuario administrador, te has quedado sin forma de administrar el servidor.
-- **Los grupos nuevos se aplican en la siguiente sesión:** si añades tu propio usuario a un grupo, `groups` no lo mostrará hasta que salgas y vuelvas a entrar.
-- **Ubuntu 26.04 usa `sudo-rs`**, una reescritura de `sudo` en Rust (`sudo --version`: `sudo-rs 0.2.13`), y algunos mensajes cambian, como el que verás en el ejercicio. Los comandos y el archivo `/etc/sudoers` son los mismos.
+- **`usermod -G` sin `-a` es un clásico:** `-G docker deploy` lo deja **solo** en `docker`, sin `sudo`; si era tu único administrador, te quedas fuera.
+- **Los grupos nuevos se aplican en la siguiente sesión:** `groups` no los muestra hasta volver a entrar.
+- **Ubuntu 26.04 usa `sudo-rs`** (`sudo-rs 0.2.13`): cambian algunos mensajes, no los comandos ni `/etc/sudoers`.
 
 </Callout>
 
 ## Paso 3: leer y cambiar permisos
 
-Cada archivo tiene un **dueño**, un **grupo** y tres juegos de permisos: para el dueño, para el grupo y para todos los demás. Cada juego tiene tres letras:
+**Qué es:** cada archivo tiene **dueño**, **grupo** y tres juegos de permisos (dueño, grupo y los demás), de tres letras cada uno.
 
 | Letra | En un archivo            | En una carpeta                                 | Valor |
 | ----- | ------------------------ | ---------------------------------------------- | ----- |
@@ -100,7 +100,7 @@ Cada archivo tiene un **dueño**, un **grupo** y tres juegos de permisos: para e
 | `w`   | Modificarlo              | Crear, borrar o renombrar lo que contiene      | 2     |
 | `x`   | Ejecutarlo como programa | **Entrar** en ella y acceder a lo que contiene | 1     |
 
-`-rw-r--r--` se lee así: el primer carácter es el tipo (`-` archivo, `d` carpeta, `l` enlace); después, `rw-` para el dueño (leer y escribir), `r--` para el grupo (leer) y `r--` para los demás (leer). En **octal** se suma cada juego: `rw-` = 4+2 = **6**, `r--` = **4**, así que `-rw-r--r--` es **644**.
+`-rw-r--r--`: tipo (`-` archivo, `d` carpeta, `l` enlace), `rw-` dueño, `r--` grupo, `r--` otros. En **octal** se suma cada juego: `rw-` = 6, `r--` = 4, así que es **644**.
 
 | Octal | Letras      | Uso típico                                           |
 | ----- | ----------- | ---------------------------------------------------- |
@@ -111,7 +111,7 @@ Cada archivo tiene un **dueño**, un **grupo** y tres juegos de permisos: para e
 | `750` | `rwxr-x---` | Carpetas para el dueño y su grupo                    |
 | `700` | `rwx------` | Carpetas privadas                                    |
 
-Practica como `deploy`. `sudo -iu deploy` abre una sesión como ese usuario, en su carpeta. El segundo usuario que intenta leer sus archivos es el tuyo:
+**Cómo se usa:** como `deploy` (`sudo -iu deploy` abre su sesión), con tu usuario intentando leer sus archivos:
 
 ```text
 $ sudo -iu deploy bash -c 'umask; touch nota.txt; mkdir privado; echo "echo hola desde el script" > saluda.sh; ls -l'
@@ -158,22 +158,24 @@ $ sudo -iu deploy bash -c 'echo "{}" > config.json && echo "escrito"'
 escrito
 ```
 
-- **Los archivos nuevos nacen con `644` y las carpetas con `755`:** lo decide la **`umask`** (`0022`), que resta permisos a los de partida (`666` para archivos, `777` para carpetas).
-- **Un _script_ recién creado no se puede ejecutar** (`Permission denied`) hasta que se le da `x`: `chmod u+x` (notación simbólica: `u` dueño, `g` grupo, `o` otros, `a` todos; `+` añade, `-` quita).
-- **La carpeta personal de `deploy` es `750`** en Ubuntu: los demás usuarios no pueden entrar, aunque `nota.txt` sea `644`. Para leer un archivo hace falta permiso sobre el archivo **y** `x` en todas las carpetas del camino. Con `755`, `nota.txt` se lee; `.env` (600) y `privado` (700), no.
-- **`chown dueño:grupo`** cambia el dueño. Un archivo creado con `sudo` es de `root`, y `deploy` no puede escribirlo hasta que se le cambia.
+- **Lo nuevo nace con `644` y `755`:** la **`umask`** (`0022`) resta a `666` y `777`.
+- **Un _script_ nuevo no se ejecuta** (`Permission denied`) hasta `chmod u+x` (`u` dueño, `g` grupo, `o` otros, `a` todos; `+` añade, `-` quita).
+- **La carpeta de `deploy` es `750`:** nadie más entra, aunque `nota.txt` sea `644`. Hace falta permiso en el archivo **y** `x` en todo el camino. Con `755`, `nota.txt` se lee; `.env` (600) y `privado` (700), no.
+- **`chown dueño:grupo`** cambia el dueño: lo creado con `sudo` es de `root` y `deploy` no lo puede escribir hasta entonces.
 
 <Callout type="risk">
 
-- **`chmod 777` no arregla nada, lo rompe:** "no funciona, le pongo 777" hace que cualquier usuario y cualquier programa del servidor pueda modificar el archivo (o, en una carpeta, borrar lo que contiene). Busca **qué** usuario necesita **qué** permiso y da solo ese.
-- **Lo que creas con `sudo` es de `root`:** `sudo nano /opt/app/.env` o `sudo git clone` dejan archivos que la app (que corre como `deploy`) no podrá leer o escribir. Trabaja como el usuario de la app, o corrige con `chown` después.
-- **`chmod -R` sobre una carpeta también cambia las subcarpetas:** `chmod -R 644 carpeta` les quita la `x`, y nadie podrá entrar en ellas. Para carpetas y archivos distintos, usa `find carpeta -type d -exec chmod 755 {} +` y `find carpeta -type f -exec chmod 644 {} +`.
+- **`chmod 777` no arregla nada, lo rompe:** cualquiera puede modificar el archivo o vaciar la carpeta. Averigua **qué** usuario necesita **qué** permiso.
+- **Lo creado con `sudo` es de `root`:** `sudo nano /opt/app/.env` o `sudo git clone` dejan archivos que la app no lee. Trabaja como su usuario o `chown` después.
+- **`chmod -R 644` quita la `x` a las subcarpetas** y nadie entra. Por tipo: `find carpeta -type d -exec chmod 755 {} +` y `find carpeta -type f -exec chmod 644 {} +`.
 
 </Callout>
 
 ## Paso 4: instalar programas con `apt`
 
-Ubuntu instala programas desde sus **repositorios** con **`apt`**: descarga el paquete, sus dependencias y lo deja todo en su sitio. Siempre en dos pasos: actualizar la lista de lo disponible e instalar:
+**Qué es:** **`apt`** instala desde los **repositorios** de Ubuntu: el paquete, sus dependencias y todo en su sitio. Siempre en dos pasos: actualizar la lista e instalar.
+
+**Cómo se usa:**
 
 ```text
 $ sudo apt update 2>&1 | tail -n 2
@@ -211,20 +213,22 @@ $ tree --version
 bash: line 1: tree: command not found
 ```
 
-- **`apt update`** solo descarga la lista de paquetes y versiones; no instala ni cambia nada. Dice además cuántos paquetes tienen actualización.
-- **`apt install -y`** instala sin preguntar (`-y`, "sí a todo"). `tree` ocupa 52,7 kB.
-- **`dpkg -L`** lista dónde dejó cada archivo el paquete: el programa en `/usr/bin` y su manual en `/usr/share/man`.
-- **`apt remove`** lo desinstala. `apt purge` borra también su configuración, y `apt autoremove` las dependencias que ya nadie usa.
-- **`sudo apt upgrade`** instala las actualizaciones pendientes (41 en la medición). En un servidor, hazlo con regularidad: muchas son de seguridad.
+- **`apt update`** solo descarga la lista y dice cuántas actualizaciones hay; **`apt install -y`** instala sin preguntar (`tree`, 52,7 kB).
+- **`dpkg -L`** dice dónde quedó cada archivo: el programa en `/usr/bin`, el manual en `/usr/share/man`.
+- **`apt remove`** desinstala, `purge` borra también la configuración y `autoremove` las dependencias huérfanas. **`sudo apt upgrade`** instala las pendientes (41): hazlo con regularidad, muchas son de seguridad.
 
 <Callout type="risk">
 
-- **No instales programas a mano si hay paquete:** un programa copiado en `/usr/local/bin` desde una web no se actualiza con `apt upgrade` y nadie recordará que está ahí. Para Node.js, que tiene versiones muy distintas, usa el repositorio oficial de NodeSource o `nvm`, no un `.tar.gz` suelto.
-- **`apt upgrade` en producción, con cuidado:** actualiza todo lo instalado, y alguna actualización reinicia servicios (la base de datos, el servidor web). Hazlo en un momento tranquilo, y antes en un servidor de pruebas como este.
+- **No instales a mano si hay paquete:** algo copiado en `/usr/local/bin` no se actualiza y nadie lo recuerda. Para Node.js, el repositorio de NodeSource o `nvm`.
+- **`apt upgrade` en producción, con calma:** algunas actualizaciones reinician servicios. En un momento tranquilo y antes en un servidor de pruebas como este.
 
 </Callout>
 
 ## Paso 5: dónde está cada cosa
+
+**Qué es:** las carpetas del sistema y lo que contiene cada una.
+
+**Cómo se usa:**
 
 ```text
 $ ls /
@@ -281,12 +285,12 @@ $ sudo du -sh /usr /var /etc 2>/dev/null
 | `/tmp`  | Archivos temporales, que se borran al reiniciar                     | —                                            |
 | `/root` | La carpeta personal de `root`                                       | —                                            |
 
-- **`/etc/shadow` es `640` y del grupo `shadow`:** ni siquiera los usuarios con cuenta pueden leer los _hashes_ de las contraseñas (I5.1). `/etc/passwd`, en cambio, es `644`.
+- **`/etc/shadow` es `640` del grupo `shadow`:** nadie más lee los _hashes_ (I5.1). `/etc/passwd` es `644`.
 
 <Callout type="risk">
 
-- **Edita `/etc` con una copia de seguridad al lado:** `sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak` antes de tocarlo. Un error en la configuración de SSH puede dejarte fuera del servidor (I6.3).
-- **`/tmp` no es para guardar nada:** se vacía al reiniciar. Los _backups_ de I6.6 van en `/var/backups`.
+- **Antes de editar `/etc`, una copia:** `sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak`. Un error en SSH puede dejarte fuera (I6.3).
+- **`/tmp` se vacía al reiniciar:** los _backups_ de I6.6 van en `/var/backups`.
 
 </Callout>
 
@@ -328,15 +332,14 @@ $ sudo -iu lector bash -c 'sudo whoami'
 sudo: I'm sorry lector. I'm afraid I can't do that
 ```
 
-- **Sin el grupo, `lector` no puede ni listar `/opt/entrenos`:** la carpeta es `750` y él es "otros".
-- **Con `usermod -aG deploy lector`,** pasa a ser "grupo": lista la carpeta y lee `config.env` (`640`, `r` para el grupo), pero no `.env` (`600`) y no puede modificar `config.env` (el grupo no tiene `w`).
-- **`lector` no puede usar `sudo`:** no está en el grupo `sudo`. El mensaje es el de `sudo-rs`.
-- **Este es el patrón de un servidor real:** la app y sus archivos son de un usuario (`deploy`), y quien necesite leer registros o configuración entra en su grupo, sin poder tocar los secretos.
+- **Sin el grupo, `lector` no lista `/opt/entrenos`:** con `750`, es "otros".
+- **Con `usermod -aG deploy lector`** es "grupo": lista y lee `config.env` (`640`), pero ni `.env` (`600`) ni modificar `config.env` (sin `w`). Y sin `sudo`, con el mensaje de `sudo-rs`.
+- **Es el patrón de un servidor real:** la app y sus archivos de un usuario, y quien lee registros o configuración en su grupo, sin tocar los secretos.
 
 <Callout type="risk">
 
-- **El grupo da acceso a todo lo que el grupo puede leer:** meter a `lector` en `deploy` le da acceso a cualquier archivo `640` o `750` de `deploy`, no solo a `/opt/entrenos`. Para separar más, crea un grupo específico (`sudo addgroup entrenos-lectura`) y usa ese.
-- **Borra los usuarios de práctica:** `sudo deluser --remove-home lector`. Un usuario olvidado es una cuenta más que proteger.
+- **El grupo da todo lo que el grupo lee:** `lector` lee cualquier `640` o `750` de `deploy`, no solo `/opt/entrenos`. Para separar, un grupo propio (`sudo addgroup entrenos-lectura`).
+- **Borra los usuarios de práctica:** `sudo deluser --remove-home lector`.
 
 </Callout>
 
@@ -348,8 +351,8 @@ Lees `-rw-r--r--` y sabes quién puede hacer qué: el dueño lee y escribe, el g
 
 ## Resumen
 
-- Lima crea un servidor Ubuntu de práctica en tu Mac; sin carpetas compartidas, no puede tocar tus archivos.
-- No se trabaja como `root`: un usuario con `sudo` (`usermod -aG sudo`, con la `-a`).
-- `rwx` para dueño, grupo y otros; en octal, `r=4`, `w=2`, `x=1`: 644 archivos, 600 secretos, 755 y 750 carpetas.
-- En una carpeta, `x` es poder entrar: hace falta en todo el camino hasta el archivo.
-- `apt update` y después `apt install`; `dpkg -L` dice dónde quedó cada archivo.
+- Lima da un Ubuntu de práctica que no puede tocar tus archivos.
+- Nada como `root`: un usuario con `sudo` (`usermod -aG`, con la `-a`).
+- `r=4`, `w=2`, `x=1`: 644 archivos, 600 secretos, 755 y 750 carpetas.
+- En una carpeta, `x` es entrar, y hace falta en todo el camino.
+- `apt update`, después `apt install`; `dpkg -L` dice dónde quedó cada archivo.

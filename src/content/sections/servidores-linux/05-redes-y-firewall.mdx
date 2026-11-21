@@ -7,13 +7,15 @@ minutes: 60
 summary: "Descubres qué puertos expone tu servidor con ss, diagnosticas con curl y ping, cierras todo menos SSH y la web con ufw, distingues un puerto bloqueado de uno vacío y frenas los intentos de entrada con fail2ban."
 ---
 
-En I6.4 dejaste una app escuchando en el puerto 3000. Funciona, pero hay una pregunta que conviene hacerse siempre: **¿quién más puede conectarse?** Un servidor en Internet recibe conexiones de cualquier sitio, y todo programa que escucha en un puerto es una puerta: la base de datos que olvidaste proteger, el panel de pruebas, la app sin pasar por el servidor web. En esta sección vas a ver qué puertos expone tu servidor y a diagnosticar conexiones. Vas a cerrar con un **_firewall_** todo lo que no sea SSH y la web, y a frenar a quien prueba credenciales contra SSH una y otra vez.
+Tu app escucha en el puerto 3000, y la pregunta es: **¿quién más puede conectarse?** Cada programa que escucha en un puerto es una puerta abierta a Internet: una base de datos sin proteger, un panel de pruebas, la app sin el servidor web delante. Aquí haces el inventario de puertos, diagnosticas conexiones, cierras con un **_firewall_** todo salvo SSH y la web, y frenas a quien prueba credenciales contra SSH.
 
-**Lo que tendrás al terminar:** el inventario de puertos de tu servidor, `ufw` activo con solo los puertos 22, 80 y 443, y `fail2ban` vigilando SSH.
-
-**Requisitos:** el servidor de I6.4, con el servicio `entrenos` en marcha en el puerto 3000. Los comandos se escriben en el servidor (`ssh academy`), salvo los que indican el Mac.
+**Requisitos:** el servidor de I6.4 con `entrenos` en el puerto 3000. Los comandos van en el servidor (`ssh academy`), salvo los que indican el Mac.
 
 ## Paso 1: interfaces, IPs y puertos abiertos
+
+**Qué es:** **`ip -brief address`** lista las **interfaces** de red y sus IPs, **`ip route`** dice por dónde sale el tráfico y **`ss -tlnp`** (TCP, a la escucha, en número, con el proceso; `-u` añade UDP) dice qué programa escucha y **en qué dirección**.
+
+**Cómo se usa:**
 
 ```text
 $ ip -brief address
@@ -28,11 +30,8 @@ $ sudo ufw status
 Status: inactive
 ```
 
-- **`ip -brief address`** lista las **interfaces** de red y sus IPs. `lo` es la propia máquina (`127.0.0.1`, _localhost_); `lima0` es la red con tu Mac (`192.168.64.2`); `eth0`, la que usa Lima internamente. En un VPS verás una interfaz con la IP pública.
-- **`ip route`** dice por dónde sale el tráfico (`default via…`).
-- **`ufw status`:** el _firewall_ está **inactivo**. Todo lo que escucha está expuesto.
-
-Lo importante es qué programas escuchan, y dónde. **`ss -tlnp`** (TCP, a la escucha, en número y con el proceso; `-u` añade UDP):
+- **`lo` es la propia máquina** (`127.0.0.1`); `lima0`, la red con tu Mac (`192.168.64.2`); `eth0`, la interna de Lima. En un VPS verás la IP pública.
+- **`ufw` está inactivo:** todo lo que escucha está expuesto.
 
 ```text
 $ sudo ss -tlnp
@@ -45,15 +44,13 @@ LISTEN 0      511                *:3000             *:*    users:(("node",pid=10
 LISTEN 0      4096            [::]:22            [::]:*    users:(("sshd",pid=1074,fd=4),("systemd",pid=1,fd=208))
 ```
 
-La columna **Local Address** dice **en qué dirección** escucha cada programa:
-
 | Dirección                      | Quién puede conectarse                           | En este servidor                |
 | ------------------------------ | ------------------------------------------------ | ------------------------------- |
 | `127.0.0.1:…` o `127.0.0.53:…` | Solo la propia máquina                           | El DNS local (53), `containerd` |
 | `0.0.0.0:…` o `[::]:…`         | Cualquiera, por cualquier interfaz (IPv4 o IPv6) | SSH (22)                        |
 | `*:…`                          | Cualquiera, IPv4 e IPv6                          | **Tu app (3000)**               |
 
-Desde tu Mac, la app responde, y SSH y `ping` también:
+Desde tu Mac responden la app, SSH y `ping`:
 
 ```text
 $ curl -s http://192.168.64.2:3000/   (desde el Mac)
@@ -68,14 +65,16 @@ round-trip min/avg/max/stddev = 0.182/0.506/0.830/0.324 ms
 
 <Callout type="risk">
 
-- **Escuchar en `127.0.0.1` es la primera defensa:** un programa que solo escucha en _localhost_ no se alcanza desde fuera, aunque no haya _firewall_. Las bases de datos (MongoDB, PostgreSQL) y las apps que van detrás de un servidor web (A4) deben escuchar así. Node escucha en todas las interfaces si no le dices otra cosa (`servidor.listen(PORT, "127.0.0.1")` lo limita).
-- **Revisa `ss -tlnp` después de instalar algo:** muchos paquetes arrancan un servicio que escucha en un puerto. Si no sabes qué es un puerto abierto, averígualo antes de dejarlo.
+- **Escuchar en `127.0.0.1` es la primera defensa:** no se alcanza desde fuera ni sin _firewall_. Bases de datos y apps detrás de un servidor web (A4), así. Node escucha en todas si no se lo dices (`servidor.listen(PORT, "127.0.0.1")`).
+- **Revisa `ss -tlnp` tras instalar algo:** muchos paquetes arrancan un servicio con puerto. Si no sabes qué es, averígualo.
 
 </Callout>
 
 ## Paso 2: diagnosticar con `curl` y `ping`
 
-Cuando algo "no conecta", estas herramientas dicen dónde está el problema:
+**Qué es:** herramientas para saber **en qué capa falla** una conexión: sin `ping`, es la red (o el servidor está apagado); con `ping` pero sin puerto, el programa o el _firewall_; con puerto pero con error, la app.
+
+**Cómo se usa:**
 
 | Herramienta | Qué comprueba                                               | Ejemplo                                           |
 | ----------- | ----------------------------------------------------------- | ------------------------------------------------- |
@@ -85,20 +84,18 @@ Cuando algo "no conecta", estas herramientas dicen dónde está el problema:
 | `curl -I`   | Solo las cabeceras de la respuesta                          | `curl -I https://academy.danielvasquez.lat`       |
 | `ss -tlnp`  | En el servidor: que el programa escucha, y en qué dirección | Paso 1                                            |
 
-La pregunta que resuelven es **en qué capa falla**: si `ping` no responde, el problema es de red (o el servidor está apagado); si `ping` responde pero el puerto no, es el programa o el _firewall_; si el puerto conecta pero la web da un error, es la app.
-
 <Callout type="risk">
 
-- **Que `ping` no responda no significa que el servidor esté caído:** muchos proveedores bloquean ICMP. Prueba también el puerto (`nc -z`).
-- **`curl -s` oculta los errores:** sin `-S` (`--show-error`), un fallo de conexión no muestra nada y parece que la respuesta está vacía. Para diagnosticar, `curl -sS`, o `curl -v` para ver la conexión paso a paso.
+- **Sin `ping` no siempre está caído:** muchos proveedores bloquean ICMP. Prueba también el puerto.
+- **`curl -s` oculta los errores:** un fallo parece una respuesta vacía. Para diagnosticar, `curl -sS` o `curl -v`.
 
 </Callout>
 
 ## Paso 3: un _firewall_ con `ufw`
 
-Un **_firewall_** decide qué conexiones entran y cuáles no. **`ufw`** (_Uncomplicated Firewall_) es la forma sencilla de configurarlo en Ubuntu. La regla de oro: **denegar todo lo que entra por defecto y permitir solo lo que necesitas**. Para un servidor web, eso es SSH (22) para administrarlo y HTTP y HTTPS (80 y 443) para la web. La app del puerto 3000 no debe ser accesible directamente: en producción, el servidor web la sirve por el 443 (A4).
+**Qué es:** un **_firewall_** decide qué conexiones entran. **`ufw`** (_Uncomplicated Firewall_) lo configura en Ubuntu con la regla de oro: **denegar todo lo que entra y permitir solo lo necesario**, aquí SSH (22), HTTP y HTTPS (80 y 443). El 3000 no se expone: en producción, el servidor web lo sirve por el 443 (A4).
 
-Las órdenes, en este orden, las aplicarás en el ejercicio:
+**Cómo se usa:** estas órdenes, en este orden, las aplicarás en el ejercicio:
 
 ```bash
 sudo ufw default deny incoming
@@ -108,21 +105,21 @@ sudo ufw allow 80,443/tcp
 sudo ufw enable
 ```
 
-- **`default deny incoming`:** lo que no tenga una regla, no entra.
-- **`default allow outgoing`:** el servidor sí puede conectarse hacia fuera (para `apt`, para llegar a MongoDB Atlas…).
-- **`allow OpenSSH`** abre el 22 usando el perfil de SSH que trae Ubuntu (`sudo ufw app list` los lista).
-- **`enable`** lo activa ya y en cada arranque. Pregunta antes de hacerlo, porque podría cortar tu conexión SSH.
+- **`default deny incoming`** deja fuera lo que no tenga regla; **`default allow outgoing`** permite salir (para `apt`, MongoDB Atlas…).
+- **`allow OpenSSH`** abre el 22 con el perfil de Ubuntu (`sudo ufw app list`), y **`enable`** lo activa ya y en cada arranque, preguntando antes porque podría cortar tu SSH.
 
 <Callout type="risk">
 
-- **Permite SSH antes de `enable`:** si activas `ufw` con `deny incoming` y sin la regla de SSH, en un VPS acabas de dejarte fuera. Tendrías que entrar por la consola web del proveedor para arreglarlo. En Lima, te queda `limactl shell`.
-- **Con Docker, `ufw` no basta:** los puertos que publica Docker (`docker run -p 8080:80`) se abren con reglas propias que `ufw` no controla, y quedan accesibles aunque `ufw` los deniegue. Publícalos solo en `127.0.0.1` (`-p 127.0.0.1:8080:80`).
+- **SSH antes de `enable`:** con `deny incoming` y sin esa regla, en un VPS te dejas fuera; solo queda la consola del proveedor (en Lima, `limactl shell`).
+- **Con Docker, `ufw` no basta:** `docker run -p 8080:80` abre reglas propias que `ufw` no controla. Publica solo en `127.0.0.1` (`-p 127.0.0.1:8080:80`).
 
 </Callout>
 
 ## Paso 4: `fail2ban` contra los intentos de entrada
 
-Un servidor con el puerto 22 abierto en Internet recibe intentos de entrada automáticos sin parar. Con SSH solo por clave (I6.3), no pueden adivinar nada, pero llenan los registros y consumen recursos. **`fail2ban`** lee los registros y, cuando una IP falla demasiadas veces, la bloquea un tiempo en el _firewall_:
+**Qué es:** con el 22 abierto llegan intentos automáticos sin parar; con SSH solo por clave (I6.3) no adivinan nada, pero llenan registros y gastan recursos. **`fail2ban`** lee los registros y bloquea un tiempo en el _firewall_ las IP que fallan demasiado.
+
+**Cómo se usa:**
 
 ```bash
 sudo apt install -y fail2ban
@@ -159,10 +156,10 @@ $ sudo fail2ban-client get sshd maxretry; sudo fail2ban-client get sshd findtime
 600
 ```
 
-- **En Ubuntu, la vigilancia de SSH (`[sshd]`) viene activada** (`enabled = true` en `/etc/fail2ban/jail.d/defaults-debian.conf`) y lee el diario de `systemd` (`backend = systemd`).
-- **Los valores por defecto:** 5 fallos (`maxretry`) en 10 minutos (`findtime`, 600 s) bloquean la IP 10 minutos (`bantime`, 600 s).
+- **En Ubuntu, `[sshd]` viene activado** (`/etc/fail2ban/jail.d/defaults-debian.conf`) y lee el diario de `systemd`.
+- **Por defecto:** 5 fallos (`maxretry`) en 10 minutos (`findtime`) bloquean la IP 10 minutos (`bantime`).
 
-Para comprobar que funciona, haz desde tu Mac seis intentos fallidos contra **tu** servidor de práctica, con un usuario que no existe:
+Seis intentos fallidos desde tu Mac contra **tu** servidor de práctica, con un usuario inexistente:
 
 ```text
 $ for i in 1 2 3 4 5 6; do ssh -o BatchMode=yes nadie@192.168.64.2 true; done   (desde el Mac)
@@ -190,14 +187,13 @@ $ ssh academy whoami   (desde el Mac)
 deploy
 ```
 
-- **Tras 5 fallos, la IP de tu Mac (`192.168.64.1`) queda bloqueada:** `Banned IP list: 192.168.64.1`.
-- **El bloqueo es por IP, no por usuario:** ni siquiera tu clave buena entra (`Connection refused`). `fail2ban` no sabe que eras tú.
-- **`unbanip`** levanta el bloqueo. Hay que darlo desde **otra** vía: aquí, `limactl shell`; en un VPS, la consola del proveedor o esperar los 10 minutos.
+- **Tras 5 fallos, tu Mac (`192.168.64.1`) queda bloqueado,** y como es por IP, ni tu clave buena entra (`Connection refused`).
+- **`unbanip`** lo levanta, por **otra** vía: `limactl shell` aquí; en un VPS, la consola del proveedor o esperar 10 minutos.
 
 <Callout type="risk">
 
-- **Puedes bloquearte a ti mismo:** un `ssh` mal configurado que prueba claves equivocadas, o un compañero con la misma IP de oficina, cuentan como fallos. Añade tus IPs fijas a `ignoreip` en `/etc/fail2ban/jail.local` (nunca edites `jail.conf`, que las actualizaciones sobrescriben).
-- **`fail2ban` frena, no protege:** un atacante con muchas IPs reparte los intentos y no llega al límite. La protección real es SSH solo con clave (I6.3); `fail2ban` reduce el ruido y el consumo.
+- **Puedes bloquearte a ti mismo:** un `ssh` probando claves equivocadas o una IP de oficina compartida. Tus IP fijas, en `ignoreip` de `/etc/fail2ban/jail.local` (nunca en `jail.conf`).
+- **`fail2ban` frena, no protege:** con muchas IP, nadie llega al límite. La protección real es SSH solo con clave (I6.3).
 
 </Callout>
 
@@ -211,7 +207,7 @@ deploy
 
 </Callout>
 
-Solución, en el servidor (en `enable`, responde `y` a la pregunta):
+Solución, en el servidor (responde `y` en `enable`):
 
 ```text
 $ sudo ufw default deny incoming
@@ -255,10 +251,10 @@ $ curl -s localhost:3000/; echo
 {"pid":1008,"enMarchaSeg":135}
 ```
 
-- **`status verbose`** muestra la política por defecto (`deny (incoming), allow (outgoing)`) y las reglas, para IPv4 y para IPv6 (`v6`). **`status numbered`** las numera, para borrar una con `sudo ufw delete 2`.
-- **Desde dentro del servidor, la app sigue respondiendo** (`curl localhost:3000`): `ufw` filtra lo que llega de fuera, no el tráfico interno.
+- **`status verbose`** da la política (`deny (incoming), allow (outgoing)`) y las reglas IPv4 e IPv6 (`v6`); **`status numbered`** las numera para `sudo ufw delete 2`.
+- **Dentro del servidor, la app sigue respondiendo** (`curl localhost:3000`): `ufw` filtra lo que viene de fuera.
 
-Desde el Mac, contra la IP del servidor:
+Desde el Mac:
 
 ```text
 $ curl -sS --max-time 5 http://192.168.64.2:3000/   (desde el Mac)
@@ -273,14 +269,14 @@ $ ping -c 1 192.168.64.2 | tail -n 2
 round-trip min/avg/max/stddev = 0.578/0.578/0.578/nan ms
 ```
 
-- **El 3000 tarda 5 segundos y se rinde** (`Connection timed out`): `ufw` **descarta** los paquetes en silencio (`deny`), así que tu Mac espera una respuesta que nunca llega. Para quien explora puertos, un puerto que no responde no da pistas.
-- **El 80 responde al instante con un rechazo** (`Couldn't connect`, 1 s): `ufw` lo deja pasar, pero no hay ningún programa escuchando, y el sistema rechaza la conexión.
+- **El 3000 se rinde a los 5 segundos** (`Connection timed out`): `ufw` **descarta** en silencio, y quien explora puertos no recibe pistas.
+- **El 80 rechaza al instante** (`Couldn't connect`): `ufw` lo deja pasar, pero nadie escucha.
 - **El 22 sigue abierto y `ping` funciona:** `ufw` permite ICMP de serie.
 
 <Callout type="risk">
 
-- **Con Lima, no compruebes el _firewall_ contra `localhost`:** Lima reenvía al `localhost` de tu Mac los puertos que escuchan en la máquina virtual, entrando **por dentro**, y así se salta `ufw`. Medido: con `ufw` activo, `http://localhost:3000` desde el Mac sigue respondiendo (`{"pid":1008,…}`), y quien escucha en el Mac es `limactl`. Prueba siempre contra `192.168.64.2`.
-- **Comprueba siempre desde fuera:** `ufw status` dice qué reglas hay, no qué está accesible. La prueba real es conectarse desde otra máquina, como acabas de hacer.
+- **Con Lima, no compruebes contra `localhost`:** Lima reenvía al Mac los puertos de la máquina **por dentro**, saltándose `ufw`. Medido: `http://localhost:3000` sigue respondiendo, y quien escucha en el Mac es `limactl`. Prueba contra `192.168.64.2`.
+- **`ufw status` dice las reglas, no lo accesible:** la prueba real es conectarse desde otra máquina.
 
 </Callout>
 
@@ -292,8 +288,8 @@ Sabes qué puertos expone tu servidor y por qué: los lees con `ss -tlnp` y dist
 
 ## Resumen
 
-- `ip -brief address` para las interfaces; `ss -tlnp` para qué escucha y en qué dirección (`127.0.0.1` solo local, `0.0.0.0` o `*` para todos).
-- Diagnostica por capas: `ping` (red), `nc -z` (puerto), `curl -sS` (aplicación).
-- `ufw default deny incoming`, permitir SSH (antes de activar), 80 y 443, y `ufw enable`.
-- Un puerto bloqueado no responde (_timeout_); uno permitido sin programa rechaza al instante.
-- `fail2ban` bloquea 10 minutos las IPs con 5 fallos en 10 minutos, también la tuya: `unbanip` y `ignoreip`.
+- `ip -brief address` y `ss -tlnp`: `127.0.0.1` es solo local; `0.0.0.0` o `*`, para todos.
+- Por capas: `ping` (red), `nc -z` (puerto), `curl -sS` (aplicación).
+- `ufw default deny incoming`, SSH antes de activar, 80 y 443, y `ufw enable`.
+- Bloqueado: _timeout_; permitido sin programa: rechazo inmediato.
+- `fail2ban`: 5 fallos en 10 minutos, 10 minutos fuera; `unbanip` e `ignoreip`.

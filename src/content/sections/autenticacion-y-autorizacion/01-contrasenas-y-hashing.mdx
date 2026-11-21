@@ -7,11 +7,9 @@ minutes: 60
 summary: "Rompes contraseñas cifradas y hasheadas sin sal en milisegundos, mides cuánto frenan a un atacante scrypt y argon2id, ves qué hace exactamente Better Auth y escribes hash y verificar con timingSafeEqual."
 ---
 
-En I3.4 la sesión era de mentira: una _cookie_ con el _id_ del usuario, que cualquiera podía escribir. Este curso la sustituye por autenticación de verdad con Better Auth, la librería que usa esta plataforma. Antes de usarla, conviene entender qué hace con lo más delicado que guardarás nunca: **las contraseñas**. Las bases de datos se filtran (por un _backup_ olvidado, un servidor mal configurado o un empleado) y, cuando pasa, la forma en que guardaste las contraseñas decide si el atacante tiene cinco minutos de trabajo o cinco siglos. En esta sección vas a romper contraseñas guardadas mal, medir cuánto frena a un atacante guardarlas bien y escribir, solo para entenderlo, lo mismo que hace Better Auth.
+La sesión de I3.4 era de mentira; este curso la cambia por Better Auth, la librería de esta plataforma. Antes, lo más delicado que guardarás: **las contraseñas**. Las bases de datos se filtran, y cómo guardaste las contraseñas decide si el atacante tarda cinco minutos o cinco siglos. Aquí las rompes guardadas mal y mides cuánto frena guardarlas bien.
 
-**Lo que tendrás al terminar:** cuatro _scripts_ en `scripts/i5/` que rompen y protegen contraseñas, y `scripts/i5/hash.ts`, un `hash` y un `verificar` compatibles con el formato de Better Auth.
-
-**Requisitos:** la app `entrenos-app` de I3 y **Node 24.7 o posterior**, que ejecuta archivos `.ts` directamente (`node archivo.ts`) y trae `argon2` de serie. Compruébalo con `node --version`.
+**Requisitos:** la app `entrenos-app` de I3 y **Node 24.7 o posterior** (ejecuta `.ts` directamente y trae `argon2` de serie). Compruébalo con `node --version`.
 
 ```bash
 mkdir -p scripts/i5
@@ -19,7 +17,9 @@ mkdir -p scripts/i5
 
 ## Paso 1: por qué no se guardan en texto plano ni cifradas
 
-Guardar la contraseña tal cual es el error evidente: quien lea la base de datos lee las contraseñas. El error menos evidente es **cifrarla**. Cifrar es reversible por definición: con la clave, se recupera el original. Y la clave tiene que estar donde la app pueda usarla, es decir, en el mismo servidor que la base de datos. Crea `scripts/i5/01-cifrar.ts`:
+**Qué es:** en texto plano, quien lee la base de datos lee las contraseñas. **Cifrarlas** tampoco sirve: cifrar es reversible, y la clave tiene que estar donde la app la use, en el mismo servidor que los datos.
+
+**Cómo se usa:** crea `scripts/i5/01-cifrar.ts`.
 
 ```ts
 // Archivo: scripts/i5/01-cifrar.ts
@@ -68,19 +68,21 @@ El atacante, con la copia de la base de datos y la clave:
   bea@ejemplo.com → 123456
 ```
 
-AES-256-GCM es un cifrado excelente, y no sirve de nada aquí. El problema no es el algoritmo: es que **la app nunca necesita conocer la contraseña**, solo comprobar si la que escribe el usuario es la misma. Para eso basta una función de un solo sentido: un **_hash_**.
+- **AES-256-GCM es excelente y no sirve:** la app nunca necesita conocer la contraseña, solo comprobar si la escrita es la misma. Para eso basta una función de un solo sentido: un **_hash_**.
 
 <Callout type="risk">
 
-- **La contraseña es del usuario, no tuya:** mucha gente reutiliza la misma contraseña en varios servicios. Si se filtra la de tu app, también se filtra la de su correo o su banco. Por eso una filtración de contraseñas es grave aunque tu app no tenga nada valioso.
-- **"La clave está en otro sitio" casi nunca es verdad:** si la app descifra, la clave está en su memoria y en su configuración. Quien entra en el servidor se lleva las dos.
-- **No guardes contraseñas en ningún otro sitio:** ni en los registros ("login fallido de ana con 1234"), ni en mensajes de error, ni en Sentry. El _middleware_ de registro de I3.4 no registra cuerpos de petición precisamente por esto.
+- **La contraseña es del usuario:** mucha gente la reutiliza, y filtrar la tuya filtra la de su correo o su banco.
+- **"La clave está en otro sitio" casi nunca es verdad:** si la app descifra, la clave está en su memoria y su configuración.
+- **Nunca en ningún otro sitio:** ni registros ("login fallido de ana con 1234"), ni errores, ni Sentry. Por eso el registro de I3.4 no guarda cuerpos.
 
 </Callout>
 
 ## Paso 2: un _hash_ sin sal se rompe con una tabla
 
-Un _hash_ criptográfico como SHA-256 convierte cualquier texto en 64 caracteres hexadecimales, y no hay forma de volver atrás. Pero tiene dos propiedades que, para contraseñas, son un problema: **la misma entrada da siempre la misma salida**, y es **rapidísimo**. Crea `scripts/i5/01-sin-sal.ts`:
+**Qué es:** un _hash_ como SHA-256 convierte cualquier texto en 64 caracteres hexadecimales sin vuelta atrás. Pero **la misma entrada da siempre la misma salida** y es **rapidísimo**: dos problemas para contraseñas.
+
+**Cómo se usa:** crea `scripts/i5/01-sin-sal.ts`.
 
 ```ts
 // Archivo: scripts/i5/01-sin-sal.ts
@@ -142,27 +144,22 @@ Tabla precalculada: 126 contraseñas en 0.1 ms
 Rotas 5 de 6 en 0.06 ms (la tabla sirve para CUALQUIER base de datos con sha256 sin sal)
 ```
 
-- **Sin calcular nada, se sabe que Bea y Dani comparten contraseña:** sus _hashes_ son idénticos. Si una de las dos se descubre, cae la otra.
-- **La tabla se calcula una vez y sirve para siempre:** 126 contraseñas comunes en 0,1 ms. Las tablas reales tienen miles de millones de entradas y se descargan ya hechas; con ellas, romper cualquier base de datos con SHA-256 sin sal es buscar en un diccionario.
-- **Solo resiste `x7#Lq!m9Vz`**, la única que no está en la tabla. Las contraseñas comunes caen todas.
-
-Las **_rainbow tables_** son una versión de esta tabla que ocupa mucho menos espacio (guarda cadenas de _hashes_ en lugar de cada par), pero la idea es la misma: **precalcular**. Y es justo lo que la sal destruye.
+- **Sin calcular nada, Bea y Dani comparten contraseña:** sus _hashes_ son idénticos; si una cae, cae la otra.
+- **La tabla se calcula una vez y sirve siempre:** 126 contraseñas comunes en 0,1 ms. Las reales tienen miles de millones de entradas y se descargan hechas. Solo resiste `x7#Lq!m9Vz`, que no está.
+- **Las _rainbow tables_** son la misma idea, comprimida: **precalcular**. Es lo que la sal destruye.
 
 <Callout type="risk">
 
-- **MD5 y SHA-1 son peores, no mejores:** son aún más rápidos, y hay tablas enormes para ellos. Si heredas una base de datos con contraseñas en MD5, migra cada una en el siguiente inicio de sesión: si la contraseña es correcta con el _hash_ antiguo, guárdala con el nuevo algoritmo (es el único momento en que la app la tiene en claro).
-- **"Hash con un secreto fijo" (_pepper_) no sustituye a la sal:** concatenar la misma cadena secreta a todas las contraseñas impide usar las tablas públicas, pero dos usuarios con la misma contraseña siguen teniendo el mismo _hash_, y si el secreto se filtra con la base de datos, vuelves al punto de partida.
+- **MD5 y SHA-1 son peores:** más rápidos y con tablas enormes. Si los heredas, migra cada contraseña en el siguiente login, el único momento en que la app la tiene en claro.
+- **Un secreto fijo (_pepper_) no sustituye a la sal:** contraseñas iguales siguen dando _hashes_ iguales, y si el secreto se filtra con la base de datos, vuelves al principio.
 
 </Callout>
 
 ## Paso 3: sal y una función lenta a propósito
 
-La solución tiene dos partes:
+**Qué es:** dos partes. **Sal:** un valor aleatorio por usuario que se combina con la contraseña y se guarda junto al _hash_; así hace falta una tabla **por usuario**. **Lentitud:** un algoritmo que haga costoso cada intento (**bcrypt**, **scrypt** o **argon2**): al usuario, con un intento, no le afecta; al atacante, con miles de millones, sí.
 
-1. **Sal:** un valor aleatorio distinto para cada usuario, que se combina con la contraseña antes del _hash_ y se guarda junto a él. La misma contraseña da _hashes_ distintos en cada usuario, así que una tabla precalculada no sirve: habría que calcular una tabla **por usuario**.
-2. **Lentitud:** un algoritmo diseñado para que cada intento cueste tiempo y memoria (**bcrypt**, **scrypt** o **argon2**). Al usuario legítimo, que hace un intento, no le afecta; al atacante, que hace miles de millones, le cambia todo.
-
-Crea `scripts/i5/01-con-sal.ts`, que mide cuánto cuesta un intento con cada algoritmo:
+**Cómo se usa:** crea `scripts/i5/01-con-sal.ts`, que mide el coste de cada algoritmo.
 
 ```ts
 // Archivo: scripts/i5/01-con-sal.ts
@@ -231,10 +228,9 @@ Todas las de 8 letras minúsculas (208,827,064,576):
   argon2id  78 años
 ```
 
-- **La misma contraseña, `123456`, da dos resultados sin nada en común:** la sal (los 8 primeros caracteres) es distinta y, con ella, todo el _hash_.
-- **scrypt es 86 000 veces más lento que SHA-256** (25 intentos por segundo frente a más de 2 millones). Probar un diccionario de 10 millones contra **un** usuario pasa de 4,6 s a 5 días, y hay que repetirlo para cada usuario, porque cada uno tiene su sal.
-- **Probarlo todo es imposible:** las 208 000 millones de contraseñas de 8 letras minúsculas llevarían 263 años con scrypt.
-- **argon2id con los parámetros de OWASP es más rápido aquí que el scrypt de Better Auth**, pero tampoco lo es mucho para un atacante. Además de tiempo, los dos consumen **memoria** (19 MiB y 32 MiB por intento), y eso es lo que frena a las tarjetas gráficas, que hacen miles de millones de SHA-256 por segundo pero no tienen memoria para millones de intentos de scrypt en paralelo.
+- **`123456` da dos resultados sin nada en común:** la sal (los 8 primeros caracteres) es distinta.
+- **scrypt es 86 000 veces más lento que SHA-256:** un diccionario de 10 millones contra **un** usuario pasa de 4,6 s a 5 días, repetido por cada usuario. Las 208 000 millones de contraseñas de 8 minúsculas llevarían 263 años.
+- **Los dos consumen memoria** (19 MiB argon2id con OWASP y 32 MiB el scrypt de Better Auth por intento): eso frena a las tarjetas gráficas, rapidísimas con SHA-256 pero sin memoria para millones de scrypt en paralelo.
 
 | Algoritmo | Desde | Coste ajustable                  | Nota                                                                |
 | --------- | ----- | -------------------------------- | ------------------------------------------------------------------- |
@@ -244,13 +240,15 @@ Todas las de 8 letras minúsculas (208,827,064,576):
 
 <Callout type="risk">
 
-- **Lento en tu servidor también:** cada inicio de sesión cuesta 40 ms de CPU con scrypt. Es un precio razonable, pero un atacante puede usarlo para saturar el servidor con intentos de login. Por eso esta plataforma limita los intentos (Better Auth `rateLimit`: 5 por minuto en `/sign-in/email`, Tanda 9).
-- **Los parámetros envejecen:** el coste que hoy es "lento" lo será menos con el _hardware_ de dentro de diez años. Las librerías serias guardan los parámetros junto al _hash_ (argon2 lo hace: `$argon2id$v=19$m=19456,t=2,p=1$…`) para poder subirlos sin romper los _hashes_ antiguos.
-- **La sal no es secreta:** se guarda en claro junto al _hash_. Su trabajo es hacer única cada contraseña, no esconderse.
+- **Lento también en tu servidor:** 40 ms de CPU por login, que un atacante puede usar para saturarlo. Por eso esta plataforma limita los intentos (Better Auth `rateLimit`: 5 por minuto en `/sign-in/email`).
+- **Los parámetros envejecen:** las librerías serias los guardan con el _hash_ (`$argon2id$v=19$m=19456,t=2,p=1$…`) para subirlos sin romper los antiguos.
+- **La sal no es secreta:** va en claro junto al _hash_; su trabajo es hacer única cada contraseña.
 
 </Callout>
 
 ## Paso 4: los ataques y qué los para
+
+**Qué es:** los tres primeros ataques necesitan tu base de datos; el cuarto no.
 
 | Ataque                | Qué hace                                                                        | Qué lo para                                                            |
 | --------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -259,20 +257,16 @@ Todas las de 8 letras minúsculas (208,827,064,576):
 | _Rainbow tables_      | Busca en _hashes_ precalculados                                                 | La sal (Paso 3)                                                        |
 | _Credential stuffing_ | Prueba en tu login los pares correo-contraseña filtrados de **otros** servicios | Límite de intentos, avisar de inicios de sesión nuevos, segundo factor |
 
-Los tres primeros necesitan que el atacante tenga tu base de datos. El cuarto no: funciona contra tu formulario de login, con contraseñas que no se filtraron en tu app sino en otra, y que el usuario reutilizó. Ningún algoritmo de _hash_ lo para. Lo frenan el **límite de intentos** (esta plataforma: 5 por minuto por IP) y comprobar las contraseñas al registrarse contra las filtradas: Better Auth trae el _plugin_ `haveIBeenPwned`, que rechaza con `PASSWORD_COMPROMISED` las contraseñas que aparecen en filtraciones conocidas.
+**Cómo se usa:** contra el _credential stuffing_ no sirve ningún _hash_: lo frenan el **límite de intentos** (aquí, 5 por minuto por IP) y rechazar contraseñas filtradas al registrarse, con el _plugin_ `haveIBeenPwned` de Better Auth (`PASSWORD_COMPROMISED`). Y lo que hace Better Auth, leído en `node_modules/@better-auth/utils/dist/password.node.mjs`:
 
-Y **qué hace Better Auth**, leído en su código (`node_modules/@better-auth/utils/dist/password.node.mjs`):
-
-- **Algoritmo:** scrypt de `node:crypto`, con `N: 16384, r: 16, p: 1` y una clave de 64 bytes.
-- **Sal:** 16 bytes aleatorios por contraseña, en hexadecimal.
-- **Normalización:** `password.normalize("NFKC")` antes del _hash_ (lo entenderás en el ejercicio).
-- **Formato guardado:** `sal:clave`, los dos en hexadecimal (161 caracteres en total).
-- **Dónde:** en la colección **`account`**, campo `password`, en el documento con `providerId: "credential"`. No en `user`: así, un usuario que entra con Google tiene una cuenta sin contraseña y el mismo documento `user`. Lo verás en I5.2.
+- **scrypt** de `node:crypto`, con `N: 16384, r: 16, p: 1` y clave de 64 bytes, y **sal** de 16 bytes aleatorios en hexadecimal.
+- **`password.normalize("NFKC")`** antes del _hash_ (el ejercicio lo explica), y se guarda **`sal:clave`**, 161 caracteres.
+- **En la colección `account`,** campo `password`, documento con `providerId: "credential"`, no en `user`: quien entra con Google tiene cuenta sin contraseña y el mismo `user` (I5.2).
 
 <Callout type="risk">
 
-- **El límite de intentos por IP no basta contra redes de bots:** un ataque distribuido usa miles de IP, cada una por debajo del límite. Para eso están el bloqueo por cuenta, los avisos al usuario y el segundo factor (Better Auth tiene el _plugin_ `twoFactor`).
-- **`haveIBeenPwned` envía datos fuera:** manda a la API los 5 primeros caracteres del SHA-1 de la contraseña (nunca la contraseña), y recibe todos los _hashes_ que empiezan igual. Es seguro, pero añade una dependencia externa en cada registro: si la API no responde, decide si el registro falla o continúa.
+- **El límite por IP no para a las redes de bots,** con miles de IP: bloqueo por cuenta, avisos y segundo factor (_plugin_ `twoFactor`).
+- **`haveIBeenPwned` consulta una API externa** con los 5 primeros caracteres del SHA-1 (nunca la contraseña). Es seguro, pero decide qué hacer si la API no responde.
 
 </Callout>
 
@@ -362,19 +356,15 @@ Guardado: 3aef8f5fc0f0cbb4bfca…a3146d38 (161 caracteres)
 Misma contraseña, otro hash: 24b4cc12a20717a82e22… · verifica: true
 ```
 
-- **NFKC salva al usuario del acento:** `é` puede escribirse como un carácter (U+00E9) o como `e` seguido de un acento combinado (U+0301). Se ven igual, pero son bytes distintos: sin normalizar, la misma contraseña escrita desde otro teclado no entraría. Con NFKC, el caso 3 verifica.
-- **`timingSafeEqual` tarda lo mismo acierte o no:** una comparación normal (`===`) se para en el primer carácter distinto, y medir esos microsegundos puede revelar cuántos caracteres coinciden. Aquí el riesgo es pequeño, porque se comparan claves derivadas que el atacante no controla (Better Auth, de hecho, compara con `===`), pero `timingSafeEqual` es la práctica correcta para comparar secretos. Exige que los dos _buffers_ midan lo mismo, por eso se comprueba la longitud antes.
-- **Un _hash_ corrupto devuelve `false`, nunca `true` ni una excepción:** los tres casos rotos tardan 0 ms porque se rechazan antes de calcular. Fallar "cerrado" es la regla.
-
-Y por qué **no** usar esto en producción, aunque funcione:
-
-- **La librería está revisada por mucha más gente** y tiene en cuenta casos que aquí no aparecen: límites de longitud (una contraseña de 10 MB tardaría mucho en procesarse), compatibilidad con otros entornos (Better Auth tiene una versión en JavaScript puro para donde no hay `node:crypto`) y migración de parámetros.
-- **Tu función es un sitio más donde equivocarse en lo más delicado:** un error en la comparación o en la sal no da ningún fallo visible, la app funciona igual. El fallo solo aparece el día de la filtración.
+- **NFKC salva al usuario del acento:** `é` puede ser un carácter (U+00E9) o `e` más un acento combinado (U+0301), iguales a la vista y distintos en bytes. Con NFKC, el caso 3 verifica.
+- **`timingSafeEqual` tarda lo mismo acierte o no:** `===` se para en el primer carácter distinto y ese tiempo puede filtrar información. Aquí el riesgo es pequeño (Better Auth usa `===`), pero es la práctica correcta; exige igual longitud, de ahí la comprobación previa.
+- **Un _hash_ corrupto da `false` en 0 ms,** sin excepción: fallar "cerrado".
+- **En producción, la librería:** está revisada por más gente y cubre lo que aquí no (longitudes enormes, entornos sin `node:crypto`, migración de parámetros). Un error propio en lo más delicado no da fallos visibles hasta la filtración.
 
 <Callout type="risk">
 
-- **Limita la longitud de la contraseña:** sin límite, una petición con una contraseña de varios megas obliga al servidor a ejecutar scrypt sobre ella. Esta plataforma usa `maxPasswordLength: 128` en Better Auth (`src/lib/auth.ts`).
-- **Nunca devuelvas `true` "por si acaso":** ante cualquier dato inesperado (formato raro, sal vacía), la respuesta es `false`. Una verificación que acepta _hashes_ corruptos es una puerta trasera.
+- **Limita la longitud:** una contraseña de megas obligaría a scrypt a procesarla. Esta plataforma usa `maxPasswordLength: 128` (`src/lib/auth.ts`).
+- **Nunca `true` "por si acaso":** ante cualquier dato raro, `false`. Aceptar _hashes_ corruptos es una puerta trasera.
 
 </Callout>
 
@@ -386,8 +376,8 @@ Puedes explicar qué es una sal y por qué hace inútiles las _rainbow tables_: 
 
 ## Resumen
 
-- Cifrar es reversible: con la clave (que está en el mismo servidor), salen todas las contraseñas.
-- Un _hash_ sin sal se rompe con tablas precalculadas y delata a los usuarios que comparten contraseña.
-- Sal aleatoria por usuario + algoritmo lento (scrypt, argon2id, bcrypt): de 4,6 s a 5 días por usuario para un diccionario de 10 millones.
-- El _credential stuffing_ no necesita tu base de datos: lo frenan el límite de intentos y rechazar contraseñas filtradas.
-- Better Auth: scrypt (N=16384, r=16, p=1), sal de 16 bytes, NFKC y `sal:clave` en la colección `account`.
+- Cifrar es reversible: con la clave salen todas las contraseñas.
+- Sin sal, una tabla precalculada las rompe y delata las repetidas.
+- Sal por usuario + algoritmo lento: de 4,6 s a 5 días por usuario.
+- El _credential stuffing_ lo frenan el límite de intentos y rechazar contraseñas filtradas.
+- Better Auth: scrypt (N=16384, r=16, p=1), sal de 16 bytes, NFKC y `sal:clave` en `account`.

@@ -7,15 +7,15 @@ minutes: 75
 summary: "Sustituyes la sesión de demostración por la de Better Auth, mides la renovación, la caducidad y el precio de la caché de cookies, proteges páginas y endpoints por separado y cierras un open redirect con tabuladores."
 ---
 
-En I3.4 el _middleware_ cargaba un usuario a partir de una _cookie_ que cualquiera podía escribir. Ahora la sesión es de verdad: un _token_ aleatorio que Better Auth guarda en MongoDB y en una _cookie_ `httpOnly`. En esta sección vas a conectar esa sesión con todo lo que construiste en I3 (_middleware_, `locals`, _endpoints_ y Actions). También vas a medir su ciclo de vida, creación, renovación y caducidad, con dos sorpresas: una renovación que no llega al navegador y una sesión revocada que sigue funcionando cinco minutos. Para terminar, cerrarás un _open redirect_ que el ejemplo más habitual deja abierto.
-
-**Lo que tendrás al terminar:** el _middleware_ con la sesión de Better Auth y su renovación, `locals.usuario` tipado, una comprobación de sesión en cada _endpoint_ y cada Action, la página `/entrar` y `destinoSeguro`, una redirección tras el login que no se puede desviar a otra web.
+La sesión ya es de verdad: un _token_ aleatorio en MongoDB y en una _cookie_ `httpOnly`. Aquí la conectas con el _middleware_, `locals`, _endpoints_ y Actions de I3, mides su ciclo de vida (con una renovación que no llega al navegador y una sesión revocada que sigue viva cinco minutos) y cierras un _open redirect_ que el ejemplo habitual deja abierto.
 
 **Requisitos:** la app con Better Auth de I5.2 y el usuario `ana@entrenos.test` registrado.
 
 ## Paso 1: la sesión de Better Auth en `locals`
 
-Primero, el ciclo de vida de la sesión. Añade la configuración de sesión a `src/lib/auth.ts` y un tipo `UsuarioSesion` con lo que la app necesita del usuario. Sustituye el archivo:
+**Qué es:** el _middleware_ carga la sesión con **`auth.api.getSession`**, la función que hay detrás de `/api/auth/get-session`, llamada directamente y sin HTTP, y la deja en `locals`.
+
+**Cómo se usa:** sustituye `src/lib/auth.ts`, con la configuración de sesión y un tipo `UsuarioSesion`:
 
 ```ts
 // Archivo: src/lib/auth.ts
@@ -69,10 +69,9 @@ export const aUsuarioSesion = (u: Sesion["user"]): UsuarioSesion => ({
 });
 ```
 
-- **`expiresIn`:** cuánto dura una sesión sin usarse (7 días).
-- **`updateAge`:** cada cuánto se renueva si se usa. Si han pasado más de 24 horas desde la última renovación, la siguiente petición alarga la caducidad otros 7 días. Un usuario que entra a diario no tiene que volver a iniciar sesión nunca; uno que desaparece una semana, sí.
-- **`cookieCache`:** guarda una copia firmada de la sesión en una segunda _cookie_ durante 5 minutos, para no consultar MongoDB en cada petición (Paso 3).
-- **`UsuarioSesion`** mantiene la forma que ya usaba la app (`id`, `nombre`…), así que páginas y servicios no cambian.
+- **`expiresIn`:** 7 días sin usarse. **`updateAge`:** si pasan más de 24 horas desde la última renovación, la siguiente petición alarga otros 7 días; quien entra a diario no vuelve a iniciar sesión.
+- **`cookieCache`:** una copia firmada de la sesión en otra _cookie_ durante 5 minutos, para no consultar MongoDB en cada petición (Paso 3).
+- **`UsuarioSesion`** mantiene la forma de la app (`id`, `nombre`…): páginas y servicios no cambian.
 
 El tipo de `locals`, `src/env.d.ts`:
 
@@ -87,7 +86,7 @@ declare namespace App {
 }
 ```
 
-Y el _middleware_, que ahora carga la sesión con **`auth.api.getSession`**. Es la misma función que hay detrás de `/api/auth/get-session`, pero llamada directamente, sin una petición HTTP. Sustituye `src/middleware.ts` (esta primera versión tiene un fallo que medirás en el Paso 2):
+El _middleware_, en una primera versión con un fallo que medirás en el Paso 2. Sustituye `src/middleware.ts`:
 
 ```ts
 // Archivo: src/middleware.ts
@@ -143,7 +142,7 @@ const proteger = defineMiddleware((ctx, next) => {
 export const onRequest = sequence(registrar, cargarSesion, proteger);
 ```
 
-Ya no hacen falta los usuarios de demostración. Borra el _endpoint_ que los usaba:
+Borra el _endpoint_ de los usuarios de demostración:
 
 ```bash
 rm src/pages/api/sesion.ts
@@ -164,7 +163,7 @@ export function usuarioDe(locals: App.Locals): UsuarioSesion {
 }
 ```
 
-La página `/entrar` necesita un formulario de inicio de sesión. Este es mínimo, porque el completo, con `react-hook-form` y Zod, es el de I5.5. Crea `src/components/EntrarRapido.tsx`:
+Un formulario de inicio de sesión mínimo (el completo es el de I5.5), `src/components/EntrarRapido.tsx`:
 
 ```tsx
 // Archivo: src/components/EntrarRapido.tsx
@@ -194,7 +193,7 @@ export default function EntrarRapido({ volver }: { volver: string }) {
 }
 ```
 
-Y sustituye `src/pages/entrar.astro`. Usa `destinoSeguro`, que escribirás en el Paso 5:
+Y `src/pages/entrar.astro`, que usa `destinoSeguro` (Paso 5):
 
 ```astro
 ---
@@ -214,7 +213,7 @@ if (Astro.locals.usuario) return Astro.redirect(volver); // ya ha entrado: no ti
 </Base>
 ```
 
-Medido con `curl`, antes y después de iniciar sesión:
+Con `curl`, antes y después de iniciar sesión:
 
 ```text
 === 1. Sin sesión
@@ -228,20 +227,22 @@ Medido con `curl`, antes y después de iniciar sesión:
   Sesiones de Ana: 2 · la última caduca el 2026-10-23T19:25 · actualizada 2026-10-16T19:25
 ```
 
-- **Dos _cookies_:** `session_token` es la sesión (7 días, `Max-Age=604800`); `session_data` es la caché (5 minutos). Las dos son `httpOnly` y `SameSite=Lax` (I5.2).
-- **Sin sesión**, las páginas privadas redirigen a `/entrar` conservando la ruta en `volver`, y la API y las Actions responden 401, como en I3.4. La diferencia es que ahora nadie puede fabricar la _cookie_.
+- **Dos _cookies_:** `session_token` (7 días, `Max-Age=604800`) y `session_data`, la caché (5 minutos), ambas `httpOnly` y `SameSite=Lax`.
+- **Sin sesión, como en I3.4:** páginas a `/entrar` con `volver`, API y Actions con 401. Pero nadie puede fabricar la _cookie_.
 
 <Callout type="risk">
 
-- **Lee la sesión una sola vez por petición, en el _middleware_:** si cada página y cada _endpoint_ llamara a `auth.api.getSession`, una página con una isla y dos _endpoints_ consultaría la sesión tres veces. El _middleware_ la deja en `locals` y todo lo demás la lee de ahí.
-- **Salta las rutas de Better Auth:** `/api/auth/get-session` ya lee la sesión por su cuenta; leerla también en el _middleware_ sería trabajo doble en cada petición del cliente.
-- **En las páginas prerenderizadas no hay sesión** (`ctx.isPrerendered`, I3.4): una página estática no puede saber quién la mira. Para eso, una isla con `useSession` (I5.2) o una _server island_ (I3.1).
+- **Lee la sesión una vez, en el _middleware_:** en cada página y _endpoint_ se consultaría varias veces por petición.
+- **Salta las rutas de Better Auth:** `/api/auth/get-session` ya lee la sesión; leerla también sería trabajo doble.
+- **Una página prerenderizada no tiene sesión** (`ctx.isPrerendered`, I3.4): para eso, `useSession` (I5.2) o una _server island_ (I3.1).
 
 </Callout>
 
 ## Paso 2: renovación y caducidad, medidas
 
-Para no esperar días, `scripts/i5/03-sesion.ts` mueve la caducidad de la sesión de Ana en MongoDB, como si hubiera pasado el tiempo. Es solo para desarrollo. Crea el archivo:
+**Qué es:** `auth.api.getSession` devuelve solo los datos, y las _cookies_ que Better Auth quiere enviar se pierden. Con **`returnHeaders: true`** devuelve también sus cabeceras, y el _middleware_ las copia a la respuesta.
+
+**Cómo se usa:** para no esperar días, `scripts/i5/03-sesion.ts` mueve la caducidad de la sesión de Ana en MongoDB (solo en desarrollo):
 
 ```ts
 // Archivo: scripts/i5/03-sesion.ts
@@ -276,7 +277,7 @@ else if (accion === "envejecer") {
 await cliente.close();
 ```
 
-Con la sesión "envejecida" 2 días (más que `updateAge`), se hacen peticiones a `/estadisticas` con y sin la _cookie_ de caché, y después se caduca:
+Con la sesión "envejecida" 2 días, peticiones con y sin la _cookie_ de caché, y después caducada:
 
 ```text
 === 3. Renovación (updateAge = 1 día)
@@ -297,11 +298,11 @@ Con la sesión "envejecida" 2 días (más que `updateAge`), se hacen peticiones 
   Sesiones de Ana: 1 · la última caduca el 2026-10-23T19:18 · actualizada 2026-10-16T19:18
 ```
 
-- **Con la caché, no se renueva nada:** la petición ni siquiera consulta MongoDB, y la caducidad sigue en el día 21.
-- **Sin la caché, la sesión se renueva en MongoDB** (vuelve a caducar el 23)… **pero la respuesta no trae ningún `Set-Cookie`.** La _cookie_ del navegador sigue con su caducidad original, 7 días desde el login. El usuario que entra a diario sería expulsado igualmente el séptimo día, y su caché no se volvería a crear nunca, así que cada petición consultaría MongoDB.
+- **Con la caché, no se renueva nada:** ni se consulta MongoDB.
+- **Sin la caché, MongoDB se renueva, pero sin `Set-Cookie`:** la _cookie_ del navegador conserva sus 7 días desde el login. Quien entra a diario sería expulsado el séptimo, y su caché no se recrearía nunca.
 - **Una sesión caducada redirige al login** y Better Auth **borra** el documento (Ana pasa de 2 sesiones a 1).
 
-El motivo: `auth.api.getSession` devuelve solo los datos, y las _cookies_ que Better Auth quiere enviar se pierden por el camino. Con **`returnHeaders: true`** devuelve también sus cabeceras, y el _middleware_ puede copiarlas a la respuesta. Sustituye `src/middleware.ts` por la versión definitiva:
+La versión definitiva de `src/middleware.ts`:
 
 ```ts
 // Archivo: src/middleware.ts
@@ -382,20 +383,21 @@ Repitiendo la medición:
   set-cookie: better-auth.dont_remember=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax
 ```
 
-- **La renovación llega al navegador:** `session_token` vuelve a `Max-Age=604800` y la caché se recrea.
-- **Con una sesión caducada, Better Auth también limpia las _cookies_** (`Max-Age=0`), incluso en la redirección al login.
+- **La renovación llega al navegador:** `session_token` vuelve a `Max-Age=604800` y la caché se recrea. Con una sesión caducada, también se limpian las _cookies_ (`Max-Age=0`), incluso al redirigir.
 
 <Callout type="risk">
 
-- **Este fallo no da ningún error:** todo funciona hasta que, siete días después del login, el usuario aparece en `/entrar` sin haber cerrado sesión. Es fácil que nadie lo relacione con el _middleware_. Si lees la sesión con `auth.api` fuera de las rutas de Better Auth, reenvía siempre sus `Set-Cookie`.
-- **Si la app ya llama a `/api/auth/get-session` desde el navegador** (la isla `SesionActual` de I5.2 lo hace en cada página), esa petición sí renueva la _cookie_, porque pasa por `auth.handler`. Eso disimula el fallo del _middleware_, pero no lo arregla: la próxima página sin la isla volvería a fallar.
-- **`updateAge` y `expiresIn` se eligen juntos:** con `updateAge` igual o mayor que `expiresIn`, la sesión no se renovaría nunca antes de caducar.
+- **El fallo no da ningún error:** siete días después, el usuario aparece en `/entrar` sin haber cerrado sesión. Con `auth.api` fuera de sus rutas, reenvía siempre los `Set-Cookie`.
+- **`SesionActual` (I5.2) lo disimula:** su `get-session` pasa por `auth.handler` y sí renueva. Pero la primera página sin la isla vuelve a fallar.
+- **`updateAge` debe ser menor que `expiresIn`,** o la sesión no se renovaría nunca antes de caducar.
 
 </Callout>
 
 ## Paso 3: el precio de la caché de _cookies_
 
-La caché ahorra una consulta a MongoDB por petición, durante 5 minutos. Pero tiene un precio. Con el _script_ del Paso 2 se revoca la sesión de Ana en MongoDB, que es lo que pasa cuando cierra sesión en otro dispositivo o cuando un administrador la expulsa:
+**Qué es:** la caché es una copia firmada, y el servidor no comprueba si el original sigue existiendo. **Una sesión revocada sigue funcionando hasta `maxAge`.**
+
+**Cómo se usa:** con el _script_ del Paso 2, se revoca la sesión de Ana, como al cerrarla en otro dispositivo o al expulsarla un administrador:
 
 ```text
 === 5. Revocar la sesión con la caché de cookies activa (maxAge: 5 min)
@@ -406,9 +408,8 @@ La caché ahorra una consulta a MongoDB por petición, durante 5 minutos. Pero t
   solo con session_token (sin caché) → 302 http://localhost:4600/entrar?volver=%2Festadisticas
 ```
 
-**Una sesión revocada sigue funcionando hasta 5 minutos**, en páginas y en la API, porque la caché es una copia firmada y el servidor no comprueba si el original sigue existiendo. Solo sin la _cookie_ de caché el acceso se corta al instante.
-
-Para la mayoría de las páginas, cinco minutos de retraso son aceptables. Para las operaciones delicadas (cambiar la contraseña, borrar la cuenta, ver datos de pago), lee la sesión **sin caché** en ese _endpoint_:
+- **Hasta 5 minutos con acceso,** en páginas y API; solo sin la _cookie_ de caché se corta al instante. Para la mayoría de las páginas es aceptable.
+- **En las operaciones delicadas** (cambiar contraseña, borrar la cuenta, datos de pago), lee la sesión **sin caché**:
 
 ```ts
 const datos = await auth.api.getSession({
@@ -419,12 +420,14 @@ const datos = await auth.api.getSession({
 
 <Callout type="risk">
 
-- **Cerrar sesión en este dispositivo no tiene retraso:** `signOut` borra las dos _cookies_. El retraso afecta a **otros** dispositivos con la sesión revocada, que es justo el caso de "me han robado el móvil, cierra todas mis sesiones".
-- **`maxAge` es el compromiso:** con 5 minutos, una sesión robada y revocada sigue viva 5 minutos. Esta plataforma usa ese mismo valor (`src/lib/auth.ts`). Si tus datos son más sensibles, bájalo o desactiva la caché.
+- **Cerrar sesión en este dispositivo no tiene retraso:** `signOut` borra las dos _cookies_. El retraso afecta a los **otros** dispositivos: "me robaron el móvil, cierra todas mis sesiones".
+- **`maxAge` es el compromiso:** esta plataforma usa 5 minutos (`src/lib/auth.ts`). Con datos más sensibles, bájalo o desactiva la caché.
 
 </Callout>
 
 ## Paso 4: dónde se valida la sesión, en cada tipo de petición
+
+**Qué es:** **defensa en profundidad**: el _middleware_ decide por la ruta, y una lista de rutas se deja incompleta con facilidad (un _endpoint_ nuevo, una errata). Cada _handler_ comprueba otra vez.
 
 | Petición                          | Dónde se lee la sesión                                        | Qué hacer sin sesión                  |
 | --------------------------------- | ------------------------------------------------------------- | ------------------------------------- |
@@ -434,7 +437,7 @@ const datos = await auth.api.getSession({
 | Isla de React                     | `useSession` en el navegador                                  | Pintar "Sin sesión" (no protege nada) |
 | Página prerenderizada             | Ninguna: no hay petición (I3.4)                               | No puede ser privada                  |
 
-¿Por qué comprobarlo otra vez en cada _handler_, si el _middleware_ ya lo hace? Porque el _middleware_ decide **por la ruta**, y una lista de rutas es fácil de dejar incompleta: un _endpoint_ nuevo en `/admin/api/`, una errata, una excepción demasiado amplia. Es la **defensa en profundidad**: dos barreras independientes. Sustituye `src/pages/api/entrenos/index.ts`:
+**Cómo se usa:** sustituye `src/pages/api/entrenos/index.ts`.
 
 ```ts
 // Archivo: src/pages/api/entrenos/index.ts
@@ -470,7 +473,7 @@ export const POST: APIRoute = async ({ request, redirect, locals }) => {
 };
 ```
 
-Haz el mismo cambio, `locals.usuario!.id` por `usuarioDe(locals).id` con su `import`, en `src/pages/api/entrenos/[id].ts`, `src/pages/api/notas/index.ts`, `src/pages/api/notas/[id].ts` y `src/pages/api/resumen.ts`. En las Actions, la comprobación devuelve un `ActionError`. Sustituye `src/actions/index.ts`:
+Cambia igual `locals.usuario!.id` por `usuarioDe(locals).id`, con su `import`, en `src/pages/api/entrenos/[id].ts`, `src/pages/api/notas/index.ts`, `src/pages/api/notas/[id].ts` y `src/pages/api/resumen.ts`. En las Actions, un `ActionError`; sustituye `src/actions/index.ts`:
 
 ```ts
 // Archivo: src/actions/index.ts
@@ -537,7 +540,7 @@ export const server = {
 };
 ```
 
-Y la página de estadísticas, `src/pages/estadisticas.astro`:
+Y `src/pages/estadisticas.astro`:
 
 ```astro
 ---
@@ -561,7 +564,7 @@ const generada = new Date().toISOString();
 </Base>
 ```
 
-Para comprobar la segunda barrera, quita `"/api/"` de `PRIVADAS` en el _middleware_, como si alguien se equivocara, y pide la API sin sesión:
+Quita `"/api/"` de `PRIVADAS`, como si alguien se equivocara, y pide la API sin sesión (luego vuelve a ponerlo):
 
 ```text
 Con /api/ fuera de PRIVADAS (un error en el middleware):
@@ -569,20 +572,20 @@ Con /api/ fuera de PRIVADAS (un error en el middleware):
   GET /api/resumen sin sesión  → {"error":"Inicia sesión para continuar"} (401)
 ```
 
-El _middleware_ ya no protege la API, y aun así responde 401: lo hace `usuarioDe` dentro de cada _endpoint_, con el mismo mensaje. Con el `locals.usuario!.id` de I3, esa misma petición habría acabado en un 500 (`Cannot read properties of null`) o, en un _endpoint_ que no usara el usuario, en datos servidos a cualquiera. Vuelve a poner `"/api/"` en `PRIVADAS`.
+- **Sigue dando 401:** lo responde `usuarioDe` dentro del _endpoint_. Con el `locals.usuario!.id` de I3, habría sido un 500 (`Cannot read properties of null`) o, sin usar el usuario, datos para cualquiera.
 
 <Callout type="risk">
 
-- **El `!` de TypeScript no comprueba nada en ejecución:** `locals.usuario!.id` le dice al compilador "confía en mí". Si un día no hay usuario, el resultado es un error 500, no un 401. `usuarioDe` convierte esa promesa en una comprobación.
-- **Las Actions son _endpoints_ públicos** (I3.3): cualquiera puede hacer un POST a `/_actions/crearNota`. `idUsuario` en cada una es obligatorio, no opcional.
+- **El `!` no comprueba nada en ejecución:** sin usuario, es un 500 y no un 401. `usuarioDe` convierte la promesa en comprobación.
+- **Las Actions son _endpoints_ públicos** (I3.3): `idUsuario` en cada una es obligatorio.
 
 </Callout>
 
 ## Paso 5: la redirección tras el login, sin _open redirect_
 
-`/entrar?volver=/notas` lleva a `/notas` tras iniciar sesión. Pero si `volver` acepta cualquier cosa, un atacante puede enviar un enlace a tu login de verdad (`/entrar?volver=https://evil.com`): el usuario ve tu dominio, inicia sesión con confianza y acaba en una copia de tu web que le pide "otra vez" la contraseña. Es un **_open redirect_**.
+**Qué es:** si `volver` acepta cualquier cosa, un enlace a tu login de verdad (`/entrar?volver=https://evil.com`) lleva tras entrar a una copia de tu web que pide "otra vez" la contraseña: un **_open redirect_**. La comprobación habitual, "empieza por `/` y no por `//`", no basta.
 
-La comprobación más habitual es "empieza por `/` y no por `//`". Crea `src/lib/redireccion.ts` con la versión robusta:
+**Cómo se usa:** la versión robusta, en `src/lib/redireccion.ts`:
 
 ```ts
 // Archivo: src/lib/redireccion.ts
@@ -608,7 +611,7 @@ export function destinoSeguro(param: string | null | undefined, porDefecto = "/"
 }
 ```
 
-Y `scripts/i5/03-redireccion.ts`, que compara las dos versiones y enseña adónde llevaría **el navegador** cada valor:
+Y `scripts/i5/03-redireccion.ts`, que compara las dos y enseña adónde llevaría **el navegador** cada valor:
 
 ```ts
 // Archivo: scripts/i5/03-redireccion.ts
@@ -661,15 +664,14 @@ node scripts/i5/03-redireccion.ts
 "//[evil"                           /                                   /
 ```
 
-- **La comprobación por texto deja pasar tres ataques:** `/\evil.com` (el navegador trata `\` como `/`), y `/` + tabulador o salto de línea + `/evil.com` (el navegador **borra** tabuladores y saltos de línea de las URL, así que queda `//evil.com`). En el enlace, el tabulador va como `%09`: `/entrar?volver=%2F%09%2Fevil.com`.
-- **`destinoSeguro` no compara texto:** resuelve la ruta con el mismo analizador que el navegador (WHATWG URL) y exige que el origen no cambie. Los ataques nuevos que se le ocurran a alguien también los resuelve el analizador, así que también quedan fuera.
-- **Devuelve la ruta normalizada,** sin los caracteres raros, y conserva `?` y `#`.
+- **La comprobación por texto deja pasar tres ataques:** `/\evil.com` (el navegador trata `\` como `/`) y `/` + tabulador o salto de línea + `/evil.com`, porque el navegador **borra** tabuladores y saltos de las URL y queda `//evil.com` (en el enlace, `%09`).
+- **`destinoSeguro` no compara texto:** resuelve con el mismo analizador que el navegador (WHATWG URL) y exige el mismo origen, así que los ataques futuros también caen. Devuelve la ruta normalizada, con `?` y `#`.
 
 <Callout type="risk">
 
-- **El ataque del tabulador funcionaba en esta plataforma:** su `safeRedirect` (Tanda 3) comprobaba el texto, como el ejemplo del temario. `/login?redirect=%2F%09%2Fexample.com` llevaba a `example.com` tras iniciar sesión (comprobado en Chrome). Se corrigió con la técnica de esta sección; los tests de `tests/unit/redirect.test.ts` incluyen ahora estos casos.
-- **Valida en el servidor y usa el resultado:** `entrar.astro` pasa `volver` por `destinoSeguro` y solo entrega a la isla el valor ya validado. Si la isla leyera `location.search` por su cuenta, la comprobación del servidor no serviría de nada.
-- **No uses el `Referer` como destino:** lo controla quien enlaza, igual que `volver`, y además no siempre llega.
+- **Esta plataforma usa la misma técnica,** y `tests/unit/redirect.test.ts` incluye estos casos. Prueba cualquier comprobación de redirecciones con ellos.
+- **Valida en el servidor y usa el resultado:** `entrar.astro` entrega a la isla solo el valor validado; si la isla leyera `location.search`, la comprobación no serviría.
+- **Nunca el `Referer` como destino:** lo controla quien enlaza y no siempre llega.
 
 </Callout>
 
@@ -683,7 +685,7 @@ node scripts/i5/03-redireccion.ts
 
 </Callout>
 
-Solución: el _middleware_ del Paso 2, `entrar.astro` con `destinoSeguro` del Paso 1 y `src/lib/redireccion.ts` del Paso 5. Probado en Chrome: abrir la URL, iniciar sesión como Ana y ver adónde lleva:
+Solución: el _middleware_ del Paso 2, `entrar.astro` del Paso 1 y `src/lib/redireccion.ts` del Paso 5. En Chrome, abriendo la URL e iniciando sesión como Ana:
 
 ```text
 /estadisticas                      → /entrar?volver=%2Festadisticas           → tras entrar: /estadisticas
@@ -692,14 +694,14 @@ Solución: el _middleware_ del Paso 2, `entrar.astro` con `destinoSeguro` del Pa
 /entrar?volver=%2F%5Cexample.com   → /entrar?volver=%2F%5Cexample.com         → tras entrar: /
 ```
 
-- **`/estadisticas` sin sesión** lleva a `/entrar?volver=%2Festadisticas` y, tras iniciar sesión, de vuelta a `/estadisticas`.
-- **Los dos ataques terminan en `/`:** `destinoSeguro` los descarta en el servidor y la isla solo recibe `/`.
-- **`/entrar` con sesión iniciada** redirige directamente al destino: no tiene sentido enseñar el formulario a quien ya ha entrado.
+- **`/estadisticas` sin sesión** lleva a `/entrar?volver=%2Festadisticas` y, tras entrar, de vuelta.
+- **Los dos ataques terminan en `/`:** `destinoSeguro` los descarta en el servidor.
+- **`/entrar` con sesión** redirige directamente al destino.
 
 <Callout type="risk">
 
-- **Codifica la ruta al construir el enlace:** el _middleware_ usa `encodeURIComponent(pathname + search)`. Sin codificar, una ruta con `?` o `&` propios rompería el parámetro `volver`.
-- **No conviertas `/entrar` en una página estática:** necesita `prerender = false` para leer `volver` y la sesión en cada petición.
+- **Codifica la ruta al construir el enlace:** `encodeURIComponent(pathname + search)`, o un `?` o `&` propios romperían `volver`.
+- **`/entrar` necesita `prerender = false`** para leer `volver` y la sesión en cada petición.
 
 </Callout>
 
@@ -711,8 +713,8 @@ Puedes explicar dónde se valida la sesión en cada tipo de petición: una vez e
 
 ## Resumen
 
-- El _middleware_ carga la sesión con `auth.api.getSession({ headers, returnHeaders: true })` y reenvía los `Set-Cookie`: sin ellos, la renovación no llega al navegador.
-- `expiresIn` (7 días) y `updateAge` (1 día): la sesión de quien la usa se alarga; una caducada se borra y sus _cookies_ se limpian.
-- `cookieCache` ahorra consultas, pero una sesión revocada sigue viva hasta `maxAge`: usa `disableCookieCache` en las operaciones delicadas.
-- Defensa en profundidad: el _middleware_ por ruta y `usuarioDe` / `idUsuario` en cada _handler_.
-- `destinoSeguro` resuelve la ruta con WHATWG URL y exige el mismo origen: la comparación por texto deja pasar `/\…` y `/%09/…`.
+- `auth.api.getSession({ headers, returnHeaders: true })` en el _middleware_, reenviando los `Set-Cookie`.
+- `expiresIn` y `updateAge`: la sesión de quien la usa se alarga; la caducada se borra.
+- `cookieCache` deja viva una sesión revocada hasta `maxAge`: `disableCookieCache` en lo delicado.
+- Defensa en profundidad: _middleware_ por ruta y `usuarioDe` / `idUsuario` en cada _handler_.
+- `destinoSeguro` resuelve con WHATWG URL; el texto deja pasar `/\…` y `/%09/…`.

@@ -7,9 +7,7 @@ minutes: 60
 summary: "Construyes el inicio de sesión y el registro con react-hook-form, Zod y el cliente de Better Auth, con campos accesibles, autocompletado correcto, estado de carga, mensajes que no dan pistas y un cierre de sesión limpio."
 ---
 
-Los formularios de acceso son lo primero que ve un usuario nuevo y lo que más veces repite uno habitual. Si son incómodos (el gestor de contraseñas no los rellena, el error no dice qué campo está mal, el botón se puede pulsar dos veces), la gente se va. Si dan demasiada información ("este correo no existe"), ayudan a quien quiere atacar la app. En esta sección vas a sustituir el formulario mínimo de I5.3 por uno completo, con `react-hook-form` y Zod (I2.5) y el cliente de Better Auth, y vas a comprobar en Chrome cada detalle.
-
-**Lo que tendrás al terminar:** `src/components/CampoTexto.tsx` (un campo accesible reutilizable), `src/components/FormEntrar.tsx` y la página `/entrar`, y, en el ejercicio, `/registro`.
+Los formularios de acceso son lo primero que ve un usuario nuevo y lo que más repite uno habitual. Incómodos, la gente se va; demasiado explícitos ("este correo no existe"), ayudan a quien ataca. Aquí sustituyes el formulario mínimo de I5.3 por uno completo, con `react-hook-form`, Zod (I2.5) y el cliente de Better Auth.
 
 **Requisitos:** la app de I5.3.
 
@@ -19,7 +17,9 @@ npm install react-hook-form
 
 ## Paso 1: los esquemas y el _resolver_
 
-Las reglas de los formularios van en un esquema de Zod, con mensajes en español. Crea `src/schemas/auth.ts`:
+**Qué es:** las reglas de los formularios van en un esquema de Zod con mensajes en español, y un **_resolver_** traduce sus errores al formato de `react-hook-form`.
+
+**Cómo se usa:** crea `src/schemas/auth.ts`.
 
 ```ts
 // Archivo: src/schemas/auth.ts
@@ -43,11 +43,11 @@ export type EntrarInput = z.infer<typeof EntrarSchema>;
 export type RegistroInput = z.infer<typeof RegistroSchema>;
 ```
 
-- **El correo se normaliza antes de validar:** `trim()` y `toLowerCase()`, para que `Ana@Entrenos.test ` y `ana@entrenos.test` sean la misma cuenta.
-- **La contraseña del registro sigue las mismas reglas que el servidor** (de 8 a 128 caracteres, `minPasswordLength` y `maxPasswordLength` de I5.2). Si el formulario aceptara 6 caracteres, el usuario vería primero que todo está bien y después un error del servidor.
-- **En el inicio de sesión solo se exige que haya contraseña:** comprobar ahí su longitud no aporta nada y puede impedir entrar a un usuario antiguo con otra regla.
+- **El correo se normaliza antes de validar** (`trim()` y `toLowerCase()`): `Ana@Entrenos.test ` y `ana@entrenos.test` son la misma cuenta.
+- **El registro sigue las reglas del servidor** (8 a 128 caracteres, I5.2); si aceptara 6, el error llegaría después, del servidor.
+- **Al entrar solo se exige que haya contraseña:** comprobar su longitud ahí podría bloquear a un usuario antiguo con otra regla.
 
-`react-hook-form` necesita un _resolver_ que traduzca los errores de Zod a su formato. El paquete oficial (`@hookform/resolvers`) arrastra dependencias que piden Zod 3, y Astro 7 usa Zod 4. Este _resolver_ de 15 líneas es el que usa la plataforma (`src/lib/zod-resolver.ts`). Crea `src/lib/zod-resolver.ts`:
+`@hookform/resolvers` arrastra dependencias que piden Zod 3, y Astro 7 usa Zod 4. El de la plataforma tiene 15 líneas; crea `src/lib/zod-resolver.ts`:
 
 ```ts
 // Archivo: src/lib/zod-resolver.ts
@@ -71,14 +71,16 @@ export function zodResolver<T extends FieldValues>(esquema: ZodType<T>): Resolve
 
 <Callout type="risk">
 
-- **La validación del navegador es comodidad, no seguridad:** Better Auth vuelve a comprobarlo todo en el servidor. Cualquiera puede saltarse el formulario y llamar a `/api/auth/sign-up/email` directamente (I5.2).
-- **Mantén el esquema y la configuración del servidor alineados:** si cambias `minPasswordLength` en `auth.ts`, cambia también `RegistroSchema`, en el mismo _commit_.
+- **La validación del navegador es comodidad:** Better Auth comprueba todo en el servidor, y cualquiera puede llamar a `/api/auth/sign-up/email` directamente (I5.2).
+- **Esquema y servidor, alineados:** si cambias `minPasswordLength` en `auth.ts`, cambia `RegistroSchema` en el mismo _commit_.
 
 </Callout>
 
 ## Paso 2: un campo accesible
 
-Cada campo necesita una etiqueta asociada (para que el lector de pantalla diga "Correo, campo de texto") y, si hay error, que el error esté enlazado al campo (para que lo lea al llegar a él). Escribirlo en cada campo es repetitivo y fácil de olvidar, así que va en un componente. Crea `src/components/CampoTexto.tsx`:
+**Qué es:** cada campo necesita una etiqueta asociada ("Correo, campo de texto") y su error enlazado, para que el lector de pantalla lo lea al llegar. Repetirlo es fácil de olvidar: va en un componente.
+
+**Cómo se usa:** crea `src/components/CampoTexto.tsx`.
 
 ```tsx
 // Archivo: src/components/CampoTexto.tsx
@@ -113,20 +115,21 @@ export const CampoTexto = forwardRef<HTMLInputElement, Props>(function CampoText
 });
 ```
 
-- **`useId()`** genera un `id` único por campo, así que `<label htmlFor>` apunta al `input` correcto aunque haya dos formularios en la página.
-- **`aria-invalid` y `aria-describedby`** marcan el campo como erróneo y lo enlazan con su mensaje.
-- **`forwardRef`** deja pasar la referencia que necesita `register` de `react-hook-form`.
+- **`useId()`** da un `id` único por campo, y `<label htmlFor>` apunta al correcto aunque haya dos formularios.
+- **`aria-invalid` y `aria-describedby`** marcan el error y lo enlazan con su mensaje; **`forwardRef`** deja pasar la referencia de `register`.
 
 <Callout type="risk">
 
-- **El _placeholder_ no es una etiqueta:** desaparece al escribir, muchos lectores de pantalla no lo leen y su contraste suele ser bajo. El formulario mínimo de I5.3 solo tenía _placeholders_; este tiene etiquetas visibles.
-- **El color no basta para marcar un error:** un campo con el borde rojo no dice nada a quien no distingue el rojo. El mensaje de texto, enlazado con `aria-describedby`, sí.
+- **El _placeholder_ no es una etiqueta:** desaparece al escribir, muchos lectores no lo leen y su contraste suele ser bajo. El formulario de I5.3 solo tenía _placeholders_.
+- **El color no basta para un error:** el mensaje de texto enlazado, sí.
 
 </Callout>
 
 ## Paso 3: el formulario de inicio de sesión
 
-Crea `src/components/FormEntrar.tsx`:
+**Qué es:** `react-hook-form` con el esquema y `authClient.signIn.email`, con estado de carga y mensajes decididos por la app.
+
+**Cómo se usa:** crea `src/components/FormEntrar.tsx`.
 
 ```tsx
 // Archivo: src/components/FormEntrar.tsx
@@ -172,7 +175,7 @@ export default function FormEntrar({ volver }: { volver: string }) {
 }
 ```
 
-Y sustituye `src/pages/entrar.astro`, que ahora usa este formulario y enlaza con el registro conservando `volver`:
+Sustituye `src/pages/entrar.astro`, que enlaza con el registro conservando `volver`:
 
 ```astro
 ---
@@ -194,29 +197,27 @@ const registro = `/registro${volver !== "/" ? `?volver=${encodeURIComponent(volv
 </Base>
 ```
 
-Borra el formulario mínimo de I5.3, que ya no se usa:
+Y borra el formulario mínimo de I5.3:
 
 ```bash
 rm src/components/EntrarRapido.tsx
 ```
 
-- **`mode: "onBlur"`:** cada campo se valida al salir de él, no a cada tecla (molesto) ni solo al enviar (tarde).
-- **`noValidate`:** desactiva la validación propia del navegador, para que los mensajes sean los de Zod, en español y con el mismo estilo, y no los globos del navegador.
-- **`isSubmitting`:** mientras se espera al servidor, el botón dice "Entrando…" y está desactivado. Sin esto, un doble clic enviaría dos peticiones.
-- **Un solo mensaje para cualquier fallo de credenciales:** "Correo o contraseña incorrectos.", exista o no el correo. Better Auth ya responde igual en los dos casos (`INVALID_EMAIL_OR_PASSWORD`, I5.2), y el formulario no debe añadir detalles.
-- **`role="alert"` y `aria-live`:** el lector de pantalla anuncia el error del servidor en cuanto aparece, sin que el usuario tenga que buscarlo.
-- **`window.location.assign(volver)`:** una recarga completa tras entrar, para que el servidor renderice la página siguiente ya con la _cookie_ nueva. `volver` llega validado por `destinoSeguro` (I5.3).
+- **`mode: "onBlur"`** valida al salir de cada campo, y **`noValidate`** quita los globos del navegador para usar los mensajes de Zod.
+- **`isSubmitting`** pone "Entrando…" y desactiva el botón: sin dobles envíos.
+- **Un solo mensaje para cualquier fallo de credenciales,** "Correo o contraseña incorrectos.", como responde Better Auth (`INVALID_EMAIL_OR_PASSWORD`, I5.2). **`role="alert"` y `aria-live`** lo anuncian al aparecer.
+- **`window.location.assign(volver)`** recarga para que el servidor vea la _cookie_ nueva; `volver` llega validado por `destinoSeguro` (I5.3).
 
 <Callout type="risk">
 
-- **Nunca enseñes `error.message` de Better Auth tal cual:** está en inglés y, en el registro, dice literalmente que el correo ya existe (`User already exists. Use another email.`). Decide tú el texto a partir de `error.status`.
-- **El límite de intentos tiene su propio mensaje:** con 429 (demasiadas peticiones), "Correo o contraseña incorrectos" haría que el usuario siguiera probando. "Espera un minuto" le dice qué hacer.
+- **Nunca `error.message` de Better Auth tal cual:** está en inglés y en el registro dice `User already exists. Use another email.`. Decide el texto por `error.status`.
+- **El 429 tiene su propio mensaje:** "incorrectos" haría seguir probando; "Espera un minuto" dice qué hacer.
 
 </Callout>
 
 ## Paso 4: autocompletado y cierre de sesión
 
-Los atributos `autoComplete` le dicen al navegador y al gestor de contraseñas qué es cada campo:
+**Qué es:** `autoComplete` dice al navegador y al gestor de contraseñas qué es cada campo, y `type="email"` con `inputMode="email"` da el teclado con `@` en el móvil.
 
 | Campo                     | `autoComplete`     | Qué consigue                                                 |
 | ------------------------- | ------------------ | ------------------------------------------------------------ |
@@ -225,9 +226,7 @@ Los atributos `autoComplete` le dicen al navegador y al gestor de contraseñas q
 | Contraseña al registrarse | `new-password`     | El gestor propone una contraseña nueva y segura, y la guarda |
 | Nombre                    | `name`             | Ofrece el nombre del perfil del navegador                    |
 
-Y `type="email"` con `inputMode="email"` muestra en el móvil el teclado con `@`.
-
-Al cerrar sesión, la isla de I5.2 borraba la sesión, pero dejaba la página tal cual: cualquier dato del usuario ya pintado seguía en pantalla. Sustituye `src/components/SesionActual.tsx` para que, al salir, recargue en la portada:
+**Cómo se usa:** la isla de I5.2 cerraba la sesión pero dejaba los datos pintados. Sustituye `src/components/SesionActual.tsx` para recargar en la portada al salir:
 
 ```tsx
 // Archivo: src/components/SesionActual.tsx
@@ -259,8 +258,8 @@ export default function SesionActual() {
 
 <Callout type="risk">
 
-- **Sin `autoComplete`, el gestor de contraseñas adivina:** a veces rellena la contraseña antigua en un campo de contraseña nueva, o no ofrece guardarla. Con `new-password` y `current-password` lo sabe.
-- **Cerrar sesión debe vaciar todo lo del usuario:** la recarga completa descarta el estado de React, y cualquier caché en memoria del cliente. Si guardas algo del usuario en `localStorage`, bórralo también al salir.
+- **Sin `autoComplete`, el gestor adivina:** rellena la contraseña antigua en un campo nuevo o no ofrece guardarla.
+- **Cerrar sesión vacía todo lo del usuario:** la recarga descarta el estado de React; borra también lo suyo en `localStorage`.
 
 </Callout>
 
@@ -343,7 +342,7 @@ const entrar = `/entrar${volver !== "/" ? `?volver=${encodeURIComponent(volver)}
 </Base>
 ```
 
-Probado en Chrome, en el orden del enunciado:
+En Chrome, en el orden del enunciado:
 
 ```text
 Campos del registro:
@@ -364,16 +363,15 @@ Errores en consola: 4
   · Failed to load resource: the server responded with a status of 422 (UNPROCESSABLE_ENTITY)
 ```
 
-- **Los tres errores aparecen al salir de los campos** y el del correo está enlazado al campo (`aria-invalid` y `aria-describedby`). Con errores, el formulario **no envía nada** (0 peticiones).
-- **Durante el registro**, el botón dice "Creando cuenta…" y está desactivado; después, la portada con la sesión de Diego.
-- **"Salir"** vuelve a la portada sin sesión.
-- **Los dos mensajes del servidor son genéricos:** el de la contraseña incorrecta no dice si el correo existe, y el del correo repetido tampoco lo confirma: invita a iniciar sesión.
-- **Los cuatro "errores" de la consola son avisos de Chrome** por respuestas con error (dos 401 de la isla del objetivo semanal, que se pide sin sesión en la portada, el 401 del login fallido y el 422 del correo repetido), no fallos de JavaScript.
+- **Los errores salen al dejar cada campo,** enlazados (`aria-invalid`, `aria-describedby`), y con ellos **no se envía nada** (0 peticiones).
+- **"Creando cuenta…"** con el botón desactivado; después, la portada con la sesión de Diego, y "Salir" vuelve sin sesión.
+- **Los mensajes del servidor son genéricos:** la contraseña incorrecta no dice si el correo existe, y el correo repetido no lo confirma: invita a iniciar sesión.
+- **Los cuatro "errores" de la consola son avisos de Chrome** por respuestas 401 y 422 esperadas (la isla del objetivo sin sesión, el login fallido y el correo repetido), no fallos de JavaScript.
 
 <Callout type="risk">
 
-- **El mensaje genérico del registro tiene un coste:** quien ya tenía cuenta y lo olvidó no sabe por qué falla. Por eso el texto le sugiere iniciar sesión. La solución completa, que esta app no tiene, es la recuperación de contraseña por correo.
-- **Prueba los formularios con el teclado:** Tab para moverte, Enter para enviar. Si un campo no se alcanza o el foco no se ve, el formulario no es accesible aunque las etiquetas estén bien.
+- **El mensaje genérico confunde a quien olvidó que tenía cuenta:** por eso sugiere iniciar sesión. La solución completa es recuperar la contraseña por correo, que esta app no tiene.
+- **Prueba con el teclado:** Tab y Enter. Un campo inalcanzable o un foco invisible no es accesible, aunque las etiquetas estén bien.
 
 </Callout>
 
@@ -385,8 +383,8 @@ El flujo de autenticación funciona, es accesible y no filtra información: los 
 
 ## Resumen
 
-- `react-hook-form` con un `zodResolver` propio y `mode: "onBlur"`; el esquema, alineado con la configuración de Better Auth.
-- Un `CampoTexto` con `<label htmlFor>`, `aria-invalid` y `aria-describedby`, reutilizado en todos los formularios.
-- `autoComplete`: `email`, `current-password` al entrar y `new-password` al registrarse.
-- Mensajes decididos por `error.status`, nunca `error.message`: los mismos para un correo que existe y para uno que no.
-- Tras entrar o salir, recarga completa: el servidor ve la _cookie_ nueva y no queda estado del usuario anterior.
+- `react-hook-form` con un `zodResolver` propio y `mode: "onBlur"`, alineado con Better Auth.
+- `CampoTexto` con `<label htmlFor>`, `aria-invalid` y `aria-describedby`.
+- `autoComplete`: `email`, `current-password` y `new-password`.
+- Mensajes por `error.status`: iguales exista o no el correo.
+- Tras entrar o salir, recarga completa.
