@@ -7,17 +7,15 @@ minutes: 70
 summary: "Configuras ESLint y Prettier, añades un hook de pre-commit que corrige solo, y proteges main para exigir CI verde. Tres barreras, y por qué ninguna basta sola: --no-verify se salta el hook en un segundo."
 ---
 
-Una revisión de código debería hablar de si la lógica es correcta. Pero sin herramientas, acaba hablando de comillas, punto y coma y variables sin usar. Es tiempo perdido y discusiones que no aportan. Todo lo que una máquina puede comprobar debe comprobarlo una máquina, para que las personas hablen de lo que solo ellas pueden juzgar.
-
-Una analogía: la seguridad de un edificio. Hay una cerradura en tu puerta, un portero en la entrada y una cámara al final del pasillo. Cada una falla de una forma distinta, y por eso hay tres. El _hook_ es tu cerradura: rápido, pero se puede abrir desde dentro. El CI es el portero. Y la protección de rama es la regla que dice que sin pasar por él no entra nadie.
-
-**Lo que tendrás al terminar:** formato y _lint_ automáticos en cada _commit_, comprobados de nuevo en CI, y una rama `main` que no acepta código que no haya pasado.
+Sin herramientas, una revisión de código acaba hablando de comillas y variables sin usar en vez de lógica. Lo que una máquina puede comprobar, que lo compruebe una máquina. Aquí pones formato y _lint_ automáticos en cada _commit_, los compruebas otra vez en CI y proteges `main` para que no entre nada que no haya pasado.
 
 **Requisitos:** el _workflow_ de A7.1.
 
 ## Paso 1: Prettier se encarga del estilo
 
-Dos herramientas, dos trabajos. **Prettier** decide cómo se ve el código. **ESLint** busca errores de verdad. Mezclarlos da problemas, y la documentación de Prettier aconseja mantenerlos separados.
+**Qué es:** dos herramientas, dos trabajos: **Prettier** decide cómo se ve el código y **ESLint** busca errores. La documentación de Prettier aconseja no mezclarlos.
+
+**Cómo se usa:**
 
 ```bash
 npm install -D prettier prettier-plugin-astro
@@ -43,14 +41,14 @@ coverage
 package-lock.json
 ```
 
-En `package.json`, dentro de `scripts`:
+En `scripts` de `package.json`:
 
 ```json
 "format": "prettier --write .",
 "format:check": "prettier --check .",
 ```
 
-`--write` cambia los archivos, y `--check` solo avisa, que es lo que necesita un CI.
+- **`--write` cambia los archivos; `--check` solo avisa,** lo que necesita un CI.
 
 ```bash
 npm run format:check
@@ -60,9 +58,20 @@ npm run format:check
 [warn] Code style issues found in 67 files. Run Prettier with --write to fix.
 ```
 
-67 archivos. Da igual: `npm run format` los arregla todos en segundos. Hazlo en un _commit_ propio, sin mezclar otros cambios, porque ese _commit_ tocó 95 archivos y sería imposible de revisar junto a algo más.
+- **67 archivos, que `npm run format` arregla en segundos.** En un _commit_ propio: tocó 95 archivos y sería imposible revisarlo junto a otra cosa.
+
+<Callout type="risk">
+
+- **Una versión nueva de Prettier puede reformatearlo todo:** `package-lock.json` la fija, siempre que se instale con `npm ci`.
+- **Sin `.prettierignore`,** reformatearía `dist`, `.astro` o `node_modules`.
+
+</Callout>
 
 ## Paso 2: ESLint busca errores
+
+**Qué es:** reglas que señalan código probablemente erróneo, más allá del estilo.
+
+**Cómo se usa:**
 
 ```bash
 npm install -D eslint @eslint/js typescript-eslint eslint-plugin-astro eslint-plugin-react-hooks globals eslint-config-prettier
@@ -95,7 +104,7 @@ export default defineConfig(
 );
 ```
 
-`"lint": "eslint ."` en `scripts`. `eslint-config-prettier` no añade nada: solo apaga las reglas de estilo que chocarían con Prettier, y por eso va la última. Para comprobar que no queda ningún choque:
+- **`"lint": "eslint ."` en `scripts`.** `eslint-config-prettier` solo apaga las reglas que chocan con Prettier, por eso va la última. Para comprobarlo:
 
 ```bash
 npx eslint-config-prettier src/lib/ritmo.ts
@@ -105,21 +114,21 @@ npx eslint-config-prettier src/lib/ritmo.ts
 No rules that are unnecessary or conflict with Prettier were found.
 ```
 
-En 1,6 s, ESLint encontró un error real:
+En 1,6 s, un error real:
 
 ```text
 src/components/Entrenos.tsx
   34:5  error  Error: Calling setState synchronously within an effect can trigger cascading renders
 ```
 
-La regla acierta en general: es un patrón que suele esconder un problema. Pero aquí es deliberado, porque la fecha solo existe en el navegador. Cuando discrepes de una regla, déjalo por escrito, con el motivo:
+- **La regla acierta en general,** pero aquí es deliberado: la fecha solo existe en el navegador. Si discrepas, por escrito y con motivo:
 
 ```tsx
 // eslint-disable-next-line react-hooks/set-state-in-effect -- la fecha solo existe en el navegador
 setFormulario((f) => ({ ...f, fecha: f.fecha || hoy() }));
 ```
 
-**¿Y el _lint_ con tipos?** `typescript-eslint` puede usar la información de TypeScript, y encontrar por ejemplo una promesa sin esperar. Se probó con `recommendedTypeChecked`:
+El _lint_ con tipos de `typescript-eslint` (`recommendedTypeChecked`) encuentra, por ejemplo, promesas sin esperar:
 
 ```text
                   Tiempo    Memoria    Problemas
@@ -127,22 +136,21 @@ Sin tipos         1,6 s     378 MB     1
 Con tipos         10,2 s    1169 MB    unos 200
 ```
 
-Seis veces más lento, y de esos, 173 eran `no-unsafe-*`, y 7, `no-misused-promises` por pasar funciones `async` a eventos, un patrón normal en React. Para esta app, no compensa adoptarlo entero. Una regla concreta, como `no-floating-promises`, que aquí no encontró nada, puede ir en CI.
+- **Seis veces más lento,** con 173 `no-unsafe-*` y 7 `no-misused-promises` por funciones `async` en eventos, normal en React. No compensa entero; una regla concreta como `no-floating-promises` (aquí, nada) puede ir en CI.
 
 <Callout type="risk">
 
-- **Si desactivas una regla, indica el motivo:** un `eslint-disable` sin motivo es una deuda que nadie entiende dentro de seis meses.
-- **No lo apliques todo de golpe a un proyecto grande:** con cientos de avisos, nadie los lee. Corrige por partes, o empieza con reglas en `warn`.
-- **Un `eslint-disable` en todo el archivo apaga todo:** usa `-next-line` y nombra la regla.
-- **ESLint no sustituye a `astro check`:** son cosas distintas. `sinUsar` lo ve ESLint, y un tipo incorrecto lo ve `astro check`. Necesitas los dos.
-- **`--fix` cambia tu código:** corrige lo que es seguro, pero revisa el resultado.
-- **Biome es una alternativa:** hace los dos trabajos con una sola herramienta. Aquí se ha usado la pareja clásica; no se ha medido Biome.
+- **Un `eslint-disable` sin motivo es una deuda:** `-next-line`, con la regla y el porqué, nunca en todo el archivo.
+- **Con cientos de avisos nadie los lee:** en un proyecto grande, por partes o en `warn`. Y `--fix` cambia tu código: revísalo.
+- **ESLint no sustituye a `astro check`:** uno ve `sinUsar`, el otro un tipo incorrecto. Biome hace los dos trabajos (no medido).
 
 </Callout>
 
 ## Paso 3: un hook antes de cada commit
 
-Un **_hook_** es un programa que Git ejecuta en un momento concreto. `pre-commit` corre antes de guardar el _commit_, y si falla, lo cancela. Con **lefthook** se define en un archivo compartido:
+**Qué es:** un **_hook_** es un programa que Git ejecuta en un momento concreto. `pre-commit` corre antes de guardar y, si falla, cancela el _commit_. **lefthook** lo define en un archivo compartido.
+
+**Cómo se usa:**
 
 ```bash
 npm install -D lefthook
@@ -165,13 +173,10 @@ pre-commit:
       stage_fixed: true
 ```
 
-En `scripts`, `"prepare": "lefthook install || true"`, para que se instale con `npm install`. El `|| true` importa: sin él, `docker build` falla, porque en la imagen no hay `.git` ni dependencias de desarrollo. Se ve en A7.4.
+- **`"prepare": "lefthook install || true"`** lo instala con `npm install`; sin `|| true`, `docker build` falla porque la imagen no tiene `.git` ni dependencias de desarrollo (A7.4).
+- **`{staged_files}`** procesa solo lo que guardas (0,84 s frente a 1,83 del proyecto), **`stage_fixed`** añade lo corregido y **`piped`** los ejecuta en orden, porque los dos escriben en el mismo archivo.
 
-- **`{staged_files}`:** solo lo que vas a guardar. Por eso es rápido: 0,84 s, frente a 1,83 s del proyecto entero.
-- **`stage_fixed`:** añade al _commit_ lo que la herramienta acaba de corregir.
-- **`piped`:** en orden. Como los dos pueden escribir en el mismo archivo, no conviene que vayan en paralelo.
-
-Con código feo, el _hook_ lo corrigió y el _commit_ salió limpio:
+Con código feo, el _hook_ lo corrigió:
 
 ```text
 En el archivo:  export   const   doble=(n:number)=>{return n*2}
@@ -188,7 +193,7 @@ Con un error que no se corrige solo, lo paró:
 ✖ 1 problem (1 error, 0 warnings)
 ```
 
-Se probaron también los casos difíciles:
+Los casos difíciles:
 
 | Caso                           | Resultado                                           |
 | ------------------------------ | --------------------------------------------------- |
@@ -197,21 +202,21 @@ Se probaron también los casos difíciles:
 | Nombre con espacios            | Funcionó                                            |
 | `npm ci` en un clon nuevo      | Instaló el _hook_                                   |
 
-El primero importa mucho: un cambio que no habías preparado (`b = 999`) no se coló en el _commit_, aunque el archivo se había corregido.
+- **El primero importa:** un cambio sin preparar (`b = 999`) no se coló aunque el archivo se corrigió.
 
 <Callout type="risk">
 
-- **Un _hook_ es opcional, y eso no se puede cambiar:** `git commit --no-verify` lo saltó, y `LEFTHOOK=0 git commit` también. Vive en el equipo de cada persona. Es una comodidad, no una garantía.
-- **Sin `npm install`, no hay _hook_:** en un clon recién hecho había 0 instalados. Con `npm ci --ignore-scripts`, tampoco.
-- **Un _hook_ lento se acaba saltando:** por eso aquí no van los tests ni `astro check`, que dejan eso a CI. Si tarda más de unos segundos, la gente usará `--no-verify`.
-- **`glob` no siempre es lo que parece:** según la documentación de lefthook, `src/**/*.js` no incluye `src/file.js`, porque `**` exige al menos una carpeta. Con `*.ts`, funcionó también en archivos dentro de carpetas.
-- **`lint-staged` y `husky` son la alternativa clásica:** hacen lo mismo. Elige una y no mezcles.
+- **Un _hook_ es opcional:** `git commit --no-verify` y `LEFTHOOK=0 git commit` lo saltan, y sin `npm install` (o con `--ignore-scripts`) no hay _hook_. Comodidad, no garantía.
+- **Un _hook_ lento se salta:** por eso los tests y `astro check` quedan para CI.
+- **`src/**/_.js`no incluye`src/file.js`** (`\*\*`exige una carpeta);`_.ts`funcionó en subcarpetas.`lint-staged`y`husky` son la alternativa: elige una.
 
 </Callout>
 
 ## Paso 4: el CI vuelve a comprobarlo
 
-Lo que el _hook_ no garantiza, lo garantiza el CI. En `.github/workflows/ci.yml`, después de `npm ci`, **primero lo más rápido**:
+**Qué es:** lo que el _hook_ no garantiza, lo garantiza el CI.
+
+**Cómo se usa:** en `.github/workflows/ci.yml`, tras `npm ci`, **primero lo más rápido**:
 
 ```yaml
 - run: npm ci
@@ -232,30 +237,28 @@ Lo que el _hook_ no garantiza, lo garantiza el CI. En `.github/workflows/ci.yml`
 🏁  Job succeeded
 ```
 
-Y ahora, saltándose el _hook_ a propósito con `--no-verify`, en dos ramas:
+Saltándose el _hook_ con `--no-verify`, en dos ramas:
 
 ```text
 Formato feo:      ❌ Failure - npm run format:check [0.9s] · 22 s en total
 Variable sin uso: ✅ format:check · ❌ Failure - npm run lint [1.5s] · 23 s en total
 ```
 
-El CI atrapó los dos en unos 20 s. Por eso se comprueba dos veces lo mismo: el _hook_ te ahorra el viaje, y el CI no se puede saltar.
+- **El CI atrapó los dos en unos 20 s:** el _hook_ ahorra el viaje y el CI no se salta.
 
 <Callout type="risk">
 
-- **Usa `--check` en CI, nunca `--write`:** con `--write`, el paso corregiría el archivo en la máquina del CI, y saldría verde sin cambiar nada en tu repositorio.
-- **`prepare` también se ejecuta en CI:** `npm ci` lanzó `lefthook install` sin problema, pero es un paso de más. Si un día falla por eso, se puede evitar con la variable `LEFTHOOK=0`.
-- **Fija lo que cambie el resultado:** una versión nueva de Prettier puede cambiar el formato de todo. `package-lock.json` lo fija, siempre que CI use `npm ci`.
+- **En CI, `--check`, nunca `--write`:** corregiría en la máquina del CI y saldría verde sin cambiar tu repositorio.
+- **`prepare` también corre en CI** (`lefthook install`, sin problema); si un día falla, `LEFTHOOK=0`.
+- **Las versiones que cambian el resultado,** fijadas por `package-lock.json` con `npm ci`.
 
 </Callout>
 
 ## Paso 5: main no acepta lo que no pasa
 
-Hasta aquí, una PR en rojo se puede fusionar igualmente. Una regla de protección lo impide. **Esta parte no se ha podido probar**, porque requiere un repositorio real en GitHub: lo que sigue viene de su documentación, y debes comprobarlo en el tuyo.
+**Qué es:** una regla de GitHub que impide fusionar una PR en rojo. **No se ha podido probar** (requiere un repositorio real): sale de su documentación, y debes comprobarlo en el tuyo. Hay **reglas de protección de rama** (una por rama) y **rulesets** (varios a la vez, más recientes): usa _rulesets_.
 
-GitHub tiene dos sistemas: **reglas de protección de rama** y **rulesets**, más recientes. Solo se puede aplicar una regla de protección a la vez a una rama, y varios _rulesets_ pueden convivir. Usa _rulesets_.
-
-En tu repositorio, **Settings → Rules → Rulesets → New ruleset → New branch ruleset**:
+**Cómo se usa:** **Settings → Rules → Rulesets → New ruleset → New branch ruleset**:
 
 1. **Enforcement status:** _Active_.
 2. **Target branches:** la rama por defecto.
@@ -263,15 +266,13 @@ En tu repositorio, **Settings → Rules → Rulesets → New ruleset → New bra
 4. **Require status checks to pass:** añade `verificar`, el nombre del _job_ de tu _workflow_.
 5. **Block force pushes.**
 
-La opción _Require branches to be up to date before merging_ exige que la rama contenga lo último de `main`. Es más estricta y obliga a actualizar más veces, pero evita que dos PR, correctas por separado, rompan `main` al unirse.
+- **_Require branches to be up to date before merging_** exige lo último de `main`: más actualizaciones, pero dos PR correctas por separado no rompen `main` al unirse.
 
 <Callout type="risk">
 
-- **Un administrador puede no estar sujeto:** según GitHub, en las reglas de protección clásicas las restricciones no se aplican a quien administra, salvo que actives _Do not allow bypassing the above settings_. Con _rulesets_, mira la lista de excepciones (_bypass list_), y déjala vacía.
-- **Una comprobación obligatoria que nunca llega bloquea para siempre:** si tu _workflow_ tiene filtros de `paths` y una PR no toca esas rutas, se queda en _Pending_ y no se puede fusionar. GitHub aconseja no exigir _workflows_ que se puedan saltar.
-- **Pon nombres de _job_ únicos:** con el mismo nombre en dos _workflows_, el resultado es ambiguo.
-- **Protege la rama antes de tener prisa:** si la regla falla el día de una urgencia, la tentación es desactivarla. Pruébala con una PR tranquila.
-- **Comprueba si tu plan lo permite:** la disponibilidad depende del plan y de si el repositorio es público. No se ha podido confirmar para repositorios privados del plan Free.
+- **Un administrador puede saltárselo:** en las reglas clásicas, salvo _Do not allow bypassing the above settings_; en _rulesets_, deja vacía la _bypass list_.
+- **Una comprobación obligatoria que nunca llega bloquea para siempre:** con filtros de `paths`, la PR queda en _Pending_. Nombres de _job_ únicos, y pruébala con una PR tranquila antes de una urgencia.
+- **Depende del plan:** no se ha podido confirmar para repositorios privados del plan Free.
 
 </Callout>
 
@@ -291,7 +292,7 @@ Solución, con los Pasos 1 a 5:
 4. Los dos pasos en `ci.yml`, antes que `check`.
 5. El _ruleset_ de `main` con `verificar`.
 
-Compruébalo con estas tres pruebas:
+Las tres pruebas:
 
 ```bash
 # 1. El hook corrige
@@ -308,7 +309,7 @@ git add -A && git commit -m "sin hook" --no-verify
 git push -u origin prueba/sin-hook
 ```
 
-La última PR debe quedar en rojo, y el botón de fusionar, bloqueado. Las dos primeras se midieron aquí. El CI de la tercera, con `act`. El botón bloqueado, **no**: compruébalo tú, porque es lo que demuestra que la regla funciona. Al terminar, borra la rama y `src/lib/prueba.ts`.
+- **La última PR debe quedar en rojo y con el botón de fusionar bloqueado.** Las dos primeras se midieron aquí y el CI de la tercera con `act`; el botón bloqueado, **no**: compruébalo tú, es lo que demuestra la regla. Después, borra la rama y `src/lib/prueba.ts`.
 
 <Callout type="mastery">
 
@@ -318,10 +319,10 @@ El formato y el _lint_ nunca se discuten en una revisión: el _hook_ corrige ant
 
 ## Resumen
 
-- **Prettier** da el formato: 67 archivos, en un _commit_ propio. **ESLint** busca errores.
-- **`eslint-config-prettier`**, la última: apaga los choques.
-- **Sin tipos:** 1,6 s y 378 MB. **Con tipos:** 10,2 s, 1169 MB y unos 200 problemas, casi todos ruido en esta app.
-- **`lefthook`** corrige lo preparado en 0,84 s, y un cambio sin preparar no entró en el _commit_.
-- **`--no-verify` y `LEFTHOOK=0` saltan el _hook_:** es una comodidad, no una garantía.
-- **El CI atrapó en unos 20 s** el formato y el _lint_ saltados.
-- **`verificar` obligatorio en un _ruleset_:** sin él, el CI solo informa. Compruébalo con una PR real, porque aquí no se ha podido.
+- **Prettier** da el formato (67 archivos, en un _commit_ propio); **ESLint** busca errores.
+- **`eslint-config-prettier`,** la última.
+- **Sin tipos:** 1,6 s y 378 MB; **con tipos:** 10,2 s, 1169 MB y unos 200 problemas, casi todo ruido aquí.
+- **`lefthook`** corrige lo preparado en 0,84 s sin colar lo no preparado.
+- **`--no-verify` y `LEFTHOOK=0`** lo saltan: comodidad, no garantía.
+- **El CI atrapó** formato y _lint_ saltados en unos 20 s.
+- **`verificar` obligatorio en un _ruleset_:** compruébalo con una PR real.

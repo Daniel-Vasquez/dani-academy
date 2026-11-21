@@ -7,29 +7,24 @@ minutes: 75
 summary: "Revisas una app real con datos, no con opiniones: un script sin dependencias, cinco miradas y una lista de deuda priorizada. Tres de las alarmas que saltaron eran falsas, y aprendes a distinguirlas."
 ---
 
-Después de meses, un proyecto funciona, pero ya no sabes por qué es como es. Algunas partes dan miedo, otras no sabes si se usan, y cada mejora parece urgente. Una **revisión de arquitectura** es sentarse a mirar el conjunto con método: qué está bien, qué estorba y qué merece arreglarse primero. Sin método, acaba en una lista de gustos personales.
+Tras meses, un proyecto funciona, pero ya no sabes por qué es como es: partes que dan miedo, otras que no sabes si se usan, y todo parece urgente. Una **revisión de arquitectura** mira el conjunto con método (qué está bien, qué estorba, qué arreglar primero), para no acabar en una lista de gustos. Aquí escribes un _script_ de revisión, separas las falsas alarmas, ordenas la deuda y dejas tus decisiones por escrito.
 
-Una analogía: una revisión médica. Nadie empieza por operar. Primero se miden cosas, y después alguien interpreta: una cifra alta puede ser normal en ti, y otra que parece buena puede esconder algo. Al final no sales con todo arreglado, sino con un diagnóstico y un orden.
-
-**Lo que tendrás al terminar:** un _script_ de revisión, una lista de deuda ordenada y tus decisiones por escrito.
-
-**Requisitos:** todo este curso, además de rendimiento (A6), seguridad (A5) y CI (A7).
-
-Se revisó la plataforma donde lees esto: 94 archivos y 4.700 líneas en `src/`, y 114 _commits_ en cinco semanas. Es un proyecto personal y joven, así que sus cifras sirven de ejemplo, no de referencia.
+**Requisitos:** todo este curso, además de rendimiento (A6), seguridad (A5) y CI (A7). Se revisó esta plataforma: 94 archivos y 4700 líneas en `src/`, 114 _commits_ en cinco semanas. Proyecto personal y joven: sus cifras son ejemplo, no referencia.
 
 ## Paso 1: el método
 
-Una revisión responde a tres preguntas, en este orden:
+**Qué es:** tres preguntas, en orden: **¿qué va a cambiar?** (revisar lo que nadie tocará es entretenimiento), **¿qué dicen los datos?** (cada hallazgo, algo que se pueda señalar) y **¿qué significa?** (un número es una pregunta, no una conclusión).
 
-1. **¿Qué va a cambiar?** Revisar lo que nadie va a tocar es un entretenimiento.
-2. **¿Qué dicen los datos?** Cada hallazgo necesita algo que se pueda señalar.
-3. **¿Qué significa?** Un número es una pregunta, no una conclusión.
+**Cómo se usa:**
 
-Y cinco miradas: acoplamiento, duplicación, límites, rendimiento y seguridad. Ponle un tiempo fijo, por ejemplo dos horas. Si tarda más, dejará de hacerse.
+- **Cinco miradas:** acoplamiento, duplicación, límites, rendimiento y seguridad.
+- **Un tiempo fijo,** por ejemplo dos horas: si tarda más, dejará de hacerse.
 
 ## Paso 2: un _script_ que mide
 
-No hace falta instalar nada para empezar. `scripts/revisar.mjs` lee `src/` y el historial de Git:
+**Qué es:** `scripts/revisar.mjs` lee `src/` y el historial de Git, sin instalar nada.
+
+**Cómo se usa:**
 
 ```js
 // Archivo: scripts/revisar.mjs
@@ -164,24 +159,23 @@ Puntos calientes: cambios × líneas
    532  components/quiz/Quiz.tsx (2 cambios, 266 líneas)
 ```
 
-Es una herramienta tosca, y conviene saberlo:
-
 <Callout type="risk">
 
-- **Comprueba tu detector.** Un "0 ciclos" solo vale si sabe encontrar uno. Se creó un ciclo a propósito en otra app, y lo encontró. Lo mismo con cualquier herramienta: provoca el fallo una vez.
-- **Lee el código con expresiones regulares,** no como un compilador. No ve las rutas construidas en tiempo de ejecución, cuenta también los `import type` y encuentra al menos un ciclo de cada grupo, no todos.
-- **La duplicación es literal.** Dos bloques iguales con otros nombres de variables no cuentan.
-- **Para un proyecto grande,** existen `madge`, `jscpd` y `knip`. No se han usado en esta lección.
+- **Comprueba tu detector:** un «0 ciclos» solo vale si sabe encontrar uno. Se provocó un ciclo en otra app y lo encontró.
+- **Lee con expresiones regulares, no como un compilador:** no ve rutas construidas en tiempo de ejecución, cuenta los `import type`, encuentra un ciclo por grupo y la duplicación es literal.
+- **Para un proyecto grande,** `madge`, `jscpd` y `knip` (no usados aquí).
 
 </Callout>
 
 ## Paso 3: acoplamiento y límites
 
-**Lo más importado no es malo por serlo.** `lib/constants.ts` lo usan 20 archivos, pero son 44 líneas de constantes que casi no cambian. Es un cimiento. Lo peligroso es un archivo muy importado **y** que cambie a menudo.
+**Qué es:** quién depende de quién, y si se respetan las reglas de capas.
 
-**Lo que más importa suele ser una página.** `[section].astro` importa 14 archivos. Es lógico: es el punto donde todo se une. Sería un problema en un servicio.
+**Cómo se usa:**
 
-**Los puntos calientes indican dónde invertir.** La portada de un curso tiene 207 líneas y ha cambiado 4 veces. En A8.4 dijimos que las páginas deben ser delgadas, y esta no lo es. Es un hallazgo real.
+- **Muy importado no es malo:** `lib/constants.ts` lo usan 20 archivos, pero son 44 líneas que casi no cambian, un cimiento. Lo peligroso es muy importado **y** cambiante.
+- **Lo que más importa suele ser una página:** `[section].astro` importa 14 archivos, el punto donde todo se une; en un servicio sería un problema.
+- **Los puntos calientes indican dónde invertir:** la portada de un curso tiene 207 líneas y 4 cambios, y las páginas debían ser delgadas (A8.4). Hallazgo real.
 
 Los límites se comprueban buscando lo que no debería ocurrir:
 
@@ -195,20 +189,28 @@ grep -rlE 'from "@/server/' src/components | wc -l           # componentes que t
 7
 ```
 
-Siete componentes tocando el servidor suena grave. Aquí está la primera falsa alarma:
+Siete componentes tocando el servidor suena grave. Primera falsa alarma:
 
 ```text
 import type { CourseOverview } from "@/server/services/overview.service";
 import type { PublicQuestion, SubmitQuizResult } from "@/server/services/quiz.service";
 ```
 
-Todos eran `import type`, que desaparece al compilar. No llega nada al navegador. Sí es un olor menor, porque el componente conoce un archivo del servidor, pero no es un fallo.
+- **Todos eran `import type`,** que desaparece al compilar: nada llega al navegador. Un olor menor, no un fallo.
+- **Los otros 3 sí son reales:** la portada de un curso, el temario y la evaluación llaman a `repos.…` sin servicio. Razonable para leer, pero rompe la regla D6 del proyecto (ruta, servicio y repositorio).
 
-Los otros 3 sí son reales. La portada de un curso, el temario y la evaluación llaman a `repos.…` sin pasar por un servicio. Para leer un dato es un atajo razonable, pero rompe la regla D6 del proyecto: ruta, servicio y repositorio.
+<Callout type="risk">
+
+- **Un `grep` cuenta coincidencias, no fallos:** mira cada resultado antes de concluir.
+- **Una regla solo existe si está escrita:** sin la D6, los 3 atajos serían una opinión (Paso 9).
+
+</Callout>
 
 ## Paso 4: duplicación
 
-Cinco bloques suena a mucho, pero cuatro son el mismo: bloques solapados de un único fragmento. En realidad hay **dos** casos. Uno es el del formulario:
+**Qué es:** código repetido, que importa cuando una corrección debe hacerse en varios sitios **y es fácil olvidar uno**.
+
+**Cómo se usa:** cinco bloques, de los que cuatro son solapes de un mismo fragmento: **dos** casos reales. Uno, el formulario:
 
 ```tsx
 <TextField
@@ -221,13 +223,21 @@ Cinco bloques suena a mucho, pero cuatro son el mismo: bloques solapados de un �
 />
 ```
 
-Está en `LoginForm` y en `RegisterForm`. ¿Hay que unirlos? **No.** Es código parecido, no el mismo conocimiento: los dos formularios cambian por motivos distintos, como `autoComplete` en la contraseña, y ya se apoyan en un `TextField` común. Sacar una abstracción aquí costaría más que las 8 líneas repetidas.
+- **Está en `LoginForm` y `RegisterForm`, y no se une:** es código parecido, no el mismo conocimiento (cambian por motivos distintos, como `autoComplete`) y ya comparten `TextField`. Una abstracción costaría más que 8 líneas.
+- **La tabla de intentos de `QuizHistoryTable` y `evaluacion.astro`** sí cumple la regla en parte: candidata, pero menor.
 
-Una regla útil: la duplicación importa cuando una corrección debe hacerse en varios sitios **y es fácil olvidar uno**. El otro caso, la tabla de intentos de `QuizHistoryTable` y `evaluacion.astro`, sí cumple esto en parte. Es candidato, pero menor.
+<Callout type="risk">
+
+- **Unir lo parecido acopla lo que cambia por separado:** cada cambio de un formulario obligaría a pensar en el otro.
+- **El detector solo ve duplicación literal:** dos bloques iguales con otros nombres pasan.
+
+</Callout>
 
 ## Paso 5: rendimiento
 
-Sin medir en producción, el _build_ ya da pistas:
+**Qué es:** sin medir producción, el _build_ ya da pistas sobre el JavaScript.
+
+**Cómo se usa:**
 
 ```bash
 npm run build
@@ -241,16 +251,27 @@ for f in dist/client/_astro/*.js; do echo "$(gzip -c "$f" | wc -c) $(basename "$
  11179 auth-client.B90wgs1i.js
 ```
 
-102 KB para un editor de notas, en una app que muestra lecciones. Parece el primer objetivo, y es la segunda falsa alarma. El propio código lo explica:
+- **102 KB para un editor de notas parece el primer objetivo,** y es la segunda falsa alarma. El código lo explica:
 
 ```tsx
 // TipTap y ProseMirror (unos 100 KB gzip) van en un trozo aparte que solo se pide si hace falta
 const NotesEditor = lazy(() => import("./NotesEditor"));
 ```
 
-Un archivo grande en `dist/` no es lo que descarga cada visita. La pregunta correcta es **cuándo se carga**, y eso se comprueba con la pestaña Network, como en A6. Estas cifras no dicen nada de eso.
+- **Un archivo grande en `dist/` no es lo que descarga cada visita:** la pregunta es **cuándo se carga**, con la pestaña Network (A6).
+
+<Callout type="risk">
+
+- **El tamaño del _build_ no dice cuándo se descarga:** confírmalo en el navegador antes de optimizar.
+- **Un `lazy` que alguien quita sin saberlo** devuelve los 100 KB a todas las páginas: el comentario del código lo protege.
+
+</Callout>
 
 ## Paso 6: pruebas
+
+**Qué es:** la cobertura de Vitest, que dice qué líneas recorren los tests unitarios.
+
+**Cómo se usa:**
 
 ```bash
 npx vitest run --coverage
@@ -264,13 +285,21 @@ src/server/repositories   62 de 66 líneas     94 %
 src/lib/domain            44 de 44 líneas    100 %
 ```
 
-¡Ni una línea de los servicios probada! Es la tercera falsa alarma, o casi. Vitest solo mide sus propios tests, y esos servicios los recorren los 64 E2E de Playwright, que aquí no cuentan. Con todo, un E2E no prueba cada rama de una regla: esta cifra no indica un desastre, pero tampoco garantiza nada.
+- **Ninguna línea de los servicios probada:** tercera falsa alarma, o casi. Vitest solo mide sus tests, y los servicios los recorren los 64 E2E de Playwright. Aun así, un E2E no prueba cada rama de una regla.
+- **Buena señal:** lo más delicado, las reglas puras de `lib/domain`, está al 100 %.
 
-Lo que sí es buena señal: lo más delicado, las reglas puras de `lib/domain`, está al 100 %.
+<Callout type="risk">
+
+- **La cobertura mide líneas recorridas, no comprobadas:** un 100 % sin aserciones no prueba nada.
+- **Sumar E2E y unitarios exige otra herramienta:** no confundas «0 % en Vitest» con «sin probar».
+
+</Callout>
 
 ## Paso 7: seguridad
 
-Esta mirada no se mide con un _script_ sino con la lista de A5:
+**Qué es:** esta mirada no se mide con un _script_, sino con la lista de A5.
+
+**Cómo se usa:**
 
 - ¿Las dependencias tienen fallos conocidos? `npm audit --omit=dev`.
 - ¿Hay secretos en el historial o en el cliente?
@@ -279,13 +308,13 @@ Esta mirada no se mide con un _script_ sino con la lista de A5:
 - ¿Hay límites en lo que se puede abusar?
 - ¿Las cabeceras son las de A5?
 
-Esta lección **no incluye resultados de esta parte**, y es a propósito: un informe de seguridad de un sistema en producción no se deja en una lección pública. Guárdalo en un sitio privado. Se puede publicar que la revisión existe, no sus hallazgos, hasta que estén resueltos.
+- **Esta lección no incluye resultados de esta parte, a propósito:** un informe de seguridad de un sistema en producción no va en una lección pública. Guárdalo en privado; se puede publicar que la revisión existe, no sus hallazgos, hasta resolverlos.
 
 ## Paso 8: la deuda técnica
 
-Deuda técnica es lo que te frena al cambiar el código, igual que un préstamo cobra intereses. **Código feo que nadie toca no es deuda:** no cobra nada. Y lo que has decidido a conciencia tampoco.
+**Qué es:** lo que te frena al cambiar el código, como un préstamo que cobra intereses. **El código feo que nadie toca no es deuda,** ni lo decidido a conciencia.
 
-Tras separar las alarmas falsas, esta es la lista, en `docs/deuda.md`:
+**Cómo se usa:** tras separar las falsas alarmas, `docs/deuda.md`:
 
 | Hallazgo                               | Impacto | Esfuerzo | Decisión    |
 | -------------------------------------- | ------- | -------- | ----------- |
@@ -296,31 +325,26 @@ Tras separar las alarmas falsas, esta es la lista, en `docs/deuda.md`:
 | Estructura por tipo, no por _features_ | Medio   | Alto     | Proyecto A8 |
 | Tabla de intentos repetida             | Bajo    | Bajo     | Al tocarla  |
 
-Fuera de la lista quedan, con su motivo, los campos repetidos de los formularios, el `import type` de los componentes y la pestaña que no se sincroniza en A8.3, que es una decisión consciente.
-
-La primera fila merece una explicación. Cuando se comprobó en A7, el CI fallaba desde octubre en el paso de MongoDB, y se siguió publicando, porque la comprobación que frena un `push` es un _hook_ local. Es la deuda que más cobra sin hacer ruido: **una alarma que siempre está roja ya no avisa de nada.** Y arreglarla es poco: en A7 se reprodujo, y fijar `mongo:8.2` debería bastar. Ese cambio sigue sin aplicarse, así que no está probado en el propio CI.
-
-Para ordenar, tres reglas:
-
-1. **Alto impacto y poco esfuerzo, ya.** Lo que quita fricción a todo lo demás.
-2. **Lo demás, al pasar por allí.** Refactoriza la portada cuando vayas a cambiarla, en una PR propia antes de la funcionalidad. No pares todo para limpiar.
-3. **Lo grande, con fecha o nunca.** Si una reorganización no tiene hueco, escribe por qué y déjala. Una lista eterna tampoco ayuda.
+- **Fuera, con su motivo:** los campos repetidos de los formularios, el `import type` de los componentes y la pestaña que no se sincroniza (A8.3, decisión consciente).
+- **La primera fila:** comprobado en A7, el CI fallaba desde octubre en el paso de MongoDB y se seguía publicando, porque lo que frena un `push` es un _hook_ local. **Una alarma siempre en rojo no avisa de nada.** En A7 se reprodujo, y fijar `mongo:8.2` debería bastar; el cambio sigue sin aplicarse ni probarse en el propio CI.
+- **Tres reglas para ordenar:** alto impacto y poco esfuerzo, ya; lo demás, al pasar por allí, en una PR propia antes de la funcionalidad; y lo grande, con fecha o nunca, escribiendo por qué.
 
 <Callout type="risk">
 
-- **Revisar y no decidir no sirve de nada.** Cada fila termina con una decisión, aunque sea "no lo haremos".
-- **El impacto es una estimación.** Esta tabla es criterio, no medida. Escríbelo para que otra persona pueda discutirlo.
-- **Vuelve a medir.** Repite el _script_ dentro de unos meses: lo interesante es la tendencia. En la app de A8.4, tras la migración, lo más importado es `features/auth/server.ts`, con 14: una puerta de entrada, justo lo que se buscaba.
+- **Revisar sin decidir no sirve:** cada fila termina con una decisión, aunque sea «no lo haremos».
+- **El impacto es criterio, no medida:** escríbelo para que otra persona lo discuta.
+- **Vuelve a medir dentro de unos meses:** importa la tendencia. En la app de A8.4, lo más importado pasó a ser `features/auth/server.ts` (14), una puerta de entrada, lo buscado.
 
 </Callout>
 
 ## Paso 9: decisiones para tu yo futuro, y para una IA
 
-La plataforma no tiene una carpeta `docs/adr/`, pero sí algo parecido: una tabla con 11 decisiones en `planificacion.md`, cada una con su motivo. Por eso esta revisión pudo decir que tres páginas rompen la "regla D6". Sin eso, habría sido solo una opinión. **Una decisión escrita convierte una preferencia en algo que se puede comprobar.**
+**Qué es:** las decisiones escritas convierten una preferencia en algo comprobable.
 
-Lo que le falta son las alternativas descartadas, que es lo primero que se olvida. Con el formato de A8.4 es fácil añadirlas.
+**Cómo se usa:**
 
-Una IA que trabaje en tu código tiene el mismo problema que tú dentro de un año: lee qué se hizo, no por qué. `AGENTS.md` es el archivo que ese tipo de herramientas lee al empezar, y en esta plataforma solo contiene las instrucciones genéricas de Astro. Debería contar lo que no se deduce del código:
+- **La plataforma no tiene `docs/adr/`,** sino una tabla de 11 decisiones con su motivo en `planificacion.md`: por eso la revisión pudo decir que tres páginas rompen la «regla D6». Le faltan las alternativas descartadas, lo primero que se olvida; el formato de A8.4 las añade.
+- **Una IA tiene tu mismo problema dentro de un año:** lee qué se hizo, no por qué. `AGENTS.md`, que esas herramientas leen al empezar, aquí solo tiene las instrucciones genéricas de Astro. Debería contar lo que no se deduce del código:
 
 ```markdown
 # Dani Academy
@@ -344,7 +368,16 @@ npm run lint && npm run check && npm run test:run
 - No renombrar los IDs de curso ni de sección: son claves del progreso (D3).
 ```
 
-Pequeño y concreto. No se ha medido cuánto ayuda: es una recomendación, no un resultado. Lo que sí es seguro es que `README`, ADR y `AGENTS.md` envejecen, así que incluye "revisar la documentación" en cada revisión.
+- **Pequeño y concreto.** No se ha medido cuánto ayuda: es una recomendación.
+
+<Callout type="risk">
+
+- **`README`, ADR y `AGENTS.md` envejecen:** incluye «revisar la documentación» en cada revisión.
+- **Un `AGENTS.md` con información falsa es peor que uno vacío:** la IA la seguirá. Solo lo que sigue siendo cierto.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
 
@@ -352,7 +385,7 @@ Haz una revisión de arquitectura de tu Planificador 2026 y escribe los 3 ADR m�
 
 </Callout>
 
-Solución. La revisión la haces tú con los Pasos 1 a 8 sobre tu Planificador: el resultado es tu lista de deuda. Como ejemplo, estos son los 3 ADR de la plataforma, sacados de sus decisiones reales.
+Solución. La revisión la haces tú con los Pasos 1 a 8 sobre tu Planificador: el resultado es tu lista de deuda. Como ejemplo, los 3 ADR de la plataforma, de sus decisiones reales.
 
 `docs/adr/0001-contenido-en-el-repositorio.md`:
 
@@ -439,10 +472,8 @@ comprobaciones antes de subir, y Vercel despliega desde `main`.
   sin frenar ninguna publicación. Por eso este ADR está en revisión.
 ```
 
-Fíjate en el tercero. Escribir sus consecuencias sacó a la luz un problema que la decisión original no contaba. Ese es el valor del ejercicio.
-
-- **Elige las tres decisiones más caras de cambiar,** no las más interesantes.
-- **Si no recuerdas el motivo,** escríbelo también: "no consta" es información útil.
+- **Fíjate en el tercero:** escribir sus consecuencias sacó a la luz un problema que la decisión original no contaba. Ese es el valor del ejercicio.
+- **Elige las tres decisiones más caras de cambiar,** no las más interesantes, y si no recuerdas el motivo, escribe «no consta».
 - **El Planificador no se ha revisado aquí:** el resultado depende de tu código.
 
 <Callout type="mastery">
@@ -453,14 +484,10 @@ Puedes explicar el porqué de cada decisión estructural de tus proyectos y señ
 
 ## Resumen
 
-- **Una revisión:** qué va a cambiar, qué dicen los datos y qué significan.
-- **Cinco miradas:** acoplamiento, duplicación, límites, rendimiento y seguridad.
-- **Prueba tu detector:** un "0 ciclos" solo vale si sabe encontrar uno.
-- **Falsas alarmas reales:** 7 `import type`, un editor de 102 KB con carga diferida y 0 % en servicios que cubre el E2E.
-- **Muy importado no es malo:** lo es si además cambia a menudo.
-- **Código parecido no es el mismo conocimiento:** 8 líneas repetidas pueden quedarse.
+- **Qué va a cambiar, qué dicen los datos y qué significan,** con cinco miradas y tiempo fijo.
+- **Prueba tu detector:** un «0 ciclos» solo vale si sabe encontrar uno.
+- **Falsas alarmas:** 7 `import type`, un editor de 102 KB con carga diferida y 0 % en servicios que cubre el E2E.
+- **Muy importado no es malo** si no cambia; código parecido no es el mismo conocimiento.
 - **La seguridad se revisa, pero sus hallazgos no se publican.**
-- **Deuda es lo que te frena:** lo que nadie toca no cobra intereses.
-- **Prioriza:** lo urgente y fácil ya, lo demás al pasar, y lo grande con fecha o nunca.
-- **Una alarma siempre en rojo no avisa de nada.**
-- **ADR y `AGENTS.md`:** lo que el código no cuenta, sobre todo lo que se descartó.
+- **Deuda es lo que te frena:** lo urgente y fácil ya, lo demás al pasar, lo grande con fecha o nunca.
+- **Una alarma siempre en rojo no avisa;** ADR y `AGENTS.md` cuentan lo que el código no.

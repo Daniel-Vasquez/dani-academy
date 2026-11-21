@@ -7,19 +7,15 @@ minutes: 90
 summary: "Reorganizas una app real por features: 29 archivos movidos y 71 tests en verde. Añades reglas de límites, ADR y mides los barrel files: uno metió MongoDB en el navegador, de 126 a 343 KB, con el build en verde."
 ---
 
-Un proyecto pequeño se organiza solo: `components/`, `services/`, `schemas/`. Funciona hasta que añadir algo tan simple como "mis marcas" te obliga a abrir siete carpetas y a editar archivos de otras funcionalidades. Lo que pertenece a la misma idea está repartido por tipo de archivo, y lo que no tiene nada que ver está junto.
+Un proyecto pequeño se ordena solo por tipo (`components/`, `services/`, `schemas/`), hasta que añadir «mis marcas» obliga a abrir siete carpetas y editar archivos de otras funcionalidades. Organizar por **_features_** es que lo que cambia junto viva junto. Aquí reorganizas la app así, proteges sus límites con una regla y dejas escrito por qué.
 
-Una analogía: un almacén frente a una cocina. En un almacén ordenas por tipo, todos los cuchillos juntos y todas las sartenes juntas. Pero nadie cocina así: en una cocina, cada puesto tiene a mano lo que necesita para su plato. Organizar por **_features_** es montar puestos: lo que cambia junto, vive junto.
-
-**Lo que tendrás al terminar:** una app reorganizada por _features_, una regla que impide saltarse sus límites y un registro escrito de por qué.
-
-**Requisitos:** capas (I3.5), ESLint (A7.2) y las lecciones anteriores de este curso.
-
-Todo se midió sobre la app de entrenamiento del curso, real, con 60 archivos en `src/` y 71 tests de Vitest, en un Mac con Node 26. El monorepo es una maqueta aparte.
+**Requisitos:** capas (I3.5), ESLint (A7.2) y las lecciones anteriores de este curso. Medido sobre la app de entrenamiento real (60 archivos en `src/`, 71 tests de Vitest) en un Mac con Node 26; el monorepo es una maqueta aparte.
 
 ## Paso 1: el síntoma
 
-Se añadió la misma funcionalidad a la app, "Mis marcas", con la estructura por tipo. Son 10 archivos en 7 carpetas:
+**Qué es:** con la estructura por tipo, una funcionalidad nueva se reparte por muchas carpetas y toca archivos ajenos.
+
+**Cómo se usa:** «Mis marcas» por tipo son 10 archivos en 7 carpetas:
 
 ```text
 A  src/components/TablaMarcas.astro
@@ -34,11 +30,21 @@ A  tests/unit/marcas.test.ts
 M  tests/unit/servicios.test.ts    ← ajeno
 ```
 
-Lo preocupante son las tres `M`: **para añadir algo nuevo has editado archivos que ya existían.** Dos personas que añadan una funcionalidad cada una chocarán ahí.
+- **Las tres `M` son lo preocupante:** para añadir algo has editado archivos existentes, donde chocarán dos personas.
+- **Esta plataforma, organizada por tipo, muestra lo mismo:** las notas están en 5 carpetas, un _commit_ típico suyo toca 6 y uno de progreso 10. Con 4 _commits_ de cada una, es una pista, no una estadística.
 
-Se ve igual en la plataforma donde lees esto, organizada por tipo. Las notas están en 5 carpetas de `src/`, y un _commit_ típico de esa funcionalidad toca 6 carpetas. Uno de progreso, 10. Son pocos _commits_, 4 de cada una, así que tómalo como una pista y no como una estadística.
+<Callout type="risk">
+
+- **Un archivo común que todos editan** (`services/index.ts`) es el primer sitio de conflictos entre ramas.
+- **Contar carpetas no basta:** mira cuántos archivos ajenos hay que editar, como en el Paso 4.
+
+</Callout>
 
 ## Paso 2: la estructura
+
+**Qué es:** cada funcionalidad en su carpeta, y lo compartido aparte.
+
+**Cómo se usa:**
 
 ```text
 src/
@@ -60,17 +66,24 @@ src/
 └── pages/                     ← solo rutas: delgadas
 ```
 
-Tres preguntas deciden dónde va cada archivo:
-
 1. **¿Pertenece a una funcionalidad?** Va a su _feature_.
 2. **¿Lo usan varias, y no sabe nada del negocio?** Va a `lib/` o a `components/ui/`.
 3. **¿Es una URL?** Va a `pages/`, porque Astro enruta por archivos. Ahí solo llamas a la _feature_.
 
-No muevas algo a `lib/` para no decidir. Un archivo `tipos.ts` tenía dos listas, una de entrenos y otra de notas. En `lib/` sería un cajón de sastre, así que se partió en dos, y cada lista se fue a su _feature_.
+- **No muevas algo a `lib/` para no decidir:** `tipos.ts` tenía una lista de entrenos y otra de notas, y se partió en dos, cada una a su _feature_.
+
+<Callout type="risk">
+
+- **`lib/` como cajón de sastre** recrea el problema: solo lo que no sabe del negocio.
+- **`pages/` sigue siendo de Astro:** no metas lógica ahí, solo llamadas a la _feature_.
+
+</Callout>
 
 ## Paso 3: una _feature_ completa
 
-Las capas de I3.5 siguen ahí, pero dentro de la carpeta. El contrato:
+**Qué es:** las capas de I3.5 (esquema, repositorio, servicio), dentro de la carpeta, con un `server.ts` como puerta de entrada.
+
+**Cómo se usa:** el contrato:
 
 ```ts
 // Archivo: src/features/marcas/marca.schema.ts
@@ -123,7 +136,7 @@ export function crearServicioMarcas(repo: Pick<MarcasRepo, "porTipo">) {
 }
 ```
 
-La pieza nueva es `server.ts`. Conecta la _feature_ con la base de datos real y es su puerta de entrada. Antes, eso lo hacía un `services/index.ts` común a todas, y por eso había que editarlo cada vez:
+- **`server.ts` conecta la _feature_ con la base real** y es su puerta. Antes lo hacía un `services/index.ts` común, que había que editar cada vez:
 
 ```ts
 // Archivo: src/features/marcas/server.ts
@@ -211,17 +224,26 @@ describe("marcas", () => {
 });
 ```
 
+<Callout type="risk">
+
+- **`server.ts` solo lo importa el servidor:** si una isla lo importa, arrastra MongoDB al navegador (Paso 6).
+- **El test importa el servicio interno a propósito:** la regla del Paso 5 deja fuera `tests/`.
+
+</Callout>
+
 ## Paso 4: la medida
 
-La misma funcionalidad, en las dos estructuras. En ambas, `astro check` dio 0 errores, y el build y los 72 tests pasaron:
+**Qué es:** la misma funcionalidad en las dos estructuras, con `astro check` sin errores y el _build_ y los 72 tests en verde en ambas.
 
-|                          | Por tipo | Por _features_ |
+**Cómo se usa:**
+
+| Aspecto                  | Por tipo | Por _features_ |
 | ------------------------ | -------- | -------------- |
 | Archivos                 | 10       | 8              |
 | Carpetas                 | 7        | 5              |
 | Archivos ajenos editados | 3        | **0**          |
 
-La diferencia de carpetas es modesta, y tres de ellas siguen ahí por necesidad: `pages/`, `pages/api/` y `tests/`. Lo que cambia de verdad es esa última fila. Y se nota al quitar la funcionalidad:
+- **La diferencia de carpetas es modesta** (`pages/`, `pages/api/` y `tests/` siguen por necesidad); lo que cambia es la última fila. Al quitar la funcionalidad:
 
 ```text
 Por features: borrar la carpeta, las 2 rutas y el test  →  build y 71 tests en verde
@@ -229,18 +251,20 @@ Por tipo:     borrar los 7 archivos nuevos              →  build 1
   Could not resolve './marcas.service' in src/services/index.ts
 ```
 
-Por tipo, además tienes que recordar qué tres archivos editaste. **Si puedes borrar una funcionalidad borrando una carpeta, sus límites son reales.** Es una prueba difícil de engañar.
+- **Por tipo, además, hay que recordar qué tres archivos editaste.** Si puedes borrar una funcionalidad borrando una carpeta, sus límites son reales.
 
 <Callout type="risk">
 
-- **Una _feature_ no significa "sin dependencias".** `resumen` usa los entrenos de `entrenos`, y eso está bien. En esta app es la única dependencia entre _features_. Mientras vaya en una dirección y pase por `server.ts`, no hay problema.
-- **La carpeta `features/` no se paga sola.** En un proyecto con unas pocas páginas, ordenar por tipo es más simple. Plantéatelo cuando una funcionalidad empiece a tocar muchas carpetas.
+- **Una _feature_ puede depender de otra:** `resumen` usa los entrenos, la única dependencia de esta app. Bien si va en una dirección y pasa por `server.ts`.
+- **`features/` no se paga solo:** con pocas páginas, por tipo es más simple; cámbialo cuando una funcionalidad toque muchas carpetas.
 
 </Callout>
 
 ## Paso 5: que los límites se cumplan
 
-Sin una regla, una carpeta es solo una costumbre. Añade esto a `eslint.config.js`, antes de `prettier`:
+**Qué es:** sin una regla, una carpeta es una costumbre. `no-restricted-imports` de ESLint impide entrar por la puerta de atrás.
+
+**Cómo se usa:** en `eslint.config.js`, antes de `prettier`:
 
 ```js
 {
@@ -271,26 +295,28 @@ Sin una regla, una carpeta es solo una costumbre. Añade esto a `eslint.config.j
 },
 ```
 
-Al activarla sobre la app recién migrada, encontró **15 importaciones en 13 archivos** que entraban por la puerta de atrás, como `@/features/auth/sesion`. Se resolvieron ampliando el `server.ts` de cada _feature_. Y ahora un atajo no pasa:
+- **Encontró 15 importaciones en 13 archivos** que entraban por detrás (`@/features/auth/sesion`); se resolvieron ampliando cada `server.ts`. Ahora un atajo no pasa:
 
 ```text
 '@/features/entrenos/entrenos.repo' import is restricted from being used by a pattern.
 Eso es interno de la feature: usa server.ts, su esquema o sus componentes.
 ```
 
-Los patrones `../*/*` están ahí por una razón. Con solo los de `@/`, una ruta relativa como `../entrenos/entrenos.repo` se saltaba la regla: dio código 0. Con ellos, dio código 1.
+- **Los patrones `../*/*` hacen falta:** solo con los de `@/`, `../entrenos/entrenos.repo` dio código 0; con ellos, 1.
 
 <Callout type="risk">
 
-- **Una regla solo protege si se ejecuta.** Ponla en tu CI (A7), o seguirá siendo una costumbre.
-- **Los tests quedan fuera a propósito** (`files: ["src/**"]`): un test sí puede importar un servicio interno para probarlo.
-- **Si lo necesitas más estricto,** existen herramientas dedicadas a las dependencias, como `dependency-cruiser`. No se han probado aquí: esta regla cubrió lo que hacía falta.
+- **Una regla solo protege si se ejecuta:** ponla en el CI (A7).
+- **Los tests quedan fuera a propósito** (`files: ["src/**"]`): pueden importar lo interno para probarlo.
+- **`dependency-cruiser`** es más estricto (no probado aquí): esta regla bastó.
 
 </Callout>
 
 ## Paso 6: _barrel files_, con cuidado
 
-Un _barrel_ es un `index.ts` que reexporta una carpeta. Es cómodo:
+**Qué es:** un _barrel_ es un `index.ts` que reexporta una carpeta. Cómodo, y peligroso.
+
+**Cómo se usa:**
 
 ```ts
 // src/features/entrenos/index.ts
@@ -302,7 +328,7 @@ export * from "./server";
 export * from "./tipos";
 ```
 
-Se probó importando una sola constante, `TIPOS_ENTRENO`, desde una isla de React:
+Importando solo `TIPOS_ENTRENO` desde una isla de React:
 
 | El _barrel_ incluye       | Build | JS del cliente (gzip) | MongoDB en el cliente |
 | ------------------------- | ----- | --------------------- | --------------------- |
@@ -311,17 +337,13 @@ Se probó importando una sola constante, `TIPOS_ENTRENO`, desde una isla de Reac
 | Todo, sin `server.ts`     | **0** | **343 KB**            | **Sí**                |
 | Esquema y funciones puras | 0     | 126 KB                | No                    |
 
-Lee la tercera fila dos veces. **El build pasó en verde con el controlador de MongoDB en el navegador,** por una línea que parecía inofensiva. Es el caso más peligroso: nada avisa, salvo que vigiles el tamaño (A6).
-
-La segunda fila falló gracias a `astro:env`, no por casualidad:
+- **La tercera fila:** el _build_ pasó en verde con el controlador de MongoDB en el navegador, y nada avisa salvo vigilar el tamaño (A6). La segunda falló gracias a `astro:env`, no por casualidad:
 
 ```text
 [ServerOnlyModule] The "astro:env/server" module is only available server-side.
 ```
 
-Hay otros dos problemas:
-
-**El servidor de desarrollo no descarta nada.** Una carpeta de 300 módulos con _barrel_, usando uno solo:
+**El servidor de desarrollo no descarta nada:** 300 módulos con _barrel_, usando uno:
 
 ```text
               peticiones en dev   de esa carpeta   build final
@@ -329,9 +351,9 @@ con barrel    331                 301              134 bytes
 directo       31                  1                134 bytes
 ```
 
-En producción, el resultado fue idéntico. En desarrollo, 300 peticiones más. En un Mac tardó entre 625 y 846 ms, frente a 572 y 639 ms: se nota poco aquí, pero crece con el proyecto.
+- **En producción, idéntico; en desarrollo, 300 peticiones más** (625–846 ms frente a 572–639 en un Mac), y crece con el proyecto.
 
-**Los ciclos.** Si un archivo importa desde el _barrel_ de su propia carpeta:
+**Los ciclos:** un archivo que importa del _barrel_ de su carpeta:
 
 ```ts
 // a.mjs
@@ -343,19 +365,20 @@ export const DOBLE = LIMITE * 2;
 ReferenceError: Cannot access 'LIMITE' before initialization
 ```
 
-Importando desde `./b.mjs`, dio `20`.
+- **Desde `./b.mjs`, dio `20`.** Por eso tres reglas: `server.ts` nombra lo que exporta, sin `export *` (`export { crearNota, listarNotas } from "./notas.server"`); nada de servidor en lo que importa el cliente; y dentro de una _feature_, rutas relativas directas.
 
-Por eso, este proyecto sigue tres reglas:
+<Callout type="risk">
 
-- **`server.ts` nombra lo que exporta,** sin `export *`. Se lee como una lista de lo público. Por ejemplo, `export { crearNota, listarNotas } from "./notas.server"`.
-- **Nada que use el servidor en un archivo que importe el cliente.** `server.ts` no lo importa ninguna isla.
-- **Dentro de una _feature_, rutas relativas directas.** Nunca a través de su propia puerta.
+- **`export *` puede meter el servidor en el navegador sin romper el _build_:** vigila el tamaño del JavaScript del cliente.
+- **Un ciclo da `ReferenceError` en tiempo de ejecución,** no al compilar: nunca importes de tu propia puerta.
+
+</Callout>
 
 ## Paso 7: nombres y documentación
 
-**Los nombres son una decisión de equipo, y lo importante es que sean coherentes.** En esta app: componentes en `PascalCase`, y el resto en minúsculas con guiones y un sufijo que dice qué es: `marcas.repo.ts`, `marcas.service.ts` y `marca.schema.ts`. Un sufijo permite buscar y escribir reglas, como la del Paso 5.
+**Qué es:** nombres coherentes, un `README` que dice cómo se usa y **ADR** que dicen por qué es así.
 
-Y cuidado con las mayúsculas. Se escribió `Ritmo` en lugar de `ritmo` en un `import`:
+**Cómo se usa:** en esta app, componentes en `PascalCase` y el resto en minúsculas con guiones y sufijo (`marcas.repo.ts`, `marcas.service.ts`, `marca.schema.ts`): el sufijo permite buscar y escribir reglas como la del Paso 5. Y las mayúsculas: `Ritmo` en vez de `ritmo` en un `import`:
 
 ```text
 Mac (sistema sin distinguir mayúsculas):  build 0
@@ -364,11 +387,9 @@ Linux, como tu CI y tu servidor:          build 1
 astro check, en el Mac:                   error ts(1149)
 ```
 
-Funciona en tu equipo y se rompe al desplegar. `astro check` lo detecta en local: otra razón para tenerlo en tu CI.
-
-**`README`: cómo se usa.** Debe responder a qué es esto, cómo se arranca, cómo se prueba y dónde está cada cosa. Es la puerta de entrada para ti, dentro de seis meses, y para cualquier IA que trabaje en tu código. El de la plataforma donde lees esto sigue siendo el de la plantilla de Astro, y no explica nada del proyecto. Es deuda real, y A8.5 trata de cómo verla y priorizarla.
-
-**ADR: por qué es así.** Un _Architecture Decision Record_ es un archivo corto que guarda una decisión y su motivo, en `docs/adr/`. El código te dice qué se hizo, pero no qué se descartó. Esta es una plantilla:
+- **Funciona en tu equipo y se rompe al desplegar;** `astro check` lo detecta en local.
+- **El `README`** responde qué es, cómo se arranca, cómo se prueba y dónde está cada cosa, para ti dentro de seis meses y para cualquier IA. El de esta plataforma sigue siendo el de la plantilla de Astro: deuda real, que A8.5 enseña a priorizar.
+- **Un ADR** (_Architecture Decision Record_) guarda en `docs/adr/` una decisión y su motivo, incluido lo descartado:
 
 ```markdown
 # ADR-0001 · Título en forma de decisión
@@ -392,11 +413,20 @@ Qué se descartó, y por qué.
 Qué mejora, qué empeora y qué hay que vigilar.
 ```
 
-No se edita un ADR aceptado. Si cambias de idea, escribes otro que lo sustituye: el historial de decisiones es lo valioso.
+- **Un ADR aceptado no se edita:** si cambias de idea, otro lo sustituye.
+
+<Callout type="risk">
+
+- **macOS no distingue mayúsculas en los nombres; Linux, sí:** un `import` mal escrito pasa en local y rompe el CI o el servidor.
+- **Un `README` de plantilla es peor que ninguno:** parece documentación y no explica nada.
+
+</Callout>
 
 ## Paso 8: monorepo, solo cuando hace falta
 
-Un monorepo con **pnpm workspaces** guarda varios paquetes en un repositorio. Se montó uno con dos apps de Astro que comparten un paquete de esquemas:
+**Qué es:** un monorepo con **pnpm workspaces** guarda varios paquetes en un repositorio. Aquí, dos apps de Astro que comparten un paquete de esquemas.
+
+**Cómo se usa:**
 
 ```text
 apps/web/  apps/panel/  packages/esquemas/  pnpm-workspace.yaml
@@ -410,25 +440,31 @@ packages:
   - "packages/*"
 ```
 
-El paquete se exporta sin compilar, con `"exports": "./src/index.ts"`, y las apps lo declaran con `"@entrenos/esquemas": "workspace:*"`. Funcionó a la primera:
+- **El paquete se exporta sin compilar** (`"exports": "./src/index.ts"`) y las apps lo declaran con `"@entrenos/esquemas": "workspace:*"`. Funcionó a la primera:
 
 ```bash
 pnpm --filter web build    # una app
 pnpm -r build              # todas
 ```
 
-La diferencia clara con npm es esta. `web` importó `zod` sin declararlo, una **dependencia fantasma**:
+`web` importó `zod` sin declararlo, una **dependencia fantasma**:
 
 ```text
 pnpm:  código 1 · failed to resolve import "zod"
 npm:   código 0 · funciona por casualidad
 ```
 
-Con npm, `zod` estaba disponible por ser dependencia de otro paquete. Si ese paquete la quita, tu app se rompe sin haber cambiado. pnpm lo detecta a tiempo.
+- **Con npm funcionaba por casualidad** (otro paquete la traía) y se rompería si la quitara; pnpm lo detecta a tiempo.
+- **Cuándo:** dos cosas que se despliegan por separado y comparten código. Con una sola app, las _features_ dan casi todo sin ceremonia; esta app no lo necesita.
 
-**¿Cuándo?** Cuando tengas dos cosas que se despliegan por separado y comparten código. Con una sola app, los paquetes solo añaden ceremonia: las _features_ dan casi toda la organización sin coste. Para esta app de entrenamiento, no hace falta.
+<Callout type="risk">
 
-No se ha probado un monorepo con Docker ni en Vercel, que es donde está buena parte de su coste.
+- **No se ha probado con Docker ni en Vercel,** donde está buena parte de su coste.
+- **Exportar `.ts` sin compilar** obliga a que cada app sepa compilarlo: funciona con Vite, no con cualquier herramienta.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
 
@@ -436,9 +472,9 @@ Reorganiza tu app de entrenamiento por _features_ y escribe un ADR explicando la
 
 </Callout>
 
-Solución. Antes de nada, comprueba que todo está en verde y haz un _commit_: los tests son tu red. Haz la migración en una PR aparte, sin cambiar ningún comportamiento.
+Solución. Comprueba que todo está en verde y haz un _commit_: los tests son tu red. La migración, en una PR aparte, sin cambiar comportamiento.
 
-Mover 29 archivos y reescribir sus importaciones a mano es buscar errores. Este _script_ lo hace con `git mv`, y reescribe todas las importaciones. Guárdalo fuera de `src`, ajusta la tabla `M` a tu app y ejecútalo desde la raíz:
+Mover 29 archivos y reescribir sus importaciones a mano es buscar errores. Este _script_ lo hace con `git mv`; guárdalo fuera de `src`, ajusta la tabla `M` a tu app y ejecútalo desde la raíz:
 
 ```python
 import os,re,subprocess,sys,json
@@ -532,13 +568,13 @@ python3 migrar.py
 imports revisados 152 cambiados 141 archivos movidos 29
 ```
 
-Git detectó los 29 como renombrados, y **los 71 tests pasaron** a la primera. Pero no todo estaba bien, y solo `astro check` lo vio:
+- **Git vio los 29 como renombrados y los 71 tests pasaron,** pero solo `astro check` vio esto:
 
 ```text
 scripts/i5/03-redireccion.ts:3:31 - error ts(2307): Cannot find module '../../src/lib/redireccion.ts'
 ```
 
-El _script_ no miraba `scripts/`, y ni los tests ni el build usan esa carpeta. Ejecuta **todas** las comprobaciones, no solo una.
+- **El _script_ no miraba `scripts/`,** que no usan ni los tests ni el _build_. Ejecuta **todas** las comprobaciones.
 
 Después, a mano:
 
@@ -603,11 +639,9 @@ usan `server.ts`, sus esquemas y sus componentes. Lo impide ESLint
 - Vigilar: que `lib/` no se convierta en un cajón de sastre.
 ```
 
-Al terminar: `astro check`, ESLint, el build y los tests, todos en verde.
-
-- **Los E2E no se ejecutaron en esta migración,** ni se probó en un servidor. Hazlo tú antes de desplegar.
+- **Al terminar, `astro check`, ESLint, el _build_ y los tests en verde.** Los E2E y un servidor no se probaron: hazlo antes de desplegar.
 - **Si tu app es distinta,** cambia la tabla `M`: es lo único específico.
-- **Lo que sigue es tu criterio.** `CampoTexto` fue a `components/ui/`, y `limites` a `lib/`. Otra persona podría defender otra cosa, y para eso está el ADR.
+- **El resto es criterio** (`CampoTexto` a `components/ui/`, `limites` a `lib/`): otra persona podría defender otra cosa, y para eso está el ADR.
 
 <Callout type="mastery">
 
@@ -618,12 +652,10 @@ Una funcionalidad nueva cabe en una carpeta, más sus rutas y sus tests, sin toc
 ## Resumen
 
 - **Por _features_:** lo que cambia junto, vive junto.
-- **Mis marcas:** de 10 archivos a 8, y de 3 archivos ajenos editados a 0.
-- **La prueba:** borrar una carpeta y que todo siga en verde.
-- **`server.ts`** es la puerta de cada _feature_ y conecta sus piezas.
-- **`no-restricted-imports`** encontró 15 atajos, y también debe cubrir las rutas relativas.
-- **_Barrels_:** con `export *`, MongoDB llegó al navegador con el build en verde. Y 331 peticiones en dev frente a 31.
-- **Mayúsculas:** Mac 0, Linux 1. `astro check` lo detecta.
-- **`README`** dice cómo se usa, y un **ADR** dice por qué es así.
-- **Monorepo:** para dos cosas que se despliegan por separado. pnpm detecta dependencias fantasma.
-- **Migrar con _script_, en una PR aparte,** y con todas las comprobaciones: los tests no vieron el error en `scripts/`.
+- **Mis marcas:** de 10 archivos a 8, y de 3 ajenos editados a 0; se borra quitando una carpeta.
+- **`server.ts`** es la puerta de cada _feature_; `no-restricted-imports` encontró 15 atajos, también relativos.
+- **_Barrels_:** con `export *`, MongoDB llegó al navegador con el _build_ en verde, y 331 peticiones en dev frente a 31.
+- **Mayúsculas:** Mac 0, Linux 1; `astro check` lo ve.
+- **`README`** para cómo se usa, **ADR** para por qué.
+- **Monorepo** solo con despliegues separados; pnpm ve dependencias fantasma.
+- **Migra con _script_ y todas las comprobaciones.**

@@ -7,17 +7,15 @@ minutes: 80
 summary: "Sincronizas islas y pestañas con Nanostores, BroadcastChannel y el servidor como fuente de verdad. Provocas lo que falla: carreras, un bucle de 43 mensajes por segundo y un store que filtró datos de otra persona."
 ---
 
-Marcas una sección como leída. El botón cambia, pero el contador de arriba sigue diciendo 0, y el índice lateral tampoco se entera. Cada isla de React vive aparte, así que cada una cree lo que recuerda. El problema se multiplica con una segunda pestaña, con un fallo de red y con otro dispositivo. Ninguna pantalla debería contradecir a otra.
+Marcas una sección como leída: el botón cambia, pero el contador sigue en 0 y el índice tampoco se entera, porque cada isla de React vive aparte con lo que recuerda. Con otra pestaña, un fallo de red u otro dispositivo, empeora. Aquí haces que botón, índice y contador nunca se contradigan: un _store_ que obedece al servidor y un aviso entre pestañas.
 
-Una analogía: varias oficinas con copias de un mismo registro. Si cada una apunta los cambios en su copia, pronto no coinciden. La solución es que haya un **registro central**: cada oficina tiene un tablón para trabajar rápido, pero lo que vale es el registro. Cuando cambia, se avisa a las demás oficinas, y cada una lo vuelve a consultar. El registro es tu servidor, el tablón es el _store_ y el aviso es `BroadcastChannel`.
-
-**Lo que tendrás al terminar:** un botón, un índice y un contador que nunca se contradicen, en una o varias pestañas, también cuando el servidor falla.
-
-**Requisitos:** Nanostores básico (B6.7), actualizaciones optimistas (I2.5), _View Transitions_ (A6) y A8.2.
-
-Se midió en Chromium con dos pestañas reales, con Astro 7.4.7, `nanostores` 1.5.5 y `@nanostores/react` 2.0.1. El servidor está en el mismo Mac, y la base de datos es **simulada**, un `Map` con esperas fijas. Solo se ha probado Chromium.
+**Requisitos:** Nanostores básico (B6.7), actualizaciones optimistas (I2.5), _View Transitions_ (A6) y A8.2. Medido en Chromium con dos pestañas reales, Astro 7.4.7, `nanostores` 1.5.5 y `@nanostores/react` 2.0.1; servidor en el mismo Mac y base **simulada** (un `Map` con esperas fijas). Solo Chromium.
 
 ## Paso 1: el problema
+
+**Qué es:** dos islas, cada una con su `useState`, que no saben nada la una de la otra.
+
+**Cómo se usa:**
 
 ```bash
 mkdir estado && cd estado
@@ -41,17 +39,26 @@ export default defineConfig({
 });
 ```
 
-Dos islas, cada una con su `useState`. Tras pulsar el botón, esto es lo que mostraba la página:
+Tras pulsar el botón, la página mostraba:
 
 ```text
 0 de 3 leídas | ✓ Leída
 ```
 
-Las dos tienen razón según lo que saben. Por eso el dato debe vivir fuera de las islas.
+- **Las dos tienen razón según lo que saben:** el dato debe vivir fuera de las islas.
+
+<Callout type="risk">
+
+- **`useState` y `Context` no se cruzan entre islas:** cada isla es un árbol de React aparte.
+- **El fallo no se ve con una sola isla:** prueba siempre con dos que muestren el mismo dato.
+
+</Callout>
 
 ## Paso 2: el _store_
 
-Empieza por lo esencial, los tres tipos de Nanostores, en `src/stores/progreso.ts`:
+**Qué es:** Nanostores guarda estado fuera de los componentes. **`atom`** guarda un valor (`.set()`), **`map`** un objeto (`.setKey()`) y **`computed`** deriva un valor de otro _store_.
+
+**Cómo se usa:** lo esencial, en `src/stores/progreso.ts`:
 
 ```ts
 import { atom, computed, map } from "nanostores";
@@ -61,13 +68,9 @@ export const $totalLeidas = computed($leidas, (l) => Object.values(l).filter(Boo
 export const $aviso = atom("");
 ```
 
-- **`atom`** guarda un valor. Se cambia con `.set()`.
-- **`map`** guarda un objeto. Con `.setKey()` cambias una clave.
-- **`computed`** deriva un valor de otro _store_. Este es el importante: **el total no se guarda, se calcula**, y dos números que no existen por separado no pueden contradecirse.
+- **El total no se guarda, se calcula:** dos números que no existen por separado no pueden contradecirse. Con `@nanostores/react`, 1,5 KB con gzip.
 
-Todo esto, junto con `@nanostores/react`, ocupa 1,5 KB con gzip.
-
-La lista de secciones y la "base de datos", que hará de registro central:
+Las secciones y la «base de datos», que hará de registro central:
 
 ```ts
 // Archivo: src/lib/secciones.ts
@@ -101,7 +104,7 @@ export async function guardar(usuario: string, seccionId: string, leida: boolean
 }
 ```
 
-La API, en dos archivos. `src/pages/api/progreso/index.ts`:
+La API. `src/pages/api/progreso/index.ts`:
 
 ```ts
 // Archivo: src/pages/api/progreso/index.ts
@@ -140,9 +143,18 @@ export const PUT = cambiar(true);
 export const DELETE = cambiar(false);
 ```
 
+<Callout type="risk">
+
+- **El servidor es la fuente de verdad, el _store_ una copia de trabajo:** nunca al revés.
+- **Guardar un total aparte invita a la contradicción:** lo que se puede calcular, con `computed`.
+
+</Callout>
+
 ## Paso 3: el primer render
 
-Las islas se renderizan primero en el servidor, donde el _store_ está vacío. Sin más cuidado, con una sección ya leída:
+**Qué es:** las islas se renderizan primero en el servidor, donde el _store_ está vacío.
+
+**Cómo se usa:** sin más cuidado, con una sección leída:
 
 ```text
 HTML:       0 de 3 leídas
@@ -150,7 +162,7 @@ navegador:  1 de 3 leídas
 consola:    Minified React error #418
 ```
 
-Es un error de hidratación: el HTML dice una cosa y React otra. Por tanto, cada isla recibe del servidor su valor inicial, y `useStore` lo usa con la opción `ssr`. El botón importa `cambiar`, que escribirás en el Paso 4, así que aún no compilará. Las islas:
+- **Error de hidratación:** el HTML dice una cosa y React otra. Cada isla recibe del servidor su valor inicial y `useStore` lo usa con `ssr`. El botón importa `cambiar` (Paso 4), así que aún no compila:
 
 ```tsx
 // Archivo: src/components/ContadorLeidas.tsx
@@ -220,7 +232,7 @@ export default function BotonLeida({ seccionId, inicial }: Props) {
 }
 ```
 
-La página consulta el servidor, se lo pasa a las islas y deja una copia para el _store_ del navegador:
+La página consulta, pasa el dato a las islas y deja una copia para el _store_ del navegador:
 
 ```astro
 ---
@@ -256,7 +268,7 @@ const total = Object.values(leidas).filter(Boolean).length;
 </Curso>
 ```
 
-`NotaRapida` se usa en el Paso 7, y `src/layouts/Curso.astro` añade `<ClientRouter />`:
+`NotaRapida` es para el Paso 7, y `src/layouts/Curso.astro` añade `<ClientRouter />`:
 
 ```tsx
 // Archivo: src/components/NotaRapida.tsx
@@ -291,7 +303,7 @@ const { titulo } = Astro.props;
 </html>
 ```
 
-El resultado, con una sección ya leída:
+Con una sección leída:
 
 ```text
 contador: 1 de 3 leídas        (un solo valor, sin parpadeos)
@@ -301,15 +313,17 @@ sin JavaScript: 1 de 3 leídas · ✓ Tipos básicos
 
 <Callout type="risk">
 
-- **Nunca escribas en un _store_ desde el servidor.** Es un módulo, y lo comparten todas las peticiones. Con `$leidas.set(leidas)` en la página, en serie todo parecía correcto. Con dos peticiones casi a la vez, **Bob recibió el contador de Ana en 3 de 20 intentos**. Un error así no se ve al probar a solas. Pasa los datos por _props_.
-- **Un `<script type="application/json">` con `set:html` no se escapa.** Aquí solo hay claves propias y booleanos. Si hubiese texto escrito por usuarios, un `</script>` podría romper la página: sustituye `<` por `<` antes de escribirlo. Esto no se ha medido aquí.
-- **`BroadcastChannel` también existe en Node.** Sin la comprobación `enNavegador`, se crearía uno en el servidor.
+- **Nunca escribas en un _store_ desde el servidor:** es un módulo compartido por todas las peticiones. Con `$leidas.set(leidas)` en la página, **Bob recibió el contador de Ana en 3 de 20 intentos** con dos peticiones casi a la vez. A solas no se ve. Pasa los datos por _props_.
+- **`<script type="application/json">` con `set:html` no se escapa:** aquí hay claves propias y booleanos; con texto de usuarios, un `</script>` rompería la página. Sustituye `<` por `\u003c` antes (no medido).
+- **`BroadcastChannel` también existe en Node:** sin `enNavegador`, se crearía uno en el servidor.
 
 </Callout>
 
 ## Paso 4: el servidor manda
 
-Este es el _store_ completo. Sustituye `src/stores/progreso.ts`:
+**Qué es:** cada cambio en cuatro pasos: pintar, enviar, volver a preguntar y avisar. La pantalla responde al momento, pero queda lo que dice el servidor.
+
+**Cómo se usa:** sustituye `src/stores/progreso.ts`:
 
 ```ts
 // Archivo: src/stores/progreso.ts
@@ -374,15 +388,15 @@ if (enNavegador) {
 }
 ```
 
-El flujo de un cambio tiene cuatro pasos: pintar, enviar, volver a preguntar y avisar. La pantalla responde al momento, pero lo que queda es lo que dice el servidor. Con la base de datos fallando, el botón pasó por:
+Con la base fallando, el botón pasó por:
 
 ```text
 ✓ Leída  →  Marcar como leída  +  "No se pudo guardar"
 ```
 
-Sin red, igual: se deshizo y mostró el aviso. La siguiente pulsación, ya con red, se guardó con normalidad.
+- **Sin red, igual:** se deshizo y avisó, y el siguiente clic con red se guardó.
 
-**La cola no es un adorno.** Con un `PUT` lento de 600 ms y un `DELETE` rápido de 10 ms, se pulsó dos veces seguidas, es decir, "marcar" y "desmarcar". El `DELETE` adelantó al `PUT`:
+**La cola no es un adorno.** Con un `PUT` de 600 ms y un `DELETE` de 10 ms, dos clics seguidos («marcar» y «desmarcar»); el `DELETE` adelantó al `PUT`:
 
 | Versión                 | Pantalla | Servidor | Resultado                    |
 | ----------------------- | -------- | -------- | ---------------------------- |
@@ -390,30 +404,30 @@ Sin red, igual: se deshizo y mostró el aviso. La siguiente pulsación, ya con r
 | Sin cola, con recargar  | Leída    | Leída    | ✗ Coinciden, pero no era eso |
 | Con cola                | Sin leer | Sin leer | ✓                            |
 
-La segunda fila enseña algo: volver a preguntar arregla la contradicción, no el dato. Solo la cola respeta lo que pediste. Con cinco clics seguidos, el botón alternó `10101`, y pantalla y servidor acabaron iguales.
+- **Volver a preguntar arregla la contradicción, no el dato:** solo la cola respeta lo pedido. Con cinco clics, `10101`, y pantalla y servidor iguales.
 
 <Callout type="risk">
 
-- **`pendientes` evita un parpadeo.** Si un cambio está en camino, la respuesta de `recargar` aún no lo refleja, y pisaría lo que el usuario acaba de pulsar.
-- **Un `catch` dentro de la cola es obligatorio.** Si una promesa de la cadena falla, `cola.then` ya no ejecuta nada más, y ningún clic posterior llegaría al servidor. Por eso `fetch` lleva `.catch` y `recargar` tiene `try`.
-- **Cada cambio cuesta una petición más,** el `GET` de `recargar`. Con un solo campo podrías usar la respuesta del propio `PUT`.
+- **`pendientes` evita un parpadeo:** la respuesta de `recargar` aún no refleja un cambio en camino y lo pisaría.
+- **El `catch` dentro de la cola es obligatorio:** una promesa rota detiene `cola.then` y ningún clic posterior llega. Por eso `fetch` lleva `.catch` y `recargar`, `try`.
+- **Cada cambio cuesta un `GET` más:** con un solo campo, usa la respuesta del `PUT`.
 
 </Callout>
 
 ## Paso 5: otra pestaña
 
-`BroadcastChannel` envía mensajes entre pestañas del mismo origen. Es lo que hacen estas dos líneas de `progreso.ts`:
+**Qué es:** `BroadcastChannel` envía mensajes entre pestañas del mismo origen.
+
+**Cómo se usa:** dos líneas de `progreso.ts`:
 
 ```ts
 canal?.postMessage("cambio"); // en la pestaña que cambia
 canal?.addEventListener("message", recargar); // en las demás
 ```
 
-El mensaje no lleva el dato, solo avisa: cada pestaña lo pregunta al servidor. Con dos pestañas abiertas, la segunda se actualizó a los 71 ms del clic, con una sola petición, un `GET`. Ese tiempo es casi todo `PUT` y `GET`. El canal en sí tardó 1 ms.
+- **El mensaje solo avisa:** cada pestaña pregunta al servidor. La segunda se actualizó a los 71 ms del clic con un `GET`; el canal tardó 1 ms.
 
-La alternativa clásica es el evento `storage`:
-
-|                                 | `BroadcastChannel` | Evento `storage` |
+| Aspecto                         | `BroadcastChannel` | Evento `storage` |
 | ------------------------------- | ------------------ | ---------------- |
 | Latencia medida                 | 1 ms o menos       | 1 ms o menos     |
 | Llega a la propia pestaña       | No                 | No               |
@@ -422,11 +436,9 @@ La alternativa clásica es el evento `storage`:
 | Deja algo guardado              | No                 | Sí               |
 | Llega a otro perfil o navegador | No                 | No               |
 
-Usa `BroadcastChannel` para avisar, y `storage` solo si lo que quieres es guardar un valor. En esta lección, el dato está en el servidor, y no hay nada que guardar.
+- **`BroadcastChannel` para avisar, `storage` para guardar un valor:** aquí el dato está en el servidor.
 
-Dos errores que se provocaron a propósito:
-
-**Avisar antes de confirmar.** Con el mensaje enviado antes del `PUT`, llevando el dato, y el servidor fallando:
+**Avisar antes de confirmar,** con el mensaje antes del `PUT` y el servidor fallando:
 
 ```text
 pestaña A: 0 de 3 leídas
@@ -434,27 +446,29 @@ pestaña B: 1 de 3 leídas    ← se quedó con algo que nunca ocurrió
 servidor:  {}
 ```
 
-Por eso, en el código final, el aviso va tras el `if (r?.ok)`.
+- **Por eso el aviso va tras `if (r?.ok)`.**
 
-**Avisar cada vez que cambia el _store_.** Parece lo natural:
+**Avisar cada vez que cambia el _store_:**
 
 ```ts
 $leidas.listen(() => canal?.postMessage("cambio")); // NO
 ```
 
-Un aviso provoca `recargar`, `recargar` cambia el _store_, y el _store_ vuelve a avisar: **43 mensajes por segundo**, cada uno con su petición, y sin final. Y la pantalla se veía bien. Solo se descubre mirando la pestaña Network.
+- **43 mensajes por segundo sin final:** aviso, `recargar`, cambio, aviso. La pantalla se veía bien; solo lo descubre la pestaña Network.
 
 <Callout type="risk">
 
-- **El canal no llega a las pestañas cerradas ni a otros dispositivos.** Las pestañas nuevas leen del servidor, y por eso no hace falta guardar nada.
-- **Mismo origen significa mismo protocolo, dominio y puerto.** `www.` y el dominio sin `www` son canales distintos.
-- **Una isla con `client:visible` sin hidratar muestra su HTML antiguo.** Nadie la ve, porque está fuera de la pantalla. Al llegar a ella, salió correcta.
+- **El canal no llega a pestañas cerradas ni a otros dispositivos:** las nuevas leen del servidor.
+- **Mismo origen es protocolo, dominio y puerto:** `www.` y sin `www` son canales distintos.
+- **Una isla `client:visible` sin hidratar muestra HTML antiguo,** fuera de la pantalla; al llegar, salió correcta.
 
 </Callout>
 
 ## Paso 6: otro dispositivo
 
-Si cambias algo desde el móvil, ningún canal te avisa en el portátil. La solución barata es preguntar al volver:
+**Qué es:** ningún canal avisa en el portátil de un cambio hecho en el móvil. Lo barato es preguntar al volver.
+
+**Cómo se usa:**
 
 ```ts
 document.addEventListener("visibilitychange", () => {
@@ -462,7 +476,7 @@ document.addEventListener("visibilitychange", () => {
 });
 ```
 
-Se simuló un cambio desde fuera y, después, ese evento:
+Un cambio simulado desde fuera, y después el evento:
 
 ```text
 al abrir:           0 de 3 leídas
@@ -470,26 +484,33 @@ tras el cambio:     0 de 3 leídas    ← aún sin enterarse
 al volver a la pestaña: 1 de 3 leídas
 ```
 
-El evento se disparó a mano: en este navegador automatizado no se cambió de pestaña de verdad. Sin _WebSockets_ hay un intervalo en el que una pantalla va por detrás, y es aceptable: lo que no debe pasar es que se quede así.
+- **El evento se disparó a mano** (el navegador automatizado no cambió de pestaña de verdad). Sin _WebSockets_, una pantalla va por detrás un rato: aceptable, siempre que no se quede así.
+
+<Callout type="risk">
+
+- **`visibilitychange` no avisa con la pestaña visible:** si dos personas trabajan a la vez sobre lo mismo, necesitarás _WebSockets_ o sondeo.
+- **Cada vuelta a la pestaña es un `GET`:** barato aquí; con datos pesados, limita su frecuencia.
+
+</Callout>
 
 ## Paso 7: con _View Transitions_
 
-Con `<ClientRouter />`, navegar no recarga la página, y eso cambia las reglas: **el módulo del _store_ no vuelve a ejecutarse.** La ventana fue la misma tras navegar, y el _store_ siguió vivo. Es una ventaja, pero tiene una trampa.
+**Qué es:** con `<ClientRouter />`, navegar no recarga la página y **el módulo del _store_ no vuelve a ejecutarse:** sigue vivo, con una trampa.
 
-El servidor envía datos nuevos en cada página, pero `sembrar()` solo se ejecutaría al inicio. Sin `astro:after-swap`, y con un cambio hecho desde fuera:
+**Cómo se usa:** cada página trae datos nuevos, pero `sembrar()` solo corría al inicio. Sin `astro:after-swap` y con un cambio desde fuera:
 
 ```text
 tras navegar: 0 de 3 leídas    ← HTML nuevo, store antiguo
 al recargar:  1 de 3 leídas
 ```
 
-Con este listener, el valor fue correcto desde la navegación:
+Con este _listener_, correcto desde la navegación:
 
 ```ts
 document.addEventListener("astro:after-swap", sembrar);
 ```
 
-`transition:persist` conserva una isla entre páginas, con su estado interno:
+`transition:persist` conserva una isla entre páginas, con su estado:
 
 | Isla                                            | Tras navegar                        |
 | ----------------------------------------------- | ----------------------------------- |
@@ -498,19 +519,35 @@ document.addEventListener("astro:after-swap", sembrar);
 | `<BotonLeida transition:persist />`             | Correcto: recibe las _props_ nuevas |
 | `<BotonLeida … transition:persist-props />`     | ✗ Sigue siendo el de la sección 1   |
 
-La última fila es una contradicción real. En la sección 2, el botón decía `✓ Leída` y, al pulsarlo, **desmarcó la sección 1**. `persist-props` conserva las _props_ antiguas: úsalo solo en lo que no dependa de la página, como un reproductor.
+- **La última fila es una contradicción real:** en la sección 2 decía `✓ Leída` y al pulsarlo **desmarcó la sección 1**. `persist-props` conserva las _props_ antiguas: solo para lo que no depende de la página, como un reproductor.
+
+<Callout type="risk">
+
+- **Sin `astro:after-swap`, el HTML es nuevo y el _store_ viejo:** vuelve a sembrar en cada navegación.
+- **`transition:persist-props` mezcla páginas:** pruébalo navegando y pulsando, no solo mirando.
+
+</Callout>
 
 ## Paso 8: la plataforma donde lees esto
 
-Comparte estado con otra técnica, sin Nanostores: `MarkAsReadButton` lanza un evento `da:section-read` en `document`, y un `<script>` del índice lateral lo escucha. Es una buena solución para un solo aviso: no añade dependencias, y el índice no necesita React.
+**Qué es:** esta plataforma comparte estado sin Nanostores: `MarkAsReadButton` lanza `da:section-read` en `document` y un `<script>` del índice lateral lo escucha. Para un solo aviso es buena solución: sin dependencias y sin React en el índice.
 
-Pero un `CustomEvent` no sale de la pestaña. Se probó en local con dos pestañas en la misma sección:
+**Cómo se usa:** un `CustomEvent` no sale de la pestaña. En local, dos pestañas en la misma sección:
 
 ```text
 tras marcar en A:  A: Leído, 1/2    B: Marcar como leído, 0/2
 ```
 
-La pestaña B queda atrás hasta que navegas o recargas. No se rompe: pulsar otra vez repite un `PUT` que no cambia nada, y acabó en `Leído, 1/2`. Es una contradicción consciente: dos pestañas en la misma sección es un caso poco habitual. Si importase, bastaría con añadir un `BroadcastChannel` a ese evento.
+- **B queda atrás hasta navegar o recargar,** sin romperse: pulsar otra vez repite un `PUT` sin efecto y acaba en `Leído, 1/2`. Es una contradicción consciente; si importase, bastaría un `BroadcastChannel` en ese evento.
+
+<Callout type="risk">
+
+- **Un evento en `document` acopla por un nombre de texto:** una errata en `da:section-read` no da error, simplemente nadie escucha.
+- **Lo que vale para un aviso no escala:** con varios datos compartidos, un _store_ es más fácil de seguir.
+
+</Callout>
+
+## Ejercicio práctico
 
 <Callout type="exercise">
 
@@ -524,7 +561,7 @@ Solución: es el proyecto de esta lección. Compila y abre dos pestañas en la m
 npm run build && npm start
 ```
 
-Después repite esta lista de comprobación, que es la que se ejecutó:
+La lista de comprobación que se ejecutó:
 
 | Prueba                     | Debe ocurrir                                |
 | -------------------------- | ------------------------------------------- |
@@ -536,9 +573,9 @@ Después repite esta lista de comprobación, que es la que se ejecutó:
 | Navegar con `ClientRouter` | El contador sigue correcto                  |
 | Recargar                   | Lo mismo que antes de recargar              |
 
-- **Mira la pestaña Network** durante un minuto sin tocar nada: no debería haber peticiones.
-- **Para simular el fallo,** pon `ajustes.fallo = true` en `datos.ts`, y sube `escrituraPut` para la carrera.
-- **Con otro navegador,** compruébalo tú: aquí solo se ha usado Chromium.
+- **Un minuto sin tocar nada en Network:** no debería haber peticiones.
+- **Para el fallo,** `ajustes.fallo = true` en `datos.ts`, y sube `escrituraPut` para la carrera.
+- **Otro navegador, compruébalo tú:** aquí solo Chromium.
 
 <Callout type="mastery">
 
@@ -548,13 +585,9 @@ Dos islas nunca muestran estados contradictorios, porque ninguna guarda su propi
 
 ## Resumen
 
-- **`atom`, `map` y `computed`:** lo derivado se calcula, no se guarda.
-- **`useStore` con `ssr`:** evita el error de hidratación #418.
-- **Nunca `.set()` en el servidor:** Bob vio el dato de Ana en 3 de 20 intentos.
-- **Cuatro pasos:** pintar, enviar, volver a preguntar y avisar.
-- **Cola de escrituras:** sin ella, un `DELETE` adelantó a un `PUT`.
-- **`BroadcastChannel`** avisa, y el dato se pide al servidor.
-- **Avisa solo lo confirmado,** y nunca desde `.listen()`: 43 mensajes por segundo.
-- **`visibilitychange`** cubre los cambios desde otro dispositivo.
-- **`ClientRouter`:** el módulo sigue vivo, así que hay que volver a sembrar en `astro:after-swap`.
-- **`transition:persist` sí, `persist-props` con cuidado:** desmarcó la sección equivocada.
+- **`atom`, `map` y `computed`:** lo derivado se calcula.
+- **`useStore` con `ssr`** evita el error #418; **nunca `.set()` en el servidor** (Bob vio a Ana 3 de 20 veces).
+- **Pintar, enviar, volver a preguntar y avisar,** con una cola: sin ella, un `DELETE` adelantó a un `PUT`.
+- **`BroadcastChannel` avisa** solo lo confirmado, nunca desde `.listen()` (43 por segundo).
+- **`visibilitychange`** para otros dispositivos.
+- **`ClientRouter`:** vuelve a sembrar en `astro:after-swap`; `persist-props` desmarcó la sección equivocada.
