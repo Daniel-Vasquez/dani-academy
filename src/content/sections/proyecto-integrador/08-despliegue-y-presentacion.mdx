@@ -1,0 +1,565 @@
+---
+sectionId: "P1.8"
+course: "P1"
+title: "Despliegue y presentación"
+order: 8
+minutes: 120
+summary: "Publicas la v2 en un VPS: imagen Docker, Compose, Nginx con HTTPS, un despliegue que vuelve atrás solo si la versión nueva falla, CD desde main y un README con el que otra persona lo repite todo."
+---
+
+La v2 sale a internet: un contenedor detrás de Nginx con HTTPS, despliegues desde `main` que vuelven atrás si algo falla y un README que otra persona puede seguir.
+
+**Requisitos:** P1.7, A4 y A7. Medido en Ubuntu 26.04 (máquina virtual) con Docker 29.10 y Nginx 1.28; sin dominio público, con certificado autofirmado y sin ejecutar el CD.
+
+## Paso 1: la imagen
+
+**Qué es:** un `Dockerfile` en dos etapas. La primera instala y construye; la segunda solo lleva lo que ejecuta el servidor, con `NODE_ENV=production` y sin permisos de administrador.
+
+**Cómo se usa:** crea el `Dockerfile` y `.dockerignore` en la raíz del proyecto.
+
+```dockerfile
+# Archivo: Dockerfile
+# Etapa 1: dependencias y build
+FROM node:24-slim AS build
+WORKDIR /app
+# mongodb-memory-server descargaría un MongoDB entero al instalar: solo lo usan los tests
+ENV MONGOMS_DISABLE_POSTINSTALL=1
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY . .
+RUN npm run build && npm prune --omit=dev
+
+# Etapa 2: solo lo necesario para ejecutar, sin herramientas de build ni dependencias de desarrollo
+FROM node:24-slim
+ENV NODE_ENV=production HOST=0.0.0.0 PORT=4321
+WORKDIR /app
+COPY --from=build --chown=node:node /app/package.json ./
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=build --chown=node:node /app/scripts/crear-colecciones.ts ./scripts/
+COPY --from=build --chown=node:node /app/src/lib/colecciones.ts ./src/lib/
+USER node
+EXPOSE 4321
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
+  CMD node -e "fetch('http://localhost:4321/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+# Primero el esquema y los índices (P1.5), después el servidor
+CMD ["sh", "-c", "node scripts/crear-colecciones.ts && exec node dist/server/entry.mjs"]
+```
+
+`.dockerignore`:
+
+```gitignore
+node_modules
+dist
+.astro
+.env
+.git
+test-results
+playwright-report
+deploy/certs
+```
+
+- **`HEALTHCHECK` con `node` y `fetch`:** la imagen `slim` no trae `curl`, y Node ya está dentro. Docker marca el contenedor como sano solo si `/api/health` responde 200.
+- **El esquema antes que el servidor:** `crear-colecciones.ts` (P1.5) se ejecuta en cada arranque, así que una versión con un índice nuevo lo crea al desplegarse.
+
+<Callout type="risk">
+
+- **`mongodb-memory-server` descarga un MongoDB completo al instalarse:** solo lo usan los tests de integración, pero `npm ci` instala también las dependencias de desarrollo. `MONGOMS_DISABLE_POSTINSTALL=1` evita esa descarga en cada _build_.
+- **Sin `.dockerignore`, `COPY . .` copia tu `node_modules` encima del que instaló `npm ci`:** si lo construyes en un Mac, los binarios nativos (el de esbuild, por ejemplo) son de macOS y no funcionan en Linux. También copiaría `.env` a la etapa de _build_.
+
+</Callout>
+
+## Paso 2: Compose
+
+**Qué es:** los tres servicios del servidor: MongoDB, la app y el _cron_ de avisos (P1.6), cada uno con su reinicio automático.
+
+**Cómo se usa:** crea `compose.yaml`.
+
+```yaml
+# Archivo: compose.yaml
+services:
+  mongo:
+    image: mongo:8.2 # versión fija: una etiqueta flotante cambia sin avisar (A8.5)
+    restart: unless-stopped
+    volumes:
+      - datos:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    image: planificador:${VERSION:-local}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+    ports:
+      - "127.0.0.1:4321:4321" # solo para el Nginx de este servidor, nunca para internet
+    depends_on:
+      mongo:
+        condition: service_healthy # Better Auth crea sus índices al arrancar (P1.7)
+
+  avisos:
+    image: curlimages/curl:8.17.0
+    restart: unless-stopped
+    env_file: .env
+    # El cron de P1.6: cada minuto, la ruta protegida con CRON_SECRET
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        while sleep 60; do
+        curl -fsS -X POST -H "Authorization: Bearer $$CRON_SECRET" http://app:4321/api/avisos/ejecutar;
+        echo; done
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  datos:
+```
+
+- **La app solo escucha en `127.0.0.1:4321`:** desde internet se llega por Nginx o no se llega. MongoDB no publica ningún puerto.
+- **`condition: service_healthy`:** la app espera a que MongoDB responda, porque Better Auth crea sus índices al arrancar y no lo reintenta (P1.7). El _cron_ espera a que la app esté sana.
+
+<Callout type="risk">
+
+- **`"4321:4321"` sin la IP publicaría la app en todas las interfaces:** quien llegara directamente a Node podría enviar su propio `X-Forwarded-For` y saltarse el límite de intentos (hallazgo 3 de P1.7). Docker además se salta las reglas de `ufw` (A4).
+- **Sin bot configurado, el servicio `avisos` registra un error por minuto:** `curl: (22) The requested URL returned error: 503`. Es la ruta diciendo que no hay bot; configúralo o quita el servicio.
+
+</Callout>
+
+## Paso 3: Nginx y HTTPS
+
+**Qué es:** el Nginx del servidor (A4.3) delante de la app, con el certificado de Let's Encrypt (A4.4), HTTP/2 y la IP real del cliente.
+
+**Cómo se usa:** crea `deploy/nginx.conf`. El README (ejercicio) lo copia al servidor con tu subdominio, tras emitir el certificado con `certbot certonly --webroot`.
+
+```nginx
+# Archivo: deploy/nginx.conf
+# En el servidor: /etc/nginx/sites-available/planificador (A4.3 y A4.4).
+# El README lo copia con planificador.test sustituido por tu subdominio.
+upstream planificador_app {
+  server 127.0.0.1:4321;
+  keepalive 16;
+}
+
+# Lo que no pide el subdominio (escáneres que recorren IP): sin respuesta y sin enseñar el certificado
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  listen 443 ssl default_server;
+  listen [::]:443 ssl default_server;
+  server_name _;
+  ssl_reject_handshake on;
+  return 444;
+}
+
+server {
+  listen 80;
+  listen [::]:80;
+  server_name planificador.test;
+  server_tokens off;
+
+  # Let's Encrypt comprueba el subdominio aquí al emitir y al renovar (certbot --webroot)
+  location /.well-known/acme-challenge/ {
+    root /var/www/html;
+  }
+  location / {
+    return 301 https://$host$request_uri;
+  }
+}
+
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  http2 on;
+  server_name planificador.test;
+
+  ssl_certificate /etc/letsencrypt/live/planificador.test/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/planificador.test/privkey.pem;
+
+  server_tokens off;
+  client_max_body_size 1m;
+
+  proxy_http_version 1.1;
+  proxy_set_header Connection "";
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  # $remote_addr sustituye lo que mande el cliente: sin esto, el límite de intentos se salta (P1.7)
+  proxy_set_header X-Forwarded-For $remote_addr;
+
+  location / {
+    proxy_pass http://planificador_app;
+  }
+}
+```
+
+En el laboratorio, `planificador.test` no existe en internet: el certificado es autofirmado y está en la ruta donde Certbot deja el suyo, `--resolve` sustituye al DNS y `-k` acepta el certificado. Con todo desplegado (Paso 4):
+
+```bash
+R="--resolve planificador.test:443:127.0.0.1 -sk"
+curl $R -w " %{http_code} http/%{http_version}\n" https://planificador.test/api/health
+curl $R -I https://planificador.test/login | grep -iE "^(HTTP|server|strict|x-frame|content-security)"
+```
+
+```text
+{"ok":true,"db":"up"} 200 http/2
+HTTP/2 200
+server: nginx
+content-security-policy: default-src 'self';img-src 'self' data:;connect-src 'self';object-src 'none';base-uri 'self';form-action 'self'; script-src 'self' 'sha256-xIb/Pa7FUshAu4ihwjchYcQpyCI8eS8kt40GpOAYCz8=' 'sha256-1BvDVWLr3QCC20uHhUDi27eDFVJpk1uMQJGIWKUks2I=' 'sha256-kmZE/W8I1iuTnl1b3yqzv9/DQZenPngd3NjSKMQl7y0=' 'sha256-Y8t0ntteBwH+PqGKUyjWW3CAk+BNJKSoQc0xZ68FjhM=' 'sha256-0O7iB6zr9x0r6X6eWYITC9V5q+yWCGAoFvcysBGbY9Q=' 'sha256-xKBggZ2csD5Lp4tQr9izOLUTCZc1Nf4gged/rUHQ2+Y=' 'sha256-2mkrkPfKG5HdF6qWOVbV6XM8cT+fSqsoBXayDHqg3hg='; style-src 'self' 'unsafe-inline' ;
+strict-transport-security: max-age=63072000
+x-frame-options: DENY
+```
+
+El registro por HTTPS (con el valor del _token_ sustituido por `…`), y siete inicios de sesión fallidos con un `X-Forwarded-For` falso en cada uno:
+
+```bash
+curl $R -D - -o /dev/null -X POST https://planificador.test/api/auth/sign-up/email \
+  -H "content-type: application/json" -H "origin: https://planificador.test" \
+  -d '{"name":"Bea","email":"bea@planificador.test","password":"contrasena-larga"}' | grep -i "^set-cookie"
+for i in 1 2 3 4 5 6 7; do
+  curl $R -o /dev/null -w "%{http_code} " -X POST https://planificador.test/api/auth/sign-in/email \
+    -H "x-forwarded-for: 203.0.113.$i" -H "content-type: application/json" \
+    -H "origin: https://planificador.test" -d '{"email":"bea@planificador.test","password":"mala"}'
+done
+```
+
+```text
+set-cookie: __Secure-better-auth.session_token=…; Max-Age=2592000; Path=/; HttpOnly; Secure; SameSite=Lax
+401 401 401 401 401 429 429
+```
+
+Lo que escucha el servidor, y lo que responde por IP, sin el subdominio:
+
+```bash
+sudo ss -ltnH | awk '{print $4}' | grep -E ":(80|443|4321|27017)$" | sort -u
+curl -sk -o /dev/null -w "https://IP → %{http_code}\n" https://127.0.0.1/
+curl -s -o /dev/null -w "http://IP → %{http_code}\n" http://127.0.0.1/
+```
+
+```text
+0.0.0.0:443
+0.0.0.0:80
+127.0.0.1:4321
+[::]:443
+[::]:80
+https://IP → 000
+http://IP → 000
+```
+
+- **El hallazgo 3 de P1.7, cerrado:** Nginx sustituye el `X-Forwarded-For` del cliente por su IP real, y el sexto intento ya es un 429.
+- **`__Secure-` y `Secure` en la _cookie_:** con `BETTER_AUTH_URL` en `https`, Better Auth la marca para que solo viaje cifrada (A4.4).
+
+<Callout type="risk">
+
+- **La app ya envía HSTS de dos años (P1.7):** si publicas con un certificado mal configurado, los navegadores que hayan visto la cabecera no dejarán entrar durante dos años. Comprueba HTTPS antes de abrir el subdominio a nadie.
+- **`certbot certonly --webroot` necesita el puerto 80 sirviendo `/.well-known/acme-challenge/`:** por eso ese `location` no redirige a HTTPS. Si lo quitas, la emisión funciona (la sirve el sitio por defecto, que aún está activo), pero la primera renovación falla.
+
+</Callout>
+
+## Paso 4: desplegar con vuelta atrás
+
+**Qué es:** un _script_ que despliega un _commit_ concreto, espera a que quede sano y, si no lo queda, vuelve a la versión anterior. Cada versión es una imagen etiquetada con su _commit_, así que volver no reconstruye nada.
+
+**Cómo se usa:** crea `deploy/desplegar.sh` y dale permiso de ejecución (`chmod +x`).
+
+```sh
+#!/bin/sh
+# Archivo: deploy/desplegar.sh
+# Despliega un commit y, si no queda sano, vuelve al anterior.
+# Uso, en el servidor: ./deploy/desplegar.sh [commit]   (sin commit, el último de origin/main)
+set -eu
+
+# Todo dentro de una función: sh la lee entera antes de empezar. Sin ella, el git checkout
+# de abajo sustituiría este archivo a mitad de ejecución, y sh seguiría leyendo el nuevo.
+desplegar() {
+  cd "$(dirname "$0")/.."
+  git fetch --quiet origin
+  NUEVA=$(git rev-parse --short "${1:-origin/main}^{commit}")
+  ANTERIOR=$(cat .version 2>/dev/null || true)
+  echo "Desplegando $NUEVA (anterior: ${ANTERIOR:-ninguna})"
+
+  git checkout --quiet --detach "$NUEVA"
+  VERSION=$NUEVA docker compose build --quiet app
+  # --wait espera a que cada servicio con healthcheck esté sano, o falla
+  if VERSION=$NUEVA docker compose up -d --quiet-pull --wait --wait-timeout 90 2>/dev/null; then
+    echo "$NUEVA" > .version
+    echo "✓ $NUEVA en producción"
+    return 0
+  fi
+
+  echo "✗ $NUEVA no quedó sana. Los primeros errores de la app:"
+  VERSION=$NUEVA docker compose logs --no-log-prefix app | grep -m 3 -i "error" || true
+  if [ -n "$ANTERIOR" ]; then
+    git checkout --quiet --detach "$ANTERIOR"
+    # La imagen planificador:$ANTERIOR sigue en el servidor: no se reconstruye nada
+    VERSION=$ANTERIOR docker compose up -d --wait --wait-timeout 90 2>/dev/null
+    echo "↩ vuelta a $ANTERIOR"
+  fi
+  return 1
+}
+
+desplegar "$@"
+```
+
+Un despliegue bueno, y uno con un `/api/health` roto:
+
+```text
+Desplegando 1d7ae76 (anterior: 18a9a16)
+ Image planificador:1d7ae76 Building
+ Image planificador:1d7ae76 Built
+✓ 1d7ae76 en producción
+```
+
+```text
+Desplegando 0c284b7 (anterior: 1d7ae76)
+ Image planificador:0c284b7 Building
+ Image planificador:0c284b7 Built
+✗ 0c284b7 no quedó sana. Los primeros errores de la app:
+[health] MongoDB no responde Error: un fallo que se coló en main
+[health] MongoDB no responde Error: un fallo que se coló en main
+[health] MongoDB no responde Error: un fallo que se coló en main
+↩ vuelta a 1d7ae76
+```
+
+Con `/api/health` comprobado cada segundo durante cada despliegue:
+
+| Despliegue | Segundos con 200 | Sin servicio                        |
+| ---------- | ---------------- | ----------------------------------- |
+| Bueno      | 27               | 1 (un 502 al cambiar el contenedor) |
+| Fallido    | 19               | 88 (87 con 503 y uno con 502)       |
+
+- **`--wait` usa el `HEALTHCHECK` del Paso 1:** «sano» significa que `/api/health` responde 200 con MongoDB conectado, no que el proceso esté vivo.
+- **Tras volver atrás, `main` sigue roto:** el siguiente _push_ lo desplegaría otra vez. Se arregla con `git revert` del _commit_ malo, que se despliega como cualquier otro: así se hizo aquí, y fue el despliegue bueno de la medida.
+
+<Callout type="risk">
+
+- **Un despliegue fallido deja la app sin servicio hasta la vuelta atrás:** aquí, 88 segundos, casi todo el `--wait-timeout 90`. Para no tener ningún corte hace falta un despliegue _blue-green_ (A4.5), con las dos versiones a la vez.
+- **`sh` lee el _script_ mientras lo ejecuta:** el `git checkout` cambia `desplegar.sh` en el disco a mitad de ejecución. Dentro de una función, `sh` lo ha leído entero antes de empezar. La primera vez que despliegues una versión con este cambio, haz tú el `git checkout`.
+
+</Callout>
+
+## Paso 5: CD desde `main`
+
+**Qué es:** un _workflow_ que, cuando el CI de A7 termina bien en `main`, entra por SSH en el servidor y ejecuta `desplegar.sh` con el _commit_ que el CI acaba de probar.
+
+**Cómo se usa:** crea `.github/workflows/deploy.yml` y los tres secretos que explica el README.
+
+```yaml
+# Archivo: .github/workflows/deploy.yml
+# CD: cuando el CI termina bien en main, despliega ese mismo commit en el VPS por SSH
+name: Despliegue
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: produccion
+  cancel-in-progress: false # un despliegue a medias no se corta
+
+jobs:
+  desplegar:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: produccion
+    steps:
+      - name: Desplegar por SSH
+        env:
+          CLAVE: ${{ secrets.DEPLOY_SSH_KEY }}
+          HUELLAS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DESTINO: ${{ secrets.DEPLOY_DESTINO }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$CLAVE" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$HUELLAS" > ~/.ssh/known_hosts
+          ssh "$DESTINO" "cd /srv/planificador && ./deploy/desplegar.sh $SHA"
+```
+
+- **`head_sha`, no `main`:** si llega otro _push_ mientras tanto, se despliega exactamente el _commit_ que pasó el CI, no uno sin probar.
+- **`concurrency` sin cancelar:** dos despliegues no se pisan, y uno a medias no se corta.
+
+<Callout type="risk">
+
+- **Este _workflow_ no se ha ejecutado en el laboratorio:** el _script_ que llama sí (Paso 4), pero la conexión desde GitHub depende de tu VPS y tus secretos. El primer despliegue, míralo en la pestaña Actions.
+- **`known_hosts` con la huella real del servidor:** desactivar la comprobación (`StrictHostKeyChecking=no`) permitiría que otro servidor se hiciera pasar por el tuyo y recibiera la clave de despliegue.
+
+</Callout>
+
+## Paso 6: monitorización
+
+**Qué es:** saber que la app funciona sin entrar a mirar: Docker reinicia el proceso que termina, `/api/health` dice si llega a MongoDB, y el registro en JSON se filtra con `jq`.
+
+**Cómo se usa:** instala `jq` en el servidor y consulta los errores con la orden del README. Con MongoDB parado un momento:
+
+```bash
+docker compose stop mongo
+curl $R -b cookies.txt -o /dev/null -w "%{http_code}\n" https://planificador.test/api/tareas
+docker compose start mongo
+docker compose logs --no-log-prefix --since 1h app | jq -R 'fromjson? | select(.nivel == "error")' -c
+```
+
+```text
+500
+{"t":"2026-11-21T11:44:36.331Z","nivel":"error","mensaje":"Error inesperado","ruta":"/api/tareas","error":"APIError: Failed to get session"}
+```
+
+- **Al volver MongoDB, la app responde 200 sin reiniciarse:** es la reconexión de P1.7, ahora dentro del contenedor.
+- **Falta un aviso desde fuera:** si cae el servidor entero, nada de lo que corre dentro puede avisar. Un servicio externo de monitorización que pida `/api/health` cada pocos minutos y avise por correo cubre ese caso, junto con Sentry para los errores.
+
+<Callout type="risk">
+
+- **`fromjson?` descarta lo que no es JSON:** los mensajes de Better Auth y de Astro no son líneas de `log()`, y sin el `?` `jq` se detiene en la primera.
+- **Los registros de Docker crecen sin límite por defecto:** en un VPS pequeño acaban llenando el disco. Limítalos con `logging: { options: { max-size: "10m", max-file: "3" } }` en cada servicio, o en la configuración de Docker.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe el `README.md`: qué es, arquitectura, dónde están las decisiones, cómo ejecutarlo en local, cómo probarlo, cómo desplegarlo y cómo operarlo.
+2. Pruébalo como lo haría otra persona: en una carpeta nueva y en un servidor limpio, siguiendo solo el README.
+3. Publica la app en tu subdominio y prepara una demo de tres minutos: el problema de P1.1, un recorrido por Hoy, un aviso que llega a Telegram y una decisión técnica que explicarías.
+
+</Callout>
+
+Solución. `README.md`:
+
+````markdown
+# Planificador 2026 v2
+
+Tus tareas del día, con un aviso por Telegram 15 minutos antes de cada tarea con hora. Multiusuario: cada persona ve solo lo suyo.
+
+## Arquitectura
+
+```text
+navegador ──HTTPS──▶ Nginx (en el VPS) ──▶ app: Astro SSR + islas React (Docker) ──▶ MongoDB 8.2 (Docker)
+                                             ▲
+                     avisos: curl cada minuto ┘ ──▶ Bot API de Telegram
+```
+
+- `src/features/`: una carpeta por funcionalidad (`auth`, `tareas`, `categorias`, `estadisticas`, `avisos`), cada una con su repositorio, su servicio y su `server.ts`.
+- `src/pages/`: solo rutas. `src/lib/`: lo compartido, sin lógica de negocio.
+- Qué se construye y por qué: `docs/requisitos.md`, `docs/diseno.md`, `docs/adr/` y `docs/calidad.md`.
+
+## Ejecutar en local
+
+Necesitas Node 24 y Docker.
+
+```bash
+git clone https://github.com/TU-USUARIO/planificador.git
+cd planificador
+npm ci
+cp .env.example .env
+```
+
+En `.env`, rellena `BETTER_AUTH_SECRET` y `CRON_SECRET` con el resultado de `openssl rand -base64 32`, uno distinto para cada uno. Después:
+
+```bash
+docker run -d --name planificador-mongo -p 27017:27017 mongo:8.2
+npm run db:setup
+npm run dev
+```
+
+La app queda en `http://localhost:4321`. Si ese puerto está ocupado, Astro usa otro: arráncala con `npm run dev -- --port <puerto>` y pon el mismo en `BETTER_AUTH_URL`, o Better Auth rechazará el registro (`INVALID_ORIGIN`). Sin `TELEGRAM_BOT_TOKEN`, todo funciona salvo los avisos.
+
+## Tests
+
+```bash
+npm run verify                  # formato, lint, tipos, unitarios, integración y build
+npx playwright install chromium # solo la primera vez
+npm run test:e2e                # necesita el MongoDB de arriba
+```
+
+## Desplegar en un VPS
+
+Necesitas un Ubuntu con Docker, Nginx y Certbot (A4), y un subdominio que apunte a su IP. Sustituye `planificador.tudominio.com` por el tuyo.
+
+```bash
+# 1. El código y su configuración
+sudo mkdir -p /srv/planificador && sudo chown "$USER" /srv/planificador
+git clone https://github.com/TU-USUARIO/planificador.git /srv/planificador
+cd /srv/planificador
+cp .env.example .env
+```
+
+En `.env`: `BETTER_AUTH_URL=https://planificador.tudominio.com`, los dos secretos y, si quieres avisos, `TELEGRAM_BOT_TOKEN` y `TELEGRAM_BOT_USUARIO` de @BotFather. `MONGODB_URI` no hace falta: lo fija `compose.yaml`.
+
+```bash
+# 2. El certificado, con el sitio por defecto de Nginx todavía activo
+sudo certbot certonly --webroot -w /var/www/html -d planificador.tudominio.com \
+  --deploy-hook "systemctl reload nginx"
+
+# 3. Nginx delante de la app
+sed "s/planificador.test/planificador.tudominio.com/g" deploy/nginx.conf \
+  | sudo tee /etc/nginx/sites-available/planificador > /dev/null
+sudo ln -s /etc/nginx/sites-available/planificador /etc/nginx/sites-enabled/
+sudo rm /etc/nginx/sites-enabled/default
+sudo nginx -t && sudo systemctl reload nginx
+
+# 4. La app
+./deploy/desplegar.sh
+```
+
+### Despliegue continuo
+
+Cada _push_ a `main` que pasa el CI se despliega solo (`.github/workflows/deploy.yml`). Una vez:
+
+1. En el VPS, crea una clave sin contraseña solo para desplegar: `ssh-keygen -t ed25519 -f ~/.ssh/despliegue -N ""` y añade `~/.ssh/despliegue.pub` a `~/.ssh/authorized_keys`.
+2. En GitHub, crea el entorno `produccion` (Settings → Environments) con estos secretos: `DEPLOY_SSH_KEY` (el contenido de `~/.ssh/despliegue`), `DEPLOY_KNOWN_HOSTS` (la salida de `ssh-keyscan <IP del VPS>`) y `DEPLOY_DESTINO` (`usuario@IP`).
+
+## Operación
+
+| Para…                          | Ejecuta, en `/srv/planificador`                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Ver si está sana               | `curl https://planificador.tudominio.com/api/health`                                                   |
+| Ver los errores recientes      | `docker compose logs --no-log-prefix --since 1h app \| jq -R 'fromjson? \| select(.nivel == "error")'` |
+| Volver a una versión anterior  | `./deploy/desplegar.sh <commit>`                                                                       |
+| Ver qué versión está publicada | `cat .version`                                                                                         |
+
+Sin bot de Telegram, el servicio `avisos` registra un `503` por minuto: es la ruta diciendo que no hay bot. Configúralo o quita ese servicio de `compose.yaml`.
+````
+
+Seguido desde un clon nuevo en otra carpeta, con el MongoDB local del laboratorio en lugar de `docker run` y el puerto 4400 porque el 4321 estaba ocupado:
+
+| Paso del README           | Resultado                                                              |
+| ------------------------- | ---------------------------------------------------------------------- |
+| `npm ci` y `.env`         | Sin errores                                                            |
+| `npm run db:setup`        | `creada` para `categorias` y `tareas`, con sus índices                 |
+| `npm run dev`             | Registro por la API: 200                                               |
+| `npm run verify`          | Sin errores                                                            |
+| `npm run test:e2e`        | 12 tests superados                                                     |
+| «Desplegar», en el Ubuntu | Del clon a `✓ 18a9a16 en producción` en 73 s, descargando las imágenes |
+
+- **La nota del puerto salió de esta prueba:** con el 4321 ocupado, Astro arrancó en otro y Better Auth habría rechazado el registro. Un README se corrige siguiéndolo, no leyéndolo.
+- **La demo cuenta decisiones, no pantallas:** tres minutos alcanzan para el problema, el recorrido y un porqué (el día como texto, o el aviso que se reclama de forma atómica).
+
+<Callout type="risk">
+
+- **Quien escribe el README no puede probarlo:** ya sabe lo que falta y lo rellena sin darse cuenta. Pídeselo a otra persona, o síguelo tú en una máquina limpia, copiando solo lo que está escrito.
+- **Un README que no cambia con el código miente:** cada cambio en `compose.yaml`, `.env.example` o `desplegar.sh` es un cambio del README. Revísalo en la misma PR.
+
+</Callout>
+
+<Callout type="mastery">
+
+Otra persona puede clonar, ejecutar y desplegar tu proyecto siguiendo solo el README. La app corre en Docker detrás de Nginx con HTTPS, se despliega desde `main` con el _commit_ que pasó el CI y vuelve sola a la versión anterior si la nueva no queda sana. Sabes cuánto tiempo de servicio cuesta un despliegue fallido y cómo eliminarlo.
+
+</Callout>
+
+## Resumen
+
+- Imagen en dos etapas, sin secretos, con `HEALTHCHECK` sobre `/api/health`.
+- La app solo en `127.0.0.1`; Nginx pone HTTPS, HTTP/2 y la IP real.
+- `desplegar.sh`: imagen por _commit_, `--wait` y vuelta atrás sin reconstruir.
+- Tras una vuelta atrás, `git revert`; sin cortes, _blue-green_ (A4.5).
+- CD con el `head_sha` que pasó el CI y `known_hosts` real.
+- El README se prueba siguiéndolo en una máquina limpia.

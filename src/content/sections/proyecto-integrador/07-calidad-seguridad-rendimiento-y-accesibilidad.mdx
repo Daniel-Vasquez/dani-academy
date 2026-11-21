@@ -1,0 +1,806 @@
+---
+sectionId: "P1.7"
+course: "P1"
+title: "Calidad: seguridad, rendimiento y accesibilidad"
+order: 7
+minutes: 120
+summary: "Auditas el Planificador con la lista de A5, Lighthouse y axe, corriges lo que encuentras (cabeceras, límite de intentos, errores sin aviso, una conexión que no se recupera) y lo dejas medido antes y después."
+---
+
+Antes de publicar, la v2 se audita con datos: la lista de seguridad de A5, Lighthouse y axe. Cada hallazgo se mide antes, se corrige y se vuelve a medir, y el informe queda en el repositorio.
+
+**Requisitos:** P1.6, A5, A6 e I8. Medido sobre el _build_ (puerto 4399) con Lighthouse 13.6 y el Chrome de Playwright, axe con Playwright y MongoDB 8.2.6 local.
+
+## Paso 1: la auditoría inicial
+
+**Qué es:** la lista de A5 recorrida contra la app en marcha, no contra el código: lo que se puede comprobar con una petición se comprueba con una petición.
+
+**Cómo se usa:** arranca el _build_ y prueba cabeceras, límite de intentos, peticiones de otro origen y dependencias.
+
+```bash
+npm run build
+PORT=4399 node --env-file=.env dist/server/entry.mjs
+curl -sI localhost:4399/login
+```
+
+```text
+HTTP/1.1 200 OK
+content-type: text/html
+Date: Sat, 21 Nov 2026 11:27:21 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+```
+
+Seis inicios de sesión con una contraseña errónea, y después lo mismo cambiando `X-Forwarded-For` en cada uno:
+
+```bash
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w '%{http_code} ' -X POST localhost:4399/api/auth/sign-in/email \
+    -H 'content-type: application/json' -H 'origin: http://localhost:4399' \
+    -d '{"email":"ana-lab@planificador.test","password":"mala"}'
+done
+```
+
+```text
+401 401 401 401 401 401                ← tal cual
+401 401 401 429 429 429                ← con NODE_ENV=production
+401 401 401 401 401 401                ← con NODE_ENV=production y X-Forwarded-For: 203.0.113.$i
+```
+
+Un formulario de otro sitio contra la API, con la sesión de un usuario, y las dependencias:
+
+```bash
+curl -s -b cookies.txt -w ' %{http_code}\n' -X POST localhost:4399/api/tareas \
+  -H 'origin: https://malo.example' -H 'content-type: application/x-www-form-urlencoded' -d 'titulo=x'
+npm audit --omit=dev
+```
+
+```text
+Cross-site POST form submissions are forbidden 403
+found 0 vulnerabilities
+```
+
+| #   | Hallazgo                                                             | Gravedad |
+| --- | -------------------------------------------------------------------- | -------- |
+| 1   | Ninguna cabecera de seguridad ni CSP                                 | Media    |
+| 2   | Sin `NODE_ENV=production`, no hay límite de intentos                 | Alta     |
+| 3   | El límite se salta con un `X-Forwarded-For` distinto en cada intento | Alta     |
+| 4   | Un error del servidor solo queda en la consola: nadie se entera      | Media    |
+
+- **Astro ya rechaza los formularios de otro origen** (`security.checkOrigin`, activo por defecto), y `npm audit` no encuentra nada: dos puntos de la lista revisados y sin hallazgo, que también van al informe.
+- **El hallazgo 2 se descubrió al buscar el 3:** Better Auth solo activa su límite en producción, y `node dist/server/entry.mjs` no pone `NODE_ENV`.
+
+<Callout type="risk">
+
+- **Revisar el código no basta para la configuración:** el límite de intentos estaba «configurado» por defecto y no funcionaba. Solo una petición real lo mostró.
+- **El hallazgo 3 depende de cómo se despliega:** cualquiera que llegue directamente a Node puede enviar `X-Forwarded-For`. Se cierra en P1.8, cuando Nginx sobrescriba esa cabecera y la app no publique su puerto.
+
+</Callout>
+
+## Paso 2: cabeceras y CSP
+
+**Qué es:** la CSP (A5) dice al navegador de dónde puede cargar cada cosa; las otras cabeceras impiden que la app se incruste en otra página, que se adivinen tipos de archivo o que se filtre la URL. Astro genera la CSP con los _hashes_ de sus propios _scripts_.
+
+**Cómo se usa:** sustituye `astro.config.mjs`; las demás cabeceras las pone el _middleware_ del Paso 4. Añade también la variable de Sentry a `.env.example`.
+
+```js
+// @ts-check
+// Archivo: astro.config.mjs
+import { defineConfig, envField } from "astro/config";
+import node from "@astrojs/node";
+import react from "@astrojs/react";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  output: "server", // todas las páginas son privadas salvo login y registro (P1.4)
+  adapter: node({ mode: "standalone" }), // un servidor Node, para Docker en el VPS (P1.8)
+  integrations: [react()],
+  vite: { plugins: [tailwindcss()] },
+  security: {
+    // CSP en <meta> con los hashes de los scripts que genera Astro (solo en el build).
+    // style-src lleva 'unsafe-inline' por los style="" del color de cada categoría (P1.3);
+    // contra XSS, lo importante es script-src, que no lo lleva.
+    csp: {
+      directives: [
+        "default-src 'self'",
+        "img-src 'self' data:",
+        "connect-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ],
+      styleDirective: { resources: ["'self'", "'unsafe-inline'"] },
+    },
+  },
+  env: {
+    schema: {
+      MONGODB_URI: envField.string({ context: "server", access: "secret", startsWith: "mongodb" }),
+      MONGODB_DB: envField.string({ context: "server", access: "secret", default: "planificador" }),
+      BETTER_AUTH_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      BETTER_AUTH_URL: envField.string({ context: "server", access: "secret", url: true }),
+      // Avisos (P1.6): sin token, la app funciona y los avisos quedan desactivados
+      CRON_SECRET: envField.string({ context: "server", access: "secret", min: 32 }),
+      // Calidad (P1.7): el límite de intentos, activo salvo que se apague a propósito (tests E2E)
+      RATE_LIMIT: envField.boolean({ context: "server", access: "secret", default: true }),
+      SENTRY_DSN: envField.string({ context: "server", access: "secret", optional: true }),
+      TELEGRAM_BOT_TOKEN: envField.string({ context: "server", access: "secret", optional: true }),
+      TELEGRAM_BOT_USUARIO: envField.string({
+        context: "server",
+        access: "public",
+        optional: true,
+      }),
+      TELEGRAM_API_URL: envField.string({
+        context: "server",
+        access: "public",
+        url: true,
+        default: "https://api.telegram.org",
+      }),
+    },
+  },
+});
+```
+
+```bash
+# Archivo: .env.example
+# Copia este archivo como .env y rellena los valores. .env no se sube nunca al repositorio.
+MONGODB_URI=mongodb://localhost:27017
+MONGODB_DB=planificador
+# 32 caracteres aleatorios como mínimo: openssl rand -base64 32
+BETTER_AUTH_SECRET=
+# La URL pública de la app, con su puerto en local
+BETTER_AUTH_URL=http://localhost:4321
+# Quien llama a /api/avisos/ejecutar (el cron) envía este secreto: openssl rand -base64 32
+CRON_SECRET=
+# De @BotFather. Sin token, los avisos por Telegram quedan desactivados
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_BOT_USUARIO=
+# El DSN del proyecto en Sentry; sin él, los errores solo van al registro
+SENTRY_DSN=
+```
+
+```bash
+curl -sI localhost:4399/login | grep -iE "^(HTTP|x-|referrer|permissions|strict|content-security)"
+```
+
+```text
+HTTP/1.1 200 OK
+content-security-policy: default-src 'self';img-src 'self' data:;connect-src 'self';object-src 'none';base-uri 'self';form-action 'self'; script-src 'self' 'sha256-xIb/Pa7FUshAu4ihwjchYcQpyCI8eS8kt40GpOAYCz8=' 'sha256-1BvDVWLr3QCC20uHhUDi27eDFVJpk1uMQJGIWKUks2I=' 'sha256-kmZE/W8I1iuTnl1b3yqzv9/DQZenPngd3NjSKMQl7y0=' 'sha256-Y8t0ntteBwH+PqGKUyjWW3CAk+BNJKSoQc0xZ68FjhM=' 'sha256-0O7iB6zr9x0r6X6eWYITC9V5q+yWCGAoFvcysBGbY9Q=' 'sha256-xKBggZ2csD5Lp4tQr9izOLUTCZc1Nf4gged/rUHQ2+Y=' 'sha256-2mkrkPfKG5HdF6qWOVbV6XM8cT+fSqsoBXayDHqg3hg='; style-src 'self' 'unsafe-inline' ;
+permissions-policy: camera=(), microphone=(), geolocation=()
+referrer-policy: strict-origin-when-cross-origin
+strict-transport-security: max-age=63072000
+x-content-type-options: nosniff
+x-frame-options: DENY
+```
+
+- **Sin errores de CSP en la consola del navegador:** se recorrieron Hoy, Estadísticas y Ajustes creando y marcando una tarea, y el color de cada categoría se sigue aplicando.
+
+<Callout type="risk">
+
+- **`'unsafe-inline'` en `script-src` anularía la CSP:** cualquier `<script>` inyectado se ejecutaría. Aquí solo lo lleva `style-src`, por los `style=""` de los colores, y un estilo inyectado no ejecuta código.
+- **HSTS de dos años solo en producción:** el navegador recordará que el dominio es solo HTTPS durante ese tiempo. Si el certificado falla, nadie podrá entrar ni saltarse el aviso; P1.8 lo comprueba antes de publicar.
+
+</Callout>
+
+## Paso 3: el límite de intentos
+
+**Qué es:** el límite de Better Auth, activado de forma explícita y no por `NODE_ENV`: 5 inicios de sesión por minuto y 5 registros por hora para cada IP.
+
+**Cómo se usa:** sustituye `auth.ts` y apágalo solo en los tests E2E, que registran muchos usuarios seguidos desde la misma IP.
+
+```ts
+// Archivo: src/features/auth/auth.ts
+import { betterAuth } from "better-auth";
+import { mongodbAdapter } from "@better-auth/mongo-adapter";
+import { BETTER_AUTH_SECRET, BETTER_AUTH_URL, RATE_LIMIT } from "astro:env/server";
+import { repoCategorias } from "@/features/categorias/server";
+import { db } from "@/lib/mongo";
+
+export const auth = betterAuth({
+  appName: "Planificador",
+  baseURL: BETTER_AUTH_URL,
+  secret: BETTER_AUTH_SECRET,
+  database: mongodbAdapter(db), // crea y usa las colecciones user, session, account y verification
+  emailAndPassword: {
+    enabled: true,
+    autoSignIn: true, // tras registrarse, la sesión queda iniciada
+    minPasswordLength: 8,
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 30, // 30 días
+    updateAge: 60 * 60 * 24, // renueva la caducidad como mucho una vez al día
+  },
+  // Sin esto, Better Auth solo limita con NODE_ENV=production, y node dist/server/entry.mjs no lo pone
+  rateLimit: {
+    enabled: RATE_LIMIT,
+    window: 60,
+    max: 100,
+    customRules: {
+      "/sign-in/email": { window: 60, max: 5 },
+      "/sign-up/email": { window: 60 * 60, max: 5 },
+    },
+  },
+  user: {
+    // Preferencias dentro del usuario (P1.2): se leen en cada página junto con la sesión
+    additionalFields: {
+      zonaHoraria: {
+        type: "string",
+        required: true,
+        defaultValue: "America/Mexico_City",
+        input: false, // el registro no puede elegirla: se cambiará desde Ajustes
+      },
+      // Lo escribe el servicio de avisos al vincular (P1.6), nunca el usuario
+      telegramChatId: { type: "string", required: false, input: false },
+    },
+  },
+  databaseHooks: {
+    user: {
+      create: {
+        // Cada usuario nuevo empieza con las cuatro categorías de B7
+        after: async (user) => repoCategorias.crearPorDefecto(user.id),
+      },
+    },
+  },
+});
+
+export type Sesion = typeof auth.$Infer.Session;
+```
+
+```ts
+// Archivo: playwright.config.ts
+import { defineConfig } from "@playwright/test";
+
+const PUERTO = 4399;
+const URL = `http://localhost:${PUERTO}`; // el mismo origen que BETTER_AUTH_URL
+
+// Una base de datos propia para los tests: nunca la de desarrollo
+process.env.MONGODB_URI ??= "mongodb://localhost:27017";
+process.env.MONGODB_DB = "planificador_e2e";
+// Secretos desechables, solo para esta base de datos de pruebas
+process.env.CRON_SECRET = "cron-solo-para-tests-e2e-0123456789-abcdef";
+
+export default defineConfig({
+  testDir: "tests/e2e",
+  use: { baseURL: URL },
+  webServer: {
+    // El mismo $jsonSchema e índices que producción, en la base de datos de los tests
+    command: "npm run build && node scripts/crear-colecciones.ts && node dist/server/entry.mjs",
+    url: `${URL}/api/health`,
+    reuseExistingServer: false,
+    env: {
+      PORT: String(PUERTO),
+      MONGODB_URI: process.env.MONGODB_URI,
+      MONGODB_DB: process.env.MONGODB_DB,
+      BETTER_AUTH_URL: URL,
+      BETTER_AUTH_SECRET: "secreto-solo-para-tests-e2e-0123456789",
+      CRON_SECRET: process.env.CRON_SECRET,
+      // Los tests registran muchos usuarios seguidos desde la misma IP
+      RATE_LIMIT: "false",
+      // Un Telegram falso que levanta tests/e2e/avisos.spec.ts: nunca se llama al real
+      TELEGRAM_API_URL: "http://localhost:4398",
+      TELEGRAM_BOT_TOKEN: "token-de-prueba",
+      TELEGRAM_BOT_USUARIO: "planificador_pruebas_bot",
+    },
+  },
+});
+```
+
+Los mismos inicios de sesión, siete esta vez, sin `NODE_ENV`:
+
+```text
+401 401 401 401 401 429 429
+```
+
+- **`RATE_LIMIT` vale `true` si no se dice nada:** para quitar una protección hay que pedirlo, y solo lo pide la configuración de Playwright.
+
+<Callout type="risk">
+
+- **El contador vive en la memoria del proceso:** un reinicio lo pone a cero, y dos instancias llevarían cuentas separadas. Con un solo contenedor (P1.8) basta; con más, Better Auth puede guardarlo en la base de datos (`storage: "database"`).
+- **Detrás de un proxy, todas las peticiones llegan desde su IP:** si Nginx no pasa la del cliente, un solo usuario bloquea a todos. P1.8 lo resuelve con `X-Forwarded-For $remote_addr`.
+
+</Callout>
+
+## Paso 4: registro, errores y reconexión
+
+**Qué es:** una línea JSON por petición, los errores inesperados en Sentry y una conexión con MongoDB que se recupera sola. Esto último apareció al probar Sentry con MongoDB parado.
+
+**Cómo se usa:** instala el SDK y crea el registro, Sentry, la conexión y el _middleware_ que los une.
+
+```bash
+npm install @sentry/node
+```
+
+```ts
+// Archivo: src/lib/log.ts
+// Una línea JSON por evento: Docker la guarda tal cual y se puede filtrar con jq (P1.8)
+
+type Nivel = "info" | "warn" | "error";
+
+export function log(nivel: Nivel, mensaje: string, datos: Record<string, unknown> = {}) {
+  const linea = JSON.stringify({ t: new Date().toISOString(), nivel, mensaje, ...datos });
+  if (nivel === "error") console.error(linea);
+  else console.log(linea);
+}
+```
+
+```ts
+// Archivo: src/lib/sentry.ts
+// Los errores inesperados del servidor, en Sentry. Sin SENTRY_DSN no se envía nada.
+import * as Sentry from "@sentry/node";
+import { SENTRY_DSN } from "astro:env/server";
+
+if (SENTRY_DSN) {
+  Sentry.init({
+    dsn: SENTRY_DSN,
+    environment: import.meta.env.MODE,
+    tracesSampleRate: 0, // solo errores: el rendimiento se mide con Lighthouse y los registros
+    // Por defecto, la versión 11 envía la IP, cookies, cabeceras y cuerpos: aquí, nada de eso.
+    // El userId (reportarError) basta para encontrar el caso
+    dataCollection: {
+      userInfo: false,
+      cookies: false,
+      httpHeaders: false,
+      httpBodies: [],
+      urlQueryParams: false,
+      databaseQueryData: false,
+    },
+  });
+}
+
+export function reportarError(error: unknown, contexto: { ruta: string; userId?: string }) {
+  if (!SENTRY_DSN) return;
+  Sentry.withScope((scope) => {
+    scope.setTag("ruta", contexto.ruta);
+    if (contexto.userId) scope.setUser({ id: contexto.userId });
+    Sentry.captureException(error);
+  });
+}
+```
+
+```ts
+// Archivo: src/lib/mongo.ts
+import { MongoClient, type Db } from "mongodb";
+import { MONGODB_DB, MONGODB_URI } from "astro:env/server";
+
+declare global {
+  var __mongoClient: MongoClient | undefined;
+}
+
+/** Un único cliente por proceso; en desarrollo sobrevive a las recargas de Vite (B5.2) */
+export const mongoClient: MongoClient =
+  globalThis.__mongoClient ?? new MongoClient(MONGODB_URI, { serverSelectionTimeoutMS: 5_000 });
+if (import.meta.env.DEV) globalThis.__mongoClient = mongoClient;
+
+export const db: Db = mongoClient.db(MONGODB_DB);
+
+/**
+ * Si la PRIMERA conexión del driver falla, el cliente queda cerrado para siempre
+ * (MongoTopologyClosedError), aunque MongoDB vuelva. Conectar de forma explícita, y olvidar
+ * el intento fallido, hace que la siguiente petición lo repita con el mismo cliente.
+ */
+let conectando: Promise<unknown> | null = null;
+export async function conectarMongo(): Promise<void> {
+  conectando ??= mongoClient.connect().catch((error: unknown) => {
+    conectando = null;
+    throw error;
+  });
+  await conectando;
+}
+```
+
+```ts
+// Archivo: src/middleware.ts
+// Todo es privado salvo lo que se declara público aquí
+import { defineMiddleware, sequence } from "astro:middleware";
+import { auth } from "@/features/auth/auth";
+import { log } from "@/lib/log";
+import { conectarMongo } from "@/lib/mongo";
+import { reportarError } from "@/lib/sentry";
+
+const PAGINAS_DE_ACCESO = new Set(["/login", "/registro"]);
+// /api/avisos/ejecutar no tiene sesión: la protege su propio secreto (CRON_SECRET)
+const PREFIJOS_PUBLICOS = ["/api/auth/", "/api/health", "/api/avisos/ejecutar"];
+
+/** 1. Registro de cada petición, cabeceras de seguridad y errores inesperados a Sentry */
+const registro = defineMiddleware(async (ctx, next) => {
+  const inicio = performance.now();
+  const ruta = ctx.url.pathname;
+  let respuesta: Response;
+  try {
+    respuesta = await next();
+  } catch (error) {
+    reportarError(error, { ruta, userId: ctx.locals.user?.id });
+    log("error", "Error inesperado", { ruta, error: String(error) });
+    respuesta = Response.json({ error: "Error interno" }, { status: 500 });
+  }
+  const h = respuesta.headers;
+  h.set("X-Content-Type-Options", "nosniff");
+  h.set("X-Frame-Options", "DENY");
+  h.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  h.set("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  if (import.meta.env.PROD) h.set("Strict-Transport-Security", "max-age=63072000");
+  if (ctx.locals.user) h.set("Cache-Control", "private, no-store"); // datos de un usuario
+  const ms = Math.round(performance.now() - inicio);
+  log("info", "petición", { metodo: ctx.request.method, ruta, estado: respuesta.status, ms });
+  return respuesta;
+});
+
+/** 2. La sesión y quién puede pasar */
+const acceso = defineMiddleware(async (ctx, next) => {
+  const { pathname, search } = ctx.url;
+  ctx.locals.user = null;
+  // Si MongoDB no responde, esta petición falla, pero la siguiente vuelve a intentarlo (mongo.ts)
+  await conectarMongo().catch((error) =>
+    log("error", "MongoDB no responde", { error: String(error) }),
+  );
+  if (PREFIJOS_PUBLICOS.some((p) => pathname.startsWith(p))) return next();
+
+  const sesion = await auth.api.getSession({ headers: ctx.request.headers });
+  ctx.locals.user = sesion?.user ?? null;
+
+  if (PAGINAS_DE_ACCESO.has(pathname)) return ctx.locals.user ? ctx.redirect("/") : next();
+  if (ctx.locals.user) return next();
+
+  if (pathname.startsWith("/api/")) {
+    return Response.json({ error: "No autenticado" }, { status: 401 });
+  }
+  return ctx.redirect(`/login?redirect=${encodeURIComponent(pathname + search)}`);
+});
+
+export const onRequest = sequence(registro, acceso);
+```
+
+Cada petición deja una línea así:
+
+```text
+{"t":"2026-11-21T11:31:22.991Z","nivel":"info","mensaje":"petición","metodo":"POST","ruta":"/api/auth/sign-in/email","estado":401,"ms":42}
+{"t":"2026-11-21T11:31:22.999Z","nivel":"info","mensaje":"petición","metodo":"POST","ruta":"/api/auth/sign-in/email","estado":429,"ms":0}
+{"t":"2026-11-21T11:31:23.005Z","nivel":"info","mensaje":"petición","metodo":"POST","ruta":"/api/auth/sign-in/email","estado":429,"ms":0}
+```
+
+Para probar Sentry sin cuenta, un servidor local hace de Sentry. Créalo en `scripts/sentry-falso.mjs`:
+
+```js
+// Archivo: scripts/sentry-falso.mjs
+// Un "Sentry" local para comprobar que llegan los errores, sin cuenta: escucha en el puerto 4397
+// y muestra cada evento recibido. Uso: node scripts/sentry-falso.mjs
+import { createServer } from "node:http";
+import { gunzipSync } from "node:zlib";
+
+createServer(async (req, res) => {
+  const trozos = [];
+  for await (const t of req) trozos.push(t);
+  let cuerpo = Buffer.concat(trozos);
+  if (req.headers["content-encoding"] === "gzip") cuerpo = gunzipSync(cuerpo);
+  // Un "envelope" son líneas JSON: cabecera, cabecera del elemento y el evento
+  for (const linea of cuerpo.toString().split("\n").slice(1)) {
+    const evento = JSON.parse(linea || "{}");
+    const excepcion = evento.exception?.values?.[0];
+    if (excepcion) {
+      console.log(`${req.url} → ${excepcion.type}: ${excepcion.value.slice(0, 60)}`);
+      console.log(
+        `   entorno=${evento.environment} etiquetas=${JSON.stringify(evento.tags)} usuario=${JSON.stringify(evento.user)}`,
+      );
+    }
+  }
+  res.end("{}");
+}).listen(4397, () => console.log("Sentry falso en http://localhost:4397"));
+```
+
+```bash
+node scripts/sentry-falso.mjs
+SENTRY_DSN="http://clavepublica@localhost:4397/1" MONGODB_URI=mongodb://localhost:27018 \
+  PORT=4399 node --env-file=.env dist/server/entry.mjs
+curl -s -b cookies.txt -w ' %{http_code}\n' localhost:4399/api/tareas
+```
+
+```text
+{"error":"Error interno"} 500
+Sentry falso en http://localhost:4397
+/api/1/envelope/?sentry_version=7&sentry_key=clavepublica&sentry_client=sentry.javascript.node%2F11.16.0 → MongoTopologyClosedError: Topology is closed
+   entorno=production etiquetas={"ruta":"/api/tareas"} usuario=undefined
+```
+
+«Topology is closed» llevó al hallazgo 5: con el `mongo.ts` de P1.3, si la app arranca antes que MongoDB, no se recupera nunca. Con el de este paso, sí:
+
+```text
+{"ok":false,"db":"down"} 503    ← MongoDB parado (con los dos mongo.ts)
+{"ok":false,"db":"down"} 503    ← MongoDB ya arrancado, mongo.ts de P1.3: así hasta reiniciar
+{"ok":true,"db":"up"} 200       ← MongoDB ya arrancado, mongo.ts de este paso
+```
+
+- **El _middleware_ captura lo que nadie más ha capturado:** responde un 500 genérico, sin detalles internos, y deja el error en Sentry y en el registro con la ruta y el usuario.
+
+<Callout type="risk">
+
+- **Un DSN mal escrito apaga Sentry sin avisar:** con `http://clave-publica@…`, el guion invalida la clave y el SDK no envía nada; solo lo dice con `debug: true`. Prueba el envío una vez con el servidor falso.
+- **La versión 11 del SDK envía datos personales por defecto:** la primera prueba llegó con `"ip_address":"::1"`. `dataCollection` desactiva IP, _cookies_, cabeceras y cuerpos, y el `userId` basta para investigar.
+
+</Callout>
+
+## Paso 5: Lighthouse
+
+**Qué es:** las cuatro categorías clásicas de Lighthouse (rendimiento, accesibilidad, buenas prácticas y SEO) con los Core Web Vitals que se pueden medir en laboratorio: LCP y CLS (A6).
+
+**Cómo se usa:** mide cada página con la _cookie_ de sesión, y resume los informes con un _script_.
+
+```bash
+npx lighthouse http://localhost:4399/ --quiet --chrome-flags="--headless=new" \
+  --only-categories=performance,accessibility,best-practices,seo \
+  --extra-headers '{"Cookie":"better-auth.session_token=…"}' \
+  --output=json --output-path=informes/hoy.json
+```
+
+```js
+// Archivo: scripts/puntuaciones.mjs
+// Resume informes JSON de Lighthouse: las cuatro categorías y las auditorías por debajo de 0,9.
+// Uso: node scripts/puntuaciones.mjs informe1.json informe2.json …
+import { readFileSync } from "node:fs";
+
+for (const archivo of process.argv.slice(2)) {
+  const r = JSON.parse(readFileSync(archivo, "utf8"));
+  const notas = Object.values(r.categories).map((c) => `${c.title} ${Math.round(c.score * 100)}`);
+  const lcp = r.audits["largest-contentful-paint"].displayValue;
+  const cls = r.audits["cumulative-layout-shift"].displayValue;
+  console.log(
+    `${new URL(r.finalDisplayedUrl).pathname.padEnd(14)} ${notas.join(" · ")} · LCP ${lcp} · CLS ${cls}`,
+  );
+  for (const a of Object.values(r.audits)) {
+    const puntuable = !["informative", "notApplicable", "manual"].includes(a.scoreDisplayMode);
+    if (puntuable && a.score !== null && a.score < 0.9 && !a.id.endsWith("-insight")) {
+      console.log(`   ✗ ${a.id}: ${a.title}`);
+    }
+  }
+}
+```
+
+```bash
+node scripts/puntuaciones.mjs informes/*.json
+```
+
+```text
+/login         Performance 100 · Accessibility 100 · Best Practices 100 · SEO 82 · LCP 0.8 s · CLS 0
+   ✗ unused-javascript: Reduce unused JavaScript
+   ✗ meta-description: Document does not have a meta description
+   ✗ robots-txt: robots.txt is not valid
+/              Performance 100 · Accessibility 100 · Best Practices 100 · SEO 82 · LCP 0.8 s · CLS 0
+   ✗ unused-javascript: Reduce unused JavaScript
+   ✗ meta-description: Document does not have a meta description
+   ✗ robots-txt: robots.txt is not valid
+/estadisticas  Performance 100 · Accessibility 100 · Best Practices 100 · SEO 82 · LCP 0.8 s · CLS 0
+   ✗ meta-description: Document does not have a meta description
+   ✗ robots-txt: robots.txt is not valid
+/ajustes       Performance 100 · Accessibility 100 · Best Practices 100 · SEO 82 · LCP 0.8 s · CLS 0
+   ✗ meta-description: Document does not have a meta description
+   ✗ robots-txt: robots.txt is not valid
+```
+
+`/robots.txt` no existía, así que el _middleware_ lo trataba como página privada y lo redirigía al login. Crea `public/robots.txt`, que el servidor entrega antes del _middleware_, y añade la descripción al _layout_:
+
+```text
+User-agent: *
+Disallow: /api/
+```
+
+```astro
+---
+// Archivo: src/layouts/Base.astro
+import "@/styles/global.css";
+
+interface Props {
+  title: string;
+  nav?: boolean; // el menú, solo en las páginas privadas
+  description?: string;
+}
+const {
+  title,
+  nav = false,
+  description = "Planificador 2026: tus tareas del día, con avisos por Telegram.",
+} = Astro.props;
+const enlaces = [
+  { href: "/", texto: "Hoy" },
+  { href: "/estadisticas", texto: "Estadísticas" },
+  { href: "/ajustes", texto: "Ajustes" },
+];
+---
+
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <title>{title} · Planificador</title>
+  </head>
+  <body class="min-h-screen bg-fondo text-texto antialiased">
+    {nav && (
+      <nav class="mx-auto flex max-w-2xl gap-4 px-4 pt-6 text-sm">
+        {enlaces.map((e) => (
+          <a
+            href={e.href}
+            aria-current={Astro.url.pathname === e.href ? "page" : undefined}
+            class="underline-offset-4 aria-[current=page]:font-semibold aria-[current=page]:underline"
+          >
+            {e.texto}
+          </a>
+        ))}
+      </nav>
+    )}
+    <main class="mx-auto max-w-2xl px-4 py-10">
+      <slot />
+    </main>
+  </body>
+</html>
+```
+
+```text
+/login         Performance 100 · Accessibility 100 · Best Practices 100 · SEO 100 · LCP 0.8 s · CLS 0
+   ✗ unused-javascript: Reduce unused JavaScript
+/              Performance 100 · Accessibility 100 · Best Practices 100 · SEO 100 · LCP 0.8 s · CLS 0
+   ✗ unused-javascript: Reduce unused JavaScript
+/estadisticas  Performance 100 · Accessibility 100 · Best Practices 100 · SEO 100 · LCP 0.8 s · CLS 0
+/ajustes       Performance 100 · Accessibility 100 · Best Practices 100 · SEO 100 · LCP 0.8 s · CLS 0
+```
+
+- **«Reduce unused JavaScript» no baja el rendimiento de 100:** es el cliente de Better Auth en `/login` y Hoy. Se anota y no se toca.
+
+<Callout type="risk">
+
+- **Lighthouse 13 añade una quinta categoría, «Agentic Browsing»:** el criterio de P1 son las cuatro clásicas, y por eso `--only-categories`. Si no las fijas, la media cambia cuando cambia la herramienta.
+- **Medir en local da un rendimiento optimista:** sin red real, el LCP sale de la simulación de Lighthouse. Repite la medida contra producción en P1.8.
+
+</Callout>
+
+## Paso 6: accesibilidad con axe
+
+**Qué es:** axe comprueba en cada página las reglas automatizables de WCAG 2.1 AA (contraste, etiquetas, roles). Como test E2E, se ejecuta en cada CI.
+
+**Cómo se usa:** instala la integración con Playwright y crea el test, con datos en las páginas privadas.
+
+```bash
+npm install -D @axe-core/playwright
+```
+
+```ts
+// Archivo: tests/e2e/accesibilidad.spec.ts
+import AxeBuilder from "@axe-core/playwright";
+import { expect, test, type Page } from "@playwright/test";
+import { correo, registrar } from "./ayudas";
+
+/** Las reglas de WCAG 2.1 A y AA; cada infracción, con los elementos que la tienen */
+async function infracciones(page: Page) {
+  const { violations } = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  return violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
+}
+
+test("las páginas públicas cumplen WCAG 2.1 AA", async ({ page }) => {
+  for (const ruta of ["/login", "/registro"]) {
+    await page.goto(ruta);
+    expect(await infracciones(page), ruta).toEqual([]);
+  }
+});
+
+test("las páginas privadas cumplen WCAG 2.1 AA, con datos", async ({ page }) => {
+  await registrar(page, correo("axe"));
+  await page.getByLabel("Nueva tarea").fill("Revisar el informe");
+  await page.getByRole("button", { name: "Añadir" }).click();
+  await page.getByLabel("Hecha: Revisar el informe").check();
+  for (const ruta of ["/", "/estadisticas", "/ajustes"]) {
+    await page.goto(ruta);
+    expect(await infracciones(page), ruta).toEqual([]);
+  }
+});
+```
+
+```bash
+npx playwright test tests/e2e/accesibilidad.spec.ts --reporter=line
+```
+
+```text
+Running 2 tests using 1 worker
+
+[1/2] tests/e2e/accesibilidad.spec.ts:14:1 › las páginas públicas cumplen WCAG 2.1 AA
+[2/2] tests/e2e/accesibilidad.spec.ts:21:1 › las páginas privadas cumplen WCAG 2.1 AA, con datos
+  2 passed (3.9s)
+```
+
+Con `--color-suave: #a0aec0`, un gris más claro, en `global.css`:
+
+```text
+  1) tests/e2e/accesibilidad.spec.ts:14:1 › las páginas públicas cumplen WCAG 2.1 AA ───────────────
+
+    Error: /login
+
+    expect(received).toEqual(expected) // deep equality
+
+    - Expected  - 1
+    + Received  + 3
+
+    - Array []
+    + Array [
+    +   "color-contrast: .text-suave, a",
+    + ]
+```
+
+- **Las páginas se prueban con datos:** una lista vacía no tiene tareas tachadas ni puntos de color, y ahí es donde suele fallar el contraste.
+
+<Callout type="risk">
+
+- **axe encuentra cerca de la mitad de los problemas, no todos:** no sabe si el orden del teclado tiene sentido ni si un texto alternativo es útil. Recorre una vez la app solo con el teclado.
+- **El fallo de contraste sale del _token_, no de un componente:** cambiar un gris en `global.css` rompe todas las páginas a la vez. Por eso el test recorre todas.
+
+</Callout>
+
+## Ejercicio práctico
+
+<Callout type="exercise">
+
+1. Escribe `docs/calidad.md`: Lighthouse por página, axe y cada hallazgo de seguridad con su estado antes y después y cómo se comprueba.
+2. Incluye lo revisado sin hallazgos, y lo que queda abierto con su plan.
+
+</Callout>
+
+Solución. `docs/calidad.md`:
+
+```markdown
+# Planificador 2026 v2: informe de calidad
+
+Fecha: 2026-11-21 · Medido sobre el _build_ (`node dist/server/entry.mjs`) con MongoDB 8.2.6 local, Lighthouse 13.6 (móvil simulado) y axe con Playwright. Se repite antes de cada versión.
+
+## Lighthouse
+
+| Página          | Rendimiento | Accesibilidad | Buenas prácticas | SEO      | LCP   | CLS |
+| --------------- | ----------- | ------------- | ---------------- | -------- | ----- | --- |
+| `/login`        | 100         | 100           | 100              | 82 → 100 | 0,8 s | 0   |
+| `/` (Hoy)       | 100         | 100           | 100              | 82 → 100 | 0,8 s | 0   |
+| `/estadisticas` | 100         | 100           | 100              | 82 → 100 | 0,8 s | 0   |
+| `/ajustes`      | 100         | 100           | 100              | 82 → 100 | 0,8 s | 0   |
+
+Queda «Reduce unused JavaScript» en `/login` y Hoy (el cliente de Better Auth): no baja el rendimiento de 100.
+
+## Accesibilidad
+
+axe (WCAG 2.1 A y AA) en las cinco páginas, con datos: 0 infracciones, antes y después. Lo comprueba `tests/e2e/accesibilidad.spec.ts` en cada CI.
+
+## Seguridad (lista de A5)
+
+| #   | Hallazgo                                                             | Antes              | Después                             | Cómo se comprueba                          |
+| --- | -------------------------------------------------------------------- | ------------------ | ----------------------------------- | ------------------------------------------ |
+| 1   | Sin cabeceras de seguridad ni CSP                                    | Ninguna            | Resuelto                            | `curl -sI /login`                          |
+| 2   | Límite de intentos inactivo sin `NODE_ENV=production`                | 6 × 401            | Resuelto: 5 × 401, después 429      | 7 inicios de sesión fallidos con `curl`    |
+| 3   | El límite se salta con un `X-Forwarded-For` distinto en cada intento | 6 × 401            | Asignado a P1.8                     | El mismo `curl`, contra el dominio público |
+| 4   | Los errores del servidor no avisan a nadie                           | Solo en la consola | Resuelto: Sentry, sin IP ni cookies | Sentry falso (`scripts/sentry-falso.mjs`)  |
+| 5   | Si MongoDB arranca después que la app, no se recupera sin reiniciar  | 503 para siempre   | Resuelto: 503 y después 200         | Arrancar MongoDB con la app ya en marcha   |
+
+Revisado sin hallazgos: `npm audit --omit=dev` (0), peticiones de otro origen (403 de Astro), acceso a datos ajenos y campos de más (tests de P1.4 y P1.5), HTML sin escapar (ningún `set:html` ni `dangerouslySetInnerHTML`), secretos en el repositorio (ninguno) y la _cookie_ de sesión (`HttpOnly`).
+
+## Abierto
+
+- **#3, hasta P1.8:** Nginx sobrescribe `X-Forwarded-For` y la app no publica su puerto. Mientras la app sea accesible directamente, el límite de intentos se puede saltar.
+- **Better Auth no reintenta sus índices** si MongoDB no estaba al arrancar (lo avisa en el registro). P1.8 arranca MongoDB antes que la app.
+```
+
+- **«Cómo se comprueba» hace el informe repetible:** dentro de tres meses, las mismas órdenes dicen si algo ha empeorado.
+- **Lo revisado sin hallazgo también cuenta:** sin esa línea, quien lea el informe no sabe si se miró o se olvidó.
+
+<Callout type="risk">
+
+- **Un hallazgo abierto necesita fecha y responsable:** «asignado a P1.8» está bien porque P1.8 lo comprueba. Un «pendiente» sin más se queda así para siempre.
+- **El informe envejece con cada versión:** una dependencia nueva o un cambio en el _middleware_ pueden reabrir un punto cerrado. Repítelo antes de cada versión, como dice su cabecera.
+
+</Callout>
+
+<Callout type="mastery">
+
+Auditas tu proyecto con datos: Lighthouse de 90 o más en las cuatro categorías clásicas (aquí, 100 en todas), axe sin infracciones en todas las páginas y la lista de seguridad de A5 sin hallazgos abiertos, salvo el que depende del despliegue y tiene su prueba en P1.8. Cada corrección se ha medido antes y después.
+
+</Callout>
+
+## Resumen
+
+- La configuración se audita con peticiones reales, no leyendo el código.
+- CSP sin `'unsafe-inline'` en `script-src`; HSTS solo en producción.
+- El límite de intentos, activo por defecto y apagado solo en los tests E2E.
+- Registro en JSON, errores a Sentry sin datos personales, y reconexión a MongoDB.
+- Lighthouse en las cuatro categorías clásicas y axe con datos en cada CI.
+- Un informe con antes, después y cómo se comprueba.

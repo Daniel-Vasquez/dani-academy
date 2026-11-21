@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 W = re.compile(r"\w+")
-FENCE = re.compile(r"^```[\s\S]*?^```", re.M)
+# Una valla de 3 o más acentos se cierra con la misma cantidad: un bloque de ```` puede contener ```
+FENCE = re.compile(r"^(`{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$", re.M)
 
 
 def partes(texto):
@@ -34,7 +35,7 @@ def revisar(ruta, ref):
             errores.append("el frontmatter ha cambiado (solo se permite minutes)")
 
         # 2. Código: los bloques que desaparecen se listan para revisarlos a mano
-        bloques = lambda c: {b.strip() for b in FENCE.findall(c)}
+        bloques = lambda c: {m.group(0).strip() for m in FENCE.finditer(c)}
         for b in bloques(cuerpo_viejo) - bloques(cuerpo):
             avisos.append(f"bloque de código eliminado o cambiado: {b.splitlines()[0]} {b.splitlines()[1][:60] if len(b.splitlines()) > 1 else ''}")
         antes, despues = prosa(cuerpo_viejo), prosa(cuerpo)
