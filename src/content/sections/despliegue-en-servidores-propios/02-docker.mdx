@@ -7,17 +7,15 @@ minutes: 90
 summary: "Empaquetas la app de entrenos en una imagen multi-stage de 562 MB que no lleva secretos ni se ejecuta como root, mides capas y caché, y la levantas con MongoDB en docker compose, con datos que sobreviven."
 ---
 
-En A4.1 llevaste la app a Ubuntu a mano: instalar la versión correcta de Node, copiar `dist`, ejecutar `npm ci --omit=dev`, evitar los archivos `._*` del Mac… Funcionó, pero en otro servidor tendrías que repetirlo todo, y cada paso es una ocasión de equivocarte. **Docker** empaqueta la app junto con todo lo que necesita (el sistema base, Node 26, `node_modules`, `dist`) en una **imagen**: un archivo que se ejecuta igual en tu Mac, en el servidor de I6 y en cualquier máquina con Docker.
+En A4.1 llevaste la app a Ubuntu a mano, y en otro servidor tendrías que repetir cada paso. **Docker** empaqueta la app con todo lo que necesita (sistema base, Node 26, `node_modules`, `dist`) en una **imagen** que se ejecuta igual en cualquier máquina con Docker. Aquí construyes una imagen de 562 MB sin secretos ni `root`, y la levantas con MongoDB usando Compose.
 
-Una analogía: una imagen es un **táper congelado** con la comida ya hecha. Lo preparas una vez (el _build_), lo etiquetas (`entrenos:1`) y lo llevas a cualquier cocina con microondas (Docker); calentarlo es arrancar un **contenedor**. Puedes calentar tres táperes iguales a la vez, y si uno se estropea, tiras ese y calientas otro: la receta no cambia.
-
-**Lo que tendrás al terminar:** un `Dockerfile` _multi-stage_ que produce una imagen de 562 MB sin secretos, sin herramientas de compilación y sin `root`; un `.dockerignore`; un `compose.yaml` que levanta la app y un MongoDB con sus datos en un volumen; y un _script_ que lo comprueba todo de principio a fin.
-
-**Requisitos:** la app `entrenos-app` de A4.1 y el servidor Ubuntu de I6. Las salidas de esta sección se midieron en ese servidor (Ubuntu 26.04, arm64) con Docker Engine. En el Mac, las órdenes son las mismas con Docker Desktop, OrbStack o Colima.
+**Requisitos:** `entrenos-app` de A4.1 y el Ubuntu de I6. Las salidas se midieron en ese servidor (Ubuntu 26.04, arm64) con Docker Engine; en el Mac, las mismas órdenes con Docker Desktop, OrbStack o Colima.
 
 ## Paso 1: Docker en el servidor, imágenes y contenedores
 
-En el servidor, instala Docker Engine desde el repositorio oficial de Docker, igual que hiciste con NodeSource en A4.1: la clave y el repositorio a mano, en formato deb822.
+**Qué es:** una **imagen** es un conjunto de **capas** de solo lectura; un **contenedor** es una imagen en marcha, con una capa propia en la que escribe y que desaparece al borrarlo.
+
+**Cómo se usa:** instala Docker Engine desde su repositorio oficial, con la clave y el repositorio a mano (deb822), como NodeSource en A4.1:
 
 ```bash
 # La clave con la que Docker firma sus paquetes
@@ -41,16 +39,16 @@ Engine 29.9.2, cliente 29.9.2
 Docker Compose version v5.6.1
 ```
 
-Son cinco paquetes: el motor (`docker-ce`), que ejecuta los contenedores; el cliente (`docker-ce-cli`), la orden `docker`; `containerd.io`, el gestor de contenedores que usa el motor por debajo; **Buildx**, que construye las imágenes; y **Compose**, que levanta varios contenedores a la vez (Paso 6).
+- **Cinco paquetes:** el motor (`docker-ce`), el cliente (`docker-ce-cli`), `containerd.io` debajo, **Buildx** para construir y **Compose** para varios contenedores (Paso 6).
 
-Para no escribir `sudo` en cada orden, añade `deploy` al grupo `docker` y vuelve a entrar por SSH, porque los grupos se leen al iniciar sesión:
+Para no escribir `sudo`, `deploy` al grupo `docker`, y vuelve a entrar (los grupos se leen al iniciar sesión):
 
 ```bash
 sudo usermod -aG docker deploy
 exit # y vuelve a entrar: ssh deploy@tu-servidor
 ```
 
-Ahora, la primera imagen. **`docker pull`** descarga una imagen de Docker Hub, el registro público de imágenes. Node publica varias variantes de cada versión:
+**`docker pull`** descarga de Docker Hub. Las variantes de Node:
 
 ```bash
 docker pull node:26-alpine
@@ -65,11 +63,9 @@ node:26 1.8GB
 node:26-slim 377MB
 ```
 
-- **`node:26`:** Debian completo, con compiladores y herramientas. 1,8 GB.
-- **`node:26-slim`:** Debian sin herramientas de compilación. 377 MB.
-- **`node:26-alpine`:** Alpine Linux, una distribución mínima. 258 MB. La usarás en toda la sección.
+- **`node:26`** es Debian completo (1,8 GB); **`node:26-slim`**, sin compiladores (377 MB); **`node:26-alpine`**, Alpine Linux mínimo (258 MB), el de esta sección.
 
-**`docker run`** crea un contenedor a partir de una imagen y ejecuta una orden dentro. `--rm` lo borra al terminar:
+**`docker run`** crea un contenedor y ejecuta una orden; `--rm` lo borra al terminar:
 
 ```bash
 docker run --rm node:26-alpine node -v
@@ -84,7 +80,9 @@ root
 /
 ```
 
-Node 26.13.0, el mismo que instalaste en A4.1, en un Alpine Linux que no es el sistema del servidor. Por defecto, el contenedor se ejecuta como `root` (lo cambiarás en el Paso 4). Una imagen está hecha de **capas**: cada instrucción que la construyó añadió una, y `docker history` las enseña de la más reciente a la más antigua:
+- **Node 26.13.0 sobre Alpine,** no el sistema del servidor, y como `root` por defecto (Paso 4).
+
+`docker history` enseña las capas, de la más reciente a la más antigua:
 
 ```bash
 docker history node:26-alpine --format "{{.Size}}\t{{.CreatedBy}}"
@@ -100,19 +98,21 @@ docker history node:26-alpine --format "{{.Size}}\t{{.CreatedBy}}"
 9.31MB	ADD alpine-minirootfs-3.24.3-aarch64.tar.gz …
 ```
 
-Abajo, Alpine (9,31 MB); encima, Node (180 MB). Las capas son de solo lectura y se comparten: si diez imágenes empiezan por `node:26-alpine`, esos 258 MB están una sola vez en el disco. Un contenedor añade encima una capa propia, en la que puede escribir, y que desaparece cuando se borra el contenedor.
+- **Alpine (9,31 MB) abajo y Node (180 MB) encima.** Las capas se comparten: diez imágenes sobre `node:26-alpine` ocupan esos 258 MB una vez.
 
 <Callout type="risk">
 
-- **El grupo `docker` equivale a `root`:** quien puede ejecutar `docker` puede arrancar un contenedor que monte `/` del servidor y cambiar cualquier archivo. Añade a ese grupo solo a usuarios en los que confiarías como administradores. `deploy` ya podía usar `sudo` (I6.2), así que no ganas ni pierdes nada; un usuario sin `sudo`, sí.
-- **Una etiqueta no es una versión fija:** `node:26-alpine` apunta hoy a Node 26.13.0 y Alpine 3.24, y mañana a otra cosa. Dos _builds_ con el mismo `Dockerfile` en días distintos pueden dar imágenes distintas. Para fijarla del todo, usa el _digest_ (`node:26-alpine@sha256:…`, el que aparece en la salida de `docker build`).
-- **Alpine usa musl, no glibc:** algunos paquetes de npm con binarios precompilados no tienen versión para musl y fallan al instalar o al arrancar. Las dependencias de esta app funcionan; si una tuya falla en Alpine, prueba `node:26-slim`.
+- **El grupo `docker` equivale a `root`:** puede montar `/` del servidor en un contenedor. Solo para quien sería administrador; `deploy` ya tenía `sudo` (I6.2).
+- **Una etiqueta no es una versión fija:** `node:26-alpine` cambiará. Para fijarla, el _digest_ (`node:26-alpine@sha256:…`).
+- **Alpine usa musl, no glibc:** algunos binarios de npm fallan. Si te pasa, `node:26-slim`.
 
 </Callout>
 
 ## Paso 2: el primer `Dockerfile`, y por qué está mal
 
-Un **`Dockerfile`** es la receta de una imagen: cada línea es una instrucción. Esta es la primera idea que se le ocurre a casi todo el mundo, en la raíz de tu proyecto:
+**Qué es:** un **`Dockerfile`** es la receta de una imagen. `FROM` es la imagen de partida, `WORKDIR` la carpeta de trabajo, `COPY` copia del **contexto** (la carpeta del proyecto), `RUN` ejecuta una orden y guarda una capa, y `CMD` es lo que arranca el contenedor.
+
+**Cómo se usa:** la primera idea de casi todo el mundo:
 
 ```dockerfile
 # Archivo: Dockerfile.ingenuo — la primera idea, con todos sus problemas
@@ -124,13 +124,7 @@ RUN npm run build
 CMD ["node", "dist/server/entry.mjs"]
 ```
 
-- **`FROM`:** la imagen de partida.
-- **`WORKDIR /app`:** la carpeta de trabajo dentro de la imagen; la crea si no existe.
-- **`COPY . .`:** copia la carpeta del proyecto (el **contexto**) a `/app`.
-- **`RUN`:** ejecuta una orden durante el _build_ y guarda el resultado como una capa.
-- **`CMD`:** la orden que se ejecuta al arrancar un contenedor.
-
-Construye la imagen. `-f` elige el archivo, `-t` le pone nombre y etiqueta, y `.` es el contexto:
+`-f` elige el archivo, `-t` le pone nombre y `.` es el contexto:
 
 ```bash
 docker build --progress=plain -f Dockerfile.ingenuo -t entrenos:ingenuo .
@@ -143,7 +137,7 @@ docker image ls entrenos --format "{{.Tag}} {{.Size}}"
 ingenuo 1.24GB
 ```
 
-Funciona, tarda 26 s y pesa **1,24 GB**. Mira qué contiene, sin enseñar ningún secreto en pantalla (solo cuenta líneas):
+Funciona en 26 s y pesa **1,24 GB**. Lo que contiene, sin enseñar secretos (solo cuenta líneas):
 
 ```bash
 docker run --rm entrenos:ingenuo sh -c 'ls -A /app | tr "\n" " "; echo; grep -c "^BETTER_AUTH_SECRET=." .env; whoami'
@@ -161,14 +155,11 @@ root
 8.19kB	WORKDIR /app
 ```
 
-Cuatro problemas:
+- **Tu `.env` está dentro:** cualquiera con la imagen lee el secreto de Better Auth y la contraseña de MongoDB.
+- **274 MB de contexto,** casi todo tu `node_modules` del Mac (340 MB en la capa `COPY`), que `npm ci` sustituye (413 MB más) sin quitar la capa anterior: las capas solo se añaden.
+- **Todo va dentro** (TypeScript, Vitest, Playwright, tests, código fuente), **y se ejecuta como `root`.**
 
-1. **Tu `.env`, con el secreto de Better Auth y la contraseña de MongoDB, está dentro de la imagen.** Cualquiera que tenga la imagen (un registro de imágenes, un compañero, un servidor comprometido) puede leerlo con una sola orden.
-2. **Se copiaron 274 MB de contexto,** casi todo tu `node_modules` del Mac (340 MB en la capa `COPY`), que `npm ci` borra y vuelve a instalar (413 MB más). La capa del `COPY` sigue en la imagen aunque `npm ci` la sustituya: las capas solo se añaden.
-3. **Todo va dentro:** compiladores de TypeScript, Vitest, Playwright, los tests, el código fuente. Nada de eso hace falta para ejecutar la app.
-4. **Se ejecuta como `root`.**
-
-Y uno más, que se ve al cambiar código. Añade una línea a cualquier archivo y vuelve a construir:
+Cambia una línea y reconstruye:
 
 ```bash
 echo "// cambio" >> src/lib/ritmo.ts
@@ -183,18 +174,20 @@ docker build --progress=plain -f Dockerfile.ingenuo -t entrenos:ingenuo .
 #9 [5/5] RUN npm run build
 ```
 
-Otros 23 s, y otra vez `npm ci`. **La caché de capas** funciona así: Docker reutiliza una capa (`CACHED`) si su instrucción y todo lo que la precede no han cambiado. En cuanto una capa cambia, todas las de debajo se rehacen. Como `COPY . .` copia también `ritmo.ts`, esa capa cambia, y `npm ci` se repite aunque `package-lock.json` sea el mismo. (Quita la línea de `ritmo.ts` antes de seguir).
+- **Otros 23 s y otra vez `npm ci`:** Docker reutiliza una capa (`CACHED`) solo si ella y las anteriores no cambian, y `COPY . .` incluye `ritmo.ts`. (Quita esa línea antes de seguir).
 
 <Callout type="risk">
 
-- **Borrar un archivo en una capa posterior no lo quita de la imagen:** `RUN rm .env` después de `COPY . .` crea una capa nueva sin el archivo, pero la capa del `COPY`, con el `.env` dentro, sigue en la imagen y se puede extraer (`docker save` la exporta entera). Un secreto que entra en una capa ya está filtrado: la única solución es que no entre (Paso 3).
-- **Si ya subiste una imagen con secretos a un registro,** borrarla no basta: cambia los secretos (el de Better Auth cierra todas las sesiones, I5.3; la contraseña de MongoDB, en Atlas) como si se hubieran publicado.
+- **`RUN rm .env` no lo quita:** la capa del `COPY` sigue en la imagen y `docker save` la exporta. Un secreto que entra en una capa ya está filtrado.
+- **Si ya subiste una imagen con secretos, cámbialos:** el de Better Auth cierra todas las sesiones (I5.3); la contraseña de MongoDB, en Atlas.
 
 </Callout>
 
 ## Paso 3: `.dockerignore` y el orden de las capas
 
-**`.dockerignore`** es a Docker lo que `.gitignore` a Git: lo que nunca entra en el contexto. Créalo en la raíz del proyecto:
+**Qué es:** **`.dockerignore`** es el `.gitignore` del contexto. Y copiar **primero** `package.json` y `package-lock.json`, después `npm ci` y luego el resto, hace que `npm ci` solo se repita al cambiar las dependencias.
+
+**Cómo se usa:** en la raíz del proyecto:
 
 ```text
 # Archivo: .dockerignore
@@ -217,11 +210,9 @@ compose*.yaml
 .DS_Store
 ```
 
-- **`node_modules`, `dist`, `.astro`:** se generan dentro de la imagen. Los del Mac, además, pueden tener binarios para macOS (A4.1).
-- **`.env` y `.env.*`, salvo `.env.example`:** los secretos nunca entran. `!` es una excepción a la regla anterior.
-- **`Dockerfile*`, `compose*.yaml`, `.dockerignore`:** cambiarlos no debe invalidar la caché del código.
+- **`node_modules`, `dist`, `.astro`** se generan dentro (y los del Mac traen binarios de macOS); **`.env` y `.env.*`** nunca entran, salvo `!.env.example`; **`Dockerfile*`, `compose*.yaml`** no deben invalidar la caché del código.
 
-Y cambia el orden: primero **solo** `package.json` y `package-lock.json`, después `npm ci`, y después el resto. Así, la capa de `npm ci` solo se rehace cuando cambian las dependencias. El paso intermedio, solo con esos dos cambios:
+El paso intermedio, solo con esos dos cambios:
 
 ```dockerfile
 FROM node:26-alpine
@@ -246,27 +237,28 @@ docker build --progress=plain -f Dockerfile.capas -t entrenos:capas .
 #10 ERROR: process "/bin/sh -c npm run build" did not complete successfully: exit code: 1
 ```
 
-El primer `Dockerfile` compilaba porque llevaba tu `.env` dentro. Sin él, `validateSecrets: true` (I3.6) para el _build_: exige las variables secretas al compilar. Y aunque lo desactivaras, no bastaría. Con `validateSecrets: false`, el _build_ falla igual, un poco más tarde:
+- **Sin `.env`, `validateSecrets: true` (I3.6) para el _build_,** y con `false` falla igual, más tarde:
 
 ```text
 #13 1.875 06:23:11 [ERROR] [build] Caught error rendering /acerca: EnvInvalidVariables: The following environment variables defined in `env.schema` are invalid:
 #13 1.875 - MONGODB_URI is missing
 ```
 
-Para prerenderizar `/acerca`, Astro ejecuta el _middleware_ (aunque ante una página prerenderizada no haga nada, I3.4). El _middleware_ importa `src/lib/auth.ts`, que importa `src/lib/mongo.ts`, y `mongo.ts` lee `MONGODB_URI` de `astro:env/server` en cuanto se carga el módulo, en su primera línea. Leer una secreta que no existe lanza el error.
-
-La solución, en el Paso 4: valores **de relleno** solo para el _build_. El _build_ nunca conecta con MongoDB (`new MongoClient(...)` no abre ninguna conexión hasta la primera consulta), así que basta con que pasen la validación.
+- **Para prerenderizar `/acerca`, Astro ejecuta el _middleware_** (I3.4), que importa `auth.ts` y este `mongo.ts`, que lee `MONGODB_URI` de `astro:env/server` al cargarse.
+- **La solución (Paso 4): valores de relleno solo para el _build_.** `new MongoClient(...)` no conecta hasta la primera consulta, así que basta con que pasen la validación.
 
 <Callout type="risk">
 
-- **No metas el `.env` en el _build_ «para que compile»:** es justo lo que hacía el primer `Dockerfile`, y acaba en una capa. Tampoco con `ARG` o `ENV`: con `--build-arg BETTER_AUTH_SECRET=…`, `docker history --no-trunc` enseña el valor, y `docker build --check` avisa: `SecretsUsedInArgOrEnv … Do not use ARG or ENV instructions for sensitive data (ARG "BETTER_AUTH_SECRET")`.
-- **Los secretos que Astro lee con `astro:env/server` no se incrustan en `dist`:** se leen del entorno al ejecutarse (`_internalGetSecret("MONGODB_URI")` en el código compilado). Las variables **públicas** sí: `PUBLIC_NOMBRE_APP` aparece como `var PUBLIC_NOMBRE_APP = "Mi entreno"` en `dist/server`. Por eso unas van al arrancar y otras al compilar (Paso 4).
+- **Ni `.env` ni `ARG`/`ENV` con secretos:** con `--build-arg BETTER_AUTH_SECRET=…`, `docker history --no-trunc` lo enseña, y `docker build --check` avisa con `SecretsUsedInArgOrEnv`.
+- **Las secretas no se incrustan en `dist`** (`_internalGetSecret("MONGODB_URI")`), **las públicas sí:** `var PUBLIC_NOMBRE_APP = "Mi entreno"`. Unas van al arrancar y otras al compilar.
 
 </Callout>
 
 ## Paso 4: el `Dockerfile` _multi-stage_
 
-Un `Dockerfile` **_multi-stage_** tiene varios `FROM`. Cada uno empieza una etapa con su propio sistema de archivos, y la imagen final es solo la última. Las anteriores son talleres: compilas en ellas y copias a la final únicamente el resultado. Sustituye el `Dockerfile` de la raíz del proyecto:
+**Qué es:** un `Dockerfile` con varios `FROM`, cada uno una etapa con su sistema de archivos. Se compila en las primeras y la imagen final, la última, recibe solo el resultado.
+
+**Cómo se usa:** sustituye el `Dockerfile` de la raíz:
 
 ```dockerfile
 # syntax=docker/dockerfile:1
@@ -310,18 +302,14 @@ EXPOSE 4321
 CMD ["node", "scripts/arrancar.mjs"]
 ```
 
-- **Etapa `build`:** todas las dependencias, incluidas las de desarrollo (Astro, Vite, TypeScript), y `npm run build`. Produce `dist`.
-- **Etapa `deps`:** otra vez desde cero, solo `npm ci --omit=dev`. Produce el `node_modules` de producción, sin herramientas de compilación.
-- **Etapa final:** `node:26-alpine` limpio, con `dist`, ese `node_modules`, `package.json` y `scripts`. Ni código fuente, ni tests, ni `.env`.
-- **`# syntax=docker/dockerfile:1`:** usa la versión más reciente de la sintaxis de los `Dockerfile`, necesaria para `--mount`.
-- **`RUN --mount=type=cache,target=/root/.npm`:** la caché de descargas de npm se guarda entre _builds_ fuera de la imagen. Si `package-lock.json` cambia, `npm ci` vuelve a ejecutarse, pero descarga solo los paquetes nuevos.
-- **`ARG`:** los valores de las variables públicas, que se fijan en el _build_ (I3.6). Las instrucciones `RUN` que vienen después los ven como variables de entorno, y se cambian con `--build-arg`.
-- **`ENV NODE_ENV=production HOST=0.0.0.0 PORT=4321`:** dentro de un contenedor, la app debe escuchar en todas las interfaces del contenedor (A4.1). `127.0.0.1` sería el propio contenedor, y Docker no podría hacerle llegar las peticiones.
-- **`USER node`:** la imagen de Node trae un usuario `node`. Los archivos copiados son de `root`: la app puede leerlos, pero no cambiarlos.
-- **`EXPOSE 4321`:** documenta el puerto. No publica nada; eso lo hace `docker run -p` (Paso 5).
-- **`CMD ["node", "scripts/arrancar.mjs"]`:** no arranca `dist/server/entry.mjs` directamente, sino un _script_ que primero valida las variables.
+- **`build`** instala todo y ejecuta `npm run build`; **`deps`**, desde cero, solo `npm ci --omit=dev`; **la final** es `node:26-alpine` con `dist`, ese `node_modules`, `package.json` y `scripts`.
+- **`# syntax=docker/dockerfile:1`** permite `RUN --mount=type=cache,target=/root/.npm`: la caché de npm vive fuera de la imagen y un `npm ci` repetido solo descarga lo nuevo.
+- **`ARG`** fija las variables públicas al compilar (I3.6), cambiables con `--build-arg`.
+- **`ENV … HOST=0.0.0.0`:** en un contenedor, `127.0.0.1` sería el propio contenedor y Docker no podría hacerle llegar peticiones (A4.1).
+- **`USER node`:** los archivos son de `root`; la app los lee, no los cambia. **`EXPOSE 4321`** solo documenta; publica `docker run -p`.
+- **`CMD ["node", "scripts/arrancar.mjs"]`:** primero valida las variables.
 
-En A4.1 viste que el servidor compilado arranca sin variables y falla en la primera petición que las usa. En un contenedor es peor: Docker lo da por arrancado y nada falla hasta que llega alguien. `scripts/arrancar.mjs` valida las secretas con Zod (ya es una dependencia de producción) y solo entonces importa el servidor:
+Sin variables, el servidor arranca y falla con la primera petición (A4.1), y Docker lo da por bueno. `scripts/arrancar.mjs` valida las secretas con Zod y solo entonces importa el servidor:
 
 ```js
 // Archivo: scripts/arrancar.mjs
@@ -349,8 +337,6 @@ if (!resultado.success) {
 await import("../dist/server/entry.mjs");
 ```
 
-Construye:
-
 ```bash
 docker build --progress=plain -t entrenos:1 .
 docker image ls entrenos --format "{{.Tag}} {{.Size}}"
@@ -373,9 +359,9 @@ ingenuo 1.24GB
 8.19kB	WORKDIR /app
 ```
 
-- **El contexto:** 418 kB, frente a 274 MB.
-- **La imagen:** 562 MB, frente a 1,24 GB. De ellos, 258 MB son `node:26-alpine` y 250 MB el `node_modules` de producción; tu app compilada, 1,2 MB.
-- **Sin rastro del relleno:** compruébalo, igual que lo que hay dentro y quién lo ejecuta:
+- **Contexto de 418 kB** (frente a 274 MB) e **imagen de 562 MB** (frente a 1,24 GB): 258 de `node:26-alpine`, 250 de `node_modules` y 1,2 de tu app.
+
+Sin rastro del relleno, qué hay dentro y quién lo ejecuta:
 
 ```bash
 docker run --rm entrenos:1 sh -c 'grep -rl relleno-del-build dist | wc -l; ls -A; whoami; touch /app/dist/x; echo hola > /app/nuevo; touch /tmp/x && echo "/tmp sí"'
@@ -393,9 +379,9 @@ sh: can't create /app/nuevo: Permission denied
 /tmp sí
 ```
 
-Si alguien encontrara un fallo en tu app que le permitiera ejecutar órdenes, no podría cambiar su código ni instalar nada en `/app`. Solo podría escribir en `/tmp`, que desaparece con el contenedor.
+- **Quien explotara un fallo de la app** no podría cambiar `/app`: solo escribir en `/tmp`, que muere con el contenedor.
 
-**La caché, ahora.** Añade otra vez una línea a `src/lib/ritmo.ts` y reconstruye:
+Con otra línea en `src/lib/ritmo.ts`:
 
 ```text
 #10 CACHED       ← [build 4/6] npm ci
@@ -404,9 +390,9 @@ Si alguien encontrara un fallo en tu app que le permitiera ejecutar órdenes, no
 #14 CACHED       ← COPY --from=deps /app/node_modules
 ```
 
-**3 s** en total: los dos `npm ci` salieron de la caché, y solo se repitió la compilación. Sin ninguna caché (`docker builder prune -af` la borra), el _build_ tarda 26 s.
+- **3 s:** los dos `npm ci` salen de la caché. Sin caché (`docker builder prune -af`), 26 s.
 
-**Las variables públicas, en el _build_.** El nombre de la app va en el `<title>` de cada página. Pasarlo al arrancar no cambia nada; pasarlo al compilar, sí:
+Las variables públicas van en el _build_: el nombre de la app, en el `<title>`:
 
 ```bash
 docker run -d --init --name e2 --env-file .env -e PUBLIC_NOMBRE_APP="Cambiado al arrancar" -p 127.0.0.1:4321:4321 entrenos:1
@@ -426,16 +412,17 @@ docker rm -f e3
 
 <Callout type="risk">
 
-- **El relleno debe pasar la validación del esquema:** `BETTER_AUTH_SECRET` necesita 32 caracteres o más (`min: 32`) y `MONGODB_URI` empezar por `mongodb` (`startsWith`). Si añades una secreta nueva a `astro.config.mjs`, añade también su relleno al `Dockerfile` y su regla a `scripts/arrancar.mjs`: son tres sitios que deben ir de acuerdo.
-- **El relleno no puede servir de nada si se cuela:** `.invalid` es un dominio reservado que nunca existe, así que un MongoDB con esa dirección no conecta con nada, ni por error.
-- **`--omit=dev` sigue instalando `vitest`** como dependencia _peer_ opcional de `better-auth` (A4.1): unos 40 MB de los 250 MB de `node_modules`. No se ejecutan, pero ocupan espacio.
-- **Una imagen por arquitectura:** este servidor es arm64, y la imagen también. Un VPS x86 (`amd64`) no puede ejecutarla. En A4.5 construirás en el propio servidor; para construir para otra arquitectura existe `docker buildx build --platform linux/amd64`.
+- **El relleno debe pasar el esquema** (`min: 32` en `BETTER_AUTH_SECRET`, `startsWith` en `MONGODB_URI`) y no servir de nada si se cuela: `.invalid` es un dominio que nunca existe. Una secreta nueva va en tres sitios: `astro.config.mjs`, el `Dockerfile` y `arrancar.mjs`.
+- **`--omit=dev` sigue instalando `vitest`** (A4.1): unos 40 de los 250 MB.
+- **Una imagen por arquitectura:** esta es arm64 y no corre en un VPS `amd64`. En A4.5 construirás en el servidor; si no, `docker buildx build --platform linux/amd64`.
 
 </Callout>
 
 ## Paso 5: ejecutar el contenedor
 
-Sin variables, `arrancar.mjs` no deja arrancar:
+**Qué es:** arrancar la imagen con sus variables, publicar el puerto y pararla bien.
+
+**Cómo se usa:** sin variables, `arrancar.mjs` no deja arrancar:
 
 ```bash
 docker run --rm entrenos:1; echo "exit $?"
@@ -453,7 +440,7 @@ exit 1
 exit 1
 ```
 
-Ahora con tu `.env`, que apunta a tu MongoDB en `127.0.0.1`. `-d` lo deja en segundo plano y `-p 127.0.0.1:4321:4321` publica el puerto 4321 del contenedor en el 4321 del servidor, solo en `127.0.0.1`:
+Con tu `.env` (MongoDB en `127.0.0.1`); `-d` en segundo plano y `-p 127.0.0.1:4321:4321` publica solo en `127.0.0.1`:
 
 ```bash
 docker run -d --name e1 --env-file .env -p 127.0.0.1:4321:4321 entrenos:1
@@ -466,7 +453,7 @@ GET /entrar -> 200
 GET /estadisticas -> 302
 ```
 
-Parece que funciona, pero ninguna de esas rutas ha tocado la base de datos (sin _cookie_, Better Auth ni la consulta). Un registro, sí:
+Ninguna ruta tocó la base. Un registro, sí:
 
 ```bash
 curl -s -o /dev/null -w "POST registro -> %{http_code} en %{time_total}s\n" \
@@ -481,9 +468,9 @@ POST registro -> 500 en 5.132106s
 ECONNREFUSED 127.0.0.1:27017
 ```
 
-500 después de 5 s, los de `serverSelectionTimeoutMS` (B5.2). **Dentro de un contenedor, `127.0.0.1` es el propio contenedor,** no el servidor: ahí no hay ningún MongoDB. Lo resolverás en el Paso 6, poniendo MongoDB en otro contenedor de la misma red.
+- **500 tras 5 s** (`serverSelectionTimeoutMS`, B5.2): **dentro de un contenedor, `127.0.0.1` es el contenedor.** MongoDB irá en otro contenedor de la misma red (Paso 6).
 
-Antes, para el contenedor:
+Para el contenedor:
 
 ```bash
 inicio=$(date +%s.%N); docker stop e1 > /dev/null; echo "docker stop tardó $(echo "$(date +%s.%N) - $inicio" | bc) s"
@@ -495,7 +482,7 @@ docker stop tardó 10.012706824 s
 exit 137
 ```
 
-**Diez segundos, y código 137** (128 + 9, `SIGKILL`). `docker stop` manda `SIGTERM` (I6.4) y espera 10 s; si el proceso sigue vivo, lo mata. Node ignoró el `SIGTERM` porque dentro del contenedor es el **PID 1**, y Linux no aplica a ese proceso la acción por defecto de las señales: solo las que el propio programa atiende, y Node no atiende `SIGTERM` por sí solo. La solución es `--init`, que pone como PID 1 un proceso mínimo que reenvía las señales:
+- **10 s y código 137** (`SIGKILL`): `docker stop` manda `SIGTERM` (I6.4) y mata a los 10 s. Node es el **PID 1**, al que Linux no aplica la acción por defecto de las señales, y no atiende `SIGTERM` por sí solo. **`--init`** pone delante un proceso mínimo que las reenvía:
 
 ```bash
 docker rm e1
@@ -514,9 +501,9 @@ docker stop con --init: .077704994 s
 exit 143
 ```
 
-0,08 s, y código 143 (128 + 15, `SIGTERM`): Node recibió la señal y terminó. En cada despliegue (A4.5) paras el contenedor antiguo; son 10 s de diferencia cada vez.
+- **0,08 s y código 143** (`SIGTERM`): 10 s menos en cada despliegue (A4.5).
 
-**`-p` y el _firewall_.** En I6.5 configuraste `ufw` para rechazar todo lo entrante salvo SSH. Medido desde otro equipo de la red, con un servidor de Python fuera de Docker en el puerto 5556 y un contenedor publicado con `-p 5555:80`:
+Con `ufw` rechazando todo salvo SSH (I6.5), desde otro equipo, frente a un Python fuera de Docker en el 5556 y un contenedor con `-p 5555:80`:
 
 ```text
 Default: deny (incoming), allow (outgoing), deny (routed)
@@ -525,19 +512,21 @@ otro equipo -> servidor:5555 (contenedor, -p 5555:80) -> 200
 otro equipo -> servidor:5555 (contenedor, -p 127.0.0.1:5555:80) -> sin conexión
 ```
 
-**Docker se salta `ufw`.** Para publicar un puerto, Docker escribe sus propias reglas en el _firewall_ del núcleo (`iptables`): el tráfico hacia un contenedor se redirige y pasa por las reglas de Docker, no por las de `ufw`, que solo filtran lo que va al propio servidor. Un `-p 5555:80` queda abierto a internet aunque `ufw status` diga lo contrario. Con `127.0.0.1:` delante, el puerto solo existe dentro del servidor.
+- **Docker se salta `ufw`:** escribe sus reglas en `iptables` y el tráfico hacia contenedores no pasa por `ufw`. `-p 5555:80` queda abierto a internet; con `127.0.0.1:` delante, solo existe dentro del servidor.
 
 <Callout type="risk">
 
-- **Publica siempre en `127.0.0.1`** (`-p 127.0.0.1:4321:4321`) salvo que quieras de verdad el puerto abierto a todo el mundo. En A4.3, Nginx recibirá el tráfico en el 80 y el 443 y lo pasará a `127.0.0.1:4321`; la app nunca necesita estar abierta por sí misma.
-- **`docker run --env-file` no quita las comillas:** con `CON="valor"` en el archivo, el contenedor recibe `"valor"`, comillas incluidas (medido). El `env_file` de Compose sí las quita (`valor`). Escribe los valores sin comillas y te dará igual cuál uses.
-- **`docker logs` guarda la salida del contenedor en el disco del servidor** (con el controlador `json-file`, el de por defecto), **sin límite de tamaño:** un contenedor que escribe mucho puede llenar el disco. En A4.6 configurarás la rotación de registros.
+- **Publica siempre en `127.0.0.1`:** en A4.3, Nginx recibe el 80 y el 443 y pasa a `127.0.0.1:4321`.
+- **`docker run --env-file` no quita comillas** (`"valor"` llega con ellas); el `env_file` de Compose sí. Escribe los valores sin comillas.
+- **`docker logs` guarda en disco sin límite** (`json-file`): puede llenarlo. Rotación en A4.6.
 
 </Callout>
 
 ## Paso 6: la app y MongoDB con `docker compose`
 
-Arrancar dos contenedores a mano, en la misma red, en el orden correcto, con sus variables y sus volúmenes, son muchas órdenes. **Docker Compose** lo describe en un archivo, `compose.yaml`, y lo levanta todo con una:
+**Qué es:** **Docker Compose** describe varios contenedores (red, orden, variables, volúmenes) en `compose.yaml` y los levanta con una orden.
+
+**Cómo se usa:**
 
 ```yaml
 # Archivo: compose.yaml
@@ -587,23 +576,20 @@ volumes:
   mongo-datos:
 ```
 
-- **Dos servicios, `app` y `mongo`:** cada uno es un contenedor. Compose los conecta a una red propia en la que **cada servicio se llama por su nombre**: desde `app`, MongoDB está en `mongo:27017`.
-- **`env_file` y `environment`:** el `.env` aporta `BETTER_AUTH_SECRET` y `BETTER_AUTH_URL`; `environment` sustituye `MONGODB_URI` y `MONGODB_DB`, que en Compose son otros.
-- **`depends_on` con `condition: service_healthy`:** la app no arranca hasta que el `healthcheck` de `mongo` pasa.
-- **`command: ["--replSet", "rs0", "--bind_ip_all"]`:** MongoDB como _replica set_ de un nodo, que escucha en todas las interfaces de su contenedor (los demás contenedores le llegan por la red de Compose).
-- **El `healthcheck`:** la primera vez, `rs.status()` falla porque el _replica set_ no existe, y `rs.initiate` lo crea. Las siguientes, comprueba que este nodo es el primario (`isWritablePrimary`): hasta entonces no acepta escrituras.
-- **`volumes`:** `mongo-datos` es un **volumen**, un espacio de disco que gestiona Docker y que no pertenece a ningún contenedor. Los datos de MongoDB sobreviven aunque borres el contenedor.
-- **`restart: unless-stopped`:** si el proceso muere, Docker vuelve a arrancar el contenedor, salvo que lo pararas tú.
+- **`app` y `mongo` comparten una red** en la que cada servicio se llama por su nombre: MongoDB está en `mongo:27017`.
+- **`env_file` aporta los secretos y `environment`** sustituye `MONGODB_URI` y `MONGODB_DB`.
+- **`depends_on` con `service_healthy`:** la app espera al `healthcheck`, que la primera vez crea el _replica set_ (`rs.initiate`) y después exige `isWritablePrimary`.
+- **`--replSet rs0 --bind_ip_all`:** _replica set_ de un nodo que escucha en su contenedor. **`mongo-datos`** es un **volumen**, disco de Docker que sobrevive al contenedor. **`restart: unless-stopped`** lo rearranca si muere.
 
-¿Por qué un _replica set_? Con la primera versión de este archivo, un `mongo:8.2` suelto, sin `command`, todo arrancaba, pero el registro daba 500:
+Con un `mongo:8.2` suelto, todo arrancaba y el registro daba 500:
 
 ```text
 app-1  | 2026-10-30T06:29:50.908Z ERROR [Better Auth]: MongoServerError MongoServerError: Transaction numbers are only allowed on a replica set member or mongos
 ```
 
-Better Auth usa transacciones al crear una cuenta, y MongoDB solo las admite en un _replica set_ (I5.2, I7.5). Atlas siempre lo es; uno local, solo si lo arrancas así.
+- **Better Auth usa transacciones al crear una cuenta,** y MongoDB solo las admite en un _replica set_ (I5.2, I7.5): Atlas siempre lo es; uno local, si lo arrancas así.
 
-Levántalo todo. `-d` en segundo plano, `--build` construye la imagen de la app:
+`-d` en segundo plano y `--build` construye la imagen:
 
 ```bash
 docker compose up -d --build
@@ -620,7 +606,7 @@ app Up Less than a second
 mongo Up 10 seconds (healthy)
 ```
 
-La app esperó a que MongoDB estuviera _healthy_. La base de datos está vacía: crea los índices (I3.2) con un contenedor de un solo uso de la misma imagen. `docker compose run` lo arranca con las variables del servicio y `--rm` lo borra al terminar:
+La base está vacía: los índices (I3.2) con un contenedor de un solo uso (`run --rm`, con las variables del servicio):
 
 ```bash
 docker compose run --rm app node scripts/crear-indices.mjs
@@ -630,7 +616,7 @@ docker compose run --rm app node scripts/crear-indices.mjs
 ✓ índice notas.usuario_titulo_unico en la base de datos «entrenos»
 ```
 
-Y el flujo real: registrarse, guardar un entreno y leerlo:
+Registrarse, guardar un entreno y leerlo:
 
 ```bash
 B=http://127.0.0.1:4321; O="origin: http://localhost:4321"
@@ -655,7 +641,7 @@ nuevo entreno -> 201
 }
 ```
 
-**Los datos, el volumen y los reinicios:**
+Los datos, el volumen y los reinicios:
 
 ```bash
 docker compose exec app sh -c 'kill $(pidof node)'   # Node muere dentro del contenedor
@@ -683,16 +669,14 @@ entrenos-app_mongo-datos
 0
 ```
 
-- **Node murió y Docker volvió a arrancar el contenedor** en segundos: lo que hacía `systemd` en I6.4.
-- **`down` y `up`:** contenedores nuevos, el mismo volumen, el entreno sigue ahí.
-- **`down -v`:** el volumen se borra, y con él todos los datos. Sin confirmación.
+- **Node murió y Docker rearrancó el contenedor** en segundos, como `systemd` en I6.4.
+- **`down` y `up`:** contenedores nuevos, el mismo volumen, el entreno sigue. **`down -v`** borra el volumen y los datos, sin confirmación.
 
 <Callout type="risk">
 
-- **`docker compose down -v` borra la base de datos sin preguntar:** en tu equipo es una forma cómoda de empezar de cero; en un servidor con datos reales es un desastre. Acostúmbrate a escribir `down` a secas y haz copias de seguridad (A4.6).
-- **Fija y prueba la versión de MongoDB:** en este servidor (Ubuntu 26.04, núcleo Linux 7.0), `mongo:8` (la 8.3.13) y `mongo:8.0` (la 8.0.34) se niegan a arrancar con `MongoDB cannot start: Linux kernel versions 6.19 and newer has a known incompatibility with this version of MongoDB`. Es un fallo conocido (SERVER-121912) entre el asignador de memoria de MongoDB y los núcleos 6.19 y posteriores, que en algunas versiones provoca caídas al cabo de un minuto y posible corrupción de datos; las versiones que lo detectan prefieren no arrancar. `mongo:8.2` (la 8.2.12) arrancó, guardó datos y siguió en marcha más de un minuto sin reinicios, que es cuando caían las afectadas. Cuando cambies de versión o de servidor, prueba antes de mover datos.
-- **MongoDB en Compose, sin `ports`:** nadie de fuera del servidor puede llegar a él, y la app sí. Si necesitas abrirlo desde tu equipo con Compass, usa un túnel SSH (`ssh -L 27017:…`, I6.3), no un `ports: "27017:27017"`, que Docker abriría a internet saltándose `ufw` (Paso 5) y sin contraseña.
-- **Un MongoDB en tu VPS es tuyo de verdad:** sin contraseña (como aquí, solo accesible en la red de Compose), sin copias de seguridad automáticas y sin alertas. Para una app con usuarios reales, Atlas resuelve todo eso; Compose con MongoDB es ideal para desarrollar y probar en local.
+- **`down -v` en un servidor con datos es un desastre:** escribe `down` a secas y haz copias (A4.6).
+- **Fija y prueba la versión de MongoDB:** en este servidor (núcleo 7.0), `mongo:8` (8.3.13) y `mongo:8.0` (8.0.34) no arrancan (`Linux kernel versions 6.19 and newer has a known incompatibility`, SERVER-121912, con caídas y posible corrupción). `mongo:8.2` (8.2.12) aguantó más de un minuto sin reinicios. Prueba antes de mover datos.
+- **MongoDB sin `ports` ni contraseña,** solo en la red de Compose: para Compass, un túnel SSH (I6.3), nunca `ports: "27017:27017"`, que Docker abriría saltándose `ufw`. Y sin copias ni alertas: para usuarios reales, Atlas; esto, para desarrollar.
 
 </Callout>
 
@@ -706,7 +690,7 @@ entrenos-app_mongo-datos
 
 </Callout>
 
-Solución. Los dos archivos del primer punto son los del Paso 4 y el Paso 6. `scripts/compose-prueba.sh`:
+Solución. Los archivos del primer punto son los de los Pasos 4 y 6. `scripts/compose-prueba.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -796,23 +780,22 @@ mongo: Up 11 seconds (healthy)
 Todo correcto
 ```
 
-22 s en total, y después `docker compose ps -a` y `docker volume ls` no muestran nada del proyecto. Sin `init: true`:
+- **22 s, y después `docker compose ps -a` y `docker volume ls` no muestran nada.** Sin `init: true`:
 
 ```text
 == 5. Se para rápido
   FALLO: docker compose stop ha tardado 10 s (¿falta init: true?)
 ```
 
-- **`trap … EXIT` con `down -v`:** el _script_ empieza y termina desde cero, así que nunca deja datos de prueba ni contenedores ocupando el puerto 4321.
-- **`up --wait mongo` y después `up app`:** `--wait` espera a que el servicio esté _healthy_ y falla si no llega a estarlo. La app no tiene `healthcheck` (llegará en A4.5, con `/api/health`), así que `esperar_app` pregunta con `curl` hasta que responde.
-- **`exec -T` y `run -T`:** no piden una terminal interactiva. En un _script_, y más aún en uno que ejecute `cron` o CI, no la hay.
-- **La sesión después de `down` y `up`:** la _cookie_ de `$COOKIES` sigue valiendo porque la sesión está en MongoDB, en el volumen, y el secreto que la firma no ha cambiado. Es lo que verá un usuario después de un despliegue.
-- **El correo usa `.test`,** un dominio reservado que nunca recibe correo: aunque la app mandara correos de verificación, no llegarían a nadie.
+- **`trap … EXIT` con `down -v`** empieza y termina desde cero: sin datos de prueba ni puerto ocupado.
+- **`up --wait mongo` y luego `up app`:** `--wait` falla si no llega a _healthy_; la app aún no tiene `healthcheck` (A4.5), así que `esperar_app` pregunta con `curl`. **`exec -T` y `run -T`** no piden terminal, que en `cron` o CI no hay.
+- **La sesión sobrevive a `down` y `up`:** está en MongoDB, en el volumen, con el mismo secreto. Lo que verá un usuario tras un despliegue.
+- **El correo usa `.test`,** un dominio reservado que nunca recibe correo.
 
 <Callout type="risk">
 
-- **El _script_ usa el puerto 4321 y el nombre de proyecto de la carpeta:** si ya tienes la app levantada con Compose en esa misma carpeta, el _script_ la para y **borra su volumen**. Ejecútalo cuando no tengas datos en el MongoDB de Compose que quieras conservar, o con otro nombre de proyecto (`COMPOSE_PROJECT_NAME=prueba bash scripts/compose-prueba.sh`) y otro puerto.
-- **`set -e` y las sustituciones `$(…)`:** si `contar_entrenos` falla porque MongoDB no responde, devuelve un texto vacío y la comparación falla con el mensaje del _script_, no con el error de `mongosh`. Si algo falla de forma rara, `falla` enseña las últimas 20 líneas del registro de la app; para el de MongoDB, `docker compose logs mongo`.
+- **El _script_ borra el volumen del proyecto de la carpeta:** si tienes datos en ese Compose, usa `COMPOSE_PROJECT_NAME=prueba` y otro puerto.
+- **Con `set -e`, un `$(…)` que falla da texto vacío:** el mensaje será el del _script_. `falla` enseña 20 líneas del registro de la app; el de MongoDB, con `docker compose logs mongo`.
 
 </Callout>
 
@@ -824,10 +807,9 @@ Tu app arranca igual en cualquier máquina con Docker: una imagen _multi-stage_ 
 
 ## Resumen
 
-- Una **imagen** son capas de solo lectura; un **contenedor**, una imagen en marcha con una capa propia que desaparece al borrarlo. `node:26-alpine` pesa 258 MB; `node:26`, 1,8 GB.
-- El primer `Dockerfile` (`COPY . .` y `npm ci`) metió tu `.env` en la imagen, copió 274 MB de contexto, pesó 1,24 GB, se ejecutaba como `root` y repetía `npm ci` con cada cambio de código.
-- **`.dockerignore`** deja fuera `node_modules`, `dist` y `.env`. **Copiar primero `package*.json`** hace que `npm ci` salga de la caché: 3 s al cambiar código.
-- El _build_ necesita las secretas porque el _middleware_ carga `mongo.ts` y `auth.ts` al prerenderizar: valores de relleno, que no quedan en `dist`. Las **públicas**, en cambio, se incrustan: van con `--build-arg`.
-- **_Multi-stage_:** compilar en una etapa, instalar solo producción en otra, copiar el resultado a una imagen limpia con `USER node`. 562 MB.
-- `scripts/arrancar.mjs` valida las variables y no deja arrancar sin ellas. Dentro de un contenedor, `127.0.0.1` es el contenedor. Sin `--init`, `docker stop` tarda 10 s (Node como PID 1 ignora `SIGTERM`). **Docker se salta `ufw`:** publica en `127.0.0.1`.
-- **Compose:** servicios que se llaman por su nombre, `depends_on` con `service_healthy`, un MongoDB _replica set_ (Better Auth usa transacciones) y un volumen que sobrevive a `down` pero no a `down -v`. Fija una versión de MongoDB probada en tu servidor.
+- Imagen: capas de solo lectura; contenedor: una imagen en marcha. `node:26-alpine`, 258 MB; `node:26`, 1,8 GB.
+- El `Dockerfile` ingenuo metió el `.env`, copió 274 MB, pesó 1,24 GB, corría como `root` y repetía `npm ci`.
+- `.dockerignore` y copiar primero `package*.json`: 3 s al cambiar código.
+- Secretas de relleno para el _build_ (no quedan en `dist`); públicas con `--build-arg`.
+- _Multi-stage_ con `USER node`: 562 MB. `arrancar.mjs` valida, `--init` para en 0,08 s y Docker se salta `ufw`: publica en `127.0.0.1`.
+- Compose: nombres de servicio, `service_healthy`, _replica set_ y un volumen que solo borra `down -v`.
