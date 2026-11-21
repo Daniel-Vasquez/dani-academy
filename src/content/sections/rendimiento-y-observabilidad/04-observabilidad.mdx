@@ -7,29 +7,27 @@ minutes: 90
 summary: "Logs en JSON con pino, un requestId que une Nginx, Node y Sentry, métricas y una alerta sacadas de tus propios logs. Y un error que solo le pasa a un usuario, resuelto sin reproducirlo."
 ---
 
-Un usuario te escribe: «me sale un error en estadísticas». En tu equipo funciona. Las pruebas pasan. El servidor responde. ¿Qué haces? Sin información, solo puedes adivinar. **Observabilidad** es poder responder desde fuera qué ha pasado en tu sistema, a partir de lo que él mismo dejó escrito, sin tener que reproducirlo.
-
-Una analogía: la caja negra de un avión. No se diseña para el día del accidente, sino que graba todo, siempre, porque ese día ya será tarde para empezar. Y el `requestId` es el número de vuelo: sin él, tienes millones de líneas; con él, ves la historia completa de una sola petición.
-
-**Lo que tendrás al terminar:** logs que una máquina puede consultar, un código que une lo que ve el usuario con Nginx, Node y Sentry, métricas de errores y latencia, y una alerta que te avisa antes de que te escriban.
+«Me sale un error en estadísticas», y en tu equipo funciona, las pruebas pasan y el servidor responde. **Observabilidad** es poder responder desde fuera qué pasó, con lo que el propio sistema dejó escrito, sin reproducirlo. Aquí escribes logs consultables y un código que une al usuario con Nginx, Node y Sentry. También sacas métricas de errores y latencia y montas una alerta que avisa antes que tus usuarios.
 
 **Requisitos:** la app con Nginx de A6.3 y el aviso de `scripts/vigilar.sh` de A4.
 
 ## Paso 1: logs que se pueden consultar
 
-Hasta ahora, cada petición dejaba esto:
+**Qué es:** un objeto JSON por línea, que una máquina puede filtrar y contar, en lugar de texto para personas.
+
+**Cómo se usa:** hasta ahora, cada petición dejaba esto:
 
 ```text
 GET /api/health → 200 (2.1 ms)
 ```
 
-Para una persona, bien. Pero ¿cuántos 500 hubo ayer en `/estadisticas`? ¿Qué le pasó a este usuario? Para eso hace falta una estructura: un objeto JSON por línea.
+- **Para una persona vale,** pero no responde cuántos 500 hubo ayer en `/estadisticas` ni qué le pasó a un usuario.
 
 ```bash
 npm install pino
 ```
 
-`src/lib/contexto.ts` guarda los datos de la petición en curso, usando `AsyncLocalStorage`, de Node. Es como una variable global, pero propia de cada petición, incluso con mil a la vez. Así no tienes que pasar el `requestId` por todas tus funciones:
+`src/lib/contexto.ts` guarda los datos de la petición con `AsyncLocalStorage` de Node: una variable global propia de cada petición, aunque haya mil, sin pasar el `requestId` a mano:
 
 ```ts
 // Archivo: src/lib/contexto.ts
@@ -67,19 +65,19 @@ export const log = pino({
 });
 ```
 
-`mixin` es la pieza importante: añade el contexto a **cada** línea, sin que tengas que pedirlo. Usa los niveles según lo que quieras que ocurra: `error` si algo ha fallado y hay que mirarlo, `warn` si algo es raro, `info` para los eventos normales y `debug` para investigar.
+- **`mixin` añade el contexto a cada línea.** Niveles: `error` si hay que mirarlo, `warn` si es raro, `info` para lo normal y `debug` para investigar.
 
 ```ts
 log.info({ entrenoId: creado.id, tipo: creado.tipo }, "entreno creado");
 ```
 
-Cambia también los `console.error` que queden, como el de `aRespuesta` en `src/lib/errores.ts`:
+Cambia los `console.error` que queden, como el de `aRespuesta` en `src/lib/errores.ts`:
 
 ```ts
 log.error({ err: e }, "error no controlado en la API");
 ```
 
-Ese cambio rompe un test: `tests/unit/api-resumen.test.ts` espiaba `console.error`. En A7.1 lo detectó el CI. Actualízalo para que espíe el log:
+Eso rompe `tests/unit/api-resumen.test.ts`, que espiaba `console.error` (en A7.1 lo detectó el CI):
 
 ```ts
 import { log } from "../../src/lib/log";
@@ -90,7 +88,7 @@ expect(registro).toHaveBeenCalledWith({ err: expect.any(Error) }, "error no cont
 registro.mockRestore();
 ```
 
-Cuesta muy poco: 4,6 µs por línea, medido con el contexto y `redact` activos. Y `redact` se probó con datos falsos:
+- **4,6 µs por línea** con contexto y `redact`. `redact`, con datos falsos:
 
 ```text
 {"password":"[oculto]","email":"[oculto]","mensaje":"nivel 1"}
@@ -102,18 +100,17 @@ Cuesta muy poco: 4,6 µs por línea, medido con el contexto y `redact` activos. 
 
 <Callout type="risk">
 
-- **`redact` es una red, no una solución:** mira las tres últimas líneas. `*.email` solo llega a un nivel, otro nombre de campo no se tapa, y el texto libre tampoco. La regla real es: **registra campos que elijas tú, nunca objetos enteros**, como `request.body` o `usuario`.
-- **Los logs son datos personales:** un `userId` y una IP lo son. Decide cuánto tiempo los guardas y quién los lee.
-- **No registres tokens ni contraseñas nunca:** un log se copia a más sitios que tu base de datos, y suele protegerse peor.
-- **`warn` y `error` que nadie va a mirar acaban en ruido:** si un error es normal, como una contraseña incorrecta, es `info`. Si no, dejarás de hacer caso a todos.
-- **No todo lo que sale es JSON:** el propio Astro escribe sus errores en texto. Por eso, en los Pasos siguientes `jq` usa `fromjson?`, que ignora lo que no entiende.
-- **En Vercel,** lo que escribes en la salida se ve en sus _Runtime Logs_. Según su documentación, se guardan 1 hora en Hobby y 1 día en Pro, y hay un máximo de 256 líneas por petición. Para investigar la semana pasada, necesitas enviarlos a otro sitio.
+- **`redact` es una red, no una solución:** `*.email` solo llega a un nivel, otros nombres y el texto libre pasan. **Registra campos que elijas, nunca objetos enteros** (`request.body`, `usuario`), y jamás _tokens_ ni contraseñas: un log se copia más y se protege peor.
+- **Los logs son datos personales** (`userId`, IP), y un `warn` que nadie mira es ruido: una contraseña incorrecta es `info`. Astro escribe sus errores en texto, por eso `jq` usa `fromjson?`.
+- **En Vercel,** los _Runtime Logs_ duran 1 hora en Hobby y 1 día en Pro, con 256 líneas por petición: para la semana pasada, envíalos fuera.
 
 </Callout>
 
 ## Paso 2: un id para cada petición
 
-En `src/middleware.ts`, sustituye el registro de I3 por este, que abre el contexto:
+**Qué es:** un `requestId` que une todas las líneas de una petición, desde Nginx hasta tu servicio.
+
+**Cómo se usa:** en `src/middleware.ts`, en lugar del registro de I3:
 
 ```ts
 import { contexto } from "./lib/contexto";
@@ -150,21 +147,23 @@ const registrar = defineMiddleware((ctx, next) => {
 });
 ```
 
-Se registra `pathname`, y no la URL entera: la _query_ puede llevar datos personales. En `cargarSesion`, justo después de identificar al usuario:
+- **Se registra `pathname`,** no la URL entera: la _query_ puede llevar datos personales.
+
+En `cargarSesion`, tras identificar al usuario:
 
 ```ts
 const actual = contexto.getStore();
 if (actual) actual.userId = datos.user.id; // desde aquí, cada línea lleva quién es
 ```
 
-En `src/env.d.ts`, añade `requestId?: string;` a `Locals`. Con eso, dos líneas de una misma petición quedan unidas, aunque una se escriba en el servicio y la otra en el _middleware_:
+Añade `requestId?: string;` a `Locals` en `src/env.d.ts`. Dos líneas de una petición, del servicio y del _middleware_, quedan unidas:
 
 ```json
 {"nivel":"info","version":"a64d","requestId":"24206cdc224cda92ca5bffa1344982c8","userId":"6aee818c64b7aca5709a6b51","entrenoId":"6aee818ea675a1c20bd746dc","tipo":"fuerza","mensaje":"entreno creado"}
 {"nivel":"info","version":"a64d","requestId":"24206cdc224cda92ca5bffa1344982c8","userId":"6aee818c64b7aca5709a6b51","metodo":"POST","ruta":"/api/entrenos","status":201,"ms":52,"mensaje":"petición"}
 ```
 
-Que el id nazca en **Nginx** tiene una ventaja: también queda registrado lo que nunca llega a Node. En el sitio, junto a los demás `proxy_set_header`:
+Que el id nazca en **Nginx** registra también lo que nunca llega a Node. Junto a los `proxy_set_header`:
 
 ```nginx
 proxy_set_header X-Request-Id $request_id; # el mismo id en Nginx y en Node
@@ -187,17 +186,17 @@ add_header X-Request-Id $request_id always; # el de ESTA petición, aunque venga
 
 <Callout type="risk">
 
-- **Astro pasa dos veces por el _middleware_ en un error:** una para la petición, y otra para pintar `500.astro`. La primera versión de este código no lo tenía en cuenta, y tuvo dos consecuencias medidas: cada error contaba doble, y sin Nginx delante, el código de la página (`121e14ae…`) era **distinto** del id del error (`3929619d…`). La línea con `ctx.locals.requestId` lo evita. Se detectó al comparar 6 errores con los 12 que salían en las métricas.
-- **Un id que viene de fuera no es de fiar:** un cliente puede enviar lo que quiera en `X-Request-Id`. Por eso se valida, y Nginx lo sustituye siempre. Sin esa comprobación, alguien podría escribir lo que quisiera en tus logs.
-- **Las sondas de salud ahogan los logs:** el _healthcheck_ de A4 llega cada 5 segundos, unas 17 000 líneas al día, sin información. Por eso van en `debug`.
-- **`AsyncLocalStorage` se puede perder:** según la documentación de Node, ocurre con algunas API basadas en _callbacks_. Con `async/await` no tendrás problema.
-- **El `access.log` por defecto de Nginx sigue guardando la _query_ y la IP:** revísalo si te preocupan los datos personales de las URL.
+- **En un error, Astro pasa dos veces por el _middleware_** (la petición y `500.astro`): sin la línea de `ctx.locals.requestId`, cada error contaba doble y, sin Nginx, el código mostrado no era el del error. Se vio al comparar 6 errores con 12 en las métricas.
+- **Un `X-Request-Id` de fuera no es de fiar:** se valida y Nginx lo sustituye, o cualquiera escribiría en tus logs. Las sondas de salud (17 000 líneas al día) van en `debug`.
+- **`AsyncLocalStorage` se pierde con algunas API de _callbacks_,** no con `async/await`. Y el `access.log` por defecto de Nginx sigue guardando _query_ e IP.
 
 </Callout>
 
 ## Paso 3: del usuario al error
 
-El error tiene que dar al usuario algo que tú puedas buscar. `src/pages/500.astro`:
+**Qué es:** el usuario recibe un código que tú puedes buscar, y con él sigues la petición por cada capa.
+
+**Cómo se usa:** `src/pages/500.astro`:
 
 ```astro
 ---
@@ -222,22 +221,22 @@ const codigo = Astro.locals.requestId;
 </html>
 ```
 
-Fíjate en `prerender = false`: sin él, la página se genera en el _build_, sin petición, y el código sale vacío. Fue el segundo fallo de esta prueba.
+- **`prerender = false` es imprescindible:** sin él la página se genera en el _build_, sin petición, y el código sale vacío (el segundo fallo de esta prueba).
 
-Ahora, un error de verdad. Añade esto a `src/pages/estadisticas.astro`:
+Un error de verdad, en `src/pages/estadisticas.astro`:
 
 ```ts
 const [ultimo] = await repos.entrenos.listar(usuario.id, { limite: 1 });
 const ultimoDia = ultimo.fecha.toISOString().slice(0, 10); // ERROR A PROPÓSITO
 ```
 
-En tu equipo funciona, porque tu usuario tiene entrenos. Solo falla a quien acaba de registrarse. Ese usuario ve «Algo ha fallado» y te manda este código:
+- **En tu equipo funciona** (tienes entrenos); solo falla a quien acaba de registrarse. Ve «Algo ha fallado» y te manda:
 
 ```text
 8804af6715b67cfc6b6822be9374f306
 ```
 
-Lo buscas en Nginx, y sabes qué pasó por fuera:
+En Nginx, qué pasó por fuera:
 
 ```bash
 sudo grep -F 8804af6715b67cfc6b6822be9374f306 /var/log/nginx/entrenos.json
@@ -247,7 +246,7 @@ sudo grep -F 8804af6715b67cfc6b6822be9374f306 /var/log/nginx/entrenos.json
 {"time":"2026-11-06T19:42:40-06:00","requestId":"8804af6715b67cfc6b6822be9374f306","metodo":"GET","ruta":"/estadisticas","status":500,"ms":0.005,"cache":"MISS"}
 ```
 
-Y en Node, qué pasó por dentro:
+En Node, qué pasó por dentro:
 
 ```bash
 sudo journalctl -t entrenos --since "-1h" -o cat | grep -F 8804af6715b67cfc6b6822be9374f306 |
@@ -258,23 +257,32 @@ sudo journalctl -t entrenos --since "-1h" -o cat | grep -F 8804af6715b67cfc6b682
 {"nivel":"error","version":"a64e","userId":"6aee821095a56e7ec54caf10","ruta":"/estadisticas","status":500,"err":{"type":"TypeError","message":"Cannot read properties of undefined (reading 'fecha')"}}
 ```
 
-Sin reproducir nada: ruta, versión, usuario y mensaje. `undefined` al leer `fecha`: `ultimo` no existe. Y si miras a ese `userId` en la base de datos, no tiene entrenos. Ya tienes la causa:
+- **Ruta, versión, usuario y mensaje sin reproducir nada:** `undefined` al leer `fecha` y un `userId` sin entrenos. La causa:
 
 ```ts
 const ultimoDia = ultimo?.fecha.toISOString().slice(0, 10) ?? "todavía ninguno";
 ```
 
-Además, el registro lleva `err.stack`. Y ahí está el límite de los logs: apunta a `estadisticas_Dko60Qmy.mjs:23`, un archivo compilado.
+- **El límite de los logs:** `err.stack` apunta a `estadisticas_Dko60Qmy.mjs:23`, un archivo compilado.
+
+<Callout type="risk">
+
+- **La página de error no da detalles:** solo el código. Una traza o un mensaje interno ayudarían a un atacante (A5.1).
+- **Busca primero en el último tramo de tiempo** (`--since "-1h"`): `grep` sobre todo el diario es lento en un servidor con meses de logs.
+
+</Callout>
 
 ## Paso 4: Sentry en el servidor
 
-Los logs guardan todo, pero hay que ir a buscarlo. **Sentry** agrupa los errores iguales, te avisa de los nuevos, y añade contexto. Su plan gratuito, en el momento de escribir esto, incluye 1 usuario y 5000 errores.
+**Qué es:** **Sentry** agrupa los errores iguales, avisa de los nuevos y añade contexto. Su plan gratuito, al escribir esto, incluye 1 usuario y 5000 errores.
+
+**Cómo se usa:**
 
 ```bash
 npm install @sentry/astro
 ```
 
-Crea un proyecto en sentry.io y añade su DSN a tu `.env` como `SENTRY_DSN`. En `astro.config.mjs`:
+Crea un proyecto en sentry.io y pon su DSN en `.env` como `SENTRY_DSN`. En `astro.config.mjs`:
 
 ```js
 import sentry from "@sentry/astro/integration";
@@ -285,7 +293,7 @@ export default defineConfig({
 });
 ```
 
-`sentry.server.config.ts`, en la raíz del proyecto:
+`sentry.server.config.ts`, en la raíz:
 
 ```ts
 // Archivo: sentry.server.config.ts
@@ -314,7 +322,7 @@ export function sinIp(evento: ErrorEvent) {
 }
 ```
 
-Para unir Sentry con tus logs, dos líneas en el _middleware_:
+Para unir Sentry con tus logs, en el _middleware_:
 
 ```ts
 import * as Sentry from "@sentry/astro";
@@ -326,16 +334,16 @@ Sentry.getIsolationScope().setTag("requestId", requestId);
 Sentry.setUser({ id: datos.user.id }); // solo el id: ni nombre ni correo
 ```
 
-Un detalle que no es automático: los errores de la API los captura `aRespuesta`, así que no suben y Sentry no los ve. Añádelo allí:
+Los errores de la API los captura `aRespuesta` y no suben, así que Sentry no los ve. Allí:
 
 ```ts
 log.error({ err: e }, "error no controlado en la API");
 Sentry.captureException(e); // este error ya no sube: sin esto, Sentry no se entera
 ```
 
-**Cómo se comprobó:** esta prueba no usó una cuenta de Sentry, sino el SDK real con un receptor propio que guarda lo que llega. Así se ve exactamente lo que sale de tu servidor. **No se ha visto el panel de Sentry**, así que lo que aparezca allí, y cómo, debes comprobarlo tú. El SDK funcionó con Astro 7 y el adaptador de Node, aunque su documentación solo menciona «4.0.0 o superior».
+- **Se comprobó con el SDK real y un receptor propio,** sin cuenta de Sentry: se ve lo que sale del servidor, pero **no el panel**. Funcionó con Astro 7 y el adaptador de Node, aunque la documentación dice «4.0.0 o superior».
 
-Con la configuración por defecto, sin `dataCollection` ni `beforeSend`, llamando a `/estadisticas?email=ana@correo.com&dni=12345678Z`:
+Por defecto, sin `dataCollection` ni `beforeSend`, con `/estadisticas?email=ana@correo.com&dni=12345678Z`:
 
 ```text
 url:     https://academy.entrenos.test/estadisticas?email=ana@correo.com&dni=12345678Z&nombre=Ana
@@ -343,7 +351,7 @@ user:    {"id": "6aee7f6500afb73860a543d6", "ip_address": "127.0.0.1"}
 cookies: "[Filtered]"
 ```
 
-Sentry tapó la _cookie_ y un parámetro `token`, pero **el correo, el DNI y la IP salieron**. Con la configuración de arriba:
+- **Tapó la _cookie_ y un `token`, pero salieron el correo, el DNI y la IP.** Con la configuración de arriba:
 
 ```text
 request: {"method": "GET", "url": "https://academy.entrenos.test/estadisticas"}
@@ -351,7 +359,7 @@ tags:    {"requestId": "27610f1d4fa1db8cf72b57b88dd43630"}
 user:    {"id": "6aee818c64b7aca5709a6b51"}
 ```
 
-Y la parte útil: el evento trae `release`, el tipo de error, 10 marcos de la pila, y **la línea exacta**, aunque el archivo esté compilado:
+- **Lo útil:** `release`, el tipo de error, 10 marcos de pila y **la línea exacta** del archivo compilado:
 
 ```text
 TypeError: Cannot read properties of undefined (reading 'fecha')
@@ -359,7 +367,7 @@ TypeError: Cannot read properties of undefined (reading 'fecha')
   const ultimoDia = ultimo.fecha.toISOString().slice(0, 10);
 ```
 
-Con un fallo real, parando MongoDB, `/api/entrenos` tardó 5 s en responder 500, `/api/health` dio 503, y el evento llegó a Sentry con su `requestId`:
+Con MongoDB parado, `/api/entrenos` dio 500 en 5 s, `/api/health` 503, y el evento llegó con su `requestId`:
 
 ```text
 MongoServerSelectionError: interrupted at shutdown
@@ -367,18 +375,17 @@ MongoServerSelectionError: interrupted at shutdown
 
 <Callout type="risk">
 
-- **Lo que envías a Sentry sale de tu servidor:** es otra empresa tratando datos de tus usuarios. Decláralo en tu política de privacidad, y revisa un evento real antes de darlo por bueno, como se ha hecho aquí.
-- **Sentry no sirve para contar:** con 6 errores iguales seguidos, llegó **1 evento**, porque descarta los duplicados consecutivos. Los logs tenían los 6. Para saber cuántos, usa los logs.
-- **El DSN no es secreto, pero el token sí:** el DSN solo permite enviar eventos. `SENTRY_AUTH_TOKEN`, para subir los _source maps_, da acceso a tu cuenta: nunca en el repositorio ni en la imagen.
-- **Pesa en el servidor:** la imagen de Docker pasó de 565 a 685 MB, y el _build_ tardó bastante más en un servidor de 2 GB.
-- **`tracesSampleRate: 1.0`, como en sus ejemplos, es caro:** traza todas las peticiones, y tiene su propio límite. Aquí es 0: solo errores.
-- **Si tu cuota se agota, Sentry deja de avisar:** justo en el peor momento. Los logs siguen ahí.
+- **Lo que envías sale de tu servidor** hacia otra empresa: decláralo en tu política de privacidad y revisa un evento real.
+- **Sentry no cuenta:** 6 errores iguales seguidos fueron 1 evento; los logs tenían 6. Y si se agota la cuota, deja de avisar.
+- **El DSN solo envía; `SENTRY_AUTH_TOKEN` da acceso a tu cuenta:** nunca en el repositorio ni la imagen. La imagen subió de 565 a 685 MB, y `tracesSampleRate: 1.0` es caro: aquí, 0.
 
 </Callout>
 
 ## Paso 5: Sentry en el navegador
 
-Un error de JavaScript en el móvil de un usuario no llega a tus logs. Sentry también puede capturarlo, pero tiene dos costes, y el primero es el peso. JavaScript de cada página, medido en un navegador:
+**Qué es:** un error de JavaScript en el móvil del usuario no llega a tus logs. Sentry lo captura, con dos costes.
+
+**Cómo se usa:** el peso, JavaScript por página en un navegador:
 
 ```text
                                  /estadisticas   /
@@ -387,21 +394,21 @@ Con sentry.client.config.ts      47,4 KB         108,9 KB
 Sin ese archivo                  80,7 KB         142,2 KB
 ```
 
-**44 KB en cada página.** En `/estadisticas`, 17 veces más: buena parte de lo que quitaste en A6.2. Y fíjate en la tercera fila: **borrar el archivo empeora las cosas**, porque el SDK se inicia con sus opciones por defecto. Las opciones de `bundleSizeOptimizations` no cambiaron el tamaño. Lo que sí funcionó, si no lo quieres en el navegador:
+- **44 KB en cada página;** en `/estadisticas`, 17 veces más, buena parte de lo ganado en A6.2. **Borrar el archivo lo empeora** (el SDK arranca con sus valores por defecto) y `bundleSizeOptimizations` no cambió nada. Lo que funcionó:
 
 ```js
 sentry({ enabled: { client: false, server: true }, sourcemaps: { disable: true }, telemetry: false });
 ```
 
-Eso dejó las páginas exactamente en la primera fila.
+- **Las páginas quedaron como en la primera fila.**
 
-Si decides que lo necesitas, el segundo coste es la CSP de A5, que bloquea sus envíos a otro dominio:
+El segundo coste es la CSP de A5, que bloquea los envíos a otro dominio sin error visible:
 
 ```text
 Connecting to 'http://…/api/1/envelope/…' violates the following Content Security Policy directive
 ```
 
-Sin error visible para ti, ningún evento llega. En lugar de abrir la CSP, los eventos pueden pasar por tu dominio. `sentry.client.config.ts`:
+Sin abrir la CSP, los eventos pasan por tu dominio. `sentry.client.config.ts`:
 
 ```ts
 // Archivo: sentry.client.config.ts
@@ -417,7 +424,7 @@ Sentry.init({
 });
 ```
 
-`src/pages/api/sentry-tunel.ts`, y añade esa ruta a `PUBLICAS` en el _middleware_:
+`src/pages/api/sentry-tunel.ts`, con la ruta en `PUBLICAS`:
 
 ```ts
 // Archivo: src/pages/api/sentry-tunel.ts
@@ -436,21 +443,21 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
 };
 ```
 
-Comprobado con un error real lanzado en el navegador: el túnel respondió 200, y el evento llegó con la URL sin `?email=`.
+- **Con un error real del navegador,** el túnel dio 200 y el evento llegó sin `?email=`.
 
 <Callout type="risk">
 
-- **La decisión depende de tu app:** en una con mucho JavaScript propio, 44 KB se justifican. En esta, con islas pequeñas, cuesta más que su valor. Si la dejas solo en el servidor, recuerda que no verás los errores del navegador.
-- **El servidor debe poder llegar a Sentry:** en la primera prueba no llegaba, y cada envío tardó 10 s en dar 500. El error era silencioso: solo se vio en los logs de `/api/sentry-tunel`.
-- **El túnel es público:** por eso lleva un límite por IP. `handleTunnelRequest` solo reenvía a tu DSN, así que no se puede usar para llegar a otro destino.
-- **La pila del navegador está minificada:** aquí apuntaba a `page.C0qHT4lz.js:21`. Para verla legible hay que subir los _source maps_ en el _build_, con `SENTRY_AUTH_TOKEN` y sin `sourcemaps: { disable: true }`. Eso no se ha probado aquí, porque exige una cuenta.
-- **Un navegador no es de fiar:** extensiones y redes generan errores que no son tuyos. Y un bloqueador de anuncios puede impedir el envío.
+- **Depende de tu app:** con mucho JavaScript propio, 44 KB se justifican; aquí no. Solo en el servidor, no verás los del navegador.
+- **El servidor debe llegar a Sentry:** si no, cada envío tardó 10 s en dar 500, visible solo en los logs del túnel. El túnel es público (con límite por IP) y solo reenvía a tu DSN.
+- **La pila del navegador va minificada** (`page.C0qHT4lz.js:21`): legible solo con _source maps_ y `SENTRY_AUTH_TOKEN`, no probado. Extensiones y bloqueadores meten ruido o impiden el envío.
 
 </Callout>
 
 ## Paso 6: métricas y alertas
 
-Un error te dice qué pasó. Una **métrica** te dice cómo va todo. Para empezar, te bastan tres: cuántas peticiones, cuántas fallan y cuánto tardan. Puedes sacarlas de los logs que ya tienes. `scripts/metricas.sh`:
+**Qué es:** un error dice qué pasó; una **métrica**, cómo va todo. Para empezar bastan tres: peticiones, fallos y latencia. Una **alerta** es una métrica con umbral y alguien que la recibe.
+
+**Cómo se usa:** `scripts/metricas.sh`, desde los logs que ya tienes:
 
 ```bash
 #!/usr/bin/env bash
@@ -477,7 +484,7 @@ journalctl -t entrenos --since "-${MINUTOS}min" -o cat --no-pager |
 sudo bash scripts/metricas.sh 5
 ```
 
-Con los 7 errores provocados en `/estadisticas`:
+Con 7 errores provocados en `/estadisticas`:
 
 ```text
 peticiones 17
@@ -488,9 +495,9 @@ p95ms 65
 ruta5xx /estadisticas 7
 ```
 
-Como en A6.1, el percentil: `p50ms` es lo normal, y `p95ms` lo que sufren los peores.
+- **`p50ms` es lo normal y `p95ms` lo que sufren los peores** (A6.1).
 
-Una **alerta** es una métrica con un umbral y alguien que la recibe. `scripts/vigilar.sh`, de A4, ya se ejecuta cada 5 minutos y avisa por Telegram solo si algo cambia. Añádele esto, antes de la comprobación de reinicio:
+`scripts/vigilar.sh` (A4) ya corre cada 5 minutos y avisa por Telegram si algo cambia. Antes de la comprobación de reinicio:
 
 ```bash
 # Errores de la app en los últimos 5 minutos, según sus propios logs
@@ -500,22 +507,20 @@ if [ "$errores" -ge 5 ] && [ $((errores * 100 / total)) -ge 5 ]; then
 fi
 ```
 
-Con un receptor de prueba en lugar de Telegram, llegó:
+Con un receptor de prueba en lugar de Telegram:
 
 ```text
 ⚠️ academy.entrenos.test
 7 errores 5xx de 17 peticiones en 5 minutos
 ```
 
-Al repetir la comprobación, no se envió de nuevo: el aviso no se repite mientras nada cambie.
+- **Al repetir no se reenvió:** no se repite mientras nada cambie.
 
 <Callout type="risk">
 
-- **Una alerta debe poder actuarse:** si te avisa de algo que no puedes arreglar, o que se arregla solo, aprenderás a ignorarla, y también ignorarás la buena. Empieza con pocas.
-- **Dos condiciones, no una:** `5 %` solo saltaría con 1 error en 2 peticiones de madrugada. `5 errores` solo, con mucho tráfico, saltaría por nada. Ajusta los números a tu tráfico real.
-- **Este vigilante vive en el mismo servidor:** si cae la máquina, no avisa nadie. Por eso en A4 había un monitor externo. Necesitas los dos.
-- **Un log no sirve para todo:** calcular desde el diario va bien para una app pequeña, pero no para millones de peticiones. Entonces necesitarás algo como Prometheus o un servicio dedicado. Empieza por lo que puedes mantener.
-- **Revisa que la alerta funcione:** provócala. Una alerta que nunca has visto saltar es una suposición.
+- **Una alerta debe poder actuarse:** si avisa de lo que no arreglas, aprenderás a ignorarla, también la buena. Pocas, y provocadas al menos una vez.
+- **Dos condiciones, no una:** `5 %` saltaría con 1 error de 2 de madrugada, y `5 errores` con mucho tráfico por nada. Ajústalas a tu tráfico.
+- **Vive en el mismo servidor** (hace falta el monitor externo de A4), y calcular desde el diario no escala a millones de peticiones: Prometheus o un servicio dedicado.
 
 </Callout>
 
@@ -530,15 +535,15 @@ Integra Sentry en tu app, provoca un error a propósito y localízalo con su tra
 Solución, con los Pasos 3 y 4:
 
 1. Crea tu proyecto en Sentry y configura `SENTRY_DSN`.
-2. Añade el `ultimo.fecha` del Paso 3, y despliega **con una etiqueta nueva** (A6.3).
-3. Regístrate con un usuario de prueba, sin entrenos, y entra en `/estadisticas`.
+2. Añade el `ultimo.fecha` del Paso 3 y despliega **con una etiqueta nueva** (A6.3).
+3. Regístrate con un usuario de prueba sin entrenos y entra en `/estadisticas`.
 4. Copia el código de la página.
-5. Búscalo en Nginx y en Node, con los comandos del Paso 3.
-6. Búscalo en Sentry: el código está en la etiqueta `requestId`. Comprueba que el evento **no** lleva correo, _cookies_ ni IP.
-7. Escribe qué falló en tres líneas, sin haber abierto el código.
-8. Corrige el error con `ultimo?.fecha`, despliega, y comprueba que el usuario ve «todavía ninguno».
+5. Búscalo en Nginx y en Node con los comandos del Paso 3.
+6. Búscalo en Sentry, en la etiqueta `requestId`, y comprueba que el evento **no** lleva correo, _cookies_ ni IP.
+7. Escribe qué falló en tres líneas, sin abrir el código.
+8. Corrige con `ultimo?.fecha`, despliega y comprueba que el usuario ve «todavía ninguno».
 
-En este laboratorio, los resultados fueron:
+En este laboratorio:
 
 ```text
 usuario nuevo: 500, código 8804af6715b67cfc6b6822be9374f306
@@ -548,9 +553,9 @@ Sentry:  tag requestId, línea 23 del archivo compilado
 tras corregirlo: 200, «Último entreno: todavía ninguno»
 ```
 
-- **Cada herramienta responde a una pregunta:** Nginx, si llegó; Node, qué pasó; Sentry, qué línea, y si es nuevo.
-- **Con Sentry solo en el servidor** el ejercicio funciona igual, porque el error es de servidor.
-- **Comprueba que aparece la etiqueta:** en el panel no se ha podido ver. Si no la encuentras, revisa `setTag`.
+- **Cada herramienta responde a una pregunta:** Nginx, si llegó; Node, qué pasó; Sentry, qué línea y si es nuevo.
+- **Con Sentry solo en el servidor** funciona igual: el error es de servidor.
+- **La etiqueta en el panel no se ha podido ver:** si no la encuentras, revisa `setTag`.
 
 <Callout type="mastery">
 
@@ -560,12 +565,9 @@ Puedes explicar qué falló en producción sin reproducirlo en local: partes del
 
 ## Resumen
 
-- **Logs en JSON con `pino`:** 4,6 µs por línea. `mixin` y `AsyncLocalStorage` añaden `requestId` y `userId` a todas.
-- **Registra campos elegidos:** `redact` no alcanzó los niveles profundos, otros nombres ni el texto libre.
-- **`requestId`:** nace en Nginx, se valida en Node, se muestra en `500.astro` y se etiqueta en Sentry.
-- **`500.astro`** necesita `prerender = false`, y Astro repite el _middleware_ al pintarla.
-- **Sentry por defecto envió el correo, el DNI y la IP:** con `dataCollection` y `beforeSend`, nada de eso.
-- **Sentry no cuenta:** 6 errores iguales fueron 1 evento. Para contar, los logs.
-- **En el navegador cuesta 44 KB por página:** `enabled: { client: false }` los quita, y borrar la configuración los aumenta a 78.
-- **La CSP bloquea sus envíos:** usa `tunnel` por tu dominio.
-- **Métricas desde los logs** y una alerta con dos condiciones, que hay que provocar para saber que funciona.
+- **`pino` en JSON:** 4,6 µs por línea; `mixin` y `AsyncLocalStorage` añaden `requestId` y `userId`.
+- **Campos elegidos:** `redact` no cubre niveles profundos, otros nombres ni texto libre.
+- **`requestId`:** nace en Nginx, se valida en Node, sale en `500.astro` (con `prerender = false`) y se etiqueta en Sentry.
+- **Sentry por defecto envió correo, DNI e IP;** con `dataCollection` y `beforeSend`, nada. Y no cuenta: 6 errores, 1 evento.
+- **En el navegador, 44 KB por página;** `enabled: { client: false }` los quita. La CSP exige `tunnel`.
+- **Métricas desde los logs** y una alerta con dos condiciones, probada.

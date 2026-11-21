@@ -7,15 +7,13 @@ minutes: 75
 summary: "Provocas un problema distinto en cada página para ver qué métrica empeora, descubres lo que Lighthouse no ve, recoges datos reales con web-vitals en tu servidor y defines un presupuesto que falla si te pasas."
 ---
 
-«La web va lenta» no es un diagnóstico. ¿Tarda en aparecer el contenido? ¿Se mueve bajo el dedo? ¿Se queda congelada al pulsar un botón? Son tres problemas distintos, con causas y soluciones distintas. **Core Web Vitals** son tres métricas, definidas por Google, que convierten esa queja en números: cuánto tarda en verse lo importante, si la página se está quieta y cuánto tarda en responder.
+«La web va lenta» no es un diagnóstico: tardar en aparecer, moverse bajo el dedo y congelarse al pulsar son tres problemas distintos. **Core Web Vitals**, tres métricas de Google, los convierten en números. Aquí ves qué empeora cada una, mides con Lighthouse, recoges datos de usuarios reales en tu servidor y fijas un presupuesto que falla cuando te pasas.
 
-Una analogía: un restaurante. **LCP** es cuánto tardan en traerte el plato principal. **CLS** es que te muevan el plato mientras comes. **INP** es cuánto tarda el camarero en hacerte caso cuando levantas la mano. Puedes tener una comida rapidísima y un camarero que te ignora, y una inspección sin clientes (Lighthouse) nunca lo vería, porque nadie levantó la mano.
-
-**Lo que tendrás al terminar:** sabrás qué métrica empeora cada tipo de problema, habrás medido tus páginas principales con Lighthouse, recogerás datos de usuarios reales en tu propio servidor y tendrás un presupuesto que falla cuando te pasas.
-
-**Requisitos:** la app `entrenos-app` desplegada como en A4 y A5.
+**Requisitos:** `entrenos-app` desplegada como en A4 y A5.
 
 ## Paso 1: las tres métricas
+
+**Qué es:**
 
 | Métrica | Mide                                   | Bien     | Mal      |
 | ------- | -------------------------------------- | -------- | -------- |
@@ -23,13 +21,12 @@ Una analogía: un restaurante. **LCP** es cuánto tardan en traerte el plato pri
 | **INP** | Cuánto tarda en responder a una acción | ≤ 200 ms | > 500 ms |
 | **CLS** | Cuánto se mueve el contenido solo      | ≤ 0,1    | > 0,25   |
 
-- **LCP** (_Largest Contentful Paint_): cuándo se pinta el elemento más grande de la pantalla, sea una imagen, un vídeo o un bloque de texto.
-- **INP** (_Interaction to Next Paint_): el tiempo desde que tocas, haces clic o pulsas una tecla hasta que la pantalla cambia, teniendo en cuenta prácticamente todas las interacciones de la visita. Se divide en tres fases: **retraso de entrada** (el hilo estaba ocupado), **procesamiento** (tu código) y **presentación** (pintar).
-- **CLS** (_Cumulative Layout Shift_): la peor ráfaga de saltos inesperados. Los que ocurren justo después de que el usuario haga algo no cuentan.
+- **LCP** (_Largest Contentful Paint_): cuándo se pinta el elemento más grande, imagen, vídeo o texto.
+- **INP** (_Interaction to Next Paint_): de un toque, clic o tecla a que la pantalla cambia, en casi todas las interacciones. Tres fases: **retraso de entrada** (hilo ocupado), **procesamiento** (tu código) y **presentación** (pintar).
+- **CLS** (_Cumulative Layout Shift_): la peor ráfaga de saltos inesperados; los que siguen a una acción del usuario no cuentan.
+- **Google evalúa el percentil 75,** por separado en móvil y escritorio: pasa si el 75 % de las visitas está en verde en las tres.
 
-Google los evalúa en el **percentil 75** de las visitas, por separado en móvil y en escritorio. Una página pasa si el 75 % de las visitas está en verde en las tres.
-
-Lo importante es qué las empeora. Se creó una página para cada problema, y se midió cada una tres veces en un Chromium con emulación de móvil: 412 px, red de 1,6 Mbit/s con 150 ms de latencia, y CPU 4 veces más lenta.
+**Cómo se usa:** una página por problema, medida tres veces en Chromium con móvil emulado (412 px, 1,6 Mbit/s con 150 ms de latencia, CPU 4 veces más lenta):
 
 ```text
                                  LCP        CLS       INP
@@ -46,18 +43,16 @@ Clic que bloquea 400 ms          200 ms     0,000     416 ms
 Clic que cede el hilo            196 ms     0,000     16 ms
 ```
 
-**LCP sube con todo lo que retrasa el elemento principal.** El servidor lento (I3) se suma entero: 2 s de espera, 2 s de LCP. La imagen es peor: 1,8 MB a 1,6 Mbit/s son 9 s. Y aquí viene una sorpresa: **`preload` no mejoró nada**. Sirve para que el navegador descubra antes un recurso que encontraría tarde, pero esta imagen ya estaba en el HTML. El problema era su peso, y bajarla a 54 KB lo resolvió.
-
-**CLS sube cuando algo aparece sin espacio reservado.** Con `width` y `height`, el navegador reserva el hueco antes de tener la imagen. Sin ellos, el texto salta cuando llega. Con el banner, lo mismo: `min-height` en su contenedor dejó el CLS en 0.
-
-**INP sube cuando tu JavaScript no suelta el hilo.** El desglose de ese clic de 416 ms lo dice todo:
+- **LCP sube con lo que retrasa el elemento principal:** 2 s de servidor (I3), 2 s de LCP; 1,8 MB de imagen a 1,6 Mbit/s, 9 s. **`preload` no mejoró nada:** sirve para descubrir antes un recurso que se encontraría tarde, y esta imagen ya estaba en el HTML. El problema era el peso, y 54 KB lo resolvieron.
+- **CLS sube con lo que aparece sin hueco:** `width` y `height` reservan el espacio; `min-height` en el contenedor del banner dejó el CLS en 0.
+- **INP sube cuando tu JavaScript no suelta el hilo.** El clic de 416 ms:
 
 ```text
 clic que bloquea 400 ms:  retraso 29 + procesamiento 410 + presentación 2
 clic que cede el hilo:    retraso 14 + procesamiento 1 + presentación 1
 ```
 
-Hace el mismo trabajo. La diferencia es que el segundo enseña primero «Guardando…», cede el hilo con un `await`, y entonces trabaja. El navegador pinta en cuanto puede:
+- **El mismo trabajo:** el segundo enseña «Guardando…», cede el hilo con un `await` y luego trabaja, y el navegador pinta en cuanto puede:
 
 ```js
 boton.addEventListener("click", async () => {
@@ -70,23 +65,23 @@ boton.addEventListener("click", async () => {
 
 <Callout type="risk">
 
-- **Una imagen sin tamaño no siempre salta:** con la imagen servida al momento dio CLS 0, porque el navegador lee las dimensiones en los primeros bytes, antes de pintar. El salto aparece cuando la imagen empieza a llegar tarde. Por eso «en mi equipo no se mueve» no prueba nada. Pon siempre `width` y `height`.
-- **Un CLS de 0,038 parece poco:** esta página era muy corta. El número crece con el trozo de pantalla que se mueve, y varios saltos se suman.
-- **Ceder el hilo no reduce el trabajo:** lo reparte. El usuario ve una respuesta al instante, pero la tarea sigue costando 400 ms. Para un cálculo enorme, un _Web Worker_ o el servidor.
-- **El límite de LCP incluye la red:** un TTFB de 2 s deja solo 0,5 s para todo lo demás. Empieza mirando el servidor.
-- **Comprueba que la emulación se aplica:** en este laboratorio, una versión reciente de Chromium ignoraba sin avisar la orden clásica de limitar la red. La pista fue que una imagen de 1,8 MB «no tardaba nada».
+- **Una imagen sin tamaño no siempre salta:** servida al momento dio CLS 0 (las dimensiones llegan en los primeros bytes); salta cuando llega tarde. «En mi equipo no se mueve» no prueba nada. Y 0,038 crece con el trozo que se mueve.
+- **Ceder el hilo reparte el trabajo, no lo reduce:** para un cálculo enorme, un _Web Worker_ o el servidor. Y un TTFB de 2 s deja 0,5 s al resto del LCP: empieza por el servidor.
+- **Comprueba que la emulación se aplica:** una versión reciente de Chromium ignoraba sin avisar la limitación clásica de red; la pista, una imagen de 1,8 MB que «no tardaba nada».
 
 </Callout>
 
 ## Paso 2: datos de laboratorio con Lighthouse
 
-**Lighthouse** carga la página en condiciones controladas y da una nota:
+**Qué es:** **Lighthouse** carga la página en condiciones controladas y da una nota.
+
+**Cómo se usa:**
 
 ```bash
 npx lighthouse https://academy.tudominio.com/entrar --view
 ```
 
-Para automatizarlo, en JSON y solo rendimiento:
+En JSON y solo rendimiento:
 
 ```bash
 mkdir -p informes
@@ -94,7 +89,7 @@ npx lighthouse https://academy.tudominio.com/entrar --only-categories=performanc
   --output=json --output-path=informes/entrar.json --chrome-flags="--headless=new" --quiet
 ```
 
-Una página privada necesita la sesión. Copia tu _cookie_, y no guardes ese informe en el repositorio:
+Una página privada necesita tu _cookie_ (no guardes ese informe en el repositorio):
 
 ```bash
 npx lighthouse https://academy.tudominio.com/estadisticas --only-categories=performance \
@@ -102,7 +97,7 @@ npx lighthouse https://academy.tudominio.com/estadisticas --only-categories=perf
   --extra-headers '{"cookie":"__Secure-better-auth.session_token=…"}'
 ```
 
-Lighthouse 13.6 sobre las tres páginas de la app, con su emulación de móvil por defecto:
+Lighthouse 13.6 en las tres páginas, con su móvil por defecto:
 
 ```text
 /              nota 100 · FCP 0,8 s · LCP 0,8 s · TBT 0 ms · CLS 0     · 107 KB
@@ -110,40 +105,39 @@ Lighthouse 13.6 sobre las tres páginas de la app, con su emulación de móvil p
 /estadisticas  nota 100 · FCP 0,8 s · LCP 0,8 s · TBT 0 ms · CLS 0,007 · 80 KB
 ```
 
-Sobre las páginas con problemas, la imagen pesada sí se nota:
+Sobre las páginas con problemas:
 
 ```text
 imagen de 1,8 MB      nota 75  · LCP 10,1 s · 1852 KB
 clic que bloquea      nota 100 · LCP 0,8 s  · TBT 0 ms
 ```
 
-**Mira la segunda línea. Una página con un INP de 416 ms saca un 100.** Lighthouse carga la página y se va: nadie pulsa el botón, así que ese código nunca se ejecuta. En su lugar mide **TBT** (_Total Blocking Time_), el tiempo que el hilo está bloqueado **durante la carga**. Es una aproximación útil del INP, pero solo ve lo que ocurre al cargar.
-
-La nota es una media ponderada: TBT 30 %, LCP 25 %, CLS 25 %, FCP 10 % y _Speed Index_ 10 %. El INP no está.
+- **Una página con un INP de 416 ms saca un 100:** Lighthouse carga y se va, nadie pulsa el botón. Mide **TBT** (_Total Blocking Time_), el hilo bloqueado **durante la carga**, una aproximación del INP.
+- **La nota pondera** TBT 30 %, LCP 25 %, CLS 25 %, FCP 10 % y _Speed Index_ 10 %. El INP no está.
 
 <Callout type="risk">
 
-- **Un 100 no significa que tu web sea rápida:** significa que esa carga, sin interacción, salió bien. Acabas de ver un 100 con un botón que se congela.
-- **Mide desde fuera y en la versión compilada:** `astro dev` no se parece a producción.
-- **La nota varía:** aquí fue estable, con cinco medidas de `/entrar` entre 786 y 822 ms y nota 100, porque esta página es sencilla y el servidor estaba cerca. En páginas complejas, ejecútalo varias veces y usa la mediana.
-- **No persigas el 100:** de 95 a 100 no cambia nada para tus usuarios. Mira las métricas, no la nota.
-- **Mide cada tipo de página:** no solo la portada. La página más pesada suele ser otra.
+- **Un 100 no significa que tu web sea rápida,** solo que esa carga sin interacción salió bien. Y de 95 a 100 no cambia nada para tus usuarios.
+- **Mide desde fuera, la versión compilada y cada tipo de página:** la más pesada suele no ser la portada.
+- **La nota varía:** aquí fue estable (`/entrar` entre 786 y 822 ms); en páginas complejas, varias veces y la mediana.
 
 </Callout>
 
 ## Paso 3: datos reales
 
-Lighthouse es **un** móvil simulado en **una** red. Tus usuarios tienen cientos de dispositivos y coberturas, y la página tiene sus datos, no los de prueba. Hay tres fuentes de datos reales:
+**Qué es:** Lighthouse es **un** móvil simulado en **una** red; tus usuarios tienen cientos. Tres fuentes de datos reales:
 
-- **CrUX** (_Chrome User Experience Report_): datos de usuarios reales de Chrome, en una ventana de 28 días. Tu web debe ser pública y tener tráfico suficiente, así que una página detrás de un inicio de sesión o una web pequeña no aparecerá.
-- **Vercel Speed Insights:** para apps en Vercel. Se instala con `@vercel/speed-insights`, añadiendo `<SpeedInsights />` al layout. Es gratuito con límite de eventos, pero ese plan solo da una nota global; todas las métricas y desgloses son de pago.
-- **Tu propio recolector:** con la biblioteca `web-vitals`, la misma que usaste para medir en el Paso 1. En tu servidor no hay Speed Insights, y es muy poco código.
+- **CrUX** (_Chrome User Experience Report_): usuarios de Chrome, 28 días. Exige web pública y tráfico: una página privada o una web pequeña no aparecen.
+- **Vercel Speed Insights:** `@vercel/speed-insights` y `<SpeedInsights />` en el layout. Gratis con límite, pero ese plan solo da una nota global.
+- **Tu propio recolector,** con `web-vitals`, la biblioteca del Paso 1. Muy poco código.
+
+**Cómo se usa:**
 
 ```bash
 npm install web-vitals
 ```
 
-`src/components/Vitales.astro`, que incluyes en `src/layouts/Base.astro` antes de `</body>`:
+`src/components/Vitales.astro`, incluido en `src/layouts/Base.astro` antes de `</body>`:
 
 ```astro
 ---
@@ -203,13 +197,13 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
 };
 ```
 
-Añade `"/api/vitales"` a `PUBLICAS` en el _middleware_, y un índice TTL en `scripts/crear-indices.mjs`, para no guardarlos para siempre:
+Añade `"/api/vitales"` a `PUBLICAS` en el _middleware_, y un TTL en `scripts/crear-indices.mjs`:
 
 ```js
   await db.collection("vitales").createIndex({ fecha: 1 }, { expireAfterSeconds: 30 * 86_400, name: "vitales_ttl" });
 ```
 
-Es un _endpoint_ público que escribe en tu base de datos: todo lo de A5 se aplica. Medido:
+Es un _endpoint_ público que escribe en tu base: todo A5 se aplica.
 
 ```text
 válido        -> 204
@@ -220,7 +214,7 @@ valor absurdo -> 400
 JSON roto     -> 400
 ```
 
-Para leerlos, `scripts/vitales.mjs` calcula el percentil 75 por ruta:
+`scripts/vitales.mjs` calcula el percentil 75 por ruta:
 
 ```js
 // Archivo: scripts/vitales.mjs
@@ -268,27 +262,27 @@ try {
 }
 ```
 
-Se simularon 30 visitas a `/entrar`, 20 de móviles rápidos y 10 de móviles lentos, con mala red y CPU 6 veces más lenta, escribiendo en un campo:
+Con 30 visitas simuladas a `/entrar` (20 de móviles rápidos y 10 lentos, con mala red y CPU 6 veces más lenta) escribiendo en un campo:
 
 ```text
 /entrar             30 visitas · LCP 516 ms (bien; media 190) · INP 16 ms (bien) · CLS 0.000 (bien)
 ```
 
-Las 20 visitas rápidas tardaron unos 20 ms, y las 10 lentas, unos 516 ms. **La media dice 190 ms: un número que no vivió nadie.** Por eso se usa el percentil 75: aquí, 516 ms, lo que notan los usuarios con peor conexión.
+- **Las rápidas tardaron unos 20 ms y las lentas unos 516:** la media, 190 ms, **un número que no vivió nadie**. El percentil 75 (516 ms) es lo que notan los de peor conexión.
 
 <Callout type="risk">
 
-- **Nada de datos personales:** el recolector guarda ruta, métricas y fecha, y ningún `userId`. Las rutas con identificadores (`/entrenos/6aed…`) conviene agruparlas, o cada una será una fila.
-- **`/api/vitales` es una puerta abierta:** sin el límite por IP de A5.4 y sin el esquema estricto, cualquiera puede llenar tu base de datos o falsear tus métricas. Trátalas como datos orientativos.
-- **`sendBeacon` no garantiza la entrega:** algunas visitas se pierden, sobre todo en móvil. No necesitas el 100 %.
-- **Tu recolector pesa:** el _script_ ocupa 8,2 KB sin comprimir, en cada página. Es poco, pero es parte de lo que mides.
-- **Con pocas visitas, un percentil no significa mucho:** diez visitas son una anécdota.
+- **Sin datos personales:** ruta, métricas y fecha, sin `userId`; agrupa las rutas con identificadores (`/entrenos/6aed…`).
+- **`/api/vitales` es una puerta abierta:** con el límite de A5.4 y un esquema estricto, y aun así datos orientativos. `sendBeacon` pierde algunas visitas, y el recolector pesa 8,2 KB en cada página.
+- **Con pocas visitas, un percentil es una anécdota.**
 
 </Callout>
 
 ## Paso 4: un presupuesto
 
-Un **presupuesto de rendimiento** es un límite acordado: «ninguna página pasa de estos números». Sin él, la web se degrada de kilobyte en kilobyte, y nadie toma la decisión. `scripts/presupuesto.mjs` lee los informes de Lighthouse:
+**Qué es:** un **presupuesto de rendimiento** es un límite acordado («ninguna página pasa de estos números»). Sin él, la web se degrada de kilobyte en kilobyte sin que nadie lo decida.
+
+**Cómo se usa:** `scripts/presupuesto.mjs` lee los informes de Lighthouse:
 
 ```js
 // Archivo: scripts/presupuesto.mjs
@@ -338,20 +332,19 @@ node scripts/presupuesto.mjs informes/*.json
   ok    Peso  109408 B (máximo 512000 B)
 ```
 
-Con un límite de LCP de 500 ms, para ver que funciona:
+Con un LCP máximo de 500 ms, para ver que funciona:
 
 ```text
   FALLO LCP   786 ms (máximo 500 ms)
 ```
 
-Código de salida 1, así que puede parar un despliegue o un CI (A7).
+- **Código de salida 1:** puede parar un despliegue o un CI (A7).
 
 <Callout type="risk">
 
-- **Lighthouse CI hace esto mismo con más opciones:** `lhci` admite aserciones y `budget.json`. Este _script_ es el mínimo para entender la idea, y no depende de nada.
-- **El presupuesto de INP no sale de aquí:** Lighthouse no lo mide. Compruébalo con `scripts/vitales.mjs`, sobre datos reales.
-- **Un presupuesto sin consecuencias es un deseo:** debe parar algo. Si siempre se ignora, ajústalo a un valor que vayas a respetar.
-- **Fija los números a partir de lo que tienes:** aquí 500 KB deja margen sobre los 114 KB actuales. Súbelo solo con un motivo.
+- **Lighthouse CI (`lhci`)** hace esto con aserciones y `budget.json`; este _script_ es el mínimo sin dependencias. El INP no sale de aquí: va con `scripts/vitales.mjs`.
+- **Un presupuesto sin consecuencias es un deseo:** debe parar algo, o ajústalo a lo que vayas a respetar.
+- **Fija los números desde lo que tienes:** 500 KB deja margen sobre 114 KB; súbelo solo con motivo.
 
 </Callout>
 
@@ -365,7 +358,7 @@ Código de salida 1, así que puede parar un despliegue o un CI (A7).
 
 </Callout>
 
-Solución. Con los Pasos 2 a 4, `docs/rendimiento.md`, en el repositorio:
+Solución. Con los Pasos 2 a 4, `docs/rendimiento.md`:
 
 ```markdown
 # Rendimiento · entrenos-app
@@ -385,14 +378,14 @@ Medido el 2026-11-06. Lighthouse 13.6, móvil emulado, en el servidor de pruebas
 **A revisar:** `/` y `/estadisticas` necesitan visitas reales para tener INP.
 ```
 
-- **INP viene de otra fuente:** Lighthouse no lo da. El laboratorio solo puede medirlo si simulas una interacción, como en el Paso 1.
-- **Anota la fecha y las condiciones:** un número sin contexto no se puede comparar.
-- **Es una foto:** repítela tras cada cambio importante. En A6.2 lo usarás como punto de partida.
+- **El INP viene de otra fuente:** Lighthouse no lo da, y el laboratorio solo lo mide simulando una interacción (Paso 1).
+- **Anota fecha y condiciones:** sin contexto, un número no se compara.
+- **Es una foto:** repítela tras cada cambio importante; A6.2 parte de ella.
 
 <Callout type="risk">
 
-- **Unos datos simulados no son datos reales:** las visitas de este ejemplo las hizo un _script_. Los tuyos serán distintos, y esa es la gracia.
-- **Una página privada solo tiene datos reales si tus usuarios la visitan:** CrUX no la verá. Tu recolector, sí.
+- **Las visitas de este ejemplo las hizo un _script_:** las tuyas serán distintas, y esa es la gracia.
+- **Una página privada solo tiene datos reales con tu recolector:** CrUX no la verá.
 
 </Callout>
 
@@ -404,11 +397,10 @@ Sabes qué métrica empeora cada tipo de problema: el servidor lento y las imág
 
 ## Resumen
 
-- **LCP** ≤ 2,5 s, **INP** ≤ 200 ms y **CLS** ≤ 0,1, en el percentil 75, por separado en móvil y escritorio.
-- **LCP:** un servidor con 2 s de espera dio 2 s, y una imagen de 1,8 MB, 9,4 s. Con 54 KB, 0,2 s. `preload` no ayudó.
-- **CLS:** `width` y `height` en las imágenes, y hueco reservado para lo que llega tarde. Sin ellos, salta solo si la imagen llega tarde.
-- **INP:** un clic que bloquea dio 416 ms, y uno que cede el hilo, 16 ms, con el mismo trabajo.
-- **Lighthouse no mide INP:** la página con ese clic de 416 ms sacó un 100. TBT es una aproximación, solo durante la carga.
-- **Datos reales:** CrUX necesita tráfico y web pública; Speed Insights es para Vercel; y con `web-vitals` y un _endpoint_ tienes los tuyos.
-- Mira el percentil 75, no la media.
-- Un **presupuesto** que falla con código de salida 1 evita que la web empeore poco a poco.
+- **LCP** ≤ 2,5 s, **INP** ≤ 200 ms, **CLS** ≤ 0,1, en el percentil 75, móvil y escritorio aparte.
+- **LCP:** 2 s de servidor, 2 s; imagen de 1,8 MB, 9,4 s; con 54 KB, 0,2 s. `preload` no ayudó.
+- **CLS:** `width`, `height` y hueco reservado.
+- **INP:** 416 ms bloqueando, 16 ms cediendo el hilo, con el mismo trabajo.
+- **Lighthouse no mide INP:** esa página sacó un 100. TBT solo ve la carga.
+- **Datos reales:** CrUX, Speed Insights o `web-vitals` con tu _endpoint_. Percentil 75, no media.
+- Un **presupuesto** con código de salida 1.

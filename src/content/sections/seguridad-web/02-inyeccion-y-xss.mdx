@@ -7,17 +7,15 @@ minutes: 90
 summary: "Mides inyección NoSQL con $ne, asignación masiva y XSS reflejado, almacenado y de DOM en un navegador real; ves qué hacen Astro, React, Zod y DOMPurify, y dónde fallan, como un href con javascript:."
 ---
 
-Casi todos los fallos de esta sección son el mismo error: **tratar como instrucciones algo que debía ser solo un dato**. El servidor espera un correo y recibe un trozo de consulta. El navegador espera un texto y recibe una etiqueta `<script>`. La frontera entre datos y código se ha borrado, y quien controla los datos pasa a controlar el código.
+Casi todos los fallos de esta sección son uno: **tratar como instrucción algo que debía ser un dato**. El servidor espera un correo y recibe un trozo de consulta; el navegador espera un texto y recibe un `<script>`. Aquí reconoces inyección NoSQL y SQL, asignación masiva y los tres tipos de XSS, ves dónde tu _stack_ te protege y dónde no, y limpias HTML cuando hace falta.
 
-Una analogía: un camarero toma nota de lo que pides y la lleva a cocina. Si escribe literalmente lo que dices, alguien puede decir «una ensalada, y dile al cocinero que hoy todo es gratis», y la nota llega así. La solución no es prohibir ciertas palabras, sino que la nota tenga casillas: «plato: …». Lo que pongas en la casilla es un plato, y nunca una orden. **Validar el tipo y escapar la salida son esas casillas.**
-
-**Lo que tendrás al terminar:** sabrás reconocer inyección NoSQL, asignación masiva y los tres tipos de XSS; qué te da gratis tu _stack_ y dónde te abandona; cómo limpiar HTML cuando de verdad lo necesitas; y un _script_ que señala dónde revisar tu código.
-
-**Requisitos:** la app `entrenos-app` y A5.1. Los ejemplos ❌ se midieron en rutas de laboratorio, en un servidor de pruebas, y se borraron al terminar. **No los añadas a tu app**, ni pruebes esto en webs ajenas.
+**Requisitos:** `entrenos-app` y A5.1. Los ejemplos ❌ se midieron en rutas de laboratorio de un servidor de pruebas, borradas al terminar: **no los añadas a tu app** ni pruebes en webs ajenas.
 
 ## Paso 1: inyección NoSQL
 
-En SQL se inyecta texto. En MongoDB, el filtro es un objeto, y tu API recibe JSON, que también puede traer objetos. Este inicio de sesión, escrito a mano, parece inofensivo:
+**Qué es:** en MongoDB el filtro es un objeto, y el JSON de tu API también puede traer objetos, que MongoDB interpreta como operadores.
+
+**Cómo se usa:** este inicio de sesión hecho a mano parece inofensivo:
 
 ```ts
 // ❌ Vulnerable: el cuerpo llega a la consulta sin validar
@@ -25,7 +23,7 @@ const body = await request.json();
 const cuenta = await cuentas.findOne({ email: body.email, clave: body.clave });
 ```
 
-Con datos normales funciona bien. Pero si `clave` no es un texto, sino un objeto, MongoDB lo interpreta como un operador. `$ne` significa «distinto de»:
+Con `clave` como objeto (`$ne` es «distinto de»):
 
 ```bash
 curl -s -H "content-type: application/json" \
@@ -42,9 +40,9 @@ clave {"$regex":"^secreta"}                 {"cuenta":{"email":"ana@prueba.test"
 clave {"$regex":"^xyz"}                     {"cuenta":null}
 ```
 
-Entra **sin conocer la contraseña**: «cuya clave no sea `null`» se cumple siempre. `$gt` elige a quién, y `$regex` es peor, porque responder sí o no deja adivinar la clave carácter a carácter.
+- **Entra sin conocer la contraseña:** «clave distinta de `null`» se cumple siempre. `$gt` elige a quién, y `$regex` deja adivinar la clave carácter a carácter.
 
-**La defensa: comprobar el tipo antes de consultar.**
+La defensa, **comprobar el tipo antes de consultar**:
 
 ```ts
 // ✅ Si no es un texto, ni llega a MongoDB
@@ -58,7 +56,7 @@ clave correcta           {"cuenta":{"email":"ana@prueba.test"}} -> 200
 clave {"$ne":null}       {"error":"Datos no válidos"} -> 400
 ```
 
-Si no puedes validar, **`$eq`** obliga a comparar literalmente, y un objeto es solo un valor que no coincide con nada:
+Si no puedes validar, **`$eq`** compara literalmente:
 
 ```ts
 await cuentas.findOne({ email: { $eq: body.email }, clave: { $eq: body.clave } });
@@ -68,7 +66,7 @@ await cuentas.findOne({ email: { $eq: body.email }, clave: { $eq: body.clave } }
 clave {"$ne":null}       {"cuenta":null} -> 200
 ```
 
-**Validar no basta si el esquema permite objetos.** Tres trampas, medidas:
+**Validar no basta si el esquema admite objetos.** Tres trampas:
 
 ```ts
 // ❌ Zod lo valida... y lo deja pasar: unknown y any aceptan un objeto
@@ -97,7 +95,7 @@ await cuentas.countDocuments(body);
 {"$or":[{"email":"x"},{"clave":{"$ne":null}}]}  ->  {"n":2}
 ```
 
-**Asignación masiva: lo mismo, al escribir.** Si pasas el cuerpo a `$set`, el cliente decide qué campos se cambian:
+**Asignación masiva** es lo mismo al escribir: con el cuerpo en `$set`, el cliente elige los campos:
 
 ```ts
 // ❌ El cliente elige los campos
@@ -108,7 +106,7 @@ await entrenos.updateOne({ _id: id, userId }, { $set: body });
 {"minutos":46,"userId":"beto"}  ->  {"_id":"e1","userId":"beto","minutos":46}
 ```
 
-El filtro por `userId` estaba, y era correcto. Y aun así el entreno **ha cambiado de dueño**, porque el campo llegó en el `$set`. Con un esquema estricto:
+- **El filtro por `userId` era correcto y el entreno cambió de dueño,** porque el campo llegó en el `$set`. Con un esquema estricto:
 
 ```ts
 // ✅ Zod descarta lo que no está en el esquema
@@ -120,20 +118,21 @@ await entrenos.updateOne({ _id: id, userId }, { $set: cambios });
 {"minutos":46,"userId":"beto"}  ->  {"_id":"e1","userId":"ana","minutos":46}
 ```
 
-Es lo que hace tu app: en A5.1 mediste que ese `userId` se ignora.
+- **Es lo que hace tu app:** en A5.1 ese `userId` se ignoró.
 
 <Callout type="risk">
 
-- **La cabecera de la petición no protege:** un formulario HTML solo envía textos, pero cualquiera puede mandar JSON con `curl`. Asume siempre que el cuerpo es lo peor posible.
-- **`?tipo[$ne]=x` no hace nada con `URLSearchParams`:** es un parámetro que se llama así, y tu app lo ignoró. Pero Express con `qs` sí lo convierte en un objeto, y por eso esta inyección es tan común allí. No te fíes: valida también los parámetros.
-- **El orden importa:** valida antes de usar. Un `z.parse()` después de la consulta no sirve de nada.
-- **`$regex` con datos del cliente también consume CPU:** una expresión lenta puede saturar el servidor (ReDoS). Si tienes que buscar por texto, escapa la cadena o usa un índice de texto.
+- **Asume que el cuerpo es lo peor posible:** un formulario solo envía textos, pero `curl` manda JSON.
+- **`?tipo[$ne]=x` no hace nada con `URLSearchParams`,** pero Express con `qs` lo convierte en objeto: valida también los parámetros, y antes de consultar.
+- **`$regex` con datos del cliente consume CPU** (ReDoS): escapa la cadena o usa un índice de texto.
 
 </Callout>
 
 ## Paso 2: inyección SQL
 
-Lo mediste en A3.4 con PostgreSQL: una plantilla `` `… '${email}'` `` dejó que `x'; DROP TABLE usuarios; --` borrara la tabla, y `x' OR '1'='1` devolviera a todos. La causa es la misma, y la defensa es **separar la consulta de los valores**:
+**Qué es:** lo de A3.4: con una plantilla `` `… '${email}'` ``, `x'; DROP TABLE usuarios; --` borró la tabla y `x' OR '1'='1` devolvió a todos.
+
+**Cómo se usa:** separando la consulta de los valores:
 
 ```ts
 // ❌ El valor forma parte del texto de la consulta
@@ -143,24 +142,20 @@ await pool.query(`SELECT nombre FROM usuarios WHERE email = '${email}'`);
 await pool.query("SELECT nombre FROM usuarios WHERE email = $1", [email]);
 ```
 
-Drizzle pasa los valores como parámetros, también dentro de su plantilla `sql`. `sql.raw()`, no: úsala solo con texto que no venga del usuario.
+- **Drizzle parametriza también dentro de `sql`;** `sql.raw()`, no: solo con texto que no venga del usuario.
 
 <Callout type="risk">
 
-- **Un nombre de columna o tabla no se puede parametrizar:** `ORDER BY $1` no funciona. Si el cliente elige el orden, compara con una lista cerrada (`z.enum(["fecha", "minutos"])`).
-- **Escapar a mano no es una alternativa:** usa parámetros siempre. Quitar comillas falla con cualquier caso que no hayas pensado.
+- **Columnas y tablas no se parametrizan** (`ORDER BY $1` no funciona): compara con una lista cerrada (`z.enum(["fecha", "minutos"])`).
+- **No escapes a mano:** quitar comillas falla en el caso que no pensaste.
 
 </Callout>
 
 ## Paso 3: XSS
 
-**XSS** (_Cross-Site Scripting_) es inyección en el navegador de otra persona: tu web le entrega HTML con un _script_ que ha escrito un atacante, y su navegador lo ejecuta como si fuera tuyo. Hay tres tipos, según por dónde llega:
+**Qué es:** **XSS** (_Cross-Site Scripting_) es inyección en el navegador de otro: tu web le entrega un _script_ del atacante y lo ejecuta como tuyo. **Reflejado** (viene en la URL de un enlace preparado), **almacenado** (en tu base, ataca a todo el que lo vea; el peor) y **de DOM** (tu JavaScript lee la URL y la escribe en la página).
 
-- **Reflejado:** viene en la URL, y la página lo repite. La víctima tiene que abrir un enlace preparado.
-- **Almacenado:** se guarda en tu base (un comentario, una nota) y ataca a todo el que lo vea. Es el peor.
-- **De DOM:** nunca pasa por tu servidor. Tu propio JavaScript lee la URL y lo escribe en la página.
-
-Para saber qué se ejecuta de verdad, hay que probarlo en un navegador: se abrió cada variante en Chromium con una carga que solo incrementa un contador en la página.
+**Cómo se usa:** cada variante, en Chromium, con una carga que solo incrementa un contador:
 
 ```text
 EJECUTA  set:html con ?q=, <img onerror>         <img src="x" onerror="…">
@@ -175,7 +170,8 @@ EJECUTA  dangerouslySetInnerHTML, <script>       <script>…</script>
 no       {html} en React, <img onerror>          &lt;img src=x onerror="…"&gt;
 ```
 
-La regla es clara. **`{q}` en Astro y `{html}` en React escapan por defecto:** `<` se convierte en `&lt;`, y el navegador lo pinta como texto. **`set:html`, `dangerouslySetInnerHTML` e `innerHTML` son las salidas de emergencia:** lo que les des se interpreta como HTML. Y fíjate en `innerHTML` con `<script>`: el _script_ no se ejecuta, pero `<img onerror>` sí. Bloquear `<script>` no protege de nada.
+- **`{q}` en Astro y `{html}` en React escapan:** `<` pasa a `&lt;` y se pinta como texto.
+- **`set:html`, `dangerouslySetInnerHTML` e `innerHTML` son salidas de emergencia:** interpretan HTML. Con `innerHTML`, `<script>` no se ejecuta pero `<img onerror>` sí: bloquear `<script>` no protege.
 
 ```astro
 ---
@@ -194,7 +190,7 @@ document.querySelector("#m").innerHTML = decodeURIComponent(location.hash.slice(
 document.querySelector("#t").textContent = decodeURIComponent(location.hash.slice(1));
 ```
 
-**Almacenado.** El campo `notas` de un entreno acepta cualquier texto de hasta 200 caracteres, y eso es correcto: `<img …>` es un texto válido, y la API responde 201. El peligro está en cómo se muestra. Una página de laboratorio con `set:html` y una sesión real:
+**Almacenado:** el campo `notas` acepta cualquier texto de hasta 200 caracteres, y eso es correcto (`<img …>` es texto válido; 201). El peligro es cómo se muestra. Con `set:html` y una sesión real:
 
 ```text
 guardar nota con HTML -> 201
@@ -203,45 +199,46 @@ EJECUTA  modo=mal (set:html)
 no       modo=bien ({notas})
 ```
 
-**Mira esa línea con atención.** El _script_ no pudo leer la _cookie_ de sesión: `document.cookie` está vacío, porque es `HttpOnly`:
+- **El _script_ no leyó la _cookie_** (`document.cookie` vacío, por `HttpOnly`):
 
 ```text
 __Secure-better-auth.session_token httpOnly=true secure=true sameSite=Lax
 ```
 
-Pero sí **hizo una petición a `/api/entrenos` con la sesión de la víctima y leyó sus datos**. Un _script_ en tu página no necesita robar la _cookie_: el navegador la adjunta sola, y el código puede hacer todo lo que haría el usuario. `HttpOnly` limita el daño, pero no sustituye a escapar.
+- **Pero pidió `/api/entrenos` con la sesión de la víctima y leyó sus datos:** el navegador adjunta la _cookie_ solo. `HttpOnly` limita el daño, no sustituye a escapar.
 
 <Callout type="risk">
 
-- **Validar la entrada no detiene el XSS:** el texto con HTML es válido. La defensa está en la **salida**: escapar según dónde se pinte. Quitar `<` al guardar rompe textos legítimos («3 < 5») y no protege otros contextos.
-- **Bloquear palabras no funciona:** hay decenas de formas de ejecutar código sin escribir `<script>`.
-- **`<script>` con datos dentro:** `set:html={JSON.stringify(datos)}` en una etiqueta `<script>` es vulnerable: un texto con `</script>` la cierra. Pasa los datos por `props` a las islas.
-- **CSP es la segunda capa:** una política sin `unsafe-inline` en `script-src` impide ejecutar los manejadores en línea, aunque un fallo se cuele. Es el tema de A5.3.
+- **Validar la entrada no detiene el XSS:** la defensa es escapar la **salida** según el contexto. Quitar `<` al guardar rompe «3 < 5» y no protege. Bloquear palabras tampoco: hay decenas de formas sin `<script>`.
+- **`set:html={JSON.stringify(datos)}` en un `<script>` es vulnerable:** `</script>` lo cierra. Pasa datos por `props` a las islas.
+- **CSP es la segunda capa:** sin `unsafe-inline` en `script-src`, los manejadores en línea no se ejecutan (A5.3).
 
 </Callout>
 
 ## Paso 4: un `href` también ejecuta código
 
-Ahora una trampa que ni `set:html` necesita. Una ficha de perfil donde el usuario pone su web:
+**Qué es:** un enlace con datos del usuario (`<a href={usuario.web}>`) donde el peligro no son las comillas sino el protocolo.
+
+**Cómo se usa:**
 
 ```astro
 <a href={usuario.web}>Mi web</a>
 ```
 
-Escapa las comillas, así que no se puede salir del atributo. Medido con `"><img src=x onerror=…>`:
+Astro escapa las comillas: no se sale del atributo.
 
 ```text
 href del enlace: "><img src=x onerror="…">   →  todo se queda dentro del atributo
 ```
 
-Pero ¿y si el valor es `javascript:window.__xss=1`? Al hacer clic:
+Con `javascript:window.__xss=1`, al hacer clic:
 
 ```text
 Astro:  href="javascript:window.__xss=1"                            EJECUTA
 React:  href="javascript:throw new Error('React has blocked…')"     no
 ```
 
-**Astro escapa, pero no mira el protocolo.** El navegador ejecuta lo que hay tras `javascript:`, y no hay nada que escapar. React 19 sí lo bloquea. Y la validación que pondrías, tampoco lo para:
+- **Astro escapa, pero no mira el protocolo:** no hay nada que escapar tras `javascript:`. React 19 lo bloquea. Y la validación habitual lo acepta:
 
 ```ts
 z.url().safeParse("javascript:alert(1)").success; // true
@@ -253,7 +250,7 @@ z.url()  true  JaVaScRiPt:alert(1)
 z.url()  true  data:text/html,hola
 ```
 
-Es una URL válida. Hay que decir qué protocolos aceptas:
+Hay que decir qué protocolos aceptas:
 
 ```ts
 // ✅ Una lista de lo permitido
@@ -272,18 +269,20 @@ true   "http://example.com"
 
 <Callout type="risk">
 
-- **Lista de permitidos, no de prohibidos:** comprobar «no empieza por `javascript:`» falla con mayúsculas, espacios y `data:`. Di qué aceptas.
-- **Valida al guardar y al mostrar si los datos son antiguos:** los registros guardados antes de añadir la regla siguen en la base.
-- **`src`, `action` y `formaction`** tienen el mismo problema que `href`.
-- **React avisa de esto:** el `href` que pinta es un error a propósito. Un enlace muerto es el resultado correcto, pero la entrada sigue siendo incorrecta.
+- **Lista de permitidos, no de prohibidos:** «no empieza por `javascript:`» falla con mayúsculas, espacios y `data:`.
+- **Los datos guardados antes de la regla siguen en la base:** valida también al mostrar. Y `src`, `action` y `formaction` tienen el mismo problema.
+- **El `href` de error de React** deja un enlace muerto, que es correcto, pero la entrada sigue mal.
 
 </Callout>
 
 ## Paso 5: cuando de verdad necesitas HTML
 
-**La primera opción es no necesitarlo.** ¿Quieres conservar los saltos de línea de una nota? `white-space: pre-line` en CSS, y `{notas}` se pinta tal cual.
+**Qué es:** tres opciones, de mejor a peor: no necesitarlo, construirlo tú desde datos que no son HTML, o limpiar el del usuario.
 
-**La segunda es construir tú el HTML desde datos que no lo son.** Esta plataforma lo hace en las notas personales, que llevan negrita, cursiva y color: el editor no guarda HTML, sino un JSON validado con Zod, y `renderNoteHtml` lo convierte:
+**Cómo se usa:**
+
+- **No necesitarlo:** para los saltos de línea de una nota, `white-space: pre-line` y `{notas}` tal cual.
+- **Construirlo tú:** las notas personales de esta plataforma (negrita, cursiva, color) se guardan como JSON validado con Zod, y `renderNoteHtml` las convierte:
 
 ```ts
 const escapeHtml = (s: string) =>
@@ -293,9 +292,8 @@ let html = escapeHtml(node.text); // el texto del usuario, siempre escapado
 if (marks.some((m) => m.type === "bold")) html = `<strong>${html}</strong>`; // las etiquetas son tuyas
 ```
 
-Es uno de los dos únicos sitios con HTML crudo en toda la plataforma, y se ve por qué es seguro: las etiquetas las escribe tu código, y lo que escribe el usuario siempre se escapa.
-
-**La tercera, si el usuario debe escribir HTML, es limpiarlo.** **DOMPurify** lo analiza con un parser real y quita lo que no esté en tu lista. En el servidor no hay DOM, así que necesita `jsdom`:
+- **Es uno de los dos únicos sitios con HTML crudo de la plataforma:** las etiquetas las escribe el código y lo del usuario siempre se escapa.
+- **Limpiarlo:** **DOMPurify** lo analiza con un parser real y quita lo que no esté en tu lista. En el servidor necesita `jsdom`:
 
 ```bash
 npm install dompurify jsdom
@@ -332,21 +330,20 @@ export function limpiarHtml(sucio: string): string {
 <style>*{display:none}</style>                => (vacío)
 ```
 
-Y la página de antes, con el mismo dato malicioso guardado:
+La página de antes, con el mismo dato malicioso:
 
 ```text
 no       modo=limpio (set:html con limpiarHtml)
 ```
 
-- **`ALLOWED_TAGS` y `ALLOWED_ATTR`:** una lista corta de lo permitido, que es lo contrario de intentar enumerar lo peligroso.
-- **Por qué no una expresión regular:** el HTML no se analiza con _regex_. Los navegadores reparan el HTML mal formado de formas sorprendentes (mXSS), y hay que usar un parser. El caso `<math><mtext>…` de la prueba, que explota esa reparación, también quedó vacío.
+- **`ALLOWED_TAGS` y `ALLOWED_ATTR`:** una lista corta de lo permitido.
+- **Nada de _regex_:** los navegadores reparan el HTML mal formado de formas sorprendentes (mXSS); el caso `<math><mtext>…` también quedó vacío.
 
 <Callout type="risk">
 
-- **Limpia al mostrar, y otra vez si cambias la lista:** si limpias al guardar y DOMPurify corrige un fallo después, lo guardado sigue igual. Conserva el original y limpia en la salida.
-- **`jsdom` debe ser dependencia de producción:** lo tienes como `devDependency` desde I7.3. `npm install jsdom` lo mueve. La imagen pasó de 562 a 565 MB. En un entorno _serverless_ puede ser más delicado por su tamaño: valora `sanitize-html`, que no necesita DOM.
-- **Mantén DOMPurify al día:** un _sanitizer_ es código de seguridad, y sus fallos se corrigen con versiones nuevas (A5.5).
-- **`a` con `href` permitido:** DOMPurify quita `javascript:`, pero un enlace limpio puede llevar a cualquier web. Si no lo necesitas, no permitas `a`.
+- **Limpia en la salida y conserva el original:** si DOMPurify corrige un fallo, lo guardado ya limpio no se beneficia. Y mantenlo al día (A5.5).
+- **`jsdom` pasa a producción** (era `devDependency` desde I7.3): la imagen sube de 562 a 565 MB. En _serverless_, valora `sanitize-html`.
+- **Permitir `a` deja enlazar a cualquier web,** aunque DOMPurify quite `javascript:`. Si no lo necesitas, quítalo.
 
 </Callout>
 
@@ -406,21 +403,15 @@ src/repositories/entrenos.repo.ts:71:        { $set: cambios, ...(quitar.length 
   (nada)
 ```
 
-Tres resultados en `entrenos-app`, y ninguno es un fallo. Por eso hay que revisarlos a mano:
-
-- **`z.record` en `NuevaNotaFetch.tsx` y `Entrenos.tsx`:** validan una respuesta de la API en el navegador. Nunca llegan a una consulta.
-- **`$set: cambios` en `entrenos.repo.ts`:** viene de `validar()` con un esquema estricto, y el `userId` extra se ignora (A5.1).
-
-Pasado por el código de esta plataforma, encuentra los dos puntos de HTML: `dangerouslySetInnerHTML` en `NotesIsland.tsx`, con la salida de `renderNoteHtml` (Paso 5), y `set:html` en `BaseLayout.astro`, con el _script_ del tema, un archivo de tu propio repositorio. Ningún dato del usuario entra sin escapar en ninguno de los dos.
-
-Contra las rutas de laboratorio de esta sección, el apartado de MongoDB marcó 5 líneas: las 3 vulnerables, incluida `findOne({ email: b.email, … })`, y 2 seguras, con datos ya validados. Un resultado no es un fallo: es un sitio donde mirar. La primera versión del _script_ no las veía, porque buscaba solo los nombres `body` e `input`: la variable se llamaba `b`.
+- **Tres resultados en `entrenos-app`, ninguno es un fallo:** los `z.record` de `NuevaNotaFetch.tsx` y `Entrenos.tsx` validan respuestas de la API en el navegador, y `$set: cambios` en `entrenos.repo.ts` viene de un esquema estricto (A5.1).
+- **En esta plataforma encuentra los dos puntos de HTML:** `dangerouslySetInnerHTML` en `NotesIsland.tsx` (con `renderNoteHtml`) y `set:html` en `BaseLayout.astro` (el _script_ del tema, de tu repositorio). Ninguno pinta datos del usuario sin escapar.
+- **En las rutas de laboratorio, MongoDB marcó 5 líneas:** las 3 vulnerables (incluida `findOne({ email: b.email, … })`) y 2 seguras. La primera versión solo buscaba `body` e `input`, y la variable se llamaba `b`.
 
 <Callout type="risk">
 
-- **Encuentra dónde mirar, no fallos:** un resultado no es un error, y ningún resultado no significa seguridad. Un `findOne(filtro)` puede estar en otra función, con el dato validado o no.
-- **`--exclude-dir=content`:** deja fuera los textos, donde estas palabras son ejemplos. Ajústalo a tu proyecto.
-- **Un linter lo hace mejor en el día a día:** `eslint-plugin-react` tiene `no-danger`, y `eslint-plugin-no-unsanitized` cubre `innerHTML`. Un _script_ se ejecuta cuando te acuerdas; el linter, siempre.
-- **Añade una prueba por cada fallo que corrijas:** `auditar.sh` (A5.1) ya comprueba `$ne` en el login. Una ruta nueva necesita la suya.
+- **Encuentra dónde mirar, no fallos:** ningún resultado no significa seguridad. `--exclude-dir=content` deja fuera los textos de ejemplo; ajústalo.
+- **Un linter lo hace siempre:** `no-danger` de `eslint-plugin-react` y `eslint-plugin-no-unsanitized` para `innerHTML`.
+- **Una prueba por cada fallo corregido:** `auditar.sh` (A5.1) ya prueba `$ne` en el login.
 
 </Callout>
 
@@ -432,11 +423,10 @@ Ningún dato del cliente llega a una consulta o al HTML sin validar o escapar. C
 
 ## Resumen
 
-- La raíz es la misma: un dato tratado como instrucción.
-- **NoSQL:** `{"$ne":null}` en la clave entró sin contraseña. Se detiene con `z.string()` o con `$eq`. `z.any()`, `z.unknown()` y `looseObject` lo dejan pasar.
-- **Asignación masiva:** `$set: body` cambió el dueño de un entreno con el filtro por `userId` puesto. Pasa solo campos validados.
-- **SQL:** parámetros (`$1`), nunca plantillas. `sql.raw()` no los usa.
-- **XSS:** reflejado, almacenado y de DOM. Astro y React escapan por defecto; `set:html`, `dangerouslySetInnerHTML` e `innerHTML` no. `<img onerror>` se ejecutó incluso donde `<script>` no.
-- `HttpOnly` ocultó la _cookie_, pero el _script_ leyó los datos con la sesión de la víctima. La defensa está en la salida.
-- **`href` con `javascript:`:** Astro lo deja y se ejecuta; React lo bloquea; `z.url()` lo acepta. Usa `z.url({ protocol: /^https?$/ })`.
-- **HTML del usuario:** primero, evítalo; después, constrúyelo escapando; y si no, DOMPurify con una lista corta.
+- La raíz: un dato tratado como instrucción.
+- **NoSQL:** `{"$ne":null}` entró sin contraseña; `z.string()` o `$eq` lo paran, `z.any()`, `z.unknown()` y `looseObject` no.
+- **Asignación masiva:** `$set: body` cambió el dueño de un entreno; solo campos validados.
+- **SQL:** parámetros, nunca plantillas ni `sql.raw()` con datos.
+- **XSS:** `set:html`, `dangerouslySetInnerHTML` e `innerHTML` ejecutaron `<img onerror>`; `HttpOnly` no impidió leer datos con la sesión.
+- **`href` con `javascript:`:** Astro lo deja y `z.url()` lo acepta; `z.url({ protocol: /^https?$/ })`.
+- **HTML del usuario:** evítalo, constrúyelo escapando o DOMPurify con lista corta.

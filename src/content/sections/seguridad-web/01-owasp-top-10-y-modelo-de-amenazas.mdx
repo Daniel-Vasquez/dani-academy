@@ -7,13 +7,9 @@ minutes: 90
 summary: "Modelas las amenazas de tu app, auditas la app de entrenos contra el OWASP Top 10:2025 con pruebas reales y automatizas los controles en un script que detecta un fallo de acceso introducido a propósito."
 ---
 
-Hasta ahora has preguntado si tu app funciona. Este curso hace otra pregunta: **¿qué pasa si alguien intenta que funcione mal?** Un formulario probado con datos normales puede estar perfecto y dejar a cualquiera leer los datos de otro. La seguridad no es un producto que se instala al final: es una forma de pensar mientras diseñas, y eso se practica.
+Este curso pregunta **qué pasa si alguien intenta que tu app funcione mal**: un formulario perfecto con datos normales puede dejar leer los datos de otro. Aquí haces el modelo de amenazas de tu app, la auditas con el OWASP Top 10:2025 y escribes un _script_ que detecta cuando un control deja de funcionar.
 
-Una analogía: para proteger una casa no empiezas comprando alarmas. Primero te preguntas qué hay de valor (las joyas, los papeles), quién podría entrar (un ladrón, un visitante curioso) y por dónde (la puerta, las ventanas, el garaje). Después decides: una buena cerradura, una ventana con reja, una caja fuerte para lo importante. **Eso es un modelo de amenazas.** Y comprar la alarma sin haberlo pensado es lo que hace casi todo el mundo con la seguridad.
-
-**Lo que tendrás al terminar:** el modelo de amenazas de tu app, una auditoría de los diez riesgos del OWASP Top 10:2025 sobre ella, con sus hallazgos, y un _script_ que comprueba tus controles y detecta cuando dejan de funcionar.
-
-**Requisitos:** la app `entrenos-app` desplegada como dejaste en A4, en tu servidor.
+**Requisitos:** `entrenos-app` desplegada como en A4, en tu servidor.
 
 <Callout type="warning" title="Solo en lo que es tuyo">
 
@@ -23,25 +19,13 @@ Todas las pruebas de este curso se hacen contra **tu propia app**, en tu servido
 
 ## Paso 1: el modelo de amenazas
 
-Un modelo de amenazas responde a **cuatro preguntas**, las que propone el Manifiesto de Modelado de Amenazas y recoge OWASP:
+**Qué es:** cuatro preguntas (las del Manifiesto de Modelado de Amenazas, que recoge OWASP): **¿en qué trabajamos?, ¿qué puede salir mal?, ¿qué hacemos?, ¿lo hemos hecho bastante bien?** La primera se responde con activos, atacantes y superficie.
 
-1. **¿En qué estamos trabajando?** Qué tienes y cómo funciona.
-2. **¿Qué puede salir mal?**
-3. **¿Qué vamos a hacer al respecto?**
-4. **¿Lo hemos hecho bastante bien?**
+**Cómo se usa:**
 
-La primera se responde con tres listas.
-
-**Activos: lo que hay que proteger.** En tu app: los entrenos de cada usuario, las cuentas y contraseñas, las sesiones, los secretos del `.env` y que la web siga funcionando. Fíjate en que no todo vale lo mismo: que alguien vea el `.env` es mucho peor que ver un entreno.
-
-**Atacantes: quién y qué sabe hacer.** No hace falta imaginar un espía:
-
-- **Un bot:** recorre internet buscando `/.env`, paneles sin contraseña y puertos abiertos. Es lo más probable, y no le importas tú: pasa por todos.
-- **Un usuario curioso:** tiene cuenta y cambia un número en la URL a ver qué pasa.
-- **Alguien con tu contraseña:** la reutilizaste, y se filtró en otra web.
-- **Un paquete de npm comprometido:** ya está dentro de tu app.
-
-**Superficie: por dónde se entra.** Se puede medir. Desde **otra máquina**:
+- **Activos:** los entrenos, las cuentas y contraseñas, las sesiones, los secretos del `.env` y que la web funcione. No valen igual: ver el `.env` es mucho peor que ver un entreno.
+- **Atacantes:** un **bot** que recorre internet buscando `/.env` y puertos abiertos (lo más probable), un **usuario curioso** que cambia un número de la URL, **alguien con tu contraseña** reutilizada y filtrada, y un **paquete de npm comprometido**, ya dentro.
+- **Superficie:** se mide, desde **otra máquina**:
 
 ```bash
 for p in 22 80 443 4321 4322 5432 27017 8000; do
@@ -61,9 +45,9 @@ puerto 27017 cerrado
 puerto 8000 cerrado
 ```
 
-Tres puertas. Y dentro del 443, cada ruta de la app es otra: formularios, `/api/*`, `/_actions/*`, `/api/auth/*`, y la propia _cookie_ de sesión, que el navegador envía y el usuario puede cambiar. **Todo lo que llega del cliente lo controla el cliente**: cuerpo, cabeceras, _cookies_, parámetros y el JavaScript que se ejecuta en su navegador.
+- **Tres puertas,** y dentro del 443 cada ruta es otra: formularios, `/api/*`, `/_actions/*`, `/api/auth/*` y la _cookie_. **Todo lo que llega del cliente lo controla el cliente:** cuerpo, cabeceras, _cookies_, parámetros y su JavaScript.
 
-La segunda pregunta, «¿qué puede salir mal?», se responde mejor con una lista de comprobación. **STRIDE**, la que usa OWASP en su guía, son seis preguntas para cada parte de tu sistema:
+Para «¿qué puede salir mal?», **STRIDE** son seis preguntas para cada parte:
 
 | Letra | Amenaza                         | Pregunta                                        |
 | ----- | ------------------------------- | ----------------------------------------------- |
@@ -74,7 +58,7 @@ La segunda pregunta, «¿qué puede salir mal?», se responde mejor con una list
 | D     | _Denial of service_             | ¿Puede dejar la app sin servicio?               |
 | E     | _Elevation of privilege_        | ¿Puede hacer más de lo que le corresponde?      |
 
-Cada amenaza se escribe con su impacto, su probabilidad y su control:
+Cada amenaza, con impacto, probabilidad y control:
 
 ```text
 Activo:   los entrenos de cada usuario
@@ -84,25 +68,25 @@ Control:  el userId de la sesión va en cada consulta del repositorio (I3.5)
 Se comprueba con: una prueba que lo intenta y debe recibir 404
 ```
 
-La última línea es la que suele faltar: **un control que no se comprueba es una suposición**.
+- **La última línea es la que suele faltar:** un control que no se comprueba es una suposición.
 
 <Callout type="risk">
 
-- **No te quedes en lo espectacular:** un modelo con diez amenazas sofisticadas y sin «un bot encuentra el `.env`» está mal priorizado. Empieza por lo probable y lo que más daño hace.
-- **No busques un documento perfecto:** media página que repasas con cada funcionalidad nueva vale más que veinte que nadie abre.
-- **Una medición de puertos desde el propio servidor no vale:** mide desde fuera. En A4.2 viste que Docker puede abrir un puerto que `ufw` dice cerrado.
+- **Empieza por lo probable:** un modelo sin «un bot encuentra el `.env`» está mal priorizado.
+- **Media página que repasas con cada funcionalidad** vale más que veinte que nadie abre.
+- **Mide los puertos desde fuera:** Docker puede abrir uno que `ufw` da por cerrado (A4.2).
 
 </Callout>
 
 ## Paso 2: tres principios
 
-La mayoría de las decisiones de seguridad salen de tres ideas. Ya las has aplicado sin nombrarlas.
+**Qué es:** las tres ideas de las que salen casi todas las decisiones, y que ya has aplicado.
 
-**Mínimo privilegio: cada parte, solo lo que necesita.** El contenedor se ejecuta como `node` y no puede escribir en `/app` (A4.2). MongoDB no tiene puerto publicado: solo la app llega a él. `deploy` no es `root`. El _middleware_ deja públicas solo las rutas que deben serlo. Si algo falla, el daño queda limitado a lo poco que podía hacer.
+**Cómo se usa:**
 
-**Defensa en profundidad: varias capas, porque cualquiera puede fallar.** Si un proceso de la app fuera comprometido, seguiría sin poder cambiar sus archivos. Si un error abriera un puerto, `ufw` lo cerraría, salvo con Docker, y por eso además se publica en `127.0.0.1`. Si se filtra la base, las contraseñas siguen protegidas con scrypt. Ninguna capa es perfecta, y no hace falta que lo sea.
-
-**Fallar de forma segura: ante la duda, no.** Si algo se rompe, el resultado debe ser denegar, no conceder. Medido parando MongoDB, con una sesión válida:
+- **Mínimo privilegio:** el contenedor corre como `node` sin escribir en `/app` (A4.2), MongoDB no publica puerto, `deploy` no es `root` y el _middleware_ solo abre lo necesario. Si algo falla, el daño se limita a lo poco que podía hacer.
+- **Defensa en profundidad:** varias capas, porque cualquiera falla. Un proceso comprometido no cambia sus archivos; un puerto abierto por error lo cierra `ufw` (o `127.0.0.1` con Docker); una base filtrada sigue con contraseñas en scrypt.
+- **Fallar de forma segura:** ante la duda, no. Con MongoDB parado y una sesión válida:
 
 ```text
 /estadisticas -> 500 en 4.96s
@@ -110,19 +94,19 @@ La mayoría de las decisiones de seguridad salen de tres ideas. Ya las has aplic
 sign-in       -> 500 en 4.96s
 ```
 
-Nadie entra, y el cliente no recibe ningún detalle del fallo: `aRespuesta` (I1.5) lo registra en el servidor y responde un mensaje genérico. Mal diseñado, un `catch` que devuelve «sin sesión, sigue» o «cuenta sin bloqueos» concede acceso justo cuando la base no puede comprobarlo.
+- **Nadie entra y el cliente no recibe detalles:** `aRespuesta` (I1.5) registra y responde un mensaje genérico. Un `catch` que devolviera «sin sesión, sigue» concedería acceso justo cuando no se puede comprobar.
 
 <Callout type="risk">
 
-- **Oscuridad no es seguridad:** cambiar el puerto de SSH o usar rutas raras reduce ruido, pero no es un control. Asume que el atacante conoce tu código, porque en muchos casos lo tiene.
-- **Un 500 también es información:** un error que tarda 5 s con MongoDB caído y 40 ms sin él cuenta algo. Es aceptable aquí; recuerda que los tiempos filtran datos (Paso 3, A07).
-- **Más capas, más trabajo:** cada control tiene un coste. El modelo de amenazas sirve para saber cuáles merecen la pena.
+- **Oscuridad no es seguridad:** otro puerto de SSH o rutas raras reducen ruido, no son controles. Asume que el atacante conoce tu código.
+- **Un 500 también informa:** 5 s con MongoDB caído frente a 40 ms; aquí es aceptable, pero los tiempos filtran datos (A07).
+- **Cada capa cuesta:** el modelo de amenazas dice cuáles compensan.
 
 </Callout>
 
 ## Paso 3: el OWASP Top 10:2025
 
-**OWASP** es una fundación que publica guías abiertas de seguridad. Su **Top 10** es la lista de riesgos más importantes en aplicaciones web, y la edición vigente es la de **2025**. No es una lista de ataques, sino de categorías: 248 tipos de debilidad (CWE) agrupados en diez.
+**Qué es:** **OWASP** publica guías abiertas de seguridad, y su **Top 10** (edición vigente: **2025**) agrupa 248 tipos de debilidad (CWE) en diez categorías de riesgo.
 
 | ID  | Categoría                              | En tu app                          |
 | --- | -------------------------------------- | ---------------------------------- |
@@ -137,11 +121,13 @@ Nadie entra, y el cliente no recibe ningún detalle del fallo: `aRespuesta` (I1.
 | A09 | Security Logging and Alerting Failures | Ataques que nadie ve               |
 | A10 | Mishandling of Exceptional Conditions  | Errores que abren la puerta        |
 
-Frente a la edición de 2021, sube la mala configuración (del 5.º al 2.º puesto), la cadena de suministro amplía lo que eran «componentes vulnerables», SSRF pasa a A01 y A10 es nueva. Ahora, una a una, contra tu app. Prepara dos usuarios de prueba, Ana y Beto, cada uno con su archivo de _cookies_.
+- **Frente a 2021:** la mala configuración sube del 5.º al 2.º, la cadena de suministro amplía «componentes vulnerables», SSRF pasa a A01 y A10 es nueva.
+
+**Cómo se usa:** una a una, contra tu app, con dos usuarios de prueba, Ana y Beto, cada uno con su archivo de _cookies_.
 
 ### A01: control de acceso roto
 
-El primer puesto, y el fallo típico es un **IDOR** (_Insecure Direct Object Reference_): la app usa un identificador que llega del cliente sin comprobar de quién es. Ana crea un entreno y Beto usa su `id`:
+El fallo típico es un **IDOR** (_Insecure Direct Object Reference_): un identificador del cliente sin comprobar de quién es. Beto usa el `id` de un entreno de Ana:
 
 ```bash
 curl -s -b beto.txt -w " -> %{http_code}\n" https://academy.tudominio.com/api/entrenos/6aed52d46f77f9cfd0b4677f
@@ -154,9 +140,10 @@ curl -s -b beto.txt -X PATCH -H "content-type: application/json" -H "origin: htt
 {"error":"El entreno 6aed52d46f77f9cfd0b4677f no existe"} -> 404
 ```
 
-Resiste, porque `obtener(userId, id)` busca `{ _id, userId }`, con el `userId` de la sesión y nunca del cliente. Y responde **404, no 403**: un 403 confirmaría que ese `id` existe. Tampoco se cuela un `userId` en el cuerpo: Ana envía `{"minutos":46,"userId":"otro"}` y, medido en la base, sigue siendo suyo, porque Zod descarta los campos que no están en el esquema.
+- **Resiste:** `obtener(userId, id)` busca `{ _id, userId }` con el `userId` de la sesión. Y da **404, no 403**, que confirmaría que el `id` existe.
+- **Un `userId` en el cuerpo tampoco cuela:** con `{"minutos":46,"userId":"otro"}`, el entreno sigue siendo de Ana, porque Zod descarta lo que no está en el esquema.
 
-**¿Y sin ese filtro?** Se probó en una versión de laboratorio, quitando `userId` de esa consulta:
+Sin ese filtro, en una versión de laboratorio:
 
 ```diff
 -      const doc = _id && (await col.findOne({ _id, userId }));
@@ -167,11 +154,11 @@ Resiste, porque `obtener(userId, id)` busca `{ _id, userId }`, con el `userId` d
 FALLO leer: 200 (esperaba 404)
 ```
 
-Una sola palabra. El código compila, los usuarios normales no notan nada, y cualquiera lee los entrenos de cualquiera. Por eso este control debe tener una prueba.
+- **Una palabra:** compila, nadie nota nada y cualquiera lee lo de cualquiera. Este control necesita una prueba.
 
 ### A02: mala configuración
 
-¿Qué hay accesible que no debería? Rutas que los bots prueban en cada web:
+Las rutas que los bots prueban en cada web:
 
 ```text
 /.env -> 404
@@ -183,15 +170,15 @@ Una sola palabra. El código compila, los usuarios normales no notan nada, y cua
 /compose.yaml -> 404
 ```
 
-Ninguna existe: Nginx solo sirve `_astro/` y lo demás se lo pide a Node, que no conoce esos archivos. Y el `.env` no está en la imagen (A4.2). Súmale los puertos del Paso 1, `server_tokens off` (A4.3) y `default_server` para la IP (A4.4).
+- **Ninguna existe:** Nginx solo sirve `_astro/` y Node no conoce esos archivos; el `.env` no está en la imagen (A4.2). Súmale los puertos del Paso 1, `server_tokens off` (A4.3) y el `default_server` para la IP (A4.4).
 
 ### A03: fallos en la cadena de suministro
 
-Tu app ejecuta en producción código de **264 paquetes** que no has escrito, y cualquiera puede venderse, abandonarse o ser comprometido. Los controles básicos ya los tienes: `npm ci` instala exactamente lo que dice `package-lock.json`, y la imagen fija versiones. Se verá a fondo en A5.5.
+- **264 paquetes** que no has escrito se ejecutan en producción, y cualquiera puede venderse, abandonarse o comprometerse. `npm ci` con `package-lock.json` y la imagen fijan versiones; el resto, en A5.5.
 
 ### A04: fallos criptográficos
 
-¿Cómo guarda tu app las contraseñas? Mirando la base sin imprimir ningún valor:
+Las contraseñas, mirando la base sin imprimir valores:
 
 ```text
 campos de account: _id accountId providerId userId password createdAt updatedAt
@@ -199,19 +186,19 @@ password: 161 caracteres · partes 32+128
 contraseñas iguales con el mismo hash: 0
 ```
 
-Un `salt` de 32 caracteres y un _hash_ de 128: scrypt, de Better Auth (I5.1). Cada usuario tiene su sal, así que dos contraseñas iguales dan resultados distintos. HTTPS protege el camino (A4.4), y las _cookies_ son `Secure` y `HttpOnly`.
+- **Sal de 32 caracteres y _hash_ de 128:** scrypt, de Better Auth (I5.1); dos contraseñas iguales dan resultados distintos. HTTPS protege el camino (A4.4) y las _cookies_ son `Secure` y `HttpOnly`.
 
-**Primer hallazgo.** La colección `session` guarda el _token_ en claro:
+**Primer hallazgo:** `session` guarda el _token_ en claro:
 
 ```text
 token de la cookie, en claro en session: 1
 ```
 
-Quien lea una copia de la base obtiene sesiones válidas, hasta que caduquen. No es una vulnerabilidad en sí, porque hace falta acceso a la base, pero sube el valor de esas copias: por eso A4.6 pide `chmod 700` y cifrarlas fuera del servidor. Esas sesiones guardan además IP y navegador, que son datos personales.
+- **Quien lea una copia de la base obtiene sesiones válidas** hasta que caduquen. Exige acceso a la base, pero sube el valor de las copias (por eso `chmod 700` y cifrado, A4.6), que además guardan IP y navegador.
 
 ### A05: inyección
 
-Datos del cliente que acaban interpretados como código o como consulta. En MongoDB, un objeto en lugar de un texto:
+Un objeto en lugar de un texto, en MongoDB:
 
 ```bash
 curl -s -H "content-type: application/json" -H "origin: https://academy.tudominio.com" \
@@ -223,11 +210,11 @@ curl -s -H "content-type: application/json" -H "origin: https://academy.tudomini
 {"message":"[body.email] Invalid input: expected string, received object; …"} -> 400
 ```
 
-Validar el tipo antes de consultar lo detiene. Es el tema de A5.2, con XSS.
+- **Validar el tipo antes de consultar lo detiene.** Es el tema de A5.2, con XSS.
 
 ### A06: diseño inseguro
 
-No es un error de programación: la funcionalidad hace lo que se diseñó, y el diseño era el problema. Ninguna validación arregla un flujo de recuperación de contraseña basado en preguntas fáciles. Por eso se modela antes de escribir: **este riesgo no se detecta probando el código, sino revisando el plan.**
+- **La funcionalidad hace lo diseñado y el diseño era el problema:** ninguna validación arregla una recuperación de contraseña con preguntas fáciles. **No se detecta probando el código, sino revisando el plan.**
 
 ### A07: fallos de autenticación
 
@@ -236,57 +223,56 @@ No es un error de programación: la funcionalidad hace lo que se diseñó, y el 
 token de sesión alterado:         302 a /entrar
 ```
 
-El límite de Better Auth funciona, gracias al `X-Forwarded-For` de A4.3. ¿Y se puede averiguar qué correos tienen cuenta? En el login, no. Medido con 40 intentos de cada tipo:
+- **El límite de Better Auth funciona** gracias al `X-Forwarded-For` de A4.3. ¿Se averigua qué correos tienen cuenta? En el login, no (40 intentos de cada tipo):
 
 ```text
 correo que existe:     mediana 44.0 ms · 401 Invalid email or password
 correo que no existe:  mediana 43.8 ms · 401 Invalid email or password
 ```
 
-Mismo mensaje y mismo tiempo: Better Auth calcula el _hash_ en los dos casos, para que el tiempo no lo delate.
+- **Mismo mensaje y mismo tiempo:** Better Auth calcula el _hash_ en los dos casos.
 
-**Segundo hallazgo.** El registro sí lo cuenta:
+**Segundo hallazgo:** el registro sí lo cuenta:
 
 ```text
 registro con correo existente: 422 {"message":"User already exists. Use another email.","code":"USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL"}
 ```
 
-Quien pruebe correos en el formulario de registro sabrá cuáles tienen cuenta, y eso ayuda al _phishing_ o a probar contraseñas filtradas. Evitarlo de verdad exige verificar el correo: responder siempre «revisa tu correo», y enviar el aviso real por email. Si tu app no envía correos, no hay solución limpia, y es un **riesgo aceptado**: se apunta, y se mitiga con el límite por IP.
+- **Probando correos en el registro se sabe cuáles tienen cuenta,** útil para _phishing_ o contraseñas filtradas. Evitarlo exige verificar el correo (responder siempre «revisa tu correo»). Sin envío de correos es un **riesgo aceptado**, mitigado con el límite por IP.
 
 ### A08: integridad de datos y de software
 
-Confiar en algo sin verificarlo. La _cookie_ lleva una firma, así que no se puede alterar: el `302` de A07 lo mide. El navegador no recibe nada de lo que dependa una decisión: el `userId`, el rol y los resultados se leen en el servidor. Y la imagen se construye con `package-lock.json`, que incluye el _hash_ de cada paquete.
+- **La _cookie_ va firmada** (el `302` de A07 lo mide), el navegador no decide nada (`userId`, rol y resultados se leen en el servidor) y la imagen se construye con `package-lock.json`, que incluye el _hash_ de cada paquete.
 
 ### A09: fallos de registro y alerta
 
-Sobrevivir a un ataque que no ves no es seguro: es tener suerte. ¿Qué queda registrado?
+Lo que queda registrado:
 
 ```text
 PATCH /api/entrenos/6aed52d46f77f9cfd0b4677f → 404 (2.1 ms)
 POST /api/auth/sign-in/email → 500 (5014.3 ms)
 ```
 
-Método, ruta y código, sin contraseñas: buscar `clave-` o `password` en los registros dio 0 coincidencias.
+- **Método, ruta y código, sin contraseñas:** buscar `clave-` o `password` dio 0 coincidencias.
 
-**Tercer hallazgo.** La categoría se llama «y alerta» por algo. Tus registros tienen los 401 y los 429 (y las IP están en el registro de Nginx), pero **nadie recibe un aviso**. Si alguien prueba mil contraseñas durante una noche, `vigilar.sh` (A4.6) no se entera. Tampoco dice qué usuario hizo cada cosa.
+**Tercer hallazgo:** los 401 y 429 están en los registros (y las IP en Nginx), pero **nadie recibe un aviso**. Mil contraseñas en una noche no las ve `vigilar.sh` (A4.6), ni consta qué usuario hizo cada cosa.
 
 ### A10: mala gestión de condiciones excepcionales
 
-La categoría nueva: errores que dejan la puerta abierta o revelan el interior. Lo que viste en el Paso 2, y además:
+Errores que abren la puerta o revelan el interior. Además del Paso 2:
 
 ```text
 JSON roto    -> 422 {"error":"Revisa los datos del formulario","campos":{}}
 id no válido -> 404 {"error":"El entreno no-es-un-id no existe"}
 ```
 
-Ni un 500 ni una traza del servidor.
+- **Ni un 500 ni una traza del servidor.**
 
 <Callout type="risk">
 
-- **Ninguna lista está completa:** pasar el Top 10 no significa que tu app sea segura. Es un mínimo y una forma de organizar la revisión. Las amenazas propias de tu negocio no están en ella.
-- **Un 404 también puede filtrar:** `El entreno <id> no existe` repite lo que envió el cliente. Es JSON, así que no ejecuta nada; en HTML habría que escapar (A5.2).
-- **Aceptar un riesgo es una decisión, no un olvido:** escríbelo, con su motivo y cuándo revisarlo. Lo peligroso es el riesgo que nadie sabe que ha aceptado.
-- **El límite por IP no para a quien tiene muchas IP:** frena lo barato, no todo (A5.4).
+- **Pasar el Top 10 no hace segura una app:** es un mínimo para organizar la revisión; las amenazas de tu negocio no están.
+- **Un 404 puede filtrar:** `El entreno <id> no existe` repite lo del cliente. En JSON no ejecuta nada; en HTML habría que escapar (A5.2).
+- **Aceptar un riesgo es una decisión escrita,** con motivo y fecha de revisión. Y el límite por IP frena lo barato, no a quien tiene muchas IP (A5.4).
 
 </Callout>
 
@@ -426,24 +412,22 @@ bash scripts/auditar.sh academy.tudominio.com 203.0.113.10
 Todo correcto
 ```
 
-Código de salida 0, en menos de 10 s. Con el filtro quitado, tras `bash scripts/desplegar.sh`:
+- **Código 0 en menos de 10 s.** Con el filtro quitado, tras `bash scripts/desplegar.sh`:
 
 ```text
   FALLO leer: 200 (esperaba 404)
 ```
 
-Código de salida 1. Solo falla «leer», porque solo se quitó de `obtener`, y eso demuestra que hay que probar cada operación por separado: editar y borrar pasan por otras consultas. Después, `bash scripts/desplegar.sh <versión buena>`, y otra vez «Todo correcto».
-
-- **`alta ana; alta beto`:** dos usuarios nuevos en cada ejecución, para no depender de datos previos. Hay que borrarlos de vez en cuando.
-- **Se prueba también lo que debe funcionar:** «su dueña sigue viéndolo, sin cambios» distingue un control correcto de una app que da 404 a todo el mundo.
-- **`case $?` con `curl`:** el código 7 es conexión rechazada y el 28, tiempo agotado, que es lo que devuelve un puerto filtrado. Todo lo demás significa que algo respondió. La primera versión usaba `nc -w 2`, que en macOS no limita la conexión y se quedaba colgada más de dos minutos.
-- **`${INTENTOS##* }`:** se mira solo el último. El intento con operador cuenta también contra el límite, así que exigir exactamente `401 401 401 429` daba un falso fallo.
+- **Código 1, y solo falla «leer»,** porque editar y borrar pasan por otras consultas: cada operación se prueba por separado. Después, `bash scripts/desplegar.sh <versión buena>` y «Todo correcto».
+- **`alta ana; alta beto`** crea usuarios nuevos en cada ejecución, y **se prueba también lo que debe funcionar** («su dueña sigue viéndolo»): así se distingue un control correcto de un 404 para todos.
+- **`case $?` con `curl`:** 7 es conexión rechazada y 28 tiempo agotado (puerto filtrado); lo demás, algo respondió. `nc -w 2` en macOS se colgaba más de dos minutos.
+- **`${INTENTOS##* }` mira solo el último:** el intento con operador también cuenta, y exigir `401 401 401 429` daba un falso fallo.
 
 <Callout type="risk">
 
-- **Crea usuarios y consume el límite de intentos:** ejecútalo en un servidor de pruebas, o bórralos después. Si lo repites en menos de 10 s, verás 429 antes de tiempo.
-- **Pasar la auditoría no demuestra que la app sea segura:** solo que estos controles siguen funcionando. Añade una comprobación por cada amenaza nueva.
-- **Este _script_ se ejecuta a mano:** la prueba de A01 debe estar además en tus tests de integración (I7.4), donde corre en cada cambio.
+- **Crea usuarios y gasta el límite de intentos:** en un servidor de pruebas, o bórralos. Repetido en menos de 10 s, verás 429 antes de tiempo.
+- **Pasar la auditoría solo dice que estos controles siguen:** añade una comprobación por cada amenaza nueva.
+- **Se ejecuta a mano:** la prueba de A01 debe estar además en los tests de integración (I7.4).
 
 </Callout>
 
@@ -455,10 +439,10 @@ Piensas en cómo romper una funcionalidad antes de darla por terminada: qué pro
 
 ## Resumen
 
-- Un **modelo de amenazas** responde a cuatro preguntas: en qué trabajamos, qué puede salir mal, qué hacemos, y si basta. Se apoya en activos, atacantes y superficies, y STRIDE ayuda a no olvidar nada.
-- Cada amenaza lleva impacto, probabilidad, control y **cómo se comprueba**. Un control sin comprobar es una suposición.
-- Principios: **mínimo privilegio**, **defensa en profundidad** y **fallar de forma segura** (con MongoDB caído, 500 y nadie entra).
-- **OWASP Top 10:2025:** control de acceso, configuración, cadena de suministro, criptografía, inyección, diseño, autenticación, integridad, registro y alerta, y condiciones excepcionales.
-- Quitar `userId` de una consulta abre un IDOR, con todo lo demás funcionando: `FALLO leer: 200`. Responde 404, no 403.
-- Hallazgos de la auditoría: el _token_ de sesión está en claro en la base, el registro revela qué correos existen y nadie recibe alertas de ataques. Se apuntan como riesgos, con su motivo.
+- Modelo de amenazas: cuatro preguntas sobre activos, atacantes y superficie, con STRIDE.
+- Cada amenaza con impacto, probabilidad, control y **cómo se comprueba**.
+- **Mínimo privilegio**, **defensa en profundidad** y **fallar de forma segura**.
+- OWASP Top 10:2025, de control de acceso a condiciones excepcionales.
+- Sin `userId` en una consulta, IDOR: `FALLO leer: 200`. Responde 404, no 403.
+- Hallazgos: _token_ en claro, registro que revela correos y sin alertas. Riesgos apuntados.
 - Prueba solo lo que es tuyo.
