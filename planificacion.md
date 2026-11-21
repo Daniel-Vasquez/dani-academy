@@ -1723,7 +1723,7 @@ return Astro.redirect("/cursos/typescript-desde-cero");
 
 > Los campos `title` y `summary` son **texto plano** (sin Markdown: nada de acentos graves ni asteriscos), porque se muestran tal cual en títulos, índices y metadatos. Escríbelos entre comillas en el YAML.
 
-> ⚠️ **Sustituida desde el 9 de octubre de 2026 por el formato "receta" de §8.6.** La estructura de abajo y la sección de referencia `01-que-es-typescript.mdx` describen el formato original; se conservan como historial. Todos los cursos básicos (B1–B7) ya están reescritos en el formato nuevo.
+> ⚠️ **Sustituida desde el 9 de octubre de 2026 por el formato "receta" de §8.6, a su vez sustituido en noviembre de 2026 por el formato "al grano" (`guia-maquetacion-cursos.md`).** La estructura de abajo y la sección de referencia `01-que-es-typescript.mdx` describen el formato original; se conservan como historial. Todos los cursos básicos (B1–B7) ya están reescritos en el formato nuevo.
 
 **Estructura original de cada sección:**
 
@@ -4554,6 +4554,8 @@ schema: z.discriminatedUnion("mode", [
 - Añade `mode: choice` explícito a los YAML existentes o confía en el `default`.
 
 ### 8.6 Formato "receta" de las lecciones (obligatorio desde el 9 de octubre de 2026)
+
+> ⚠️ **Sustituido desde noviembre de 2026 por el formato "al grano".** Las 125 lecciones de B1 a A8 (23 cursos) se reestructuraron en 13 Tandas (commits `content(…): reestructuración "al grano"`, hasta `b92b12f`): cada `## Paso N` lleva `**Qué es:**`, `**Cómo se usa:**` y un `risk` de 2 o 3 viñetas, la entrada tiene 60 palabras como máximo, sin "Lo que tendrás al terminar" ni analogías, y los dos últimos `##` son `Ejercicio práctico` y `Resumen`. Las reglas vigentes y el esqueleto están en `guia-maquetacion-cursos.md`, y `python3 scripts/validar-tanda.py HEAD <carpeta-del-curso>` las comprueba. Lo que sigue describe el formato "receta" y se conserva como historial; sus reglas de verificación (laboratorio real, salidas no inventadas, seguridad de los comandos) siguen vigentes.
 
 Todas las lecciones, las ya reescritas (B1–B7) y las que se escriban a partir de ahora (I1–I8, A1–A8, P1), siguen este formato. `temario.md` define **qué** se enseña; esta sección define **cómo** se maqueta cada `.mdx`.
 

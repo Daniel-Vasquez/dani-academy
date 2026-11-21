@@ -1,5 +1,5 @@
 # Archivo: scripts/validar-tanda.py
-# Compara las lecciones editadas con su versión en Git y comprueba las reglas del plan.
+# Compara las lecciones editadas con su versión en Git y comprueba las reglas del formato "al grano" (guia-maquetacion-cursos.md).
 # Uso: python3 scripts/validar-tanda.py <ref-git> <carpeta-del-curso>...
 #   p. ej.: python3 scripts/validar-tanda.py HEAD src/content/sections/typescript-desde-cero
 import re
