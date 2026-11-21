@@ -7,13 +7,13 @@ minutes: 70
 summary: "Eliges el matcher justo (toEqual no ve las claves undefined), parametrizas con it.each, aíslas un endpoint con vi.mock, vi.fn y un reloj falso, descubres un bug que solo sale fuera de UTC y cubres el reducer de I2.3."
 ---
 
-En I8.1 escribiste tests con `toBe` y `toBeNull`. Vitest trae muchas más formas de comprobar un resultado, y elegir la equivocada da tests que pasan cuando no deberían. Además, la mayoría del código real no es una función pura como `ritmo()`: llama a una base de datos, lee la fecha de hoy o escribe en la consola. Para probarlo de forma unitaria hay que **sustituir** esas dependencias por otras controladas. En esta sección vas a elegir el _matcher_ justo, a escribir tablas de casos con `it.each`, a aislar un _endpoint_ con _mocks_ y un reloj falso, y a probar a fondo el _reducer_ de I2.3.
-
-**Lo que tendrás al terminar:** tests del esquema de los entrenos con una fila por caso, un test unitario de `GET /api/resumen` con los servicios y el reloj simulados, una zona horaria fija en los tests y 22 tests para `cuestionarioReducer`.
+Elegir mal el _matcher_ da tests que pasan cuando no deberían, y casi todo el código real llama a una base de datos, lee la fecha o escribe en la consola: para probarlo de forma unitaria hay que **sustituir** esas dependencias. Aquí eliges el _matcher_ justo, escribes tablas de casos, aíslas un _endpoint_ con _mocks_ y un reloj falso y pruebas a fondo el _reducer_ de I2.3.
 
 **Requisitos:** la app de entrenos de I8.1.
 
 ## Paso 1: el _matcher_ justo
+
+**Qué es:** cada _matcher_ comprueba una cosa distinta.
 
 | _Matcher_          | Comprueba                                                            | Úsalo para                                                          |
 | ------------------ | -------------------------------------------------------------------- | ------------------------------------------------------------------- |
@@ -24,7 +24,7 @@ En I8.1 escribiste tests con `toBe` y `toBeNull`. Vitest trae muchas más formas
 | `toThrow(x)`       | Que la función lanza; `x` puede ser la clase, el mensaje o un objeto | Errores de validación y de reglas                                   |
 | `expect.any(Date)` | Cualquier valor de esa clase                                         | Valores que cambian en cada ejecución                               |
 
-Prueba cada uno con algo real: el esquema de los entrenos, que comparten el formulario, la API y la base de datos (I3.2). Crea `tests/unit/entreno.schema.test.ts`:
+**Cómo se usa:** con el esquema de los entrenos que comparten formulario, API y base de datos (I3.2), en `tests/unit/entreno.schema.test.ts`:
 
 ```ts
 // Archivo: tests/unit/entreno.schema.test.ts
@@ -100,35 +100,37 @@ describe("EntrenoSchema: cada dato incorrecto, su mensaje", () => {
 });
 ```
 
-- **Dos `Date` con la misma fecha no son `toBe`:** son dos objetos distintos. `toEqual` compara lo que contienen.
-- **`toEqual` ignora las claves con `undefined`.** Zod devuelve `km: undefined` y `notas: undefined` cuando el campo llega vacío, y `toEqual` da por bueno un objeto sin esas claves. `toStrictEqual` no. En I3.2 eso importó: el _driver_ de MongoDB guarda una clave `undefined` como `null`, y por eso el repositorio abre la colección con `ignoreUndefined: true`.
+- **Dos `Date` con la misma fecha no son `toBe`:** son objetos distintos; `toEqual` compara el contenido.
+- **`toEqual` ignora las claves `undefined`,** y Zod devuelve `km: undefined` con el campo vacío; `toStrictEqual`, no. En I3.2 importó: MongoDB guarda `undefined` como `null`, de ahí `ignoreUndefined: true`.
 - **`toThrow` acepta la clase, el mensaje o un objeto parcial** (`expect.objectContaining`), que comprueba también el código HTTP y los errores por campo.
 
 <Callout type="risk">
 
-- **Para `toThrow`, pasa una función, no la llamada:** `expect(() => validar(…)).toThrow()` funciona; `expect(validar(…)).toThrow()` lanza el error **antes** de que `expect` pueda atraparlo, y el test falla con el error en lugar de comprobarlo.
-- **`toMatchObject` puede ser demasiado tolerante:** `expect(entreno).toMatchObject({ tipo: "running" })` pasa aunque los km sean incorrectos. Úsalo para ignorar lo que de verdad no importa, y `toEqual` cuando todo el objeto importa.
+- **A `toThrow`, una función:** `expect(() => validar(…)).toThrow()`. Con `expect(validar(…))`, el error salta antes de que `expect` lo atrape.
+- **`toMatchObject` puede ser demasiado tolerante:** `{ tipo: "running" }` pasa con los km mal. Para ignorar lo irrelevante, sí; cuando todo importa, `toEqual`.
 
 </Callout>
 
 ## Paso 2: tests parametrizados con `it.each`
 
-El segundo bloque del archivo es una **tabla**: una fila por caso, y un solo test que se ejecuta con cada fila. Para añadir un caso, se añade una línea.
+**Qué es:** una **tabla** con una fila por caso y un test que se ejecuta con cada una; añadir un caso es añadir una línea. Es el segundo bloque del archivo del Paso 1.
 
-- **Con objetos (`{ caso, cambio, campo, mensaje }`)** cada columna tiene nombre, y `$caso` en el título del test pone el valor de esa columna: "rechaza km en un entreno de fuerza".
-- **Con _arrays_ (`["sin km ni notas", {}]`)** los valores llegan por posición, y `%s` en el título pone el primero. Más corto, menos legible si hay muchas columnas.
-- **Los límites, por los dos lados:** 600 minutos se acepta y 601 se rechaza; 200 caracteres se aceptan y 201, no. Un fallo en el límite (un `>` donde iba `>=`) solo lo encuentra un test justo en el límite.
+**Cómo se usa:**
+
+- **Con objetos (`{ caso, cambio, campo, mensaje }`)** cada columna tiene nombre, y `$caso` en el título pone su valor: "rechaza km en un entreno de fuerza".
+- **Con _arrays_ (`["sin km ni notas", {}]`)** van por posición y `%s` pone el primero: más corto, menos legible con muchas columnas.
+- **Los límites, por los dos lados:** 600 minutos sí, 601 no; 200 caracteres sí, 201 no. Un `>` donde iba `>=` solo lo encuentra un test en el límite.
 
 <Callout type="risk">
 
-- **Una tabla no sustituye a pensar los casos:** ocho filas del mismo tipo de error son un solo caso repetido. Cada fila tiene que probar algo distinto.
-- **Si las filas necesitan lógica distinta** (un `if` dentro del test según la fila), son tests distintos: sepáralos.
+- **Una tabla no sustituye a pensar:** ocho filas del mismo error son un caso repetido.
+- **Si una fila necesita otra lógica** (un `if` según la fila), son tests distintos.
 
 </Callout>
 
 ## Paso 3: _fakes_, _stubs_, _spies_ y _mocks_
 
-Cuando el código depende de algo que no quieres en un test unitario (la base de datos, la red, la consola, la fecha), lo sustituyes por un **doble de prueba**:
+**Qué es:** un **doble de prueba** sustituye lo que no quieres en un test unitario (base de datos, red, consola, fecha). En Vitest, todos parten de `vi.fn()`, una función que registra sus llamadas.
 
 | Doble      | Qué es                                                          | En tu app                                                 |
 | ---------- | --------------------------------------------------------------- | --------------------------------------------------------- |
@@ -137,7 +139,7 @@ Cuando el código depende de algo que no quieres en un test unitario (la base de
 | **_Spy_**  | Registra cómo lo llamaron (y puede dejar pasar la llamada real) | `vi.spyOn(console, "error")`                              |
 | **_Mock_** | Sustituye un módulo entero                                      | `vi.mock("../../src/services", …)`                        |
 
-En Vitest, todos se construyen con `vi.fn()`, que da una función que registra sus llamadas. Primero, un _stub_ que también se usa como _spy_, para comprobar **qué** pide el servicio de resumen al repositorio. `tests/unit/resumen.spy.test.ts`:
+**Cómo se usa:** un _stub_ que hace de _spy_, para ver **qué** pide el servicio de resumen, en `tests/unit/resumen.spy.test.ts`:
 
 ```ts
 // Archivo: tests/unit/resumen.spy.test.ts
@@ -159,9 +161,9 @@ describe("servicio de resumen", () => {
 });
 ```
 
-Para un jueves por la tarde, el servicio pide la semana del lunes 12 al lunes 19 (sin incluirlo) y la anterior, del 5 al 12. Sin un _spy_, solo verías el resultado; con él, compruebas que los rangos no se solapan.
+- **Para un jueves, pide del lunes 12 al 19 (sin incluirlo) y del 5 al 12:** sin el _spy_ solo verías el resultado; con él, que los rangos no se solapan.
 
-Ahora la capa HTTP. `GET /api/resumen` lee la URL, comprueba la sesión, valida `?semana`, llama al servicio y responde. Para probar **solo** eso, sin MongoDB, se sustituye el módulo de los servicios con `vi.mock`, se construye a mano el contexto de Astro (la URL y `locals`) y se fija la fecha de hoy. `tests/unit/api-resumen.test.ts`:
+La capa HTTP de `GET /api/resumen`, sola: servicios sustituidos con `vi.mock`, el contexto de Astro (URL y `locals`) construido a mano y la fecha fija. `tests/unit/api-resumen.test.ts`:
 
 ```ts
 // Archivo: tests/unit/api-resumen.test.ts
@@ -263,22 +265,24 @@ Tests  22 passed (22)
 Duration  325ms (setup 48%, import 34%, transform 14%, tests 3%, worker 1%)
 ```
 
-- **`vi.mock` se ejecuta antes que los `import`**, aunque esté escrito después: Vitest lo sube al principio del archivo. Así, cuando el _endpoint_ importa `servicios`, recibe el falso.
-- **`vi.mocked(…)`** solo sirve para TypeScript: le dice que la función es un _mock_ y tiene `mockRejectedValueOnce`. `mockRejectedValueOnce` hace que **la siguiente** llamada falle, y solo esa.
-- **`vi.spyOn(console, "error").mockImplementation(() => {})`** registra las llamadas y, además, evita que el error ensucie la salida de los tests. `mockRestore()` devuelve a `console.error` su comportamiento normal.
-- **Las llamadas registradas no pasan de un test a otro:** Vitest 5 trae `clearMocks: true` por defecto, y las borra antes de cada test. Comprobado: sin ninguna limpieza en `afterEach`, el test del 422 (`not.toHaveBeenCalled()`) sigue pasando después de los dos que llaman al servicio.
+- **`vi.mock` se ejecuta antes que los `import`:** Vitest lo sube al principio, y el _endpoint_ recibe el falso.
+- **`vi.mocked(…)`** es solo para TypeScript; **`mockRejectedValueOnce`** hace fallar solo la siguiente llamada.
+- **`vi.spyOn(console, "error").mockImplementation(() => {})`** registra sin ensuciar la salida, y **`mockRestore()`** lo devuelve a la normalidad.
+- **Las llamadas no pasan de un test a otro:** Vitest 5 trae `clearMocks: true`. Comprobado: sin limpieza, el `not.toHaveBeenCalled()` del 422 sigue pasando tras los tests que llaman al servicio.
 
 <Callout type="risk">
 
-- **Cada _mock_ es una suposición:** este test supone que `servicios.resumen.semanal` devuelve algo que se puede pasar a JSON. Si el servicio real cambia su firma, el test seguirá en verde. Por eso los _mocks_ no sustituyen a los tests de integración (I8.4), que usan las piezas reales.
-- **`clearMocks` borra las llamadas, no las implementaciones:** un `mockImplementation` o un `spyOn` siguen activos en el test siguiente. Por eso el _spy_ de la consola termina con `mockRestore()`. Si prefieres que se restaure siempre, activa `restoreMocks: true` en la configuración.
-- **No hagas _mock_ de lo que estás probando:** si sustituyes `validar` en el test del _endpoint_, ya no compruebas que el 422 funciona.
+- **Cada _mock_ es una suposición:** si el servicio real cambia de firma, este test sigue en verde. Por eso existen los de integración (I8.4).
+- **`clearMocks` borra llamadas, no implementaciones:** un `spyOn` sigue activo, de ahí `mockRestore()` (o `restoreMocks: true`).
+- **No hagas _mock_ de lo que pruebas:** sustituir `validar` dejaría de comprobar el 422.
 
 </Callout>
 
 ## Paso 4: el reloj falso y la zona horaria
 
-El test del _endpoint_ necesita que "hoy" sea siempre el mismo día; si no, su resultado cambiaría cada semana. `vi.useFakeTimers()` sustituye el reloj, y `vi.setSystemTime()` lo pone en la fecha que digas. Pero sustituye **todo**: la fecha y también los temporizadores (`setTimeout`, `setInterval`, `setImmediate`). Mira la diferencia, con una espera de 10 ms:
+**Qué es:** `vi.useFakeTimers()` sustituye el reloj y `vi.setSystemTime()` fija "hoy". Pero sustituye **todo**: la fecha y los temporizadores (`setTimeout`, `setInterval`, `setImmediate`).
+
+**Cómo se usa:** la diferencia con una espera de 10 ms:
 
 ```ts
 // Archivo: tests/unit/reloj.test.ts
@@ -318,9 +322,9 @@ Error: Test timed out in 1000ms.
 Tests  1 failed | 2 passed (3)
 ```
 
-Con el reloj falso completo, el `setTimeout` de 10 ms no se dispara nunca, y el test se queda esperando hasta su límite. Por eso el test del _endpoint_ usa **`toFake: ["Date"]`**: solo la fecha es falsa, y cualquier librería que use temporizadores sigue funcionando. (Este archivo solo es una demostración: no lo dejes en `tests/`, porque el primer test falla a propósito.)
+- **Con el reloj falso completo, el `setTimeout` no se dispara nunca** y el test espera hasta su límite. Por eso el _endpoint_ usa **`toFake: ["Date"]`**: solo la fecha. (No dejes este archivo en `tests/`: su primer test falla a propósito).
 
-Ahora rompe el _endpoint_ a propósito, como si alguien hubiera olvidado la `Z` (UTC) de la fecha. En `src/pages/api/resumen.ts`, cambia `` `${semana}T00:00:00Z` `` por `` `${semana}T00:00:00` ``. Sin la `Z`, JavaScript interpreta la hora en la zona horaria **del ordenador**:
+Rompe el _endpoint_ a propósito: en `src/pages/api/resumen.ts`, `` `${semana}T00:00:00Z` `` pasa a `` `${semana}T00:00:00` ``, sin la `Z`, y la hora se interpreta en la zona **del ordenador**:
 
 ```text
  FAIL  tests/unit/api-resumen.test.ts > GET /api/resumen > con ?semana usa ese día, a las 00:00 UTC
@@ -338,7 +342,7 @@ Number of calls: 1
       Tests  1 failed | 4 passed (5)
 ```
 
-El test lo detecta: el lunes 5 empieza a las 06:00 UTC, la medianoche de Ciudad de México. Pero ejecuta el mismo test, con el mismo error, en tres zonas horarias:
+- **El test lo detecta:** el lunes 5 empieza a las 06:00 UTC, la medianoche de México. Con el mismo error, en tres zonas:
 
 ```text
 TZ=America/Mexico_City  1 failed | 4 passed (5)
@@ -346,7 +350,7 @@ TZ=Europe/Madrid        1 failed | 4 passed (5)
 TZ=UTC                  5 passed (5)
 ```
 
-**En UTC, el test pasa.** Y UTC es la zona horaria de casi todos los servidores de CI (GitHub Actions) y de despliegue (Vercel): el bug llegaría a producción con todos los tests en verde. La solución es fijar en los tests una zona horaria que **no** sea UTC. Sustituye `vitest.config.ts`:
+- **En UTC pasa,** y UTC es la zona de casi todo CI (GitHub Actions) y despliegue (Vercel): el bug llegaría a producción con todo en verde. Fija en los tests una zona que **no** sea UTC; sustituye `vitest.config.ts`:
 
 ```ts
 // Archivo: vitest.config.ts
@@ -370,12 +374,12 @@ Con env: { TZ: "America/Mexico_City" } en vitest.config.ts, y el endpoint sin la
   TZ=Europe/Madrid   1 failed | 4 passed (5)
 ```
 
-Ahora el test falla en cualquier máquina. Deshaz el cambio del _endpoint_ y vuelve a ejecutar: todo en verde.
+- **Ahora falla en cualquier máquina.** Deshaz el cambio del _endpoint_: todo en verde.
 
 <Callout type="risk">
 
-- **Restaura siempre el reloj real** (`vi.useRealTimers()` en `afterEach`): si un test falla antes de llegar al final, el reloj falso se quedaría para los siguientes.
-- **La zona horaria fija no sustituye a guardar las fechas en UTC:** solo hace que los errores de zona horaria se vean. Las fechas se guardan y se comparan en UTC (`Date.UTC`, `getUTCDay`, como `lunesDe`), y se convierten a la hora local solo para mostrarlas.
+- **Restaura el reloj real** (`vi.useRealTimers()` en `afterEach`): si un test falla antes del final, el falso se quedaría para los siguientes.
+- **La zona fija no sustituye a guardar en UTC:** solo hace visibles los errores. Se guarda y compara en UTC (`Date.UTC`, `getUTCDay`, como `lunesDe`) y se convierte solo al mostrar.
 
 </Callout>
 
@@ -388,7 +392,7 @@ Ahora el test falla en cualquier máquina. Deshaz el cambio del _endpoint_ y vue
 
 </Callout>
 
-Solución. Copia en tu app de entrenos `src/lib/preguntas.ts` y `src/lib/cuestionario.ts` tal como los dejaste en I2.3. `tests/unit/cuestionario.test.ts`:
+Solución. Copia `src/lib/preguntas.ts` y `src/lib/cuestionario.ts` de I2.3. `tests/unit/cuestionario.test.ts`:
 
 ```ts
 // Archivo: tests/unit/cuestionario.test.ts
@@ -530,13 +534,12 @@ Tests  22 passed (22)
 Duration  70ms (transform 58%, import 22%, tests 12%, worker 6%, environment 2%)
 ```
 
-- **Cada acción, en cada fase:** `elegir`, `ir` y `enviar` cambian el estado en `"respondiendo"` y no hacen nada en `"resultado"`; `repetir` funciona en las dos.
-- **"No hace nada" se comprueba con `toBe`:** el _reducer_ devuelve **el mismo** objeto, y así React sabe que no tiene que volver a pintar. Con `toEqual`, un _reducer_ que devolviera una copia idéntica también pasaría.
-- **"Devuelve uno nuevo" se comprueba también:** si `elegir` modificara el estado anterior en lugar de crear otro, React no vería el cambio.
-- **Los casos límite:** `ir` fuera de rango por los dos lados, enviar con huecos, enviar dos veces, menos preguntas que respuestas y un cuestionario sin preguntas.
-- **Un test documenta una decisión:** "acepta cualquier número" no es un bug que arreglar, sino lo que hace el _reducer_: la opción la valida el componente, que solo ofrece las que existen. Si algún día cambia, el test avisará.
+- **Cada acción en cada fase:** `elegir`, `ir` y `enviar` cambian el estado en `"respondiendo"` y no hacen nada en `"resultado"`; `repetir`, en las dos.
+- **"No hace nada" con `toBe`:** el mismo objeto, para que React no repinte; con `toEqual`, una copia idéntica también pasaría. Y **"devuelve uno nuevo"** también se comprueba, o React no vería el cambio.
+- **Casos límite:** `ir` fuera de rango por los dos lados, enviar con huecos o dos veces, menos preguntas que respuestas y ninguna pregunta.
+- **"Acepta cualquier número" documenta una decisión:** la opción la valida el componente. Si cambia, el test avisará.
 
-La cobertura, solo de ese archivo (la herramienta la instalas aquí y la verás a fondo en I8.6):
+La cobertura de ese archivo (la herramienta se instala aquí y se ve a fondo en I8.6):
 
 ```bash
 npm install --save-dev @vitest/coverage-v8
@@ -550,12 +553,12 @@ Functions    : 100% ( 5/5 )
 Lines        : 100% ( 14/14 )
 ```
 
-Las 14 ramas del _reducer_ (cada `case` y cada `if`) se ejecutan al menos una vez.
+- **Las 14 ramas del _reducer_** (cada `case` y cada `if`) se ejecutan al menos una vez.
 
 <Callout type="risk">
 
-- **El 100 % de cobertura dice que cada rama se ejecutó, no que se comprobó bien:** un test sin `expect` también "cubre" el código. Lo que importa son las comprobaciones de cada test.
-- **No uses el código para calcular lo esperado:** `expect(enviado()).toEqual(reducer(…))` compara el _reducer_ consigo mismo. Lo esperado se escribe a mano: `{ fase: "resultado", respuestas: [1, 1, 0], aciertos: 2 }`.
+- **El 100 % dice que cada rama se ejecutó, no que se comprobó:** un test sin `expect` también "cubre".
+- **Lo esperado, a mano:** `expect(enviado()).toEqual(reducer(…))` compara el _reducer_ consigo mismo. Se escribe `{ fase: "resultado", respuestas: [1, 1, 0], aciertos: 2 }`.
 
 </Callout>
 
@@ -567,8 +570,8 @@ Cubres los casos límite antes de que aparezcan en producción: eliges el _match
 
 ## Resumen
 
-- `toBe` (identidad), `toEqual` (contenido, ignora `undefined`), `toStrictEqual` (todo), `toMatchObject` (lo que indiques) y `toThrow` (con una función).
-- `it.each` con objetos y `$columna`: una fila por caso, y los límites por los dos lados.
-- _Fake_, _stub_, _spy_ y _mock_: `vi.fn()`, `vi.spyOn()` y `vi.mock()`. Vitest borra las llamadas entre tests (`clearMocks`), pero no las implementaciones.
-- `vi.useFakeTimers({ toFake: ["Date"] })` y `vi.setSystemTime()` fijan "hoy" sin congelar los temporizadores.
-- `env: { TZ: "America/Mexico_City" }` en `vitest.config.ts`: los bugs de zona horaria salen también en un servidor en UTC.
+- `toBe`, `toEqual` (ignora `undefined`), `toStrictEqual`, `toMatchObject` y `toThrow` con una función.
+- `it.each` con `$columna`: una fila por caso y los límites por los dos lados.
+- `vi.fn()`, `vi.spyOn()` y `vi.mock()`; `clearMocks` borra llamadas, no implementaciones.
+- `vi.useFakeTimers({ toFake: ["Date"] })` fija "hoy" sin congelar temporizadores.
+- `env: { TZ: "America/Mexico_City" }`: los bugs de zona horaria salen también en UTC.

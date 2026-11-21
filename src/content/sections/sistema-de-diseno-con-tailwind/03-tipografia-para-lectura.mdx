@@ -7,9 +7,7 @@ minutes: 60
 summary: "Eliges serif, sans y mono, mides lo que ahorra precargar la fuente y qué subconjuntos descarga el navegador, ajustas la medida a 70 caracteres por línea y ligas prose y Shiki a los tokens, en claro y oscuro."
 ---
 
-Esta plataforma es, sobre todo, texto: lecciones de miles de palabras que alguien lee durante media hora. En una interfaz, la tipografía es un detalle; en una lección, es lo que decide si se lee con gusto o se abandona. Tres cosas lo deciden casi todo: la **fuente**, el **largo de cada línea** y el **espacio entre líneas**. Y una cuarta técnica: que la fuente llegue a tiempo y no cambie el texto de sitio mientras se lee. En esta sección vas a montar la tipografía de una lección en `tw-lab`, midiendo cada decisión: cuánto tarda la fuente, cuántos caracteres caben por línea y qué colores tiene cada elemento en los dos temas.
-
-**Lo que tendrás al terminar:** tres fuentes (serif, sans y mono) cargadas con Fontsource, el _layout_ `LayoutLectura.astro`, el `prose` de Tailwind ligado a tus _tokens_ y los bloques de código de Shiki con un tema claro y otro oscuro.
+Esta plataforma es sobre todo texto que se lee durante media hora, y la tipografía decide si se lee con gusto o se abandona. Lo deciden la **fuente**, el **largo de línea**, el **interlineado** y que la fuente llegue a tiempo sin mover el texto. Aquí montas la tipografía de una lección en `tw-lab` y mides cada decisión.
 
 **Requisitos:** el proyecto `tw-lab` de I7.2, con los _tokens_ claros y oscuros.
 
@@ -19,20 +17,18 @@ npm install @fontsource-variable/jetbrains-mono
 
 ## Paso 1: tres fuentes y cómo se cargan
 
+**Qué es:** una familia por uso, y **Fontsource**, que empaqueta cada fuente en npm con su CSS y la sirve desde tu dominio, sin Google Fonts.
+
 | Uso                | Familia       | En esta plataforma | Por qué                                                                                     |
 | ------------------ | ------------- | ------------------ | ------------------------------------------------------------------------------------------- |
 | Texto largo        | Serif         | Source Serif 4     | Los remates guían el ojo a lo largo de la línea; cansa menos en lecturas largas             |
 | Interfaz y títulos | Sans-serif    | Inter              | Limpia y legible en tamaños pequeños (botones, menús, etiquetas)                            |
 | Código             | Monoespaciada | JetBrains Mono     | Todos los caracteres miden lo mismo: el código se alinea, y `0`/`O` y `1`/`l` se distinguen |
 
-**Fontsource** empaqueta cada fuente como un paquete de npm, con el CSS listo y los archivos en tu propio dominio, sin pedir nada a Google Fonts. Sus `@font-face` traen dos cosas importantes, que puedes ver en `node_modules/@fontsource-variable/inter/index.css`:
+- **`font-display: swap`:** mientras descarga, el texto se pinta con la de reserva (Georgia, `system-ui`…) y se cambia al llegar.
+- **Subconjuntos con `unicode-range`:** Inter viene en 7 archivos (latín, cirílico, griego…) y solo se descargan los que usa la página; para el español basta `latin`, con ñ y acentos (`node_modules/@fontsource-variable/inter/index.css`).
 
-- **`font-display: swap`:** mientras la fuente descarga, el navegador pinta el texto con la de reserva (Georgia, `system-ui`…) y la cambia cuando llega. El texto se ve desde el principio.
-- **Subconjuntos con `unicode-range`:** Inter viene partida en 7 archivos (latín, latín extendido, cirílico, griego, vietnamita…). El navegador solo descarga los que contienen caracteres que la página usa. Para el español basta el `latin`, que incluye la ñ y los acentos.
-
-Las fuentes de las letras se cargan en `src/styles/global.css`, que en el Paso 3 tendrá su forma final. Lo que cambia respecto a I7.2: el `@import` de JetBrains Mono y `--font-mono` en `@theme`.
-
-Para el texto principal conviene un paso más: **precargar** la fuente. Normalmente, el navegador no sabe que necesita una fuente hasta que ha descargado y leído el CSS; con `<link rel="preload">` la pide a la vez que el CSS. Añade un hueco para el `<head>` en tu _layout_. Sustituye `src/layouts/Layout.astro`:
+**Cómo se usa:** las fuentes se cargan en `src/styles/global.css` (forma final en el Paso 3; respecto a I7.2, el `@import` de JetBrains Mono y `--font-mono`). Para el texto principal, además, **precarga**: con `<link rel="preload">` se pide a la vez que el CSS, no después. Añade un hueco para el `<head>` en `src/layouts/Layout.astro`:
 
 ```astro
 ---
@@ -106,10 +102,10 @@ const { frontmatter } = Astro.props;
 </Layout>
 ```
 
-- **`?url`** le dice a Vite que importe la **dirección** del archivo, con el mismo nombre con _hash_ que usa el CSS (`source-serif-4-latin-wght-normal.DMe4EKeb.woff2` en ambos). Si fueran distintos, la fuente se descargaría dos veces.
-- **`crossorigin`** es obligatorio en la precarga de fuentes, aunque sea del mismo dominio: sin él, el navegador no reutiliza la descarga y la pide otra vez.
+- **`?url`** importa la **dirección** del archivo con el mismo nombre con _hash_ que usa el CSS (`source-serif-4-latin-wght-normal.DMe4EKeb.woff2`); si no coincidieran, se descargaría dos veces.
+- **`crossorigin` es obligatorio** en la precarga de fuentes, aunque sean del mismo dominio, o el navegador la pide otra vez.
 
-Medido en la página de prueba del Paso 2, en el _build_ de producción con una red lenta (300 ms de latencia, 400 KB/s):
+En el _build_, con 300 ms de latencia y 400 KB/s:
 
 ```text
 Con preload de Source Serif 4:
@@ -124,21 +120,22 @@ Sin preload:
   jetbrains-mono-latin-wght-normal.woff2       39.5 KB · empieza   696 ms · termina  1312 ms
 ```
 
-- **Con la precarga, la fuente del texto llega 556 ms antes** (802 ms frente a 1358 ms): empieza a la vez que el CSS, en lugar de esperar a que termine.
-- **Solo se descargan los 3 archivos `latin`** (unos 136 KB en total) de los 19 subconjuntos que declaran los tres paquetes (7 de Inter, 6 de cada una de las otras).
-- **Inter y JetBrains Mono, sin precargar,** esperan al CSS. Es lo correcto: precargar todo competiría con el CSS y la fuente principal por la misma red lenta.
+- **Con la precarga, la fuente llega 556 ms antes** (802 frente a 1358 ms): empieza a la vez que el CSS.
+- **Solo bajan los 3 archivos `latin`** (unos 136 KB) de los 19 subconjuntos declarados. Inter y JetBrains Mono esperan al CSS, y está bien: precargarlas competiría por la red.
 
 <Callout type="risk">
 
-- **Precarga solo la fuente del texto principal, y solo el subconjunto que se usa:** cada precarga es una descarga que el navegador hace **siempre**, aunque la página no la necesite. Precargar las tres (o el cirílico, que nadie usa) retrasa el resto.
-- **`swap` cambia el texto de sitio al llegar la fuente:** si la fuente de reserva es mucho más ancha o más estrecha, los párrafos se reorganizan mientras se lee (un _layout shift_, CLS). Elige fuentes de reserva de proporciones parecidas (Georgia para la serif, `system-ui` para la sans) y precarga la principal: cuanto antes llega, menos texto se mueve.
-- **Con fuentes variables, un archivo sirve para todos los pesos:** `@fontsource-variable/inter` trae del 100 al 900 en un solo `.woff2` por subconjunto. Con el paquete estático (`@fontsource/inter`), cada peso es otro archivo.
+- **Precarga solo la fuente principal y su subconjunto:** cada precarga se descarga **siempre**, la use o no la página.
+- **`swap` mueve el texto al llegar la fuente** (CLS) si la de reserva tiene otras proporciones. Georgia para la serif, `system-ui` para la sans, y la principal precargada.
+- **Las fuentes variables traen todos los pesos en un archivo** por subconjunto; con `@fontsource/inter` (estático), cada peso es otro.
 
 </Callout>
 
 ## Paso 2: medida, interlineado y escala
 
-Crea una página de prueba en Markdown con el contenido típico de una lección (títulos, párrafos, listas, cita, código y tabla). Astro usa el _layout_ indicado en el _frontmatter_. `src/pages/lectura.md`:
+**Qué es:** la **medida** (caracteres por línea) es más cómoda entre 60 y 75: con más, cuesta volver al principio de la siguiente; con menos, se salta demasiado. El **interlineado** de un texto largo, entre 1,6 y 1,8.
+
+**Cómo se usa:** una página de prueba en Markdown con lo típico de una lección (títulos, párrafos, listas, cita, código y tabla), con el _layout_ en el _frontmatter_. `src/pages/lectura.md`:
 
 ````md
 ---
@@ -185,7 +182,7 @@ Los operadores más usados:
 | Borrado lógico | Ninguno (los marca) | Sí |
 ````
 
-La medida de cada elemento, en Chrome, contando los caracteres de cada línea del primer párrafo:
+En Chrome, contando los caracteres de cada línea del primer párrafo:
 
 ```text
 Con max-w-[68ch], a 1280 px:
@@ -201,22 +198,22 @@ Sin límite (max-w-none), a 1280 px:
   artículo de 1248 px · caracteres por línea: 143 (media 143)
 ```
 
-- **La medida: 70 caracteres por línea.** Las líneas de entre 60 y 75 caracteres son las más cómodas: con más, al ojo le cuesta volver al principio de la siguiente; con menos, salta de línea demasiado. `max-w-[68ch]` da unos 70, porque `ch` es el ancho del carácter `0`, algo mayor que la media de las letras de un texto.
-- **Sin límite, 143:** el mismo párrafo a 1280 px de ancho. Ilegible para una lectura larga.
-- **En el móvil, 40:** la pantalla manda, y el tamaño de 18 px mantiene la letra legible.
-- **El interlineado, 1,78:** `prose-lg` da 18 px de letra con 32 px de línea, dentro del rango de 1,6 a 1,8 para texto largo. Los títulos van más apretados (1,33 en `h2`), porque son cortos.
-- **La escala:** 48, 30 y 18 px para `h1`, `h2` y texto. Cada nivel se distingue de un vistazo. El código baja a 14,2 px, porque la monoespaciada es más ancha.
+- **70 caracteres por línea con `max-w-[68ch]`:** `ch` es el ancho del `0`, algo mayor que la media de un texto. Sin límite, 143 a 1280 px; en el móvil, 40, con 18 px de letra.
+- **Interlineado 1,78:** `prose-lg` da 18 px de letra y 32 de línea; los títulos, cortos, más apretados (1,33 en `h2`).
+- **Escala 48, 30 y 18 px** para `h1`, `h2` y texto; el código baja a 14,2 px porque la monoespaciada es más ancha.
 
 <Callout type="risk">
 
-- **`prose-headings:font-sans` cambia solo los títulos:** el _layout_ usa serif para el texto e Inter para los títulos, como esta plataforma. Mezcla como mucho dos familias en el texto (más la del código).
-- **El interlineado de `h1` es 1,0:** bien para un título de una línea, pero uno largo que ocupe dos líneas quedará muy apretado. Si tus títulos son largos, `prose-h1:leading-tight`.
+- **`prose-headings:font-sans` cambia solo los títulos:** serif para el texto e Inter para títulos, como esta plataforma. Dos familias como mucho, más la del código.
+- **`h1` con interlineado 1,0** va bien en una línea; un título largo en dos queda apretado: `prose-h1:leading-tight`.
 
 </Callout>
 
 ## Paso 3: `prose` y Shiki con los _tokens_
 
-El plugin `@tailwindcss/typography` (B7.5) define sus colores con variables (`--tw-prose-body`, `--tw-prose-links`…). Si las apuntas a tus _tokens_, el mismo `prose` sirve para los dos temas sin `dark:prose-invert`. Y los bloques de código los colorea **Shiki**, que Astro trae integrado: con `themes` y `defaultColor: false`, cada palabra lleva su color de los dos temas (`--shiki-light` y `--shiki-dark`), y el CSS elige uno. Sustituye `astro.config.mjs`:
+**Qué es:** `@tailwindcss/typography` (B7.5) define sus colores con variables (`--tw-prose-body`, `--tw-prose-links`…); apuntadas a tus _tokens_, el mismo `prose` sirve en los dos temas sin `dark:prose-invert`. **Shiki**, integrado en Astro, colorea el código: con `themes` y `defaultColor: false`, cada palabra lleva sus dos colores (`--shiki-light` y `--shiki-dark`) y el CSS elige.
+
+**Cómo se usa:** sustituye `astro.config.mjs`.
 
 ```js
 // @ts-check
@@ -378,9 +375,9 @@ Y `src/styles/global.css`:
 
 <Callout type="risk">
 
-- **Con `defaultColor: false`, sin CSS no hay color:** las palabras del código solo llevan las variables, y el bloque se vería del color del texto. Las reglas `.astro-code span { color: var(--shiki-light) }` y su versión `[data-theme="dark"]` son obligatorias.
-- **El `!important` del fondo** gana al color de fondo que Shiki escribe en el atributo `style` de cada bloque. Así todos los bloques usan `--surface`, el mismo fondo que el código en línea.
-- **Los temas de Shiki no siempre llegan al contraste AA sobre tu fondo:** esta plataforma ajusta cuatro colores del tema claro de GitHub en su `global.css`. Lo medirás en I7.4.
+- **Con `defaultColor: false`, sin CSS no hay color:** las reglas `.astro-code span { color: var(--shiki-light) }` y su versión `[data-theme="dark"]` son obligatorias.
+- **El `!important` del fondo** gana al `style` que Shiki pone en cada bloque, y todos usan `--surface`, como el código en línea.
+- **Los temas de Shiki no siempre llegan al AA sobre tu fondo:** esta plataforma ajusta cuatro colores de GitHub claro en su `global.css` (I7.4).
 
 </Callout>
 
@@ -393,7 +390,7 @@ Y `src/styles/global.css`:
 
 </Callout>
 
-Solución: la página `/lectura` de los pasos, con `LayoutLectura`, el `prose` ligado a los _tokens_ y Shiki con dos temas. La medida y el interlineado están en el Paso 2. Los colores calculados de cada elemento, con el tema claro y con el oscuro guardados:
+Solución: la página `/lectura` de los pasos; la medida y el interlineado están en el Paso 2. Los colores de cada elemento, con el tema claro y el oscuro guardados:
 
 ```text
 light:
@@ -414,14 +411,14 @@ dark:
   await        rgb(249, 117, 131)
 ```
 
-- **Todo cambia con el tema, sin una sola clase `dark:`:** fondo, texto, títulos, el borde de la cita (el acento), el código en línea y el fondo de los bloques. Es el efecto de ligar `prose` a los _tokens_.
-- **El código también cambia de paleta:** la palabra `await` pasa del rojo de `github-light` (`rgb(215, 58, 73)`) al de `github-dark` (`rgb(249, 117, 131)`), más claro, para leerse sobre fondo oscuro.
-- **El texto oscuro no es blanco puro** (`rgb(230, 237, 243)`), y el fondo, `rgb(13, 17, 23)`. Esa diferencia, menor que la de blanco sobre negro, es lo que hace llevadera una lectura larga en oscuro.
+- **Todo cambia con el tema sin una sola clase `dark:`:** fondo, texto, títulos, el borde de la cita, el código en línea y el fondo de los bloques.
+- **El código cambia de paleta:** `await` pasa del rojo de `github-light` (`rgb(215, 58, 73)`) al de `github-dark` (`rgb(249, 117, 131)`), más claro.
+- **El texto oscuro no es blanco puro** (`rgb(230, 237, 243)`) sobre `rgb(13, 17, 23)`: esa diferencia menor hace llevadera la lectura larga.
 
 <Callout type="risk">
 
-- **Lee tú la página 20 minutos antes de darla por buena:** las medidas dicen si está dentro de los rangos, no si es cómoda. Un interlineado de 1,78 en una fuente con letras muy altas puede sentirse apretado; con otra, separado.
-- **Comprueba el contraste de cada color, no solo el del texto:** los enlaces (`--accent-strong`), el texto secundario y los colores del código tienen que llegar a 4,5:1 (I7.4).
+- **Lee tú la página 20 minutos:** las medidas dicen si está en rango, no si es cómoda; según la fuente, 1,78 puede sentirse apretado o separado.
+- **Mide el contraste de cada color,** no solo el del texto: enlaces (`--accent-strong`), texto secundario y código, a 4,5:1 (I7.4).
 
 </Callout>
 
@@ -433,8 +430,8 @@ Puedes leer 20 minutos seguidos en tu página sin fatiga: el texto va en serif a
 
 ## Resumen
 
-- Serif para el texto largo, sans-serif para la interfaz y los títulos, monoespaciada para el código.
-- Fontsource: `font-display: swap` y subconjuntos con `unicode-range` (para español, solo `latin`). Precarga solo la fuente principal: 556 ms antes, medido.
-- Medida de 60 a 75 caracteres (`max-w-[68ch]` ≈ 70) e interlineado de 1,6 a 1,8 (`prose-lg`: 1,78).
-- `prose` ligado a los _tokens_ con sus variables `--tw-prose-*`: sin `prose-invert`.
-- Shiki con `themes` y `defaultColor: false`, y CSS que elige `--shiki-light` o `--shiki-dark` según `data-theme`.
+- Serif para leer, sans-serif para interfaz y títulos, monoespaciada para código.
+- Fontsource con `swap` y `unicode-range`; precargar la principal la adelantó 556 ms.
+- Medida de 60 a 75 caracteres (`max-w-[68ch]` ≈ 70) e interlineado de 1,6 a 1,8.
+- `prose` ligado a los _tokens_ con `--tw-prose-*`, sin `prose-invert`.
+- Shiki con `themes` y `defaultColor: false`, y CSS que elige el color por `data-theme`.

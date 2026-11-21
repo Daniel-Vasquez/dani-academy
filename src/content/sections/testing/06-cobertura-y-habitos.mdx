@@ -7,15 +7,15 @@ minutes: 60
 summary: "Mides la cobertura y ves dos bugs reales en archivos al 100 %, arreglas uno con TDD (rojo, verde), repasas las causas de los tests inestables vistas en el curso y dejas scripts, carpetas y un hook pre-push."
 ---
 
-Ya tienes tests en las tres capas: unitarios, de integración, de componentes y E2E. Queda lo que hace que sigan siendo útiles dentro de un año: saber qué te dice (y qué no) la **cobertura**, convertir cada bug en un test antes de arreglarlo, evitar los tests que fallan "a veces" y organizarlo todo para que ejecutarlos no cueste nada. En esta sección vas a medir la cobertura de tu app y a descubrir lo que esconde, a arreglar un bug real con TDD y a dejar los tests ordenados y vigilando cada `git push`.
+Con tests en todas las capas, falta lo que los mantiene útiles dentro de un año: saber qué dice (y qué no) la **cobertura**, convertir cada bug en un test antes de arreglarlo, evitar los tests que fallan "a veces" y que ejecutarlos no cueste nada. Aquí mides la cobertura de tu app, arreglas un bug real con TDD y dejas los tests vigilando cada `git push`.
 
-**Lo que tendrás al terminar:** la cobertura configurada, dos bugs menos (el ritmo `4:60` y los km con coma), la suite en orden aleatorio en cada ejecución, los _scripts_ de `package.json` y un _hook_ `pre-push`.
-
-**Requisitos:** la app de entrenos de I8.5, con `@vitest/coverage-v8` (lo instalaste en I8.2).
+**Requisitos:** la app de entrenos de I8.5, con `@vitest/coverage-v8` (instalado en I8.2).
 
 ## Paso 1: la cobertura, una pista y no un objetivo
 
-La **cobertura** mide qué líneas y qué ramas (cada lado de un `if`) se ejecutaron durante los tests. Añádela a la configuración y deja los _scripts_ de los tests. Sustituye `vitest.config.ts`:
+**Qué es:** la **cobertura** mide qué líneas y qué ramas (cada lado de un `if`) se ejecutaron en los tests. Dice dónde no hay tests; no que lo probado esté bien.
+
+**Cómo se usa:** sustituye `vitest.config.ts` (`sequence`, en el Paso 3):
 
 ```ts
 // Archivo: vitest.config.ts
@@ -41,7 +41,7 @@ export default getViteConfig({
 });
 ```
 
-(La opción `sequence` se explica en el Paso 3). Y en `package.json`:
+Y los _scripts_ de `package.json`:
 
 ```json
 {
@@ -57,11 +57,10 @@ export default getViteConfig({
 }
 ```
 
-- **`npm test`** deja Vitest vigilando: vuelve a ejecutar los tests afectados cada vez que guardas un archivo. Es el que tienes abierto mientras programas.
-- **`npm run test:run`** los ejecuta una vez y termina: para el _hook_ y para CI.
-- **`coverage.include` con `src/**`\*\* hace que salgan también los archivos que ningún test importa, con un 0 %. Sin él, solo verías la cobertura de lo que ya tiene tests.
+- **`npm test`** deja Vitest vigilando y reejecuta lo afectado al guardar; **`npm run test:run`** ejecuta una vez y termina, para el _hook_ y CI.
+- **`coverage.include`** con `src/**` muestra también los archivos sin ningún test, al 0 %.
 
-`npm run test:coverage`. Un extracto de la tabla, y el total:
+`npm run test:coverage`, un extracto y el total:
 
 ```text
 -------------------|---------|----------|---------|---------|-------------------
@@ -82,29 +81,22 @@ All files          |   50.41 |    50.66 |   54.74 |   51.95 |
 Al 100 % (líneas y ramas): components/CampoTexto.tsx, components/FormRegistro.tsx, lib/auth-client.ts, lib/cuestionario.ts, lib/preguntas.ts, lib/ritmo.ts, pages/api/resumen.ts, repositories/index.ts, schemas/auth.ts, schemas/entreno.ts, services/index.ts, services/resumen.service.ts
 ```
 
-La tabla dice dos cosas útiles:
-
-- **Dónde no hay ningún test:** `middleware.ts`, `FormEntrar.tsx`, `Objetivo.tsx`, `redireccion.ts`. Algunos los cubren los E2E (el _middleware_ y el login), pero Vitest no ve lo que ejecuta Playwright. Es una lista de candidatos, no de deberes: cada uno se decide con las preguntas de I8.1.
-- **Qué rama se quedó sin probar** en código que sí tiene tests: la línea 65 del repositorio, la 28 del servicio.
-
-Y una que **no** dice: `ritmo.ts` y `schemas/entreno.ts` están al 100 % de líneas y de ramas, y los dos tienen un bug real, que arreglarás en este paso y en el ejercicio. La cobertura comprueba que cada línea se **ejecutó**; no que se ejecutara con los datos que la rompen.
+- **Dónde no hay tests:** `middleware.ts`, `FormEntrar.tsx`, `Objetivo.tsx`, `redireccion.ts`. Algunos los cubren los E2E, que Vitest no ve. Son candidatos, no deberes (I8.1).
+- **Qué rama quedó sin probar** en código con tests: la línea 65 del repositorio, la 28 del servicio.
+- **Lo que no dice:** `ritmo.ts` y `schemas/entreno.ts` están al 100 % y tienen un bug cada uno (este paso y el ejercicio). La cobertura dice que cada línea se **ejecutó**, no con los datos que la rompen.
 
 <Callout type="risk">
 
-- **No pongas un porcentaje mínimo como objetivo:** con un 80 % obligatorio, se escriben tests sin `expect` para subir el número, y el número deja de significar nada. Usa la cobertura para encontrar código sin probar, y decide tú si merece un test.
-- **La cobertura de v8 cuenta lo que ejecuta Node:** los componentes `.astro` y lo que solo prueban los E2E no aparecen. Un 52 % no significa que la mitad de la app esté sin probar.
+- **Un porcentaje mínimo como objetivo** trae tests sin `expect` para subir el número, que deja de significar nada. Úsala para encontrar código sin probar.
+- **v8 cuenta lo que ejecuta Node:** ni `.astro` ni lo que prueban los E2E. Un 52 % no es media app sin probar.
 
 </Callout>
 
 ## Paso 2: TDD aplicado a un bug
 
-Un usuario te escribe: "Corrí 30 minutos y 6,01 km, y la app dice que mi ritmo es 4:60 min/km". Antes de tocar `ritmo()`, el **TDD** (_Test-Driven Development_, desarrollo guiado por tests) propone un orden:
+**Qué es:** **TDD** (_Test-Driven Development_) ordena el arreglo: **rojo** (un test que reproduce el bug y falla, por ese motivo), **verde** (el cambio mínimo para que pase) y **refactorizar** con los tests en verde. Escribirlo primero demuestra que entiendes el bug y lo deja vigilado para siempre.
 
-1. **Rojo:** escribe un test que reproduce el bug, y comprueba que **falla**, y que falla por ese motivo.
-2. **Verde:** cambia el código lo mínimo para que pase.
-3. **Refactorizar:** limpia el código con los tests en verde, que te avisan si rompes algo.
-
-El test primero tiene dos ventajas: demuestra que entiendes el bug (si no sabes escribir el test, no sabes qué falla) y se queda para siempre, impidiendo que el bug vuelva. Añade a `tests/unit/ritmo.test.ts`, antes de "sin km no hay ritmo", una tabla con el caso del usuario y los de alrededor. El archivo completo:
+**Cómo se usa:** un usuario escribe: "Corrí 30 minutos y 6,01 km, y la app dice que mi ritmo es 4:60 min/km". Añade a `tests/unit/ritmo.test.ts`, antes de "sin km no hay ritmo", una tabla con su caso y los de alrededor:
 
 ```ts
 // Archivo: tests/unit/ritmo.test.ts
@@ -150,7 +142,7 @@ describe("ritmo", () => {
 });
 ```
 
-En la primera versión de este test, en el laboratorio del curso, el tercer caso era `{ minutos: 59.99, km: 1, esperado: "60:00 min/km" }`:
+La primera versión tenía como tercer caso `{ minutos: 59.99, km: 1, esperado: "60:00 min/km" }`:
 
 ```text
 ✓ ritmo > 45 minutos en 9 km son 5:00 min/km 1ms
@@ -171,7 +163,7 @@ Received: "59:59 min/km"
 Tests  2 failed | 6 passed (8)
 ```
 
-Dos fallos, pero solo uno es el bug. 59,99 minutos son 59 min 59,4 s, que redondea a `59:59`: **el test estaba mal**, no el código. Por eso el paso rojo consiste en leer cada fallo, no solo en verlo rojo. Con un caso correcto (y con minutos enteros, como en la app):
+- **Dos fallos, y solo uno es el bug:** 59,99 minutos son 59 min 59,4 s, que redondea a `59:59`. **El test estaba mal.** El paso rojo es leer cada fallo, no solo verlo rojo. Con un caso correcto (minutos enteros, como en la app):
 
 ```text
 ✓ ritmo > 45 minutos en 9 km son 5:00 min/km 1ms
@@ -187,7 +179,7 @@ AssertionError: expected '4:60 min/km' to be '5:00 min/km' // Object.is equality
 Tests  2 failed | 6 passed (8)
 ```
 
-Los dos fallos dicen lo mismo, `expected '4:60 min/km' to be '5:00 min/km'`, y Vitest agrupa los errores idénticos. Ahora el código. El problema está en el orden: `ritmo()` separa los minutos (4) y **después** redondea los segundos (59,5 → 60). Sustituye `src/lib/ritmo.ts`:
+- **Los dos fallos dicen `expected '4:60 min/km' to be '5:00 min/km'`,** y Vitest los agrupa. El problema es el orden: `ritmo()` separa los minutos (4) y **después** redondea los segundos (59,5 → 60). Sustituye `src/lib/ritmo.ts`:
 
 ```ts
 // Archivo: src/lib/ritmo.ts
@@ -217,18 +209,18 @@ export function ritmo(minutos: number, km: number | undefined): string | null {
 Tests  8 passed (8)
 ```
 
-Verde, y los cinco tests originales siguen pasando: el arreglo no ha roto nada de lo que ya funcionaba.
+- **Verde, y los cinco tests originales siguen pasando:** el arreglo no rompió nada.
 
 <Callout type="risk">
 
-- **Un test que pasa a la primera no prueba que reproduzca el bug:** si lo escribes después del arreglo, nunca lo has visto fallar. Vuelve al código antiguo (`git stash`) y comprueba que falla.
-- **Busca los casos de alrededor, no solo el del usuario:** 30 min en 6,01 km era uno; 47 min en 9,41 km, otro. 25 min en 5,03 km comprueba el otro lado del límite: 58,2 s se quedan en el mismo minuto.
+- **Un test que pasa a la primera no prueba que reproduzca el bug:** si lo escribes tras el arreglo, nunca lo viste fallar. `git stash` y compruébalo con el código antiguo.
+- **Prueba los casos de alrededor:** 47 min en 9,41 km es otro; 25 min en 5,03 km comprueba el otro lado (58,2 s se quedan en el mismo minuto).
 
 </Callout>
 
 ## Paso 3: tests inestables (_flaky_)
 
-Un test **_flaky_** pasa unas veces y falla otras, sin que cambie el código. Es peor que no tener test: cuando falla, nadie sabe si es un bug o "el de siempre", y al final se ignoran todos. En este curso has visto casi todas sus causas, medidas:
+**Qué es:** un test **_flaky_** pasa unas veces y falla otras sin cambiar el código. Es peor que no tener test: nadie sabe si falla por un bug o "el de siempre", y acaban ignorándose todos. Sus causas, medidas en este curso:
 
 | Causa                                    | Dónde la viste                                                                                                  | Remedio                                                               |
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
@@ -239,7 +231,7 @@ Un test **_flaky_** pasa unas veces y falla otras, sin que cambie el código. Es
 | Esperas fijas                            | I8.5: `waitForTimeout`                                                                                          | Comprobaciones que esperan solas (`expect(…).toBeVisible()`)          |
 | Algo que todavía no está listo           | Esta plataforma: un E2E de CI fallaba a veces porque empezaba antes de que el replica set tuviera nodo primario | Esperar a la condición concreta (`isWritablePrimary`), no a un tiempo |
 
-La primera causa es la más común, y la más fácil de vigilar: con **`sequence: { shuffle: true }`** en la configuración, cada ejecución usa un orden distinto. La suite completa, diez veces:
+**Cómo se usa:** la primera causa se vigila con **`sequence: { shuffle: true }`**, un orden distinto en cada ejecución. La suite, diez veces:
 
 ```text
 semilla 1792202103504 · 101 passed (101)
@@ -254,18 +246,20 @@ semilla 1792202121944 · 101 passed (101)
 semilla 1792202124089 · 101 passed (101)
 ```
 
-Diez órdenes distintos, ningún fallo. Si un día uno falla, Vitest imprime la semilla al empezar (`Running tests with seed "…"`), y `npx vitest run --sequence.seed=<semilla>` repite exactamente ese orden para depurarlo.
+- **Diez órdenes, ningún fallo.** Si uno falla, Vitest imprime la semilla al empezar (`Running tests with seed "…"`) y `npx vitest run --sequence.seed=<semilla>` repite ese orden.
 
 <Callout type="risk">
 
-- **Los reintentos esconden los tests inestables, no los arreglan:** con `retries: 1` (la configuración de Playwright en CI), un test que falla y luego pasa sale como `flaky` en el informe. Trátalo como un bug: es una carrera que un día fallará dos veces seguidas.
-- **No borres un test inestable sin entender por qué falla:** muchas veces es el único que ha visto un bug real de concurrencia o de fechas.
+- **Los reintentos esconden, no arreglan:** con `retries: 1` (Playwright en CI), un test que falla y luego pasa sale como `flaky`. Es una carrera que un día fallará dos veces.
+- **No borres un test inestable sin entenderlo:** a menudo es el único que ha visto un bug de concurrencia o de fechas.
 
 </Callout>
 
 ## Paso 4: carpetas, _scripts_ y el _hook_
 
-La organización de este curso, una carpeta por tipo de test:
+**Qué es:** una carpeta por tipo de test, cada una con su herramienta y entorno (`unit` e `integration` en Node, `components` en jsdom, `e2e` con Playwright), los ayudantes junto a lo que los usa y un _hook_ de Git que ejecuta lo rápido sin que nadie se acuerde.
+
+**Cómo se usa:**
 
 ```text
 tests/
@@ -296,9 +290,7 @@ tests/
 │   └── ritmo.test.ts
 ```
 
-Cada carpeta tiene su herramienta y su entorno: `unit` e `integration` en Node, `components` en jsdom (por el comentario de cada archivo), `e2e` con Playwright. Los ayudantes (`setup.ts`, `msw.ts`, `mongo.ts`) viven junto a lo que los usa.
-
-Y para que los tests se ejecuten sin acordarse, un _hook_ de Git, como el de esta plataforma. Crea `.githooks/pre-push`:
+Como en esta plataforma, `.githooks/pre-push`:
 
 ```sh
 #!/bin/sh
@@ -315,7 +307,7 @@ chmod +x .githooks/pre-push
 git config core.hooksPath .githooks
 ```
 
-Cada `git push` ejecuta antes los tipos y los tests rápidos:
+Cada `git push` ejecuta antes tipos y tests rápidos:
 
 ```text
 - 0 errors
@@ -323,12 +315,12 @@ Cada `git push` ejecuta antes los tipos y los tests rápidos:
       Tests  101 passed (101)
 ```
 
-Unos 6 segundos en total. Los E2E se quedan fuera del _hook_: son más lentos y es mejor ejecutarlos en CI (lo harás en A7).
+- **Unos 6 segundos.** Los E2E, más lentos, van a CI (A7).
 
 <Callout type="risk">
 
-- **`git push --no-verify` se salta el _hook_:** úsalo solo en una emergencia, y sabiendo que lo que subes no ha pasado los tests.
-- **Un _hook_ que tarda un minuto acaba desactivado:** deja en él lo rápido (tipos, unitarios, integración) y lo lento para CI.
+- **`git push --no-verify` se salta el _hook_:** solo en una emergencia, sabiendo que lo subido no pasó los tests.
+- **Un _hook_ de un minuto acaba desactivado:** lo rápido en el _hook_, lo lento en CI.
 
 </Callout>
 
@@ -341,7 +333,7 @@ Unos 6 segundos en total. Los E2E se quedan fuera del _hook_: son más lentos y 
 
 </Callout>
 
-Solución. Un bug real de la app de entrenos: el campo de los km tiene `inputMode="decimal"`, y en muchos teclados configurados en español la tecla decimal es la **coma**. Quien escribe `8,5` recibe un error, y en inglés: `Invalid input: expected number, received NaN`. Y `schemas/entreno.ts` estaba al 100 % de cobertura. El test, `tests/unit/km.test.ts`:
+Solución. El campo de km tiene `inputMode="decimal"`, y en muchos teclados en español la tecla decimal es la **coma**: `8,5` da un error, y en inglés (`Invalid input: expected number, received NaN`). Y `schemas/entreno.ts` estaba al 100 %. El test, `tests/unit/km.test.ts`:
 
 ```ts
 // Archivo: tests/unit/km.test.ts
@@ -377,7 +369,7 @@ describe("km con coma o con punto", () => {
 });
 ```
 
-Rojo, y por los motivos esperados:
+Rojo, por los motivos esperados:
 
 ```text
  FAIL  tests/unit/km.test.ts > km con coma o con punto > «8,5» son 8.5 km
@@ -391,7 +383,7 @@ AssertionError: expected [ Array(1) ] to deeply equal [ Array(1) ]
 +   "Invalid input: expected number, received NaN",
 ```
 
-`"8,5"` y `" 7,25 "` se rechazan (un `ValidacionError`), y un texto que no es un número da el mensaje en inglés. El arreglo, en `src/schemas/entreno.ts`: una función que cambia la coma por un punto antes de convertir el texto en número, y un mensaje propio para lo que no es un número. Sustituye el archivo:
+- **`"8,5"` y `" 7,25 "` dan un `ValidacionError`,** y un texto que no es número da el mensaje en inglés. El arreglo, en `src/schemas/entreno.ts`: cambiar la coma por un punto antes de convertir, y un mensaje propio para lo que no es número:
 
 ```ts
 // Archivo: src/schemas/entreno.ts
@@ -467,12 +459,13 @@ export type EntrenoFormulario = Record<keyof EntrenoInput, string>;
 Tests  5 passed (5)
 ```
 
-Verde. La suite completa sigue pasando, en orden aleatorio (101 tests, con los nuevos), y los E2E también. Y como el formulario de `Entrenos` valida con el mismo esquema, el arreglo llega al navegador sin tocar el componente: un test del componente como los de I8.3, escribiendo `8,5` en el campo Km, comprueba que la API recibe `km: 8.5`.
+- **Verde,** y la suite completa (101 tests) sigue pasando en orden aleatorio, como los E2E.
+- **El formulario valida con el mismo esquema:** el arreglo llega al navegador sin tocar el componente, y un test como los de I8.3, escribiendo `8,5`, comprueba que la API recibe `km: 8.5`.
 
 <Callout type="risk">
 
-- **Cambia solo la coma decimal, no los separadores de miles:** `"1.000,5"` seguiría sin ser válido, y está bien: nadie corre mil kilómetros en un entreno. No resuelvas casos que la app no tiene.
-- **El mensaje de error es parte del arreglo:** un usuario que no entiende el mensaje no sabe qué corregir. El test comprueba el texto exacto.
+- **Solo la coma decimal, no los miles:** `"1.000,5"` sigue sin valer, y nadie corre mil kilómetros. No resuelvas casos que la app no tiene.
+- **El mensaje es parte del arreglo:** si el usuario no lo entiende, no sabe qué corregir. El test comprueba el texto exacto.
 
 </Callout>
 
@@ -484,8 +477,8 @@ Escribir un test antes de arreglar un bug es tu reflejo natural: lo reproduces, 
 
 ## Resumen
 
-- La cobertura dice qué se ejecutó, no qué se comprobó: dos archivos al 100 % tenían un bug cada uno.
-- TDD: rojo (y lee por qué falla: a veces el error está en el test), verde y refactorizar.
-- _Flaky_: datos compartidos, fechas y zona horaria, red real, estado global, esperas fijas y condiciones que no están listas. Los reintentos los esconden.
+- La cobertura dice qué se ejecutó, no qué se comprobó: dos archivos al 100 % tenían un bug.
+- TDD: rojo (leyendo por qué falla), verde y refactorizar.
+- _Flaky_: datos compartidos, fechas, red real, estado global, esperas fijas y condiciones no listas; los reintentos los esconden.
 - `sequence: { shuffle: true }` y la semilla para repetir un orden.
-- Una carpeta por tipo de test, `test`, `test:run`, `test:coverage` y `test:e2e`, y un _hook_ `pre-push` con lo rápido.
+- Una carpeta por tipo, `test`, `test:run`, `test:coverage`, `test:e2e` y un _hook_ `pre-push` con lo rápido.

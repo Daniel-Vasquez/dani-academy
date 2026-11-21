@@ -7,9 +7,7 @@ minutes: 75
 summary: "Defines las variantes de Button, Badge, Card y Alerta con cva y tipos que avisan de errores, escribes Checkbox, ProgressBar y Tabs accesibles con teclado, y montas una página /ui sin fallos de axe en ambos temas."
 ---
 
-Con los _tokens_ (I7.1), el tema (I7.2), la tipografía (I7.3) y la accesibilidad (I7.4), lo que falta es no repetir. Cada botón de la app debería ser **el** botón: mismas formas, mismos estados, mismo foco, sin que cada página reinvente sus clases. Una **librería de componentes** es ese conjunto de piezas, cada una con sus variantes (primario o secundario, pequeño o grande), y una página donde verlas todas juntas. En esta sección vas a definir las variantes con `cva`, de forma que TypeScript avise si alguien pide una que no existe, vas a escribir siete componentes y vas a montar la página `/ui`, revisada en los dos temas.
-
-**Lo que tendrás al terminar:** `src/components/ui/variantes.ts` con las variantes de todos los componentes; `Button`, `Badge`, `Card`, `Checkbox`, `ProgressBar`, `Alerta` y `Tabs`, y la página `/ui`.
+Con _tokens_, tema, tipografía y accesibilidad (I7.1–I7.4), falta no repetir: cada botón debería ser **el** botón, sin que cada página reinvente sus clases. Una **librería de componentes** reúne esas piezas con sus variantes y una página para verlas juntas. Aquí defines las variantes con `cva` (con TypeScript avisando de las que no existen), escribes siete componentes y montas `/ui`.
 
 **Requisitos:** el proyecto `tw-lab` de I7.4, con `cn()` de B7.5.
 
@@ -18,6 +16,8 @@ npm install class-variance-authority
 ```
 
 ## Paso 1: el inventario y `cva`
+
+**Qué es:** **`cva`** (_class-variance-authority_) hace lo del objeto de B7.5 (`VARIANTES[variante]`) con una estructura fija: clases base, variantes y valores por defecto, y devuelve una función con las clases de cada combinación.
 
 | Componente    | Para qué                              | Variantes                                                                    |
 | ------------- | ------------------------------------- | ---------------------------------------------------------------------------- |
@@ -29,7 +29,7 @@ npm install class-variance-authority
 | `Alerta`      | Mensajes de la interfaz               | `tipo` (info, exito, warning, danger)                                        |
 | `Tabs`        | Alternar contenidos en el mismo sitio | —                                                                            |
 
-En B7.5 escribiste las variantes con un objeto (`VARIANTES[variante]`). **`cva`** (_class-variance-authority_) hace lo mismo con una estructura fija: unas clases base, las variantes y sus valores por defecto, y devuelve una función que da las clases de cada combinación. Crea `src/components/ui/variantes.ts`, con las de todos los componentes:
+**Cómo se usa:** crea `src/components/ui/variantes.ts`, con las de todos los componentes.
 
 ```ts
 // Archivo: src/components/ui/variantes.ts
@@ -123,19 +123,21 @@ insignia danger:   inline-flex items-center rounded-full px-2.5 py-0.5 text-xs f
 ```
 
 - **`defaultVariants`:** sin argumentos, `boton()` es primario y mediano.
-- **`VariantProps<typeof boton>`** saca el tipo de las propiedades a partir de las variantes: `{ variante?: "primario" | "secundario" | …; tamano?: … }`. No hay que escribirlo a mano ni mantenerlo.
-- **Todo en un archivo `.ts`:** las variantes valen igual para componentes de Astro (`.astro`) y de React (`.tsx`). Hay que poder usar el mismo `boton()` en un enlace de Astro y en un botón de React.
+- **`VariantProps<typeof boton>`** da el tipo de las propiedades sin escribirlo ni mantenerlo.
+- **En un `.ts`, sirven a `.astro` y `.tsx`:** el mismo `boton()` en un enlace de Astro y en un botón de React.
 
 <Callout type="risk">
 
-- **Los nombres de clase, completos y literales:** `cva` funciona con Tailwind porque las clases están escritas enteras en el archivo (`"bg-accent-strong"`), y Tailwind las encuentra al escanear (B7.1). Nunca construyas una clase con plantillas (`` `bg-${color}` ``): Tailwind no la generaría.
-- **Una variante, una decisión de diseño:** si un botón necesita algo que ninguna variante tiene, piensa si es una variante nueva (para toda la app) o una excepción. Con `className` desde fuera, la excepción queda en esa página y no ensucia la librería.
+- **Clases completas y literales:** Tailwind las encuentra escritas enteras (B7.1); nunca `` `bg-${color}` ``.
+- **Una variante es una decisión de diseño:** si un caso no encaja, decide si es variante nueva o excepción; la excepción va con `className` en esa página.
 
 </Callout>
 
 ## Paso 2: `Button` y `Badge`
 
-Sustituye `src/components/ui/Button.tsx`:
+**Qué es:** los componentes heredan sus propiedades de las variantes, así que TypeScript conoce los valores válidos.
+
+**Cómo se usa:** sustituye `src/components/ui/Button.tsx`.
 
 ```tsx
 // Archivo: src/components/ui/Button.tsx
@@ -168,24 +170,26 @@ const { tono, class: className } = Astro.props;
 <span class={cn(insignia({ tono }), className)}><slot /></span>
 ```
 
-Los dos componentes heredan sus propiedades de las variantes, así que TypeScript conoce los valores válidos. Prueba con una variante que no existe, `<Button variante="enorme">`:
+Con una variante inexistente, `<Button variante="enorme">`:
 
 ```text
 src/pages/prueba.astro:5:9 - error ts(2322): Type '"enorme"' is not assignable to type '"primario" | "secundario" | "fantasma" | "peligro" | null | undefined'.
 ```
 
-El error sale al escribirlo (y en `npm run check`), no en el navegador. Al hacer este cambio en `tw-lab`, `astro check` encontró, de la misma forma, tres usos antiguos con variantes que ya no existían en otra página.
+- **El error sale al escribir** (y en `npm run check`), no en el navegador. En `tw-lab`, `astro check` encontró así tres usos antiguos con variantes ya desaparecidas.
 
 <Callout type="risk">
 
-- **`cn()` sigue siendo necesario:** `cva` junta las clases, pero no resuelve conflictos. Sin `cn()`, `<Button className="px-2">` dejaría `px-5 px-2` en el HTML, y ganaría la que Tailwind haya escrito después en el CSS, no la tuya.
-- **No metas lógica de negocio en un componente de la librería:** un `Button` no sabe qué es una sección leída. Los componentes de la librería reciben datos y pintan; los de la app (`MarcarLeida`) los usan.
+- **`cn()` sigue haciendo falta:** `cva` junta pero no resuelve conflictos; sin `cn()`, `className="px-2"` dejaría `px-5 px-2` y ganaría el orden del CSS.
+- **Nada de lógica de negocio en la librería:** un `Button` no sabe qué es una sección leída; los componentes de la app (`MarcarLeida`) lo usan.
 
 </Callout>
 
 ## Paso 3: `Card`, `Checkbox`, `ProgressBar` y `Alerta`
 
-`src/components/ui/Card.astro`. Con `href`, la tarjeta entera es un enlace, y se comporta como tal con el teclado:
+**Qué es:** cuatro piezas que se apoyan en HTML nativo y añaden ARIA solo donde falta.
+
+**Cómo se usa:** `src/components/ui/Card.astro`; con `href`, la tarjeta entera es un enlace y se comporta como tal con el teclado:
 
 ```astro
 ---
@@ -209,7 +213,7 @@ const Elemento = href ? "a" : "div";
 </Elemento>
 ```
 
-`src/components/ui/Checkbox.astro`. Una casilla **nativa**, con su etiqueta y una descripción opcional enlazada:
+`src/components/ui/Checkbox.astro`, una casilla **nativa** con su etiqueta y una descripción enlazada:
 
 ```astro
 ---
@@ -272,7 +276,7 @@ const porcentaje = max === 0 ? 0 : Math.round((valor / max) * 100);
 </div>
 ```
 
-Y `src/components/ui/Alerta.astro`, para los mensajes de la interfaz. Con `vivo`, los lectores de pantalla lo anuncian al aparecer: `role="alert"` para los errores (interrumpe) y `role="status"` para lo demás (espera a que el usuario termine):
+Y `src/components/ui/Alerta.astro`; con `vivo`, se anuncia al aparecer, con `role="alert"` (interrumpe) para errores y `role="status"` (espera) para lo demás:
 
 ```astro
 ---
@@ -298,20 +302,22 @@ const rol = vivo ? (tipo === "danger" ? "alert" : "status") : undefined;
 </div>
 ```
 
-- **`accent-accent-strong`** es la utilidad de Tailwind para la propiedad CSS `accent-color`: colorea la casilla nativa sin rehacerla. Una casilla dibujada con `<div>` habría que hacerla accesible a mano (teclado, estado, etiqueta).
-- **`role="progressbar"`** con `aria-valuenow`, `aria-valuemax` y `aria-valuetext`: el lector de pantalla dice "Progreso de TypeScript desde cero, 3 de 8".
-- **`Alerta` es distinto del `Aviso` de B7.5:** `Aviso` son los bloques de una lección (Nota, Ejercicio, Riesgos); `Alerta`, los mensajes de la app (guardado, error). Mezclarlos en un componente con siete variantes lo haría inmanejable.
+- **`accent-accent-strong`** usa `accent-color` para colorear la casilla nativa sin rehacerla; una con `<div>` habría que hacerla accesible a mano.
+- **`role="progressbar"`** con `aria-valuenow`, `aria-valuemax` y `aria-valuetext`: "Progreso de TypeScript desde cero, 3 de 8".
+- **`Alerta` no es el `Aviso` de B7.5:** uno son los mensajes de la app; el otro, los bloques de una lección. Juntos serían un componente inmanejable.
 
 <Callout type="risk">
 
-- **`role="alert"` solo para lo urgente:** el lector de pantalla interrumpe lo que esté leyendo. Un "Guardado" que interrumpe en cada cambio es insoportable; para eso está `role="status"`.
-- **El `h3` de `Card` supone que va dentro de una sección con `h2`:** si la usas directamente bajo el `h1` de una página, el orden de los títulos se rompe (I7.4). Una librería más completa recibiría el nivel como propiedad.
+- **`role="alert"` solo para lo urgente:** interrumpe la lectura; un "Guardado" en cada cambio, con `role="status"`.
+- **El `h3` de `Card` supone una sección con `h2`:** bajo el `h1` rompe el orden (I7.4). Una librería más completa recibiría el nivel.
 
 </Callout>
 
 ## Paso 4: `Tabs`, con el teclado de verdad
 
-Las pestañas son el componente más fácil de hacer mal: con un `<div>` por pestaña, no se pueden usar con el teclado ni las entiende un lector de pantalla. El patrón de WAI-ARIA dice cómo deben comportarse: `role="tablist"`, `tab` y `tabpanel`, Tab para **entrar** en la pestaña activa y las flechas para **cambiar** de pestaña. Crea `src/components/ui/Tabs.tsx`:
+**Qué es:** el patrón de WAI-ARIA para pestañas: `role="tablist"`, `tab` y `tabpanel`, Tab para **entrar** en la activa y flechas para **cambiar**. Con un `<div>` por pestaña, ni teclado ni lector de pantalla.
+
+**Cómo se usa:** crea `src/components/ui/Tabs.tsx`.
 
 ```tsx
 // Archivo: src/components/ui/Tabs.tsx
@@ -375,14 +381,14 @@ export function Tabs({ pestanas, etiqueta }: { pestanas: Pestana[]; etiqueta: st
 }
 ```
 
-- **`tabIndex` móvil:** solo la pestaña activa tiene `tabIndex={0}`; las demás, `-1`. Así, Tab entra en el grupo una sola vez y el siguiente Tab sale al panel, en lugar de recorrer todas las pestañas.
-- **Las flechas cambian la pestaña y mueven el foco a la vez;** Inicio y Fin van a la primera y a la última; las flechas dan la vuelta al llegar a un extremo.
-- **`aria-selected`, `aria-controls` y `aria-labelledby`** enlazan cada pestaña con su panel; `useId()` da _ids_ únicos aunque haya dos grupos de pestañas en la página.
+- **`tabIndex` móvil:** solo la activa tiene `0`, las demás `-1`; Tab entra una vez y el siguiente sale al panel.
+- **Las flechas cambian pestaña y foco a la vez,** dando la vuelta en los extremos; Inicio y Fin van a la primera y la última.
+- **`aria-selected`, `aria-controls` y `aria-labelledby`** enlazan pestaña y panel, con _ids_ únicos de `useId()`.
 
 <Callout type="risk">
 
-- **Si la isla de React deja de funcionar tras instalar un paquete** (en la consola del servidor, `_jsxDEV is not a function` o `Invalid hook call`), es la caché de Vite: para el servidor y arráncalo con `npm run dev -- --force` (I5.2).
-- **Las pestañas no sustituyen a la navegación:** si cada pestaña es una página distinta con su propia URL, son enlaces (`<nav>` con `aria-current`), no pestañas.
+- **`_jsxDEV is not a function` o `Invalid hook call` tras instalar un paquete:** caché de Vite, `npm run dev -- --force` (I5.2).
+- **Pestañas con URL propia son navegación:** enlaces en un `<nav>` con `aria-current`, no pestañas.
 
 </Callout>
 
@@ -497,14 +503,14 @@ const seccion = "space-y-4 border-t border-surface-2 pt-8";
 </Layout>
 ```
 
-La primera pasada de axe, en los dos temas:
+La primera pasada de axe:
 
 ```text
 light /ui                sin infracciones
 dark  /ui                color-contrast(1)
 ```
 
-El botón "Peligro", en oscuro. `danger-strong` vale `#be123c` en claro y `#fda4af` en oscuro, un rosa claro, y el texto blanco encima no se lee:
+- **El botón "Peligro" falla en oscuro:** `danger-strong` es `#be123c` en claro y `#fda4af` (rosa claro) en oscuro, y el blanco encima no se lee:
 
 ```text
 claro:  #ffffff sobre #be123c 6.29:1
@@ -512,7 +518,7 @@ oscuro: #ffffff sobre #fda4af 1.89:1 (el error)
 oscuro: #2a0a12 sobre #fda4af 9.65:1
 ```
 
-Es el mismo caso que el acento en I7.2: el texto sobre un color de estado necesita su propio _token_. Añade `--danger-contrast` a `src/styles/global.css` (blanco en claro, casi negro en oscuro) y úsalo en la variante. El archivo completo:
+- **Es el caso del acento de I7.2:** el texto sobre un estado necesita su _token_. Añade `--danger-contrast` (blanco en claro, casi negro en oscuro) a `src/styles/global.css`:
 
 ```css
 /* Archivo: src/styles/global.css */
@@ -707,14 +713,13 @@ Clic en la etiqueta «Recibir avisos»: marcada true
 Barra: «Progreso de TypeScript desde cero» · 3 de 8 · relleno 38%
 ```
 
-- **Tab entra en la pestaña activa** (`tabindex` 0/-1/-1), las flechas cambian a la vez el foco, la selección y el panel visible, y dan la vuelta al llegar a un extremo.
-- **El siguiente Tab sale al panel**, sin pasar por las otras pestañas.
-- **La casilla tiene nombre y descripción** (la etiqueta y el texto enlazado con `aria-describedby`), y un clic en la etiqueta la marca, porque `<label for>` la conecta. La barra de progreso anuncia "3 de 8".
+- **Tab entra en la activa** (`tabindex` 0/-1/-1); las flechas cambian foco, selección y panel y dan la vuelta; el siguiente Tab sale al panel.
+- **La casilla tiene nombre y descripción** (`aria-describedby`) y se marca con un clic en la etiqueta (`<label for>`). La barra anuncia "3 de 8".
 
 <Callout type="risk">
 
-- **Revisa `/ui` en los dos temas cada vez que añadas una variante:** el fallo del botón de peligro solo existía en oscuro, y ninguna otra página tenía un botón de peligro.
-- **La página `/ui` es interna:** si no quieres que sea pública en producción, ponle `prerender = false` y protégela con el _middleware_ (I5.3), o no la incluyas en el _build_.
+- **Revisa `/ui` en los dos temas con cada variante nueva:** el fallo de "Peligro" solo existía en oscuro, y en ninguna otra página había uno.
+- **`/ui` es interna:** si no debe ser pública, `prerender = false` y _middleware_ (I5.3), o fuera del _build_.
 
 </Callout>
 
@@ -726,9 +731,8 @@ Construyes una página nueva solo combinando tus componentes: cada pieza tiene s
 
 ## Resumen
 
-- Un inventario de componentes y sus variantes, en un solo `variantes.ts` que comparten Astro y React.
-- `cva(base, { variants, defaultVariants })` da las clases de cada combinación; `VariantProps` da sus tipos.
-- `cn()` sigue haciendo falta para que una clase de fuera gane a la de la variante.
-- Componentes nativos siempre que se pueda (`<input type="checkbox">`, `<button>`); ARIA para lo que el HTML no trae (`role="progressbar"`, `role="tab"`).
-- Pestañas con el patrón WAI-ARIA: `tabIndex` móvil, flechas, Inicio y Fin.
-- Una página `/ui` con todo, revisada con axe en claro y en oscuro.
+- Un inventario y un `variantes.ts` que comparten Astro y React.
+- `cva` da las clases de cada combinación; `VariantProps`, sus tipos.
+- `cn()` sigue haciendo falta para que gane la clase de fuera.
+- Nativo siempre que se pueda; ARIA para lo que el HTML no trae.
+- Pestañas con `tabIndex` móvil, flechas, Inicio y Fin; `/ui` revisada con axe en los dos temas.

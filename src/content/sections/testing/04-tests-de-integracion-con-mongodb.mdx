@@ -7,17 +7,15 @@ minutes: 75
 summary: "Pruebas repositorio y endpoints contra un MongoDB en memoria, vacías la base antes de cada test (el de I3.5 fallaba en 4 de 10 órdenes), aíslas la conexión del .env y encuentras un bug que el test unitario no veía."
 ---
 
-En I8.2 aislaste el _endpoint_ del resumen con un servicio falso, y en I3.5 probaste el servicio de entrenos con un repositorio falso, un `Map`. Esos tests son rápidos, pero cada doble es una **suposición**: que el repositorio falso se comporta como MongoDB. Un test de **integración** quita la suposición: usa las piezas reales, juntas, contra una base de datos de verdad. En esta sección vas a preparar esa base para que cada test empiece limpio, a probar los _endpoints_ con todas sus capas sin tocar tu base real, y a comprobar que el repositorio hace lo que dice. Y vas a ver el bug que tuvo el repositorio de I3 hasta que un test como este lo encontró.
-
-**Lo que tendrás al terminar:** un ayudante que da a cada archivo de tests su propio MongoDB en memoria, vacío antes de cada test; tests de los _endpoints_ de entrenos con el servicio, el repositorio y MongoDB reales; y un repositorio con un bug menos.
+Un servicio falso (I8.2) o un repositorio falso (I3.5) son rápidos, pero cada doble es una **suposición** sobre cómo se comporta MongoDB. Un test de **integración** la quita: usa las piezas reales, juntas, contra una base de verdad. Aquí haces que cada test empiece limpio, pruebas los _endpoints_ con todas sus capas sin tocar tu base real y encuentras el bug que tuvo el repositorio de I3.
 
 **Requisitos:** la app de entrenos de I8.3, con `mongodb-memory-server` (I3.5).
 
 ## Paso 1: un MongoDB en memoria, vacío antes de cada test
 
-**`mongodb-memory-server`** descarga un binario de MongoDB (la primera vez) y arranca un servidor de verdad, en un puerto libre, con los datos en una carpeta temporal. Las consultas, los índices y los operadores funcionan como en tu base real, y al terminar no queda nada.
+**Qué es:** **`mongodb-memory-server`** descarga MongoDB la primera vez y arranca un servidor de verdad, en un puerto libre y con los datos en una carpeta temporal: consultas, índices y operadores como en tu base, y al terminar no queda nada.
 
-El test del repositorio de I3.5 arranca uno en `beforeAll` y lo comparte entre sus tres tests. Ejecútalo varias veces en **orden aleatorio**, con la opción `--sequence.shuffle` y una semilla distinta cada vez:
+**Cómo se usa:** el test del repositorio de I3.5 comparte un servidor entre sus tres tests. Ejecútalo en **orden aleatorio** con varias semillas:
 
 ```bash
 npx vitest run tests/integration/entrenos.repo.test.ts --sequence.shuffle --sequence.seed=2
@@ -36,7 +34,7 @@ semilla 9  1 failed | 2 passed (3)      un id mal formado es '|no guarda los cam
 semilla 10 1 failed | 2 passed (3)      no guarda los campos u|aísla los entrenos por|un id mal formado es '|
 ```
 
-**Falla en 4 de cada 10 órdenes**, y siempre por lo mismo:
+- **Falla en 4 de cada 10 órdenes,** siempre por lo mismo:
 
 ```text
  FAIL  tests/integration/entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales
@@ -52,9 +50,9 @@ AssertionError: expected { total: 3, minutos: 100 } to deeply equal { total: 2, 
  ❯ tests/integration/entrenos.repo.test.ts:29:39
 ```
 
-Cuando "no guarda los campos undefined" se ejecuta antes que "aísla los entrenos por usuario", deja en la base un entreno de Ana de 30 minutos, y los totales de Ana pasan de 2 a 3. El test de los totales depende de lo que **otro** test dejó en la base. En el orden en que están escritos pasa siempre, así que el problema no se ve hasta que alguien añade un test, cambia el orden o los ejecuta en paralelo.
+- **"No guarda los campos undefined" deja un entreno de Ana** de 30 minutos, y si va antes, los totales de Ana pasan de 2 a 3. En el orden escrito pasa siempre, y no se ve hasta que alguien añade un test, cambia el orden o los paraleliza.
 
-La solución es que cada test empiece con la base vacía. Crea `tests/integration/mongo.ts`, un ayudante que cualquier archivo de integración puede usar:
+Que cada test empiece con la base vacía. El ayudante `tests/integration/mongo.ts`:
 
 ```ts
 // Archivo: tests/integration/mongo.ts
@@ -90,7 +88,7 @@ export function usarMongo() {
 }
 ```
 
-Y reescribe `tests/integration/entrenos.repo.test.ts` con él:
+Y `tests/integration/entrenos.repo.test.ts`, reescrito con él:
 
 ```ts
 // Archivo: tests/integration/entrenos.repo.test.ts
@@ -141,23 +139,23 @@ semilla 9  3 passed (3)
 semilla 10 3 passed (3)
 ```
 
-- **El servidor arranca una vez por archivo** (`beforeAll`), porque cuesta unas décimas de segundo; **los datos se vacían antes de cada test** (`beforeEach`), porque cuesta milisegundos.
-- **`mongo.db()` es una función y no un valor:** cuando el archivo llama a `usarMongo()`, el `beforeAll` todavía no se ha ejecutado y `db` no existe. La función lo lee en el momento de usarlo, ya dentro del test.
-- **`findOne({})` ya no necesita ordenar** por fecha de creación para encontrar "el último": la base solo tiene lo que creó este test.
+- **El servidor arranca una vez por archivo** (`beforeAll`, décimas de segundo) y **los datos se vacían antes de cada test** (`beforeEach`, milisegundos).
+- **`mongo.db()` es una función:** al llamar a `usarMongo()`, el `beforeAll` aún no ha corrido; la función lee `db` ya dentro del test.
+- **`findOne({})` ya no necesita ordenar** para dar "el último": solo hay lo de este test.
 
 <Callout type="risk">
 
-- **Cada archivo de tests tiene su propio servidor:** Vitest ejecuta los archivos en paralelo, y si dos compartieran base, uno vaciaría los datos del otro a mitad de test. Con un servidor por archivo, no se ven.
-- **La primera ejecución descarga MongoDB** (unos 140 MB, en `node_modules/.cache/mongodb-memory-server`), y por eso `hookTimeout` es de 120 segundos. En CI, guarda esa carpeta en caché para no descargarlo en cada ejecución.
-- **Borrar los datos no borra los índices** (`deleteMany`, no `dropDatabase`). Si un test crea un índice único, sigue ahí en el test siguiente, igual que en producción.
+- **Un servidor por archivo:** Vitest los ejecuta en paralelo, y compartiendo base uno vaciaría los datos del otro.
+- **La primera ejecución descarga unos 140 MB** (`node_modules/.cache/mongodb-memory-server`), de ahí `hookTimeout` de 120 s. En CI, cachea esa carpeta.
+- **`deleteMany` no borra índices:** un índice único sigue en el test siguiente, como en producción.
 
 </Callout>
 
 ## Paso 2: los _endpoints_ con todas sus capas
 
-Un test de integración de un _endpoint_ llama al _handler_ real (`POST` de `src/pages/api/entrenos/index.ts`), que llama al servicio real, que llama al repositorio real, que habla con MongoDB. Pero hay una trampa: el _endpoint_ importa `servicios`, que importa `src/lib/mongo.ts`, que crea la conexión con el `MONGODB_URI` de `astro:env`. ¿Y de dónde sale ese valor en un test? Se puede comprobar sin escribir nada: cambiando `process.env.MONGODB_URI` antes de importar `src/lib/mongo.ts`, el cliente sigue apuntando al host de tu `.env`. **`astro:env` lee el `.env` al arrancar Vitest**, no al importar el módulo.
+**Qué es:** un test que llama al _handler_ real, que llama al servicio, al repositorio y a MongoDB. La trampa: **`astro:env` lee el `.env` al arrancar Vitest**, no al importar (comprobado: cambiar `process.env.MONGODB_URI` antes de importar `src/lib/mongo.ts` no cambia el host). Importado sin más, el _endpoint_ escribiría en la base de tu `.env`, quizá Atlas.
 
-Si el test importara el _endpoint_ sin más, crearía entrenos en la base de tu `.env`, que puede ser la de Atlas. Por eso, el módulo de la conexión se sustituye con `vi.mock` por la base en memoria, y el test **comprueba** que la sustitución funcionó antes de hacer nada. `tests/integration/api-entrenos.test.ts`:
+**Cómo se usa:** el módulo de la conexión se sustituye con `vi.mock` por la base en memoria, y el test **comprueba** la sustitución antes de nada. `tests/integration/api-entrenos.test.ts`:
 
 ```ts
 // Archivo: tests/integration/api-entrenos.test.ts
@@ -272,12 +270,12 @@ describe("/api/entrenos/[id]", () => {
 });
 ```
 
-- **El contexto de Astro se construye a mano:** la petición, la URL, los `params`, `locals` (con el usuario que pondría el _middleware_) y `redirect`. Es lo mínimo que usan estos _endpoints_.
-- **Los _endpoints_ se importan en el `beforeAll`, con `await import()`**, y no arriba del archivo. El repositorio llama a `db.collection()` al importarse, y en ese momento la base en memoria ya tiene que existir.
-- **Cada test comprueba la respuesta HTTP y lo que quedó en MongoDB:** el 422 responde bien **y** no guarda nada; el formulario redirige **y** no guarda el campo `km` vacío.
-- **`UsuarioSesion` tipa el usuario de prueba:** el contexto se convierte con `as unknown as APIContext`, y esa conversión apaga las comprobaciones de TypeScript. Sin el tipo, un rol mal escrito (`"usuario"` en lugar de `"user"`) pasaría desapercibido.
+- **El contexto de Astro, a mano:** petición, URL, `params`, `locals` (con el usuario del _middleware_) y `redirect`.
+- **Los _endpoints_ se importan en el `beforeAll` con `await import()`:** el repositorio llama a `db.collection()` al importarse, y la base en memoria ya tiene que existir.
+- **Cada test comprueba la respuesta y la base:** el 422 responde bien **y** no guarda; el formulario redirige **y** no guarda `km` vacío.
+- **`UsuarioSesion` tipa el usuario de prueba,** porque `as unknown as APIContext` apaga TypeScript y un rol `"usuario"` pasaría.
 
-La comprobación del `beforeAll` es la red de seguridad. Quitando la línea del `vi.mock`:
+Sin la línea del `vi.mock`:
 
 ```text
 ❯ tests/integration/api-entrenos.test.ts (7 tests | 7 skipped) 436ms
@@ -294,9 +292,9 @@ Test Files  1 failed (1)
      Tests  7 skipped (7)
 ```
 
-La comprobación falla en el `beforeAll`, y Vitest **salta los siete tests** sin ejecutar ninguno: nada llega a escribirse en la base del `.env`.
+- **La comprobación falla en el `beforeAll` y Vitest salta los siete tests:** nada llega a la base del `.env`.
 
-Hay otra forma de llamar a un _endpoint_: la **Container API** de Astro, que construye el contexto por ti (URL, `params`, `redirect`…) igual que en una petición real. `tests/integration/api-container.test.ts`:
+La **Container API** de Astro construye el contexto como en una petición real. `tests/integration/api-container.test.ts`:
 
 ```ts
 // Archivo: tests/integration/api-container.test.ts
@@ -337,12 +335,12 @@ it("POST /api/entrenos con la Container API", async () => {
 Tests  1 passed (1)
 ```
 
-Funciona igual, con menos código de preparación. A cambio, la API todavía es experimental (`experimental_AstroContainer`) y sus tipos solo aceptan componentes `.astro`, de ahí el `as never`. Para _endpoints_, el contexto a mano es más explícito; la Container API brilla al renderizar componentes `.astro` a HTML.
+- **Menos preparación, pero experimental** (`experimental_AstroContainer`), y sus tipos solo aceptan `.astro`, de ahí el `as never`. Para _endpoints_, el contexto a mano es más explícito; la Container API brilla al renderizar `.astro`.
 
 <Callout type="risk">
 
-- **Nunca confíes en que el test "no debería" llegar a la base real:** compruébalo, como hace el `beforeAll`. Si mañana alguien mueve un `import` arriba del archivo, la comprobación lo parará.
-- **`vi.mock` con variables del archivo funciona porque la fábrica se ejecuta tarde:** Vitest sube `vi.mock` al principio, pero solo llama a la fábrica la primera vez que alguien importa el módulo, en el `beforeAll`. Con un `import` del _endpoint_ arriba del archivo, la fábrica se ejecuta antes de que exista `mongo`, y Vitest falla con `ReferenceError: Cannot access 'mongo' before initialization`.
+- **No confíes en que "no debería" llegar a la base real: compruébalo,** como el `beforeAll`. Si alguien sube un `import`, lo parará.
+- **`vi.mock` con variables del archivo funciona porque la fábrica corre tarde:** en el primer `import`, dentro del `beforeAll`. Con el _endpoint_ importado arriba: `ReferenceError: Cannot access 'mongo' before initialization`.
 
 </Callout>
 
@@ -458,7 +456,7 @@ describe("borrar", () => {
 });
 ```
 
-La primera ejecución, con el repositorio tal como era originalmente en I3.5 (`{ $set: cambios }`, sin `$unset`). Las lecciones I3.2 y I3.5 ya incluyen el arreglo, que salió precisamente de este test; si tu repositorio lo tiene, cambia un momento el `findOneAndUpdate` por `col.findOneAndUpdate({ _id, userId }, { $set: cambios }, { returnDocument: "after" })` para verlo fallar:
+La primera ejecución, con el repositorio original de I3.5 (`{ $set: cambios }`, sin `$unset`). I3.2 e I3.5 ya incluyen el arreglo, que salió de este test; para verlo fallar, cambia un momento el `findOneAndUpdate` por `col.findOneAndUpdate({ _id, userId }, { $set: cambios }, { returnDocument: "after" })`:
 
 ```text
 ✓ crear y obtener > devuelve el DTO con id y fecha de creación, sin el userId 31ms
@@ -476,7 +474,7 @@ AssertionError: expected 9 to be undefined
 Tests  1 failed | 6 passed (7)
 ```
 
-**El test está bien; el repositorio, no.** Pasar un entreno de running a fuerza exige quitarle los km, y el servicio lo permite: `{ tipo: "fuerza", km: undefined }` deja un entreno válido. Pero el repositorio guarda los cambios con `$set`, en una colección abierta con `ignoreUndefined: true` (I3.2), y el _driver_ **descarta** la clave `km: undefined` antes de enviarla. MongoDB nunca recibe la orden de quitar los km. Desde la API, un `PATCH` con `{"tipo":"fuerza","km":null}` respondía 200 y dejaba en la base un entreno de **fuerza con 9 km**, justo lo que la regla de los km tiene que impedir.
+- **El test está bien; el repositorio, no.** Pasar de running a fuerza exige quitar los km, y el servicio lo permite (`{ tipo: "fuerza", km: undefined }`). Pero con `ignoreUndefined: true` (I3.2), el _driver_ **descarta** `km: undefined` del `$set` y MongoDB nunca recibe la orden. Un `PATCH` con `{"tipo":"fuerza","km":null}` daba 200 y dejaba **fuerza con 9 km**.
 
 ¿Por qué no lo vio el test del servicio de I3.5? Añade este caso a `tests/unit/entrenos.service.test.ts`, dentro del `describe`:
 
@@ -496,9 +494,9 @@ Con el repositorio SIN arreglar:
   integración (MongoDB en memoria):      1 failed | 7 skipped (8)
 ```
 
-El repositorio falso hace `{ ...e, ...cambios }`, que sí sustituye los km por `undefined`. Se comporta como **creías** que se comportaba MongoDB, y por eso el test unitario pasa. Solo la base real descubre la diferencia. Es el argumento del trofeo (I8.1): los fallos de verdad están donde las piezas se juntan.
+- **El repositorio falso hace `{ ...e, ...cambios }`,** que sí sustituye los km por `undefined`: se comporta como **creías** que se comportaba MongoDB. Solo la base real descubre la diferencia, el argumento del trofeo (I8.1).
 
-El arreglo: las claves que llegan con `undefined` se borran con `$unset`. Sustituye `src/repositories/entrenos.repo.ts`:
+El arreglo: borrar con `$unset` las claves que llegan con `undefined`. Sustituye `src/repositories/entrenos.repo.ts`:
 
 ```ts
 // Archivo: src/repositories/entrenos.repo.ts
@@ -597,7 +595,7 @@ export function crearEntrenosRepo(db: Db) {
 export type EntrenosRepo = ReturnType<typeof crearEntrenosRepo>;
 ```
 
-Y añade a `api-entrenos.test.ts` el caso que reproducía el bug desde la API (ya está en el archivo del Paso 2: "PATCH con km: null pasa un entreno a fuerza y le quita los km"). Todos los tests de integración:
+El caso del bug desde la API ya está en `api-entrenos.test.ts` ("PATCH con km: null pasa un entreno a fuerza y le quita los km"). Toda la integración:
 
 ```text
 ✓ entrenos.repo.test.ts > repositorio de entrenos > aísla los entrenos por usuario y calcula los totales 84ms
@@ -624,14 +622,14 @@ Tests  19 passed (19)
 Duration  1.23s (tests 80%, import 8%, setup 7%, transform 4%)
 ```
 
-- **"Quitar solo un campo" comprueba el caso límite del arreglo:** con `{ notas: undefined }`, el `$set` queda vacío después de descartar la clave, y solo actúa el `$unset`.
-- **El periodo de `entre` se prueba justo en sus bordes:** el domingo anterior a las 23:59:59 no entra, el lunes a las 00:00:00 sí; el domingo a las 23:59:59 sí, y el lunes siguiente a las 00:00:00, no.
-- **"Devuelve null si no es de ese usuario" comprueba también que no lo tocó:** el entreno de Ana sigue con sus 45 minutos.
+- **"Quitar solo un campo" prueba el límite del arreglo:** con `{ notas: undefined }`, el `$set` queda vacío y solo actúa el `$unset`.
+- **`entre` se prueba en sus bordes:** el domingo anterior a las 23:59:59 no entra y el lunes a las 00:00:00 sí; el domingo a las 23:59:59 sí y el lunes siguiente, no.
+- **"Devuelve null si no es de ese usuario" comprueba que no lo tocó:** el entreno de Ana sigue con 45 minutos.
 
 <Callout type="risk">
 
-- **Las lecciones I3.2 y I3.5 se corrigieron después de que este test encontrara el bug.** Si escribiste tu app con la versión anterior, aplica el arreglo también en el `PATCH` de I3.2 y en el repositorio de I3.5.
-- **Un test de integración que falla puede tener la culpa:** antes de cambiar el código, comprueba que el test pide lo correcto. Aquí, la regla de negocio ("pasar a fuerza quitando los km") confirma que el test tenía razón.
+- **I3.2 e I3.5 se corrigieron tras este hallazgo:** si escribiste tu app antes, aplica el arreglo en el `PATCH` de I3.2 y en el repositorio de I3.5.
+- **Un test que falla puede ser el culpable:** antes de cambiar el código, confirma que pide lo correcto. Aquí, la regla de negocio le daba la razón.
 
 </Callout>
 
@@ -643,8 +641,8 @@ Confías en tus consultas sin probarlas a mano en Compass: cada archivo de integ
 
 ## Resumen
 
-- `mongodb-memory-server`: un MongoDB de verdad, en memoria, uno por archivo de tests.
-- `beforeEach` con `deleteMany` en cada colección: ningún test depende de otro. `--sequence.shuffle` lo comprueba.
-- `astro:env` lee el `.env` al arrancar: sustituye `src/lib/mongo.ts` con `vi.mock`, importa los _endpoints_ en el `beforeAll` y comprueba el host antes de escribir nada.
-- El contexto de Astro, a mano (o con la Container API, experimental).
-- Un repositorio falso se comporta como crees que se comporta la base; la base real descubrió que `$set` con `ignoreUndefined` no borra un campo. Se arregla con `$unset`.
+- `mongodb-memory-server`: un MongoDB real en memoria, uno por archivo.
+- `deleteMany` en `beforeEach`: ningún test depende de otro, comprobado con `--sequence.shuffle`.
+- `astro:env` lee el `.env` al arrancar: `vi.mock` de `src/lib/mongo.ts`, `import` en el `beforeAll` y comprobar el host.
+- El contexto de Astro, a mano o con la Container API.
+- La base real descubrió que `$set` con `ignoreUndefined` no borra un campo: `$unset`.

@@ -7,9 +7,7 @@ minutes: 75
 summary: "Pruebas la app entera en Chromium contra un MongoDB en memoria, con locators y esperas automáticas, reutilizas la sesión con storageState, descubres que un newContext la hereda y depuras con la traza."
 ---
 
-Los tests de las secciones anteriores prueban piezas: una función, un componente con la API simulada, un _endpoint_ con la base en memoria. Ninguno comprueba que, con la app arrancada de verdad, alguien puede entrar, guardar un entreno y verlo en la lista. Un test **_end-to-end_** (E2E) hace exactamente eso: abre un navegador real, carga tus páginas desde tu servidor y hace clic donde haría clic una persona. Es el más lento y el más caro de mantener, y por eso se reserva para los **flujos críticos**. En esta sección vas a montar Playwright para que pruebe tu app contra una base de datos desechable, a reutilizar la sesión entre tests y a depurar un fallo con su traza.
-
-**Lo que tendrás al terminar:** `scripts/e2e.mjs`, que levanta un MongoDB en memoria y ejecuta Playwright contra él; `playwright.config.ts` con el servidor de Astro; un _setup_ que crea la cuenta y guarda la sesión, y cuatro tests E2E de tus flujos principales.
+Los tests anteriores prueban piezas; ninguno comprueba que, con la app arrancada de verdad, alguien entra, guarda un entreno y lo ve en la lista. Un test **_end-to-end_** (E2E) abre un navegador real contra tu servidor y hace clic como una persona. Es el más lento y caro de mantener, así que se reserva para los **flujos críticos**. Aquí montas Playwright contra una base desechable, reutilizas la sesión y depuras un fallo con su traza.
 
 **Requisitos:** la app de entrenos de I8.4.
 
@@ -18,11 +16,13 @@ npm install --save-dev @playwright/test
 npx playwright install chromium
 ```
 
-El segundo comando descarga el Chromium que usa Playwright, una sola vez por versión: en este Mac, unos 570 MB entre el navegador y su versión sin ventana (_headless shell_).
+El segundo comando descarga, una vez por versión, el Chromium de Playwright: unos 570 MB con su versión sin ventana (_headless shell_).
 
 ## Paso 1: una base desechable y el servidor de Astro
 
-Un E2E crea cuentas y entrenos de verdad, en la base a la que esté conectado el servidor. **Nunca** debe ser tu base real. La solución es la misma de la plataforma en la que estás leyendo esto: un lanzador que arranca un MongoDB en memoria, ejecuta Playwright con las variables apuntando a él y lo apaga todo al terminar. Crea `scripts/e2e.mjs`:
+**Qué es:** un E2E crea cuentas y entrenos de verdad en la base del servidor, que **nunca** debe ser la tuya. Como en esta plataforma, un lanzador arranca un MongoDB en memoria, ejecuta Playwright apuntando a él y lo apaga al terminar.
+
+**Cómo se usa:** crea `scripts/e2e.mjs`.
 
 ```js
 // Archivo: scripts/e2e.mjs
@@ -55,13 +55,13 @@ await replSet.stop();
 process.exit(status ?? 1);
 ```
 
-Y en `package.json`, el _script_:
+El _script_ en `package.json`:
 
 ```json
 "test:e2e": "node scripts/e2e.mjs"
 ```
 
-Ahora la configuración, `playwright.config.ts`:
+La configuración, `playwright.config.ts`:
 
 ```ts
 // Archivo: playwright.config.ts
@@ -104,30 +104,29 @@ export default defineConfig({
 });
 ```
 
-- **`webServer`** arranca `astro dev` antes de los tests, espera a que `/acerca` responda y lo para al terminar. Las variables del lanzador (`MONGODB_URI`, `BETTER_AUTH_SECRET`) le llegan porque Playwright hereda el entorno, y tienen prioridad sobre tu `.env`.
-- **El puerto 4330 y `--ignore-lock`:** el servidor de los tests no choca con tu `npm run dev` del 4321.
-- **`reuseExistingServer: false`:** si hubiera un servidor ya abierto en ese puerto, conectado a tu base real, Playwright no lo usaría.
-- **La comprobación del principio** para cualquier ejecución que no venga del lanzador:
+- **`webServer`** arranca `astro dev`, espera a que `/acerca` responda y lo para al final. Las variables del lanzador le llegan porque Playwright hereda el entorno, por encima de tu `.env`.
+- **El puerto 4330 y `--ignore-lock`** evitan chocar con tu `npm run dev` del 4321, y **`reuseExistingServer: false`** impide usar un servidor ya abierto, quizá conectado a tu base.
+- **La comprobación del principio** para cualquier ejecución sin el lanzador:
 
 ```text
 Error: Los E2E necesitan un MONGODB_URI local. Usa `npm run test:e2e`, que levanta uno en memoria.
     at file://playwright.config.ts:9:9
 ```
 
-Ejecutado con `npx playwright test` a secas, sin el lanzador, `MONGODB_URI` no existe (Playwright no lee el `.env`) y la configuración se niega a seguir. Con una dirección de Atlas (`mongodb+srv://…`), también.
+- **Con `npx playwright test` a secas,** `MONGODB_URI` no existe (Playwright no lee el `.env`) y se niega; con una dirección de Atlas (`mongodb+srv://…`), también.
 
 <Callout type="risk">
 
-- **Un replica set, no un servidor suelto:** Better Auth usa transacciones al crear una cuenta, y MongoDB solo las admite en un replica set. Con `MongoMemoryServer` el registro falla, y el servidor lo dice: `Transaction numbers are only allowed on a replica set member or mongos`. `MongoMemoryReplSet` arranca un replica set de un nodo.
-- **Añade a `.gitignore`** `tests/e2e/.auth/`, `test-results/` y `playwright-report/`: el primero guarda cookies de sesión (aunque sean de una base desechable) y los otros dos, los resultados de cada ejecución.
+- **Un replica set, no un servidor suelto:** Better Auth usa transacciones al crear cuentas; con `MongoMemoryServer`, `Transaction numbers are only allowed on a replica set member or mongos`. `MongoMemoryReplSet` arranca uno de un nodo.
+- **A `.gitignore`:** `tests/e2e/.auth/` (cookies de sesión), `test-results/` y `playwright-report/`.
 
 </Callout>
 
 ## Paso 2: el primer test, con _locators_ y esperas automáticas
 
-Playwright encuentra los elementos con **_locators_**, que funcionan como las consultas de Testing Library: `page.getByRole("button", { name: "Guardar" })`, `page.getByLabel("Minutos")`, `page.getByText("…")`. Y sus comprobaciones **esperan solas**: `await expect(locator).toContainText("…")` vuelve a mirar durante 5 segundos, hasta que se cumple o se agota el tiempo. No hace falta escribir esperas.
+**Qué es:** los **_locators_** encuentran elementos como Testing Library (`getByRole`, `getByLabel`, `getByText`), y sus `expect` **esperan solos** hasta 5 segundos. Para no registrarse en cada test, un proyecto de **_setup_** se ejecuta una vez y guarda las cookies en un archivo (`storageState`) que los demás cargan.
 
-Pero antes de cada test hace falta una sesión. Registrarse en cada test sería lento y repetiría lo mismo cien veces. Playwright lo resuelve con un proyecto de **_setup_**: se ejecuta una vez, antes que los demás, y guarda las cookies de la sesión en un archivo (`storageState`), que los demás tests cargan al empezar. Es el proyecto `setup` de la configuración. Crea `tests/e2e/auth.setup.ts`:
+**Cómo se usa:** crea `tests/e2e/auth.setup.ts`.
 
 ```ts
 // Archivo: tests/e2e/auth.setup.ts
@@ -180,9 +179,9 @@ test.describe("sin sesión", () => {
 });
 ```
 
-- **`getByRole("listitem").filter({ hasText: "rodaje suave" })`** busca el elemento de la lista que contiene ese texto: así el test no depende de la posición ni de lo que hayan creado otros tests.
-- **`page.reload()`** comprueba que el entreno no solo estaba en el estado de React, sino que se guardó en MongoDB.
-- **"Sin sesión" vacía el `storageState`** con `test.use`: esos tests empiezan con un navegador sin cookies.
+- **`getByRole("listitem").filter({ hasText: "rodaje suave" })`** busca por texto, sin depender de la posición ni de otros tests.
+- **`page.reload()`** comprueba que se guardó en MongoDB, no solo en el estado de React.
+- **"Sin sesión" vacía el `storageState`** con `test.use`: empieza sin cookies.
 
 `npm run test:e2e`:
 
@@ -196,7 +195,7 @@ Running 4 tests using 1 worker
 En la base en memoria: 2 usuarios y 2 entrenos
 ```
 
-(El cuarto test es el del ejercicio). Los cuatro tests tardan unos 4 segundos, y la ejecución completa, con el arranque de MongoDB y de Astro, unos 5. Repetida cinco veces:
+- **Los cuatro tests (uno es el del ejercicio) tardan unos 4 segundos,** unos 5 con el arranque. Cinco veces:
 
 ```text
 ejecución 1:  4 passed (4.2s) · total 5 s
@@ -206,19 +205,21 @@ ejecución 4:  4 passed (3.8s) · total 5 s
 ejecución 5:  4 passed (4.0s) · total 6 s
 ```
 
-Cinco de cinco: sin esperas fijas y sin depender del orden, un E2E es estable.
+- **Cinco de cinco:** sin esperas fijas ni dependencias de orden, un E2E es estable.
 
 <Callout type="risk">
 
-- **Nunca uses `page.waitForTimeout(2000)`:** con una máquina lenta (la de CI) no es suficiente, y con una rápida sobra tiempo. Espera siempre a algo concreto: un texto, una URL, un elemento.
-- **Los tests comparten la cuenta del _setup_,** y lo que uno crea lo ve el siguiente. Por eso cada test busca **su** entreno por un texto único, en lugar de contar los elementos de la lista.
-- **La primera ejecución tarda más** (unos 9 segundos en este laboratorio): Vite prepara las dependencias la primera vez que se arranca el servidor.
+- **Nunca `page.waitForTimeout(2000)`:** en CI no basta y en una máquina rápida sobra. Espera a algo concreto: un texto, una URL, un elemento.
+- **Los tests comparten la cuenta del _setup_:** cada uno busca **su** entreno por un texto único, en vez de contar la lista.
+- **La primera ejecución tarda más** (unos 9 s aquí): Vite prepara las dependencias.
 
 </Callout>
 
 ## Paso 3: depurar un fallo con la traza
 
-La primera versión del test "sin sesión" de este laboratorio no usaba `test.use`, sino un contexto de navegador creado a mano:
+**Qué es:** cuando un E2E falla, Playwright da tres pistas: el **registro de llamadas**, el **contexto del error** (la página como la vería un lector de pantalla) y la **traza**.
+
+**Cómo se usa:** la primera versión del test "sin sesión" usaba un contexto creado a mano:
 
 ```ts
 test("las páginas privadas piden sesión: sin ella, a /entrar", async ({ browser }) => {
@@ -265,7 +266,7 @@ Running 2 tests using 1 worker
 En la base en memoria: 1 usuarios y 0 entrenos
 ```
 
-Playwright da tres pistas. El **registro de llamadas** (_Call log_): durante 5 segundos, 14 comprobaciones, siempre en `/nuevo`; no es que llegara tarde, es que la redirección no ocurrió. El **contexto del error** (`error-context.md`), con lo que había en la página al fallar, como lo vería un lector de pantalla:
+- **El registro de llamadas:** 14 comprobaciones en 5 segundos, siempre en `/nuevo`. No llegó tarde: la redirección no ocurrió. El contexto del error (`error-context.md`) lo explica:
 
 ```text
 - navigation:
@@ -280,28 +281,26 @@ Playwright da tres pistas. El **registro de llamadas** (_Call log_): durante 5 s
 - heading "Nuevo entreno (sin JavaScript)" [level=1]
 ```
 
-El navegador "sin cookies" muestra **"Ana E2E · Salir"**: tenía la sesión del _setup_. Un `browser.newContext()` dentro de un test **hereda las opciones de `use`** del proyecto, incluido el `storageState` (por eso `page.goto("/nuevo")` funcionaba con una ruta relativa: también heredó la `baseURL`). Con `test.use({ storageState: { cookies: [], origins: [] } })`, como en el Paso 2, el contexto empieza vacío de verdad.
+- **El navegador "sin cookies" muestra "Ana E2E · Salir":** `browser.newContext()` **hereda el `use`** del proyecto, `storageState` incluido (y la `baseURL`, por eso `page.goto("/nuevo")` funcionaba). Con `test.use({ storageState: { cookies: [], origins: [] } })` empieza vacío de verdad.
 
-Y la tercera pista: la **traza** (`trace.zip`), que se guarda porque la configuración tiene `trace: "retain-on-failure"`. Se abre con:
+La traza (`trace.zip`, por `trace: "retain-on-failure"`) se abre con:
 
 ```bash
 npx playwright show-trace test-results/<carpeta-del-test>/trace.zip
 ```
 
-El _trace viewer_ muestra cada acción del test en una línea de tiempo y, para cada una, cómo estaba la página antes y después, las peticiones de red, los mensajes de la consola y la línea del test. Para un fallo en CI, donde no puedes ver el navegador, es la mejor herramienta.
+- **El _trace viewer_** muestra cada acción en una línea de tiempo, con la página antes y después, la red, la consola y la línea del test: la mejor herramienta para un fallo en CI.
 
-Y para escribir y depurar tests en tu máquina, el **modo UI**:
+Para escribir y depurar en tu máquina, el **modo UI** (el `--` pasa la opción a Playwright a través del lanzador):
 
 ```bash
 npm run test:e2e -- --ui
 ```
 
-Abre una ventana con todos los tests, los ejecuta al guardar y deja ver cada paso como en la traza. El `--` pasa la opción a Playwright a través del lanzador, que es quien prepara la base en memoria.
-
 <Callout type="risk">
 
-- **Lee el contexto del error antes de cambiar el test:** "no redirige" parecía un fallo del _middleware_, y el problema estaba en el test. El contexto de la página lo deja claro en segundos.
-- **`retain-on-failure` solo guarda las trazas de los tests que fallan:** grabar todas ralentiza la ejecución y llena el disco. En CI, sube `test-results/` como artefacto para poder descargar la traza.
+- **Lee el contexto del error antes de tocar el test:** "no redirige" parecía del _middleware_, y era del test.
+- **`retain-on-failure` solo guarda las trazas que fallan:** grabar todas ralentiza y llena el disco. En CI, sube `test-results/` como artefacto.
 
 </Callout>
 
@@ -357,17 +356,15 @@ test("entrar, registrar un entreno y verlo en la lista", async ({ page }) => {
 });
 ```
 
-- **La cuenta se crea por la API** (`request.post`), sin navegador: el registro ya lo prueba `auth.setup.ts`, y aquí solo es preparación. Es más rápido y no depende de la pantalla de registro.
-- **El login sí pasa por la interfaz:** es parte del flujo que se prueba.
-- **`toHaveText` compara la línea completa** del entreno: fecha, tipo, minutos, notas y sensación, tal como se enviaron. Y `toHaveCount(1)` comprueba que la lista es solo de este usuario.
-- **`selectOption`** elige en un `<select>`, y `fill` en un `<input type="date">` acepta la fecha en formato `AAAA-MM-DD`.
-
-Los cuatro tests se ven en la salida del Paso 2, y el lanzador confirma al final: 2 usuarios y 2 entrenos en la base en memoria, ninguno en tu base real.
+- **La cuenta se crea por la API** (`request.post`), sin navegador: el registro ya lo prueba el _setup_, y aquí es preparación.
+- **El login pasa por la interfaz:** es parte del flujo.
+- **`toHaveText` compara la línea completa** (fecha, tipo, minutos, notas y sensación) y **`toHaveCount(1)`** que la lista es solo de este usuario. `selectOption` elige en un `<select>`, y `fill` acepta `AAAA-MM-DD` en un `<input type="date">`.
+- **Los cuatro tests salen en el Paso 2,** y el lanzador confirma: 2 usuarios y 2 entrenos en memoria, ninguno en tu base.
 
 <Callout type="risk">
 
-- **Un E2E por flujo crítico, no por caso:** los errores de validación, los 422 y los casos límite ya están en los tests de componentes y de integración, que son cien veces más rápidos. El E2E comprueba que las piezas funcionan juntas.
-- **Los correos de prueba usan el dominio `example.test`**, reservado para pruebas: nunca existirá, y ningún correo saldrá hacia una persona real.
+- **Un E2E por flujo crítico, no por caso:** validaciones, 422 y límites ya están en componentes e integración, cien veces más rápidos.
+- **Los correos usan `example.test`,** reservado para pruebas: nunca saldrá un correo hacia nadie real.
 
 </Callout>
 
@@ -379,9 +376,8 @@ Un test E2E te avisa cuando rompes un flujo crítico: Playwright arranca tu app 
 
 ## Resumen
 
-- Un E2E abre un navegador real contra tu app: pocos, y solo para los flujos críticos.
-- `scripts/e2e.mjs`: un replica set en memoria, sus variables para el servidor y la comprobación de que se usó.
-- `webServer` arranca `astro dev` en otro puerto, sin reutilizar servidores abiertos.
-- _Locators_ (`getByRole`, `getByLabel`) y `expect` que espera solo: nunca `waitForTimeout`.
-- Un proyecto `setup` guarda la sesión en `storageState`; `test.use({ storageState: { cookies: [], origins: [] } })` empieza sin ella. `browser.newContext()` la hereda.
-- `trace: "retain-on-failure"`, `npx playwright show-trace` y el modo `--ui` para depurar.
+- Un E2E abre un navegador real: pocos, y solo para lo crítico.
+- `scripts/e2e.mjs`: un replica set en memoria y la comprobación de que se usó.
+- `webServer` arranca `astro dev` en otro puerto, sin reutilizar servidores.
+- _Locators_ y `expect` que espera solo; nunca `waitForTimeout`.
+- `storageState` del _setup_, `test.use` para empezar sin él (`newContext()` lo hereda), traza y modo `--ui`.
